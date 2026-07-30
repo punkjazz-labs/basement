@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>RunOnSpark Manager</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <header>
+    <div><span class="mark">RS</span><strong>RunOnSpark Manager</strong></div>
+    <span id="connection" class="status neutral">Connecting</span>
+  </header>
+  <main>
+    <section id="pairing" class="panel pairing hidden">
+      <p class="eyebrow">LOCAL PAIRING</p>
+      <h1>Connect to this Spark</h1>
+      <p>Read the local credential from the manager's <code>pairing-token</code> file. It never leaves this machine.</p>
+      <form id="pair-form"><input id="pair-token" type="password" autocomplete="off" placeholder="Pairing token" required><button>Pair</button></form>
+      <p id="pair-error" class="error"></p>
+    </section>
+
+    <div id="console" class="hidden">
+      <section class="hero">
+        <div><p class="eyebrow">SINGLE-SPARK CONTROL PLANE</p><h1 id="hostname">DGX Spark</h1><p id="system-summary">Reading inventory…</p></div>
+        <div class="capacity"><span>AVAILABLE STORAGE</span><strong id="storage">—</strong></div>
+      </section>
+
+      <section id="blockers" class="alert hidden"><strong>Preflight blockers</strong><ul id="blocker-list"></ul></section>
+
+      <section>
+        <div class="section-title"><div><p class="eyebrow">CURATED RECIPES</p><h2>Models</h2></div><button id="refresh" class="secondary">Refresh</button></div>
+        <div id="recipes" class="cards"></div>
+      </section>
+
+      <section>
+        <div class="section-title"><div><p class="eyebrow">PERSISTED EXECUTION</p><h2>Jobs</h2></div></div>
+        <div id="jobs" class="jobs"><p class="muted">No jobs yet.</p></div>
+      </section>
+    </div>
+  </main>
+  <dialog id="confirm-dialog">
+    <form method="dialog"><button class="close" value="cancel" aria-label="Close">×</button><p class="eyebrow">CONFIRM INSTALL</p><h2 id="confirm-title"></h2><div id="confirm-detail"></div><label class="check"><input id="licence" type="checkbox"> I accept the linked model licence</label><menu><button value="cancel" class="secondary">Cancel</button><button id="confirm-install" value="default">Install</button></menu></form>
+  </dialog>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

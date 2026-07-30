@@ -1,0 +1,72 @@
+schema_version: 1
+id: qwen36-35b-a3b-nvfp4-1s
+version: 1
+display_name: Qwen 3.6 35B-A3B
+publisher: NVIDIA
+trust: runonspark-candidate
+verification: candidate
+topology:
+  spark_count: 1
+runtime:
+  kind: vllm
+  image: vllm/vllm-openai
+  digest: sha256:4cebac8c03f2cd9f5fabe72ac7c2a0b3aaa8450ef8f0e47429425fd1bfb83d42
+  image_bytes: 10686016979
+artifacts:
+  - role: primary
+    repository: nvidia/Qwen3.6-35B-A3B-NVFP4
+    revision: bafac91da4448b4c81b820e90a089d4ae953f5f8
+    expected_bytes: 23462477838
+    licence: Apache-2.0
+    licence_url: https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  safety_margin_bytes: 10000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: nvidia/Qwen3.6-35B-A3B-NVFP4
+  vllm:
+    tensor_parallel_size: 1
+    kv_cache_dtype: fp8
+    attention_backend: flashinfer
+    moe_backend: marlin
+    gpu_memory_utilization: "0.4"
+    max_model_len: 262144
+    max_num_seqs: 4
+    max_num_batched_tokens: 8192
+    speculative_method: mtp
+    speculative_tokens: 3
+    speculative_moe_backend: triton
+    reasoning_parser: qwen3
+    tool_call_parser: qwen3_xml
+    load_format: fastsafetensors
+    trust_remote_code: true
+    chunked_prefill: true
+    async_scheduling: true
+    prefix_caching: true
+    auto_tool_choice: true
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared
