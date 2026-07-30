@@ -3,50 +3,84 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#ffffff">
   <title>RunOnSpark Manager</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
-  <div class="atmosphere" aria-hidden="true"></div>
+  <a class="skip-link" href="#main">Skip to models</a>
   <header>
-    <div class="brand"><span class="mark">RS</span><span><strong>RunOnSpark</strong><small>CONTROL DECK</small></span></div>
-    <span id="connection" class="status neutral">Connecting</span>
+    <div class="header-inner">
+      <a class="wordmark" href="/" aria-label="RunOnSpark Manager home">RunOnSpark</a>
+      <span id="connection" class="connection neutral">Connecting</span>
+    </div>
   </header>
-  <main>
-    <section id="pairing" class="panel pairing hidden">
-      <p class="eyebrow">LOCAL PAIRING</p>
-      <h1>Connect to this Spark</h1>
-      <p>Read the local credential from the manager's <code>pairing-token</code> file. It never leaves this machine.</p>
-      <form id="pair-form"><input id="pair-token" type="password" autocomplete="off" placeholder="Pairing token" required><button>Pair</button></form>
-      <p id="pair-error" class="error"></p>
+
+  <main id="main">
+    <section id="pairing" class="pairing hidden">
+      <p class="kicker">Spark Manager</p>
+      <h1>Pair this Spark.</h1>
+      <p>Enter the token from the manager’s <code>pairing-token</code> file.</p>
+      <form id="pair-form">
+        <label for="pair-token">Pairing token</label>
+        <div class="pair-controls"><input id="pair-token" type="password" autocomplete="off" required><button>Pair</button></div>
+      </form>
+      <p id="pair-error" class="error" role="alert"></p>
     </section>
 
     <div id="console" class="hidden">
-      <section class="hero">
-        <div class="hero-copy"><p class="eyebrow">SINGLE-SPARK CONTROL PLANE / LOCAL ONLY</p><h1 id="hostname">DGX Spark</h1><p id="system-summary">Reading inventory…</p></div>
-        <div class="telemetry">
-          <div class="capacity"><span>AVAILABLE STORAGE</span><strong id="storage">—</strong></div>
-          <div class="capacity"><span>RECIPE PACK</span><strong id="recipe-count">—</strong></div>
+      <section class="hardware-step" aria-labelledby="hardware-title">
+        <h1 id="hardware-title">How many Sparks do you have?</h1>
+        <p>Pick your hardware. Install a model.</p>
+        <div class="hardware-rail" role="radiogroup" aria-label="Spark count">
+          <button class="hardware-choice" type="button" role="radio" data-sparks="1" aria-checked="true" aria-label="1 Spark, 128 GB">
+            <span class="spark-stack" data-count="1" aria-hidden="true"><i></i></span><strong>1</strong><small>128 GB</small>
+          </button>
+          <button class="hardware-choice" type="button" role="radio" data-sparks="2" aria-checked="false" aria-label="2 Sparks, 256 GB">
+            <span class="spark-stack" data-count="2" aria-hidden="true"><i></i><i></i></span><strong>2</strong><small>256 GB</small>
+          </button>
+          <button class="hardware-choice" type="button" role="radio" data-sparks="3" aria-checked="false" aria-label="3 Sparks, 384 GB">
+            <span class="spark-stack" data-count="3" aria-hidden="true"><i></i><i></i><i></i></span><strong>3</strong><small>384 GB</small>
+          </button>
+          <button class="hardware-choice" type="button" role="radio" data-sparks="4" aria-checked="false" aria-label="4 Sparks, 512 GB">
+            <span class="spark-stack" data-count="4" aria-hidden="true"><i></i><i></i><i></i><i></i></span><strong>4</strong><small>512 GB</small>
+          </button>
         </div>
       </section>
 
-      <section id="blockers" class="alert hidden"><strong>Preflight blockers</strong><ul id="blocker-list"></ul></section>
+      <section class="catalog" aria-labelledby="catalog-title">
+        <div class="host-bar">
+          <div class="host-identity"><i aria-hidden="true"></i><strong id="hostname">DGX Spark</strong><span id="system-summary">Reading system…</span></div>
+          <div class="host-meta"><span><strong id="storage">—</strong> free</span><button id="refresh" class="quiet" type="button">Refresh</button></div>
+        </div>
 
-      <section>
-        <ol class="flow" aria-label="Deployment workflow"><li class="done"><span>01</span>Inventory</li><li><span>02</span>Select</li><li><span>03</span>Install</li><li><span>04</span>Verify</li></ol>
-        <div class="section-title"><div><p class="eyebrow">CURATED / IMMUTABLY PINNED</p><h2>Model recipes</h2><p class="section-note">Candidate means the source is pinned and locally validated. Promotion happens only after a complete DGX Spark run.</p></div><button id="refresh" class="secondary">Refresh</button></div>
-        <div id="recipes" class="cards"></div>
+        <div id="blockers" class="alert hidden"><strong>Setup needed</strong><ul id="blocker-list"></ul></div>
+
+        <div class="catalog-heading">
+          <div><h2 id="catalog-title">Available models</h2><p id="catalog-note">For 1 Spark</p></div>
+          <span id="recipe-count" class="count">—</span>
+        </div>
+        <div id="recipes" class="model-list" aria-live="polite"></div>
       </section>
 
-      <section>
-        <div class="section-title"><div><p class="eyebrow">PERSISTED EXECUTION</p><h2>Flight log</h2></div></div>
-        <div id="jobs" class="jobs"><p class="muted">No jobs yet.</p></div>
+      <section class="activity" aria-labelledby="activity-title">
+        <div class="activity-heading"><h2 id="activity-title">Activity</h2><span id="job-count">0</span></div>
+        <div id="jobs" class="jobs"><p class="empty-copy">Nothing running.</p></div>
       </section>
     </div>
   </main>
+
   <dialog id="confirm-dialog">
-    <form method="dialog"><button class="close" value="cancel" aria-label="Close">×</button><p class="eyebrow">CONFIRM INSTALL</p><h2 id="confirm-title"></h2><div id="confirm-detail"></div><label class="check"><input id="licence" type="checkbox"> I accept the linked model licence</label><menu><button value="cancel" class="secondary">Cancel</button><button id="confirm-install" value="default">Install</button></menu></form>
+    <form method="dialog">
+      <button class="dialog-close" value="cancel" aria-label="Close">×</button>
+      <p class="kicker">Install model</p>
+      <h2 id="confirm-title"></h2>
+      <div id="confirm-detail"></div>
+      <label class="licence"><input id="licence" type="checkbox"> <span>I accept the model licence.</span></label>
+      <menu><button value="cancel" class="secondary">Cancel</button><button id="confirm-install" value="default">Install</button></menu>
+    </form>
   </dialog>
   <script src="/assets/app.js" defer></script>
 </body>
