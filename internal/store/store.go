@@ -300,16 +300,52 @@ ON CONFLICT(recipe_id) DO UPDATE SET recipe_version=excluded.recipe_version,stat
 	return err
 }
 
+func (s *Store) BeginSwitch(ctx context.Context, previousRecipeID, targetRecipeID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	timestamp := now()
+	result, err := tx.ExecContext(ctx, `UPDATE installed_models SET status='switching',active=1,updated_at=? WHERE recipe_id=?`, timestamp, previousRecipeID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE installed_models SET status='starting',active=0,updated_at=? WHERE recipe_id=?`, timestamp, targetRecipeID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SetModelState(ctx context.Context, recipeID, status string, active bool) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE installed_models SET status=?,active=?,updated_at=? WHERE recipe_id=?`, status, active, now(), recipeID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
 func (s *Store) SetOnlyActive(ctx context.Context, recipeID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE installed_models SET active=0`); err != nil {
+	timestamp := now()
+	result, err := tx.ExecContext(ctx, `UPDATE installed_models SET active=1,status='ready',updated_at=? WHERE recipe_id=?`, timestamp, recipeID)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE installed_models SET active=1,status='ready',updated_at=? WHERE recipe_id=?`, now(), recipeID); err != nil {
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE installed_models SET status=CASE WHEN active=1 THEN 'stopped' ELSE status END,active=0,updated_at=? WHERE recipe_id<>?`, timestamp, recipeID); err != nil {
 		return err
 	}
 	return tx.Commit()

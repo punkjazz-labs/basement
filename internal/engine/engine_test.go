@@ -22,6 +22,56 @@ type fakeExecutor struct {
 	failPull                                    bool
 }
 
+type switchExecutor struct {
+	mu           sync.Mutex
+	running      map[string]bool
+	failVerifyID string
+	failStartID  string
+	events       []string
+}
+
+func (s *switchExecutor) ArtifactPath(r recipe.Recipe) string { return "/managed/" + r.ID }
+func (s *switchExecutor) Execute(_ context.Context, _ operations.Execution, op recipe.Operation, r recipe.Recipe, _ operations.Progress) (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, op.Type+":"+r.ID)
+	switch op.Type {
+	case "stop_container":
+		s.running[r.ID] = false
+	case "start_container":
+		if r.ID == s.failStartID {
+			return nil, errors.New("rollback start failed")
+		}
+		s.running[r.ID] = true
+	case "wait_http":
+		if !s.running[r.ID] {
+			return nil, errors.New("not running")
+		}
+	case "verify_openai_inference":
+		if !s.running[r.ID] {
+			return nil, errors.New("not running")
+		}
+		if r.ID == s.failVerifyID {
+			return nil, errors.New("target inference verification failed")
+		}
+	}
+	return map[string]any{"operation": op.Type, "recipe_id": r.ID}, nil
+}
+func (s *switchExecutor) Completed(_ context.Context, _ operations.Execution, op recipe.Operation, r recipe.Recipe, _ json.RawMessage) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch op.Type {
+	case "stop_container":
+		return !s.running[r.ID]
+	case "start_container", "wait_http":
+		return s.running[r.ID]
+	case "verify_openai_inference":
+		return s.running[r.ID] && r.ID != s.failVerifyID
+	default:
+		return false
+	}
+}
+
 func (f *fakeExecutor) ArtifactPath(r recipe.Recipe) string { return "/managed/" + r.ID }
 func (f *fakeExecutor) Execute(_ context.Context, execution operations.Execution, op recipe.Operation, _ recipe.Recipe, progress operations.Progress) (map[string]any, error) {
 	f.mu.Lock()
@@ -199,6 +249,216 @@ func TestRestartReconcilesHealthBeforeRestoringReady(t *testing.T) {
 	}
 	model, _ := s.Model(ctx, id)
 	t.Fatalf("model was not reconciled: %#v", model)
+}
+
+func TestSwitchMakesOnlyVerifiedTargetActive(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	previous, target := recipes[0], recipes[1]
+	for _, model := range []store.InstalledModel{
+		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+	} {
+		if err := s.SetInstalled(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &switchExecutor{running: map[string]bool{previous.ID: true, target.ID: false}}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "start", target.ID, "switch-success", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	completed := waitJob(t, s, job.ID, "ready")
+	if len(completed.Steps) != 4 || completed.Steps[0].Operation != "stop_container" {
+		t.Fatalf("switch steps=%#v", completed.Steps)
+	}
+	assertActiveModel(t, s, target.ID, previous.ID, "stopped")
+	if got := strings.Join(executor.events, ","); !strings.HasPrefix(got, "stop_container:"+previous.ID+",start_container:"+target.ID) {
+		t.Fatalf("unsafe switch order: %s", got)
+	}
+}
+
+func TestSwitchFailureRestoresPreviousModel(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	previous, target := recipes[0], recipes[1]
+	for _, model := range []store.InstalledModel{
+		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+	} {
+		if err := s.SetInstalled(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &switchExecutor{running: map[string]bool{previous.ID: true, target.ID: false}, failVerifyID: target.ID}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "start", target.ID, "switch-rollback", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	failed := waitJob(t, s, job.ID, "failed")
+	if !strings.Contains(failed.Error, "previous model "+previous.ID+" restored and verified") {
+		t.Fatalf("rollback outcome missing from job: %q", failed.Error)
+	}
+	if len(failed.Steps) < 8 || failed.Steps[4].Operation != "rollback_stop_container" {
+		t.Fatalf("rollback receipts missing: %#v", failed.Steps)
+	}
+	assertActiveModel(t, s, previous.ID, target.ID, "stopped")
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if !executor.running[previous.ID] || executor.running[target.ID] {
+		t.Fatalf("runtime rollback state=%#v events=%#v", executor.running, executor.events)
+	}
+}
+
+func TestInstallSecondModelDownloadsBeforeSwitch(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	previous, target := recipes[0], recipes[1]
+	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	executor := &switchExecutor{running: map[string]bool{previous.ID: true, target.ID: false}}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "install", target.ID, "install-and-switch", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	waitJob(t, s, job.ID, "ready")
+	assertActiveModel(t, s, target.ID, previous.ID, "stopped")
+	executor.mu.Lock()
+	events := append([]string(nil), executor.events...)
+	executor.mu.Unlock()
+	downloadIndex, stopIndex, startIndex := -1, -1, -1
+	for index, event := range events {
+		switch event {
+		case "download_artifact:" + target.ID:
+			downloadIndex = index
+		case "stop_container:" + previous.ID:
+			stopIndex = index
+		case "start_container:" + target.ID:
+			startIndex = index
+		}
+	}
+	if downloadIndex < 0 || stopIndex <= downloadIndex || startIndex <= stopIndex {
+		t.Fatalf("download/switch order is unsafe: %#v", events)
+	}
+}
+
+func TestSwitchReportsWhenRollbackAlsoFails(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	previous, target := recipes[0], recipes[1]
+	for _, model := range []store.InstalledModel{
+		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+	} {
+		if err := s.SetInstalled(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &switchExecutor{
+		running:      map[string]bool{previous.ID: true, target.ID: false},
+		failVerifyID: target.ID,
+		failStartID:  previous.ID,
+	}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "start", target.ID, "switch-double-failure", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	failed := waitJob(t, s, job.ID, "failed")
+	if !strings.Contains(failed.Error, "rollback to "+previous.ID+" failed: rollback start failed") {
+		t.Fatalf("double failure outcome missing: %q", failed.Error)
+	}
+	for _, id := range []string{previous.ID, target.ID} {
+		model, err := s.Model(ctx, id)
+		if err != nil || model.Active || model.Status != "failed" {
+			t.Fatalf("model %s should be failed and inactive: %#v err=%v", id, model, err)
+		}
+	}
+}
+
+func TestRestartFinalizesAlreadyVerifiedRollback(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	previous, target := recipes[0], recipes[1]
+	for _, model := range []store.InstalledModel{
+		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "switching", ArtifactPath: "/managed/" + previous.ID, Active: true},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "starting", ArtifactPath: "/managed/" + target.ID},
+	} {
+		if err := s.SetInstalled(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	job, _, err := s.CreateJob(ctx, "start", target.ID, "rollback-restart", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BeginStep(ctx, job.ID, 7, "rollback_verify_openai_inference"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteStep(ctx, job.ID, 7, map[string]any{"response_non_empty": true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateJobState(ctx, job.ID, "interrupted", "target inference verification failed"); err != nil {
+		t.Fatal(err)
+	}
+	executor := &switchExecutor{running: map[string]bool{previous.ID: true, target.ID: false}}
+	runner := New(s, executor, recipes)
+	runner.Start(job.ID)
+	failed := waitJob(t, s, job.ID, "failed")
+	if !strings.Contains(failed.Error, "previous model "+previous.ID+" restored and verified") {
+		t.Fatalf("rollback recovery outcome missing: %q", failed.Error)
+	}
+	assertActiveModel(t, s, previous.ID, target.ID, "stopped")
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.events) != 0 {
+		t.Fatalf("verified rollback was executed again: %#v", executor.events)
+	}
+}
+
+func assertActiveModel(t *testing.T, s *store.Store, activeID, inactiveID, inactiveStatus string) {
+	t.Helper()
+	active, err := s.Model(context.Background(), activeID)
+	if err != nil || !active.Active || active.Status != "ready" {
+		t.Fatalf("active model=%#v err=%v", active, err)
+	}
+	inactive, err := s.Model(context.Background(), inactiveID)
+	if err != nil || inactive.Active || inactive.Status != inactiveStatus {
+		t.Fatalf("inactive model=%#v err=%v", inactive, err)
+	}
 }
 
 func waitJob(t *testing.T, s *store.Store, id, want string) store.Job {

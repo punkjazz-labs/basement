@@ -10,6 +10,8 @@ The embedded candidate pack contains:
 
 All three remain candidates until their complete install, inference, restart, and removal lifecycles pass on real DGX Spark hardware. A candidate label is not a claim of device verification.
 
+Only one model is active at a time. Starting another installed model performs a transactional switch: the manager stops the previous runtime, verifies the target with health and inference checks, and attempts to restore and re-verify the previous model if the target fails. An authenticated redacted diagnostic bundle is available from the console.
+
 ## Development
 
 The manager defaults to loopback until an operator deliberately chooses a LAN bind address.
@@ -29,3 +31,5 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/runonspark-manager
 ```
 
 Local tests use deterministic fakes and do not pull model weights, mutate Docker, or exercise GB10 kernels. A passing local suite and registry metadata checks are not proof of the real-DGX acceptance criteria in `PRD.md`.
+
+For real-hardware acceptance, follow [`docs/DGX-QUALIFICATION.md`](docs/DGX-QUALIFICATION.md). The included `packaging/qualify-dgx.sh` helper captures preflight, installation, real inference, stop/start, smoke-test, and diagnostic receipts without printing the local pairing credential.

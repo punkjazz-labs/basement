@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,15 +30,19 @@ func (readyInventory) Inspect(context.Context) (inventory.System, error) {
 }
 
 type apiExecutor struct {
-	mu      sync.Mutex
-	done    map[string]bool
-	running bool
+	mu       sync.Mutex
+	done     map[string]bool
+	running  bool
+	failPort bool
 }
 
 func (a *apiExecutor) ArtifactPath(r recipe.Recipe) string { return "/managed/" + r.ID }
 func (a *apiExecutor) Execute(_ context.Context, _ operations.Execution, op recipe.Operation, _ recipe.Recipe, progress operations.Progress) (map[string]any, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if op.Type == "verify_port" && a.failPort {
+		return nil, errors.New("port 8000 is occupied")
+	}
 	a.done[op.Type] = true
 	if op.Type == "start_container" {
 		a.running = true
@@ -164,6 +169,48 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	events.Body.Close()
 	if !bytes.Contains(eventBody, []byte("event: job")) || !bytes.Contains(eventBody, []byte(`"state":"ready"`)) {
 		t.Fatalf("unexpected SSE payload: %s", eventBody)
+	}
+
+	executor.mu.Lock()
+	executor.failPort = true
+	executor.mu.Unlock()
+	managedPort := doRequest(t, http.MethodGet, server.URL+"/api/v1/preflight?recipe_id="+recipes[1].ID, "", cookies, nil)
+	var switchPreflight preflightResponse
+	if err := json.NewDecoder(managedPort.Body).Decode(&switchPreflight); err != nil {
+		t.Fatal(err)
+	}
+	managedPort.Body.Close()
+	if !switchPreflight.Ready {
+		t.Fatalf("managed active port should be switchable: %#v", switchPreflight)
+	}
+	executor.mu.Lock()
+	executor.failPort = false
+	executor.mu.Unlock()
+
+	leakJob, _, err := database.CreateJob(context.Background(), "smoke-test", recipes[0].ID, "diagnostic-redaction", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "hf_SUPERSECRET1234567890"
+	if err := database.UpdateJobState(context.Background(), leakJob.ID, "failed", "Authorization: Bearer "+secret); err != nil {
+		t.Fatal(err)
+	}
+	unauthenticatedDiagnostics, err := http.Get(server.URL + "/api/v1/diagnostics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unauthenticatedDiagnostics.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated diagnostics status=%d", unauthenticatedDiagnostics.StatusCode)
+	}
+	unauthenticatedDiagnostics.Body.Close()
+	diagnostics := doRequest(t, http.MethodGet, server.URL+"/api/v1/diagnostics", "", cookies, nil)
+	diagnosticBody, _ := io.ReadAll(diagnostics.Body)
+	diagnostics.Body.Close()
+	if diagnostics.StatusCode != http.StatusOK || !strings.HasPrefix(diagnostics.Header.Get("Content-Disposition"), "attachment;") {
+		t.Fatalf("diagnostics status=%d disposition=%q", diagnostics.StatusCode, diagnostics.Header.Get("Content-Disposition"))
+	}
+	if !bytes.Contains(diagnosticBody, []byte(`"format": "runonspark-diagnostics-v1"`)) || !bytes.Contains(diagnosticBody, []byte("[REDACTED]")) || bytes.Contains(diagnosticBody, []byte(secret)) {
+		t.Fatalf("diagnostic export was incomplete or leaked a secret: %s", diagnosticBody)
 	}
 }
 

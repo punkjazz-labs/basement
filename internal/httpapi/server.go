@@ -18,6 +18,7 @@ import (
 	"github.com/punkjazz-labs/runonspark-manager/internal/inventory"
 	"github.com/punkjazz-labs/runonspark-manager/internal/operations"
 	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
+	"github.com/punkjazz-labs/runonspark-manager/internal/redact"
 	"github.com/punkjazz-labs/runonspark-manager/internal/store"
 	"github.com/punkjazz-labs/runonspark-manager/internal/webui"
 )
@@ -160,6 +161,12 @@ func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) prefl
 			break
 		}
 		receipt, err := s.executor.Execute(ctx, operations.Execution{Kind: "preflight"}, op, selected, nil)
+		if err != nil && op.Type == "verify_port" {
+			if owner := s.managedPortOwner(ctx, selected); owner != "" {
+				receipt = map[string]any{"host_port": selected.Service.DefaultHostPort, "occupied_by_managed_recipe": owner, "available_after_switch": true}
+				err = nil
+			}
+		}
 		check := preflightCheck{Operation: op.Type, OK: err == nil, Receipt: receipt}
 		if err != nil {
 			check.Error = err.Error()
@@ -177,6 +184,22 @@ func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) prefl
 		}
 	}
 	return response
+}
+
+func (s *Server) managedPortOwner(ctx context.Context, selected recipe.Recipe) string {
+	models, err := s.store.Models(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, model := range models {
+		if !model.Active || model.RecipeID == selected.ID {
+			continue
+		}
+		if active, ok := recipe.Find(s.recipes, model.RecipeID); ok && active.Service.DefaultHostPort == selected.Service.DefaultHostPort {
+			return active.ID
+		}
+	}
+	return ""
 }
 
 func (s *Server) listRecipes(w http.ResponseWriter, r *http.Request) {
@@ -412,7 +435,39 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 	system, _ := s.inventory.Inspect(r.Context())
 	jobs, _ := s.store.ListJobs(r.Context(), 20)
 	models, _ := s.store.Models(r.Context())
-	writeJSON(w, 200, map[string]any{"manager_version": s.version, "system": system, "recipes": s.recipes, "models": models, "jobs": jobs, "redacted": true})
+	recentLogs := make([]string, 0)
+	for _, job := range jobs {
+		if job.Error != "" {
+			recentLogs = append(recentLogs, fmt.Sprintf("job %s %s: %s", job.ID, job.State, job.Error))
+		}
+		for _, step := range job.Steps {
+			if step.Error != "" {
+				recentLogs = append(recentLogs, fmt.Sprintf("job %s step %d %s: %s", job.ID, step.Index, step.Operation, step.Error))
+			}
+		}
+		if len(recentLogs) >= 100 {
+			break
+		}
+	}
+	bundle := map[string]any{
+		"format": "runonspark-diagnostics-v1", "generated_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"manager_version": s.version, "system": system, "recipes": s.recipes, "models": models,
+		"jobs": jobs, "recent_logs": recentLogs, "redacted": true,
+	}
+	body, err := json.MarshalIndent(bundle, "", "  ")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	body = []byte(redact.String(string(body)))
+	if redact.ContainsLikelySecret(string(body)) {
+		writeError(w, http.StatusInternalServerError, errors.New("diagnostic export failed secret scan"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="runonspark-diagnostics-%s.json"`, time.Now().UTC().Format("20060102T150405Z")))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(append(body, '\n'))
 }
 
 func (s *Server) withReadAuth(next http.HandlerFunc) http.HandlerFunc {

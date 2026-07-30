@@ -132,6 +132,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .activity-heading { display: flex; margin-bottom: 16px; align-items: center; gap: 12px; }
 .activity-heading h2 { font-size: 30px; }
 .activity-heading span { color: var(--faint); font: 13px/1 var(--mono); }
+.activity-heading .diagnostics { min-height: 36px; margin-left: auto; color: var(--ink); text-decoration: none; }
 .jobs { border-top: 1px solid var(--line); }
 .empty-copy { padding: 20px 0; color: var(--muted); font-size: 14px; }
 .job { display: grid; min-height: 72px; padding: 14px 0; grid-template-columns: minmax(230px, 1fr) minmax(180px, .8fr) 100px; align-items: center; gap: 24px; border-bottom: 1px solid var(--line); }
@@ -164,6 +165,8 @@ dialog h2 { margin: 8px 46px 24px 0; font-size: 34px; font-weight: 550; line-hei
 .install-facts div + div { padding-left: 14px; border-left: 1px solid var(--line); }
 .install-facts dt { color: var(--faint); font-size: 11px; }
 .install-facts dd { margin-top: 4px; font-size: 14px; font-weight: 650; }
+.switch-notice { margin: 0 0 18px; padding: 14px 16px; border-radius: 12px; background: #fff8eb; color: #6f4b22; font-size: 13px; }
+.switch-notice strong { display: block; margin-bottom: 3px; color: var(--warning); }
 .licence { display: flex; min-height: 48px; margin-top: 20px; align-items: center; gap: 9px; color: var(--muted); font-size: 14px; cursor: pointer; }
 .licence input { width: 17px; height: 17px; accent-color: var(--accent-dark); }
 menu { display: flex; margin: 18px 0 0; padding: 0; justify-content: flex-end; gap: 8px; }

@@ -3,7 +3,7 @@ const requestedSetup = new URLSearchParams(location.search).get('sparks');
 const state = {
   csrf: '', recipes: [], models: [], jobs: [],
   sparkCount: Math.max(1, setupNames.indexOf(requestedSetup) + 1),
-  catalogueFingerprint: '', jobFingerprint: '', streams: new Map()
+  catalogueFingerprint: '', jobFingerprint: '', streams: new Map(), pendingModels: new Set()
 };
 const $ = selector => document.querySelector(selector);
 const terminal = value => ['ready', 'failed', 'cancelled', 'stopped', 'removed'].includes(value);
@@ -147,7 +147,13 @@ function renderSystem(system) {
 function catalogueState() {
   const models = state.models.map(({ recipe_id, status, active }) => [recipe_id, status, active]);
   const busy = state.jobs.filter(job => !terminal(job.state)).map(job => job.recipe_id).sort();
-  return JSON.stringify([state.sparkCount, state.recipes.map(item => [item.id, item.version]), models, busy]);
+  return JSON.stringify([state.sparkCount, state.recipes.map(item => [item.id, item.version]), models, busy, [...state.pendingModels].sort()]);
+}
+
+function setPending(id, pending) {
+  if (pending) state.pendingModels.add(id); else state.pendingModels.delete(id);
+  state.catalogueFingerprint = '';
+  renderRecipes();
 }
 
 function renderRecipes() {
@@ -170,18 +176,19 @@ function renderRecipes() {
   const recipes = [...state.recipes].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
   recipesElement.innerHTML = recipes.map(item => {
     const model = installed.get(item.id);
-    const busy = state.jobs.some(job => job.recipe_id === item.id && !terminal(job.state));
+    const busy = state.pendingModels.has(item.id) || state.jobs.some(job => job.recipe_id === item.id && !terminal(job.state));
     const copy = productCopy[item.id] || { name: item.display_name, mark: 'AI', verdict: 'Ready for your Spark.', pace: '—', use: 'Local model' };
-    const status = busy ? 'Installing' : model ? model.status : 'Not installed';
+    const status = busy ? 'Working' : model ? model.status : 'Not installed';
+    const activeOther = state.models.find(candidate => candidate.active && candidate.recipe_id !== item.id);
     let primaryAction;
     let utilityActions = '';
-    if (!model) primaryAction = `<button data-action="install" data-id="${item.id}" ${busy ? 'disabled' : ''}>${busy ? 'Installing' : 'Install'}</button>`;
+    if (!model) primaryAction = `<button data-action="install" data-id="${item.id}" ${busy ? 'disabled' : ''}>${busy ? 'Working' : 'Install'}</button>`;
     else if (model.active && model.status === 'ready') {
       primaryAction = `<button class="secondary" data-action="stop" data-id="${item.id}" ${busy ? 'disabled' : ''}>Stop</button>`;
       utilityActions = `<button class="secondary" data-action="smoke-test" data-id="${item.id}">Test</button><button class="secondary" data-action="copy-endpoint" data-id="${item.id}">Copy endpoint</button><button class="secondary" data-action="copy-model" data-id="${item.id}">Copy model ID</button>`;
     } else if (model.status === 'recovering') primaryAction = '<button disabled>Recovering</button>';
     else {
-      primaryAction = `<button data-action="start" data-id="${item.id}" ${busy ? 'disabled' : ''}>Start</button>`;
+      primaryAction = `<button data-action="start" data-id="${item.id}" ${busy ? 'disabled' : ''}>${activeOther ? 'Switch' : 'Start'}</button>`;
       utilityActions = `<button class="danger" data-action="remove" data-id="${item.id}">Remove</button>`;
     }
     const artifacts = item.artifacts.map(artifact => `<li><span>${escapeHTML(artifact.role)}</span><code>${escapeHTML(artifact.repository)}@${artifact.revision.slice(0, 12)}</code></li>`).join('');
@@ -218,15 +225,26 @@ async function action(name, id) {
     const item = state.recipes.find(recipe => recipe.id === id);
     if (name === 'copy-endpoint') { await navigator.clipboard.writeText(`http://${location.hostname}:${item.service.default_host_port}/v1`); return; }
     if (name === 'copy-model') { await navigator.clipboard.writeText(item.service.served_model_id); return; }
+    if (name === 'start') {
+      const active = state.models.find(model => model.active && model.recipe_id !== id);
+      if (active) {
+        const activeRecipe = state.recipes.find(recipe => recipe.id === active.recipe_id);
+        if (!confirm(`Switch to ${productCopy[id]?.name || item.display_name}?\n\n${productCopy[active.recipe_id]?.name || activeRecipe?.display_name || active.recipe_id} will stop. If the new model fails verification, RunOnSpark will try to restore it.`)) return;
+      }
+    }
     let options = { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: '{}' };
     if (name === 'remove') {
       if (!confirm('Remove this model runtime and configuration?')) return;
       const removeArtifacts = confirm(`Also remove ${formatBytes(item.artifact_bytes)} of model data? Cancel keeps the download.`);
       options = { method: 'DELETE', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ remove_artifacts: removeArtifacts, expected_reclaim_bytes: removeArtifacts ? item.artifact_bytes : 0 }) };
-      await api(`/api/v1/models/${id}`, options);
-    } else await api(`/api/v1/models/${id}/${name}`, options);
+    }
+    if (state.pendingModels.has(id)) return;
+    setPending(id, true);
+    if (name === 'remove') await api(`/api/v1/models/${id}`, options);
+    else await api(`/api/v1/models/${id}/${name}`, options);
     await refreshModelsAndJobs();
   } catch (error) { alert(error.message); }
+  finally { if (state.pendingModels.has(id)) setPending(id, false); }
 }
 
 async function confirmInstall(id) {
@@ -239,17 +257,22 @@ async function confirmInstall(id) {
     return;
   }
   $('#confirm-title').textContent = item.display_name;
-  $('#confirm-detail').innerHTML = `<dl class="install-facts"><div><dt>Download</dt><dd>${formatBytes(item.artifact_bytes)}</dd></div><div><dt>Space needed</dt><dd>${formatBytes(item.required_bytes)}</dd></div><div><dt>Port</dt><dd>${item.service.default_host_port}</dd></div></dl><a href="${item.artifacts[0].licence_url}" target="_blank" rel="noreferrer">Read the ${escapeHTML(item.artifacts[0].licence)} licence ↗</a>`;
+  const active = state.models.find(model => model.active && model.recipe_id !== id);
+  const switchNotice = active ? `<p class="switch-notice"><strong>${escapeHTML(productCopy[active.recipe_id]?.name || active.recipe_id)} will stop after the download.</strong> If this model fails verification, RunOnSpark will try to restore it.</p>` : '';
+  $('#confirm-detail').innerHTML = `<dl class="install-facts"><div><dt>Download</dt><dd>${formatBytes(item.artifact_bytes)}</dd></div><div><dt>Space needed</dt><dd>${formatBytes(item.required_bytes)}</dd></div><div><dt>Port</dt><dd>${item.service.default_host_port}</dd></div></dl>${switchNotice}<a href="${item.artifacts[0].licence_url}" target="_blank" rel="noreferrer">Read the ${escapeHTML(item.artifacts[0].licence)} licence ↗</a>`;
   $('#licence').checked = false;
   $('#confirm-dialog').showModal();
   $('#confirm-install').onclick = async event => {
     event.preventDefault();
     if (!$('#licence').checked) return alert('Accept the licence to continue.');
+    if (state.pendingModels.has(id)) return;
+    setPending(id, true);
     try {
       await api(`/api/v1/models/${id}/install`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ confirmed: true, accept_licence: true }) });
       $('#confirm-dialog').close();
       await refreshModelsAndJobs();
     } catch (error) { alert(error.message); }
+    finally { if (state.pendingModels.has(id)) setPending(id, false); }
   };
 }
 

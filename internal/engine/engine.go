@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,13 @@ type Engine struct {
 
 type RemovePayload struct {
 	RemoveArtifacts bool `json:"remove_artifacts"`
+}
+
+type plannedOperation struct {
+	Operation   recipe.Operation
+	Recipe      recipe.Recipe
+	BeginSwitch bool
+	Receipt     map[string]any
 }
 
 func New(s *store.Store, executor operations.Executor, recipes []recipe.Recipe) *Engine {
@@ -109,10 +117,134 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		return
 	}
 	execution := operations.Execution{JobID: job.ID, Kind: job.Kind}
+	if job.Kind == "remove" {
+		var payload RemovePayload
+		_ = json.Unmarshal(job.Payload, &payload)
+		execution.RemoveArtifacts = payload.RemoveArtifacts
+	}
+	plans, previous, err := e.plan(ctx, job, r)
+	if err != nil {
+		_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(err.Error()))
+		return
+	}
+	if previous != nil && rollbackWasVerified(job) {
+		if err := e.store.SetModelState(ctx, r.ID, "stopped", false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			e.fail(ctx, jobID, len(plans)-1, fmt.Errorf("recover completed rollback target state: %w", err))
+			return
+		}
+		if err := e.store.SetOnlyActive(ctx, previous.ID); err != nil {
+			e.fail(ctx, jobID, len(plans)-1, fmt.Errorf("recover completed rollback active model: %w", err))
+			return
+		}
+		message := strings.TrimSpace(job.Error)
+		if message == "" {
+			message = "target switch failed before manager restart"
+		}
+		_ = e.store.UpdateJobState(ctx, jobID, "failed", fmt.Sprintf("%s; previous model %s restored and verified", redact.String(message), previous.ID))
+		return
+	}
+	switchStarted := false
+	for index, plan := range plans {
+		if plan.BeginSwitch {
+			if previous == nil {
+				e.fail(ctx, jobID, index, errors.New("switch plan lost the previous model"))
+				return
+			}
+			if err := e.store.BeginSwitch(ctx, previous.ID, r.ID); err != nil {
+				e.fail(ctx, jobID, index, fmt.Errorf("record switch intent: %w", err))
+				return
+			}
+			switchStarted = true
+		}
+		if ctx.Err() != nil {
+			if switchStarted && previous != nil {
+				e.failSwitch(job, r, *previous, plans, index, ctx.Err())
+			} else {
+				_ = e.store.UpdateJobState(context.Background(), jobID, "cancelled", "cancelled at a safe operation boundary")
+			}
+			return
+		}
+		op, target := plan.Operation, plan.Recipe
+		previousStep, exists, err := e.store.Step(ctx, jobID, index)
+		if err != nil {
+			if switchStarted && previous != nil {
+				e.failSwitch(job, r, *previous, plans, index, err)
+			} else {
+				e.fail(ctx, jobID, index, err)
+			}
+			return
+		}
+		if exists && previousStep.State == "completed" && (plan.Receipt != nil || e.executor.Completed(ctx, execution, op, target, previousStep.Receipt)) {
+			continue
+		}
+		if err := e.store.UpdateJobState(ctx, jobID, stateFor(job.Kind, op.Type), ""); err != nil {
+			return
+		}
+		if err := e.store.BeginStep(ctx, jobID, index, op.Type); err != nil {
+			if switchStarted && previous != nil {
+				e.failSwitch(job, r, *previous, plans, index, err)
+			} else {
+				e.fail(ctx, jobID, index, err)
+			}
+			return
+		}
+		if plan.Receipt != nil {
+			if err := e.store.CompleteStep(ctx, jobID, index, redact.JSON(plan.Receipt)); err != nil {
+				e.fail(ctx, jobID, index, err)
+				return
+			}
+			continue
+		}
+		progress := func(value any) error { return e.store.UpdateStepReceipt(ctx, jobID, index, redact.JSON(value)) }
+		receipt, err := e.executor.Execute(ctx, execution, op, target, progress)
+		if err != nil {
+			if switchStarted && previous != nil {
+				e.failSwitch(job, r, *previous, plans, index, err)
+			} else {
+				e.fail(ctx, jobID, index, err)
+			}
+			return
+		}
+		if ctx.Err() != nil {
+			if switchStarted && previous != nil {
+				e.failSwitch(job, r, *previous, plans, index, ctx.Err())
+			} else {
+				e.fail(ctx, jobID, index, ctx.Err())
+			}
+			return
+		}
+		if err := e.store.CompleteStep(ctx, jobID, index, redact.JSON(receipt)); err != nil {
+			if switchStarted && previous != nil {
+				e.failSwitch(job, r, *previous, plans, index, err)
+			} else {
+				e.fail(ctx, jobID, index, err)
+			}
+			return
+		}
+	}
+	if ctx.Err() != nil {
+		if switchStarted && previous != nil {
+			e.failSwitch(job, r, *previous, plans, len(plans)-1, ctx.Err())
+		} else {
+			_ = e.store.UpdateJobState(context.Background(), jobID, "cancelled", "cancelled at a safe operation boundary")
+		}
+		return
+	}
+	if err := e.finish(ctx, job, r); err != nil {
+		if switchStarted && previous != nil {
+			e.failSwitch(job, r, *previous, plans, len(plans)-1, err)
+		} else {
+			e.fail(ctx, jobID, len(plans)-1, err)
+		}
+		return
+	}
+}
+
+func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) ([]plannedOperation, *recipe.Recipe, error) {
 	var ops []recipe.Operation
 	switch job.Kind {
 	case "install":
-		ops = r.Operations
+		ops = target.Operations
 	case "start":
 		ops = []recipe.Operation{{Type: "start_container"}, {Type: "wait_http"}, {Type: "verify_openai_inference"}}
 	case "stop":
@@ -122,55 +254,126 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 	case "remove":
 		var payload RemovePayload
 		_ = json.Unmarshal(job.Payload, &payload)
-		execution.RemoveArtifacts = payload.RemoveArtifacts
-		ops = r.Uninstall
+		ops = target.Uninstall
 	default:
-		_ = e.store.UpdateJobState(ctx, jobID, "failed", "unknown job kind")
-		return
+		return nil, nil, fmt.Errorf("unknown job kind %s", job.Kind)
 	}
-	for index, op := range ops {
-		if ctx.Err() != nil {
-			_ = e.store.UpdateJobState(context.Background(), jobID, "cancelled", "cancelled at a safe operation boundary")
-			return
+	plans := make([]plannedOperation, 0, len(ops)+1)
+	if job.Kind != "install" && job.Kind != "start" {
+		for _, op := range ops {
+			plans = append(plans, plannedOperation{Operation: op, Recipe: target})
 		}
-		previous, exists, err := e.store.Step(ctx, jobID, index)
-		if err != nil {
-			e.fail(ctx, jobID, index, err)
-			return
+		return plans, nil, nil
+	}
+	previous, err := e.activeRecipe(ctx, target.ID)
+	if err != nil || previous == nil {
+		for _, op := range ops {
+			plans = append(plans, plannedOperation{Operation: op, Recipe: target})
 		}
-		if exists && previous.State == "completed" && e.executor.Completed(ctx, execution, op, r, previous.Receipt) {
+		return plans, previous, err
+	}
+	for _, op := range ops {
+		if job.Kind == "install" && op.Type == "verify_port" && previous.Service.DefaultHostPort == target.Service.DefaultHostPort {
+			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Receipt: map[string]any{"host_port": target.Service.DefaultHostPort, "occupied_by_managed_recipe": previous.ID, "available_after_switch": true}})
 			continue
 		}
-		if err := e.store.UpdateJobState(ctx, jobID, stateFor(job.Kind, op.Type), ""); err != nil {
-			return
+		if op.Type == "start_container" {
+			plans = append(plans, plannedOperation{Operation: recipe.Operation{Type: "stop_container"}, Recipe: *previous, BeginSwitch: true})
 		}
-		if err := e.store.BeginStep(ctx, jobID, index, op.Type); err != nil {
-			e.fail(ctx, jobID, index, err)
-			return
+		plans = append(plans, plannedOperation{Operation: op, Recipe: target})
+	}
+	return plans, previous, nil
+}
+
+func (e *Engine) activeRecipe(ctx context.Context, targetID string) (*recipe.Recipe, error) {
+	models, err := e.store.Models(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, model := range models {
+		if !model.Active || model.RecipeID == targetID {
+			continue
 		}
-		progress := func(value any) error { return e.store.UpdateStepReceipt(ctx, jobID, index, redact.JSON(value)) }
-		receipt, err := e.executor.Execute(ctx, execution, op, r, progress)
+		active, ok := recipe.Find(e.recipes, model.RecipeID)
+		if !ok {
+			return nil, fmt.Errorf("active model recipe %s is no longer available", model.RecipeID)
+		}
+		return &active, nil
+	}
+	return nil, nil
+}
+
+func rollbackWasVerified(job store.Job) bool {
+	for _, step := range job.Steps {
+		if step.Operation == "rollback_verify_openai_inference" && step.State == "completed" {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) failSwitch(job store.Job, target, previous recipe.Recipe, plans []plannedOperation, failedIndex int, cause error) {
+	original := redact.String(cause.Error())
+	_ = e.store.FailStep(context.Background(), job.ID, failedIndex, original)
+	_ = e.store.UpdateJobState(context.Background(), job.ID, "rolling_back", original)
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	defer cancel()
+	execution := operations.Execution{JobID: job.ID, Kind: "rollback"}
+	rollback := []plannedOperation{
+		{Operation: recipe.Operation{Type: "stop_container"}, Recipe: target},
+		{Operation: recipe.Operation{Type: "start_container"}, Recipe: previous},
+		{Operation: recipe.Operation{Type: "wait_http"}, Recipe: previous},
+		{Operation: recipe.Operation{Type: "verify_openai_inference"}, Recipe: previous},
+	}
+	var rollbackErr error
+	for offset, plan := range rollback {
+		index := len(plans) + offset
+		name := "rollback_" + plan.Operation.Type
+		if err := e.store.BeginStep(rollbackCtx, job.ID, index, name); err != nil {
+			rollbackErr = err
+			break
+		}
+		if e.executor.Completed(rollbackCtx, execution, plan.Operation, plan.Recipe, nil) {
+			if err := e.store.CompleteStep(rollbackCtx, job.ID, index, redact.JSON(map[string]any{"operation": plan.Operation.Type, "already_satisfied": true})); err != nil {
+				rollbackErr = err
+				break
+			}
+			continue
+		}
+		receipt, err := e.executor.Execute(rollbackCtx, execution, plan.Operation, plan.Recipe, nil)
 		if err != nil {
-			e.fail(ctx, jobID, index, err)
-			return
+			rollbackErr = err
+			_ = e.store.FailStep(context.Background(), job.ID, index, redact.String(err.Error()))
+			break
 		}
-		if ctx.Err() != nil {
-			e.fail(ctx, jobID, index, ctx.Err())
-			return
-		}
-		if err := e.store.CompleteStep(ctx, jobID, index, redact.JSON(receipt)); err != nil {
-			e.fail(ctx, jobID, index, err)
-			return
+		if err := e.store.CompleteStep(rollbackCtx, job.ID, index, redact.JSON(receipt)); err != nil {
+			rollbackErr = err
+			break
 		}
 	}
-	if ctx.Err() != nil {
-		_ = e.store.UpdateJobState(context.Background(), jobID, "cancelled", "cancelled at a safe operation boundary")
-		return
+	finalState := "failed"
+	if errors.Is(cause, context.Canceled) {
+		finalState = "cancelled"
 	}
-	if err := e.finish(ctx, job, r); err != nil {
-		e.fail(ctx, jobID, len(ops)-1, err)
-		return
+	message := original
+	if rollbackErr == nil {
+		if err := e.store.SetModelState(context.Background(), target.ID, "stopped", false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			rollbackErr = err
+		}
 	}
+	if rollbackErr == nil {
+		if err := e.store.SetOnlyActive(context.Background(), previous.ID); err != nil {
+			rollbackErr = err
+		}
+	}
+	if rollbackErr == nil {
+		message = fmt.Sprintf("%s; previous model %s restored and verified", original, previous.ID)
+	} else {
+		_ = e.store.SetModelState(context.Background(), target.ID, "failed", false)
+		_ = e.store.SetModelState(context.Background(), previous.ID, "failed", false)
+		message = fmt.Sprintf("%s; rollback to %s failed: %s", original, previous.ID, redact.String(rollbackErr.Error()))
+	}
+	_ = e.store.UpdateJobState(context.Background(), job.ID, finalState, message)
 }
 
 func (e *Engine) finish(ctx context.Context, job store.Job, r recipe.Recipe) error {
