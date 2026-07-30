@@ -68,8 +68,12 @@ func TestHuggingFaceDownloadResumesAndVerifies(t *testing.T) {
 	if string(downloaded) != string(content) {
 		t.Fatalf("download=%q", downloaded)
 	}
-	if err := os.WriteFile(filepath.Join(target, "weights/model.bin"), []byte("corrupted model byte"), 0o640); err != nil { t.Fatal(err) }
-	if client.Complete(artifact, target) { t.Fatal("corrupted completed artifact was reused") }
+	if err := os.WriteFile(filepath.Join(target, "weights/model.bin"), []byte("corrupted model byte"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if client.Complete(artifact, target) {
+		t.Fatal("corrupted completed artifact was reused")
+	}
 }
 
 func TestHuggingFaceManifestPathTraversalIsRejected(t *testing.T) {
@@ -90,9 +94,13 @@ func TestVLLMArgumentsAreStructuredAndPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := vllmArgs(recipes[0])
+	r, ok := recipe.Find(recipes, "qwen36-35b-a3b-nvfp4-1s")
+	if !ok {
+		t.Fatal("Qwen 35 recipe missing")
+	}
+	args := vllmArgs(r)
 	joined := strings.Join(args, " ")
-	for _, required := range []string{"serve /model", "--reasoning-parser qwen3", "--tool-call-parser qwen3_xml", "--speculative-config", "--served-model-name nvidia/Qwen3.6-35B-A3B-NVFP4"} {
+	for _, required := range []string{"serve /model", "--reasoning-parser qwen3", "--tool-call-parser qwen3_coder", "--linear-backend flashinfer_b12x", "--speculative-config", "--served-model-name unsloth/Qwen3.6-35B-A3B-NVFP4"} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("arguments missing %q: %s", required, joined)
 		}

@@ -30,7 +30,8 @@ func NewHostExecutor(dataDir, dockerSocket string, provider inventory.Provider) 
 }
 
 func (h *HostExecutor) ArtifactPath(r recipe.Recipe) string {
-	artifact := r.Artifacts[0]
+	index, _ := r.ArtifactIndex("primary")
+	artifact := r.Artifacts[index]
 	return filepath.Join(h.dataDir, "artifacts", strings.ReplaceAll(artifact.Repository, "/", "--"), artifact.Revision)
 }
 
@@ -113,13 +114,25 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return nil, err
 		}
-		config := map[string]any{"recipe_id": r.ID, "recipe_version": r.Version, "image": r.Runtime.Reference(), "model_revision": r.Artifacts[0].Revision, "container_name": containerName(r), "arguments": vllmArgs(r)}
+		modelRevisions := make(map[string]string, len(r.Artifacts))
+		for _, artifact := range r.Artifacts {
+			modelRevisions[artifact.Role] = artifact.Revision
+		}
+		config := map[string]any{"recipe_id": r.ID, "recipe_version": r.Version, "image": r.Runtime.Reference(), "model_revisions": modelRevisions, "container_name": containerName(r), "arguments": vllmArgs(r)}
 		if err := atomicJSON(path, config, 0o640); err != nil {
 			return nil, err
 		}
 		return map[string]any{"path": path, "contains_secrets": false}, nil
 	case "create_container":
-		id, err := h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), h.ArtifactPath(r), r)
+		artifactPaths := make([]string, len(r.Artifacts))
+		for index := range r.Artifacts {
+			artifactPaths[index] = h.artifactPath(r, index)
+		}
+		cachePath := h.cachePath(r)
+		if err := os.MkdirAll(cachePath, 0o750); err != nil {
+			return nil, err
+		}
+		id, err := h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, r)
 		if err != nil {
 			return nil, err
 		}
@@ -145,7 +158,10 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := h.removeOwnedConfig(r); err != nil {
 			return nil, err
 		}
-		return map[string]any{"container_name": containerName(r), "removed": true, "generated_config_removed": true}, nil
+		if err := h.removeOwnedCache(r); err != nil {
+			return nil, err
+		}
+		return map[string]any{"container_name": containerName(r), "removed": true, "generated_config_removed": true, "compilation_cache_removed": true}, nil
 	case "wait_http":
 		return h.waitHTTP(ctx, r, progress)
 	case "verify_openai_inference":
@@ -184,7 +200,15 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 		return true
 	case "write_generated_config":
 		data, err := os.ReadFile(h.configPath(r))
-		return err == nil && bytes.Contains(data, []byte(r.Runtime.Digest)) && bytes.Contains(data, []byte(r.Artifacts[0].Revision))
+		if err != nil || !bytes.Contains(data, []byte(r.Runtime.Digest)) {
+			return false
+		}
+		for _, artifact := range r.Artifacts {
+			if !bytes.Contains(data, []byte(artifact.Revision)) {
+				return false
+			}
+		}
+		return true
 	case "create_container":
 		state, err := h.docker.Container(ctx, containerName(r))
 		return err == nil && state.Labels["ai.runonspark.recipe-id"] == r.ID && state.Labels["ai.runonspark.recipe-version"] == fmt.Sprint(r.Version)
@@ -202,7 +226,8 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 	case "remove_container":
 		_, err := h.docker.Container(ctx, containerName(r))
 		_, configErr := os.Stat(filepath.Dir(h.configPath(r)))
-		return errors.Is(err, ErrContainerNotFound) && errors.Is(configErr, os.ErrNotExist)
+		_, cacheErr := os.Stat(h.cachePath(r))
+		return errors.Is(err, ErrContainerNotFound) && errors.Is(configErr, os.ErrNotExist) && errors.Is(cacheErr, os.ErrNotExist)
 	case "remove_artifact_if_unshared":
 		if !execution.RemoveArtifacts {
 			return true
@@ -294,6 +319,9 @@ func (h *HostExecutor) artifactPath(r recipe.Recipe, index int) string {
 func (h *HostExecutor) configPath(r recipe.Recipe) string {
 	return filepath.Join(h.dataDir, "configs", r.ID, fmt.Sprint(r.Version), "launch.json")
 }
+func (h *HostExecutor) cachePath(r recipe.Recipe) string {
+	return filepath.Join(h.dataDir, "caches", r.ID, fmt.Sprint(r.Version))
+}
 func (h *HostExecutor) modelURL(r recipe.Recipe) string {
 	return fmt.Sprintf("http://127.0.0.1:%d", r.Service.DefaultHostPort)
 }
@@ -318,6 +346,18 @@ func (h *HostExecutor) removeOwnedConfig(r recipe.Recipe) error {
 	rel, err := filepath.Rel(absRoot, absTarget)
 	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return errors.New("configuration removal escaped managed root")
+	}
+	return os.RemoveAll(absTarget)
+}
+
+func (h *HostExecutor) removeOwnedCache(r recipe.Recipe) error {
+	target := h.cachePath(r)
+	root := filepath.Join(h.dataDir, "caches")
+	absRoot, _ := filepath.Abs(root)
+	absTarget, _ := filepath.Abs(target)
+	rel, err := filepath.Rel(absRoot, absTarget)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return errors.New("cache removal escaped managed root")
 	}
 	return os.RemoveAll(absTarget)
 }

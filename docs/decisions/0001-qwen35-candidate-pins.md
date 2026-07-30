@@ -1,6 +1,6 @@
 # ADR 0001: Qwen 35B candidate pins
 
-Status: candidate, awaiting complete DGX Spark acceptance verification
+Status: superseded by ADR 0002 before DGX Spark acceptance verification
 Date: 2026-07-30
 
 ## Decision
@@ -25,3 +25,5 @@ The recipe is deliberately `runonspark-candidate`, not `runonspark-verified`. Re
 - The UI must label the recipe as a candidate.
 - Release packaging must not describe it as verified until real-device validation is recorded.
 - The image is historical nightly content addressed immutably. `nightly` is never stored or pulled by the recipe.
+
+The operator subsequently selected a different Qwen 35B artifact and runtime source. This record remains as the rationale for recipe version 1; it is not an active embedded recipe.

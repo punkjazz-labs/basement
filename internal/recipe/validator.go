@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,6 +19,7 @@ var (
 	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	revisionPattern   = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	imagePattern      = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$`)
 )
 
 var allowedOperations = map[string]bool{
@@ -65,14 +68,18 @@ func Validate(r Recipe) error {
 	if r.Trust == "runonspark-verified" && r.Verification != "dgx-spark-verified" {
 		problems = append(problems, "verified trust requires real DGX verification")
 	}
+	sourceURL, sourceErr := url.Parse(r.Source.URL)
+	if sourceErr != nil || sourceURL.Scheme != "https" || (sourceURL.Host != "github.com" && sourceURL.Host != "huggingface.co") || !revisionPattern.MatchString(r.Source.Revision) {
+		problems = append(problems, "source must use an approved HTTPS URL and immutable revision")
+	}
 	if r.Topology.SparkCount != 1 {
 		problems = append(problems, "only one Spark is supported")
 	}
 	if r.Runtime.Kind != "vllm" {
 		problems = append(problems, "runtime kind must be vllm")
 	}
-	if !repositoryPattern.MatchString(r.Runtime.Image) {
-		problems = append(problems, "runtime image must be a two-part repository without a tag")
+	if !imagePattern.MatchString(r.Runtime.Image) {
+		problems = append(problems, "runtime image must be a repository path without a tag")
 	}
 	if !digestPattern.MatchString(r.Runtime.Digest) {
 		problems = append(problems, "runtime digest must be an immutable sha256")
@@ -80,14 +87,29 @@ func Validate(r Recipe) error {
 	if r.Runtime.ImageBytes <= 0 {
 		problems = append(problems, "runtime image_bytes must be positive")
 	}
+	if r.Runtime.ShmBytes < 0 || r.Runtime.ShmBytes > 64<<30 {
+		problems = append(problems, "runtime shm_bytes is outside the safe limit")
+	}
+	allowedEnvironment := map[string]map[string]bool{
+		"CUTE_DSL_ARCH":      {"sm_121a": true},
+		"VLLM_TARGET_DEVICE": {"cuda": true},
+		"MAX_JOBS":           {"4": true},
+	}
+	for name, value := range r.Runtime.Environment {
+		if !allowedEnvironment[name][value] {
+			problems = append(problems, "runtime environment is outside the allowlist")
+		}
+	}
 	if len(r.Artifacts) == 0 {
 		problems = append(problems, "at least one artifact is required")
 	}
+	roles := map[string]bool{}
 	for i, artifact := range r.Artifacts {
 		prefix := fmt.Sprintf("artifact[%d]", i)
-		if artifact.Role == "" || !repositoryPattern.MatchString(artifact.Repository) {
+		if !recipeIDPattern.MatchString(artifact.Role) || roles[artifact.Role] || !repositoryPattern.MatchString(artifact.Repository) {
 			problems = append(problems, prefix+" role/repository are invalid")
 		}
+		roles[artifact.Role] = true
 		if !revisionPattern.MatchString(artifact.Revision) {
 			problems = append(problems, prefix+" revision must be a 40-character immutable commit")
 		}
@@ -101,6 +123,9 @@ func Validate(r Recipe) error {
 		if err != nil || licenceURL.Scheme != "https" || licenceURL.Host != "huggingface.co" {
 			problems = append(problems, prefix+" licence_url must be an HTTPS Hugging Face URL")
 		}
+	}
+	if !roles["primary"] {
+		problems = append(problems, "artifacts must contain one primary role")
 	}
 	if r.Requirements.Architecture != "aarch64" {
 		problems = append(problems, "architecture must be aarch64")
@@ -124,10 +149,10 @@ func Validate(r Recipe) error {
 	if r.Service.ServedModelID == "" || filepath.IsAbs(r.Service.ServedModelID) || strings.Contains(r.Service.ServedModelID, "..") {
 		problems = append(problems, "served_model_id is unsafe")
 	}
-	if len(r.Artifacts) > 0 && r.Service.ServedModelID != r.Artifacts[0].Repository {
+	if primaryIndex, ok := r.ArtifactIndex("primary"); ok && r.Service.ServedModelID != r.Artifacts[primaryIndex].Repository {
 		problems = append(problems, "served_model_id must identify the pinned primary artifact")
 	}
-	if err := validateVLLM(r.Service.VLLM); err != nil {
+	if err := validateVLLM(r.Service.VLLM, roles); err != nil {
 		problems = append(problems, err.Error())
 	}
 	if len(r.Operations) == 0 || len(r.Uninstall) == 0 {
@@ -167,22 +192,61 @@ func operationSequenceEqual(operations []Operation, expected []string) bool {
 	return true
 }
 
-func validateVLLM(v VLLMConfig) error {
-	if v.TensorParallelSize != 1 || v.MaxModelLen <= 0 || v.MaxNumSeqs <= 0 || v.MaxBatchedTokens <= 0 {
+func validateVLLM(v VLLMConfig, roles map[string]bool) error {
+	if v.TensorParallelSize != 1 || v.MaxModelLen <= 0 || v.MaxNumSeqs <= 0 || v.MaxBatchedTokens < 0 || v.MultimodalImageLimit < 0 || v.MultimodalImageLimit > 8 {
 		return errors.New("vllm numeric settings are invalid")
 	}
 	allowed := map[string]map[string]bool{
-		"kv": {"fp8": true}, "attention": {"flashinfer": true}, "moe": {"marlin": true},
-		"spec_method": {"mtp": true}, "spec_moe": {"triton": true}, "reasoning": {"qwen3": true},
-		"tool": {"qwen3_xml": true}, "load": {"fastsafetensors": true},
+		"kv": {"": true, "fp8": true}, "attention": {"": true, "flashinfer": true},
+		"moe": {"": true, "auto": true, "marlin": true}, "linear": {"": true, "flashinfer_b12x": true},
+		"spec_method": {"mtp": true, "dflash": true}, "spec_moe": {"": true, "triton": true},
+		"reasoning": {"qwen3": true, "poolside_v1": true},
+		"tool":      {"qwen3_xml": true, "qwen3_coder": true, "poolside_v1": true},
+		"load":      {"": true, "fastsafetensors": true},
 	}
 	if !allowed["kv"][v.KVCacheDType] || !allowed["attention"][v.AttentionBackend] || !allowed["moe"][v.MoEBackend] ||
+		!allowed["linear"][v.LinearBackend] ||
 		!allowed["spec_method"][v.SpeculativeMethod] || !allowed["spec_moe"][v.SpeculativeMoE] ||
 		!allowed["reasoning"][v.ReasoningParser] || !allowed["tool"][v.ToolCallParser] || !allowed["load"][v.LoadFormat] {
 		return errors.New("vllm setting is outside the recipe policy")
 	}
-	if v.GPUMemoryUtil != "0.4" || v.SpeculativeTokens != 3 {
+	util, err := strconv.ParseFloat(v.GPUMemoryUtil, 64)
+	if err != nil || util <= 0 || util > 0.95 || v.SpeculativeTokens <= 0 || v.SpeculativeTokens > 32 {
 		return errors.New("vllm resource settings are outside the verified candidate")
+	}
+	if v.SpeculativeMethod == "mtp" && v.SpeculativeModelRole != "" {
+		return errors.New("MTP must not reference a separate speculative model")
+	}
+	if v.SpeculativeMethod == "dflash" && (v.SpeculativeModelRole == "" || !roles[v.SpeculativeModelRole] || v.SpeculativeModelRole == "primary") {
+		return errors.New("DFlash must reference a declared non-primary artifact role")
+	}
+	if v.ChatTemplateFile != "" {
+		clean := path.Clean(v.ChatTemplateFile)
+		if filepath.IsAbs(v.ChatTemplateFile) || strings.Contains(v.ChatTemplateFile, "\\") || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+			return errors.New("chat template file is unsafe")
+		}
+	}
+	if err := validateGeneration(v.Generation); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateGeneration(g GenerationConfig) error {
+	if g.Temperature == nil || g.TopP == nil || *g.Temperature < 0 || *g.Temperature > 2 || *g.TopP <= 0 || *g.TopP > 1 {
+		return errors.New("generation settings must include safe temperature and top_p values")
+	}
+	if g.TopK != nil && (*g.TopK < 0 || *g.TopK > 1000) {
+		return errors.New("generation top_k is outside the safe range")
+	}
+	if g.MinP != nil && (*g.MinP < 0 || *g.MinP > 1) {
+		return errors.New("generation min_p is outside the safe range")
+	}
+	if g.PresencePenalty != nil && (*g.PresencePenalty < -2 || *g.PresencePenalty > 2) {
+		return errors.New("generation presence penalty is outside the safe range")
+	}
+	if g.RepetitionPenalty != nil && (*g.RepetitionPenalty <= 0 || *g.RepetitionPenalty > 2) {
+		return errors.New("generation repetition penalty is outside the safe range")
 	}
 	return nil
 }

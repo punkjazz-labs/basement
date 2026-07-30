@@ -8,6 +8,7 @@ type Recipe struct {
 	Publisher     string       `yaml:"publisher" json:"publisher"`
 	Trust         string       `yaml:"trust" json:"trust"`
 	Verification  string       `yaml:"verification" json:"verification"`
+	Source        Source       `yaml:"source" json:"source"`
 	Topology      Topology     `yaml:"topology" json:"topology"`
 	Runtime       Runtime      `yaml:"runtime" json:"runtime"`
 	Artifacts     []Artifact   `yaml:"artifacts" json:"artifacts"`
@@ -17,15 +18,24 @@ type Recipe struct {
 	Uninstall     []Operation  `yaml:"uninstall" json:"uninstall"`
 }
 
+type Source struct {
+	URL      string `yaml:"url" json:"url"`
+	Revision string `yaml:"revision" json:"revision"`
+}
+
 type Topology struct {
 	SparkCount int `yaml:"spark_count" json:"spark_count"`
 }
 
 type Runtime struct {
-	Kind       string `yaml:"kind" json:"kind"`
-	Image      string `yaml:"image" json:"image"`
-	Digest     string `yaml:"digest" json:"digest"`
-	ImageBytes int64  `yaml:"image_bytes" json:"image_bytes"`
+	Kind        string            `yaml:"kind" json:"kind"`
+	Image       string            `yaml:"image" json:"image"`
+	Digest      string            `yaml:"digest" json:"digest"`
+	ImageBytes  int64             `yaml:"image_bytes" json:"image_bytes"`
+	Environment map[string]string `yaml:"environment" json:"environment"`
+	ShmBytes    int64             `yaml:"shm_bytes" json:"shm_bytes"`
+	MemoryLock  bool              `yaml:"memory_lock" json:"memory_lock"`
+	IPCLock     bool              `yaml:"ipc_lock" json:"ipc_lock"`
 }
 
 func (r Runtime) Reference() string { return r.Image + "@" + r.Digest }
@@ -57,25 +67,54 @@ type Service struct {
 }
 
 type VLLMConfig struct {
-	TensorParallelSize int    `yaml:"tensor_parallel_size" json:"tensor_parallel_size"`
-	KVCacheDType       string `yaml:"kv_cache_dtype" json:"kv_cache_dtype"`
-	AttentionBackend   string `yaml:"attention_backend" json:"attention_backend"`
-	MoEBackend         string `yaml:"moe_backend" json:"moe_backend"`
-	GPUMemoryUtil      string `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
-	MaxModelLen        int    `yaml:"max_model_len" json:"max_model_len"`
-	MaxNumSeqs         int    `yaml:"max_num_seqs" json:"max_num_seqs"`
-	MaxBatchedTokens   int    `yaml:"max_num_batched_tokens" json:"max_num_batched_tokens"`
-	SpeculativeMethod  string `yaml:"speculative_method" json:"speculative_method"`
-	SpeculativeTokens  int    `yaml:"speculative_tokens" json:"speculative_tokens"`
-	SpeculativeMoE     string `yaml:"speculative_moe_backend" json:"speculative_moe_backend"`
-	ReasoningParser    string `yaml:"reasoning_parser" json:"reasoning_parser"`
-	ToolCallParser     string `yaml:"tool_call_parser" json:"tool_call_parser"`
-	LoadFormat         string `yaml:"load_format" json:"load_format"`
-	TrustRemoteCode    bool   `yaml:"trust_remote_code" json:"trust_remote_code"`
-	ChunkedPrefill     bool   `yaml:"chunked_prefill" json:"chunked_prefill"`
-	AsyncScheduling    bool   `yaml:"async_scheduling" json:"async_scheduling"`
-	PrefixCaching      bool   `yaml:"prefix_caching" json:"prefix_caching"`
-	AutoToolChoice     bool   `yaml:"auto_tool_choice" json:"auto_tool_choice"`
+	TensorParallelSize   int                 `yaml:"tensor_parallel_size" json:"tensor_parallel_size"`
+	KVCacheDType         string              `yaml:"kv_cache_dtype" json:"kv_cache_dtype"`
+	AttentionBackend     string              `yaml:"attention_backend" json:"attention_backend"`
+	MoEBackend           string              `yaml:"moe_backend" json:"moe_backend"`
+	LinearBackend        string              `yaml:"linear_backend" json:"linear_backend"`
+	GPUMemoryUtil        string              `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
+	MaxModelLen          int                 `yaml:"max_model_len" json:"max_model_len"`
+	MaxNumSeqs           int                 `yaml:"max_num_seqs" json:"max_num_seqs"`
+	MaxBatchedTokens     int                 `yaml:"max_num_batched_tokens" json:"max_num_batched_tokens"`
+	MultimodalImageLimit int                 `yaml:"multimodal_image_limit" json:"multimodal_image_limit"`
+	SpeculativeMethod    string              `yaml:"speculative_method" json:"speculative_method"`
+	SpeculativeTokens    int                 `yaml:"speculative_tokens" json:"speculative_tokens"`
+	SpeculativeMoE       string              `yaml:"speculative_moe_backend" json:"speculative_moe_backend"`
+	SpeculativeModelRole string              `yaml:"speculative_model_role" json:"speculative_model_role"`
+	ReasoningParser      string              `yaml:"reasoning_parser" json:"reasoning_parser"`
+	ToolCallParser       string              `yaml:"tool_call_parser" json:"tool_call_parser"`
+	LoadFormat           string              `yaml:"load_format" json:"load_format"`
+	ChatTemplateFile     string              `yaml:"chat_template_file" json:"chat_template_file"`
+	ChatTemplate         ChatTemplateOptions `yaml:"chat_template" json:"chat_template"`
+	Generation           GenerationConfig    `yaml:"generation" json:"generation"`
+	TrustRemoteCode      bool                `yaml:"trust_remote_code" json:"trust_remote_code"`
+	ChunkedPrefill       bool                `yaml:"chunked_prefill" json:"chunked_prefill"`
+	AsyncScheduling      bool                `yaml:"async_scheduling" json:"async_scheduling"`
+	PrefixCaching        bool                `yaml:"prefix_caching" json:"prefix_caching"`
+	AutoToolChoice       bool                `yaml:"auto_tool_choice" json:"auto_tool_choice"`
+}
+
+type ChatTemplateOptions struct {
+	EnableThinking   bool `yaml:"enable_thinking" json:"enable_thinking"`
+	PreserveThinking bool `yaml:"preserve_thinking" json:"preserve_thinking"`
+}
+
+type GenerationConfig struct {
+	Temperature       *float64 `yaml:"temperature" json:"temperature,omitempty"`
+	TopP              *float64 `yaml:"top_p" json:"top_p,omitempty"`
+	TopK              *int     `yaml:"top_k" json:"top_k,omitempty"`
+	MinP              *float64 `yaml:"min_p" json:"min_p,omitempty"`
+	PresencePenalty   *float64 `yaml:"presence_penalty" json:"presence_penalty,omitempty"`
+	RepetitionPenalty *float64 `yaml:"repetition_penalty" json:"repetition_penalty,omitempty"`
+}
+
+func (r Recipe) ArtifactIndex(role string) (int, bool) {
+	for index, artifact := range r.Artifacts {
+		if artifact.Role == role {
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 type Operation struct {

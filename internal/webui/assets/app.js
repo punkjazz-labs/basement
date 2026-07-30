@@ -73,6 +73,7 @@ function renderSystem(system) {
   $('#hostname').textContent = system.hostname || 'DGX Spark';
   $('#system-summary').textContent = `${system.product_name || 'Unknown hardware'} · ${system.architecture} · ${system.os} · Manager ${system.manager_version}`;
   $('#storage').textContent = formatBytes(system.storage_available_bytes);
+  $('#recipe-count').textContent = `${state.recipes.length} candidate${state.recipes.length === 1 ? '' : 's'}`;
   const blockers = system.blocking_conditions || [];
   $('#blockers').classList.toggle('hidden', !blockers.length);
   $('#blocker-list').innerHTML = blockers.map(value => `<li>${escapeHTML(value)}</li>`).join('');
@@ -80,15 +81,28 @@ function renderSystem(system) {
 
 function renderRecipes() {
   const installed = new Map(state.models.map(model => [model.recipe_id, model]));
-  $('#recipes').innerHTML = state.recipes.map(item => {
+  const order = ['qwen36-35b-a3b-nvfp4-1s', 'qwen36-27b-nvfp4-1s', 'laguna-s-2-1-nvfp4-dflash-1s'];
+  const recipes = [...state.recipes].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+  $('#recipes').innerHTML = recipes.map((item, index) => {
     const model = installed.get(item.id);
     const busy = state.jobs.some(job => job.recipe_id === item.id && !terminal(job.state));
+    const featured = index === 0;
     let actions;
     if (!model) actions = `<button data-action="install" data-id="${item.id}" ${busy ? 'disabled' : ''}>Install</button>`;
     else if (model.active && model.status === 'ready') actions = `<button data-action="stop" data-id="${item.id}" ${busy ? 'disabled' : ''}>Stop</button><button class="secondary" data-action="smoke-test" data-id="${item.id}">Smoke test</button><button class="secondary" data-action="copy-endpoint" data-id="${item.id}">Copy endpoint</button><button class="secondary" data-action="copy-model" data-id="${item.id}">Copy model ID</button>`;
     else if (model.status === 'recovering') actions = '<button disabled>Recovering health…</button>';
     else actions = `<button data-action="start" data-id="${item.id}" ${busy ? 'disabled' : ''}>Start</button><button class="danger" data-action="remove" data-id="${item.id}">Remove</button>`;
-    return `<article class="card"><div class="card-head"><div><p class="eyebrow">${escapeHTML(item.publisher)}</p><h3>${escapeHTML(item.display_name)}</h3><code>${escapeHTML(item.artifacts[0].repository)}@${item.artifacts[0].revision.slice(0, 8)}</code></div><span class="pill">${escapeHTML(item.verification)}</span></div><div class="facts"><div><span>RUNTIME</span><strong>vLLM · NVFP4</strong></div><div><span>DOWNLOAD</span><strong>${formatBytes(item.artifact_bytes)}</strong></div><div><span>ENDPOINT</span><strong>:${item.service.default_host_port}/v1</strong></div><div><span>STATE</span><strong>${model ? escapeHTML(model.status) : 'Not installed'}</strong></div></div><div class="actions">${actions}</div></article>`;
+    const artifacts = item.artifacts.map(artifact => `<li><span>${escapeHTML(artifact.role)}</span><div><strong>${escapeHTML(artifact.repository)}</strong><code>${artifact.revision.slice(0, 12)} · ${formatBytes(artifact.expected_bytes)}</code></div></li>`).join('');
+    const speculation = item.service.vllm.speculative_method === 'dflash' ? `DFlash ×${item.service.vllm.speculative_tokens}` : `MTP ×${item.service.vllm.speculative_tokens}`;
+    const backend = item.service.vllm.linear_backend || item.service.vllm.moe_backend || 'automatic';
+    return `<article class="card ${featured ? 'featured' : ''}">
+      <div class="card-index">${String(index + 1).padStart(2, '0')}</div>
+      <div class="card-head"><div><p class="eyebrow">${escapeHTML(item.publisher)}</p><h3>${escapeHTML(item.display_name)}</h3><p class="model-id">${escapeHTML(item.service.served_model_id)}</p></div><div class="badges">${featured ? '<span class="pill recommended">recommended</span>' : ''}<span class="pill">${escapeHTML(item.verification)}</span></div></div>
+      <div class="signal"><span>${escapeHTML(speculation)}</span><span>${formatBytes(item.artifact_bytes)} weights</span><span>${item.artifacts.length} artifact${item.artifacts.length === 1 ? '' : 's'}</span></div>
+      <div class="facts"><div><span>RUNTIME</span><strong>vLLM · ${escapeHTML(backend)}</strong></div><div><span>REQUIRED DISK</span><strong>${formatBytes(item.required_bytes)}</strong></div><div><span>ENDPOINT</span><strong>:${item.service.default_host_port}/v1</strong></div><div><span>STATE</span><strong class="model-state">${model ? escapeHTML(model.status) : 'Not installed'}</strong></div></div>
+      <details><summary>Pins & provenance</summary><ul class="artifacts">${artifacts}</ul><a class="source" href="${escapeHTML(item.source.url)}" target="_blank" rel="noreferrer">Upstream source @ ${item.source.revision.slice(0, 12)} ↗</a><code class="digest">${escapeHTML(item.runtime.digest)}</code></details>
+      <div class="actions">${actions}</div>
+    </article>`;
   }).join('');
   document.querySelectorAll('[data-action]').forEach(button => { button.onclick = () => action(button.dataset.action, button.dataset.id); });
 }

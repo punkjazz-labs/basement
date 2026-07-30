@@ -8,8 +8,9 @@
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
+  <div class="atmosphere" aria-hidden="true"></div>
   <header>
-    <div><span class="mark">RS</span><strong>RunOnSpark Manager</strong></div>
+    <div class="brand"><span class="mark">RS</span><span><strong>RunOnSpark</strong><small>CONTROL DECK</small></span></div>
     <span id="connection" class="status neutral">Connecting</span>
   </header>
   <main>
@@ -23,19 +24,23 @@
 
     <div id="console" class="hidden">
       <section class="hero">
-        <div><p class="eyebrow">SINGLE-SPARK CONTROL PLANE</p><h1 id="hostname">DGX Spark</h1><p id="system-summary">Reading inventory…</p></div>
-        <div class="capacity"><span>AVAILABLE STORAGE</span><strong id="storage">—</strong></div>
+        <div class="hero-copy"><p class="eyebrow">SINGLE-SPARK CONTROL PLANE / LOCAL ONLY</p><h1 id="hostname">DGX Spark</h1><p id="system-summary">Reading inventory…</p></div>
+        <div class="telemetry">
+          <div class="capacity"><span>AVAILABLE STORAGE</span><strong id="storage">—</strong></div>
+          <div class="capacity"><span>RECIPE PACK</span><strong id="recipe-count">—</strong></div>
+        </div>
       </section>
 
       <section id="blockers" class="alert hidden"><strong>Preflight blockers</strong><ul id="blocker-list"></ul></section>
 
       <section>
-        <div class="section-title"><div><p class="eyebrow">CURATED RECIPES</p><h2>Models</h2></div><button id="refresh" class="secondary">Refresh</button></div>
+        <ol class="flow" aria-label="Deployment workflow"><li class="done"><span>01</span>Inventory</li><li><span>02</span>Select</li><li><span>03</span>Install</li><li><span>04</span>Verify</li></ol>
+        <div class="section-title"><div><p class="eyebrow">CURATED / IMMUTABLY PINNED</p><h2>Model recipes</h2><p class="section-note">Candidate means the source is pinned and locally validated. Promotion happens only after a complete DGX Spark run.</p></div><button id="refresh" class="secondary">Refresh</button></div>
         <div id="recipes" class="cards"></div>
       </section>
 
       <section>
-        <div class="section-title"><div><p class="eyebrow">PERSISTED EXECUTION</p><h2>Jobs</h2></div></div>
+        <div class="section-title"><div><p class="eyebrow">PERSISTED EXECUTION</p><h2>Flight log</h2></div></div>
         <div id="jobs" class="jobs"><p class="muted">No jobs yet.</p></div>
       </section>
     </div>

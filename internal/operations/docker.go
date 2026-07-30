@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
@@ -119,21 +120,45 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels}, nil
 }
 
-func (d *DockerClient) Create(ctx context.Context, name, image, modelPath string, r recipe.Recipe) (string, error) {
+func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, r recipe.Recipe) (string, error) {
+	if len(artifactPaths) != len(r.Artifacts) || cachePath == "" {
+		return "", errors.New("container artifact and cache paths are incomplete")
+	}
 	port := fmt.Sprintf("%d/tcp", r.Service.InternalPort)
+	binds := make([]string, 0, len(artifactPaths)+1)
+	for index, artifactPath := range artifactPaths {
+		binds = append(binds, artifactPath+":"+artifactMountPath(r.Artifacts[index].Role)+":ro")
+	}
+	binds = append(binds, cachePath+":/root/.cache:rw")
+	environment := make([]string, 0, len(r.Runtime.Environment))
+	for name, value := range r.Runtime.Environment {
+		environment = append(environment, name+"="+value)
+	}
+	sort.Strings(environment)
+	hostConfig := map[string]any{
+		"Binds":          binds,
+		"PortBindings":   map[string]any{port: []map[string]string{{"HostIp": "0.0.0.0", "HostPort": fmt.Sprint(r.Service.DefaultHostPort)}}},
+		"DeviceRequests": []map[string]any{{"Driver": "nvidia", "Count": -1, "Capabilities": [][]string{{"gpu"}}}},
+		"IpcMode":        "host", "ReadonlyRootfs": true,
+		"Tmpfs": map[string]string{"/tmp": "rw,noexec,nosuid,size=8g"},
+	}
+	if r.Runtime.ShmBytes > 0 {
+		hostConfig["ShmSize"] = r.Runtime.ShmBytes
+	}
+	if r.Runtime.MemoryLock {
+		hostConfig["Ulimits"] = []map[string]any{{"Name": "memlock", "Soft": -1, "Hard": -1}}
+	}
+	if r.Runtime.IPCLock {
+		hostConfig["CapAdd"] = []string{"IPC_LOCK"}
+	}
 	body := map[string]any{
 		"Image":        image,
 		"Entrypoint":   []string{"vllm"},
 		"Cmd":          vllmArgs(r),
+		"Env":          environment,
 		"Labels":       map[string]string{"ai.runonspark.managed": "true", "ai.runonspark.recipe-id": r.ID, "ai.runonspark.recipe-version": fmt.Sprint(r.Version)},
 		"ExposedPorts": map[string]any{port: map[string]any{}},
-		"HostConfig": map[string]any{
-			"Binds":          []string{modelPath + ":/model:ro"},
-			"PortBindings":   map[string]any{port: []map[string]string{{"HostIp": "0.0.0.0", "HostPort": fmt.Sprint(r.Service.DefaultHostPort)}}},
-			"DeviceRequests": []map[string]any{{"Driver": "nvidia", "Count": -1, "Capabilities": [][]string{{"gpu"}}}},
-			"IpcMode":        "host", "ReadonlyRootfs": true,
-			"Tmpfs": map[string]string{"/tmp": "rw,noexec,nosuid,size=4g", "/root/.cache": "rw,nosuid,size=8g"},
-		},
+		"HostConfig":   hostConfig,
 	}
 	encoded, _ := json.Marshal(body)
 	resp, err := d.request(ctx, http.MethodPost, "/containers/create?name="+url.QueryEscape(name), bytes.NewReader(encoded))
@@ -203,12 +228,39 @@ func dockerError(resp *http.Response) error {
 
 func vllmArgs(r recipe.Recipe) []string {
 	v := r.Service.VLLM
-	spec, _ := json.Marshal(map[string]any{"method": v.SpeculativeMethod, "num_speculative_tokens": v.SpeculativeTokens, "moe_backend": v.SpeculativeMoE})
+	specConfig := map[string]any{"method": v.SpeculativeMethod, "num_speculative_tokens": v.SpeculativeTokens}
+	if v.SpeculativeMoE != "" {
+		specConfig["moe_backend"] = v.SpeculativeMoE
+	}
+	if v.SpeculativeModelRole != "" {
+		specConfig["model"] = artifactMountPath(v.SpeculativeModelRole)
+	}
+	spec, _ := json.Marshal(specConfig)
 	args := []string{"serve", "/model", "--host", "0.0.0.0", "--port", fmt.Sprint(r.Service.InternalPort), "--served-model-name", r.Service.ServedModelID,
-		"--tensor-parallel-size", fmt.Sprint(v.TensorParallelSize), "--kv-cache-dtype", v.KVCacheDType, "--attention-backend", v.AttentionBackend,
-		"--moe-backend", v.MoEBackend, "--gpu-memory-utilization", v.GPUMemoryUtil, "--max-model-len", fmt.Sprint(v.MaxModelLen),
-		"--max-num-seqs", fmt.Sprint(v.MaxNumSeqs), "--max-num-batched-tokens", fmt.Sprint(v.MaxBatchedTokens), "--speculative-config", string(spec),
-		"--load-format", v.LoadFormat, "--reasoning-parser", v.ReasoningParser, "--tool-call-parser", v.ToolCallParser}
+		"--tensor-parallel-size", fmt.Sprint(v.TensorParallelSize), "--gpu-memory-utilization", v.GPUMemoryUtil, "--max-model-len", fmt.Sprint(v.MaxModelLen),
+		"--max-num-seqs", fmt.Sprint(v.MaxNumSeqs), "--speculative-config", string(spec),
+		"--reasoning-parser", v.ReasoningParser, "--tool-call-parser", v.ToolCallParser}
+	args = appendOptional(args, "--kv-cache-dtype", v.KVCacheDType)
+	args = appendOptional(args, "--attention-backend", v.AttentionBackend)
+	args = appendOptional(args, "--moe-backend", v.MoEBackend)
+	args = appendOptional(args, "--linear-backend", v.LinearBackend)
+	args = appendOptional(args, "--load-format", v.LoadFormat)
+	if v.MaxBatchedTokens > 0 {
+		args = append(args, "--max-num-batched-tokens", fmt.Sprint(v.MaxBatchedTokens))
+	}
+	if v.MultimodalImageLimit > 0 {
+		limit, _ := json.Marshal(map[string]int{"image": v.MultimodalImageLimit})
+		args = append(args, "--limit-mm-per-prompt", string(limit))
+	}
+	if v.ChatTemplateFile != "" {
+		args = append(args, "--chat-template", artifactMountPath("primary")+"/"+v.ChatTemplateFile)
+	}
+	if v.ChatTemplate.EnableThinking || v.ChatTemplate.PreserveThinking {
+		options, _ := json.Marshal(v.ChatTemplate)
+		args = append(args, "--default-chat-template-kwargs", string(options))
+	}
+	generation, _ := json.Marshal(v.Generation)
+	args = append(args, "--override-generation-config", string(generation))
 	if v.TrustRemoteCode {
 		args = append(args, "--trust-remote-code")
 	}
@@ -225,4 +277,18 @@ func vllmArgs(r recipe.Recipe) []string {
 		args = append(args, "--enable-auto-tool-choice")
 	}
 	return args
+}
+
+func appendOptional(args []string, flag, value string) []string {
+	if value == "" {
+		return args
+	}
+	return append(args, flag, value)
+}
+
+func artifactMountPath(role string) string {
+	if role == "primary" {
+		return "/model"
+	}
+	return "/" + role
 }

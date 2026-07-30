@@ -1,0 +1,97 @@
+schema_version: 1
+id: laguna-s-2-1-nvfp4-dflash-1s
+version: 1
+display_name: Laguna S 2.1 + DFlash
+publisher: poolside
+trust: runonspark-candidate
+verification: candidate
+source:
+  url: https://huggingface.co/poolside/Laguna-S-2.1-NVFP4
+  revision: 07614121b31898586430f189d27a25a0be310843
+topology:
+  spark_count: 1
+runtime:
+  kind: vllm
+  image: vllm/vllm-openai
+  digest: sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089
+  image_bytes: 10238912364
+  environment:
+    CUTE_DSL_ARCH: sm_121a
+    MAX_JOBS: "4"
+  shm_bytes: 34359738368
+  memory_lock: true
+  ipc_lock: true
+artifacts:
+  - role: primary
+    repository: poolside/Laguna-S-2.1-NVFP4
+    revision: 07614121b31898586430f189d27a25a0be310843
+    expected_bytes: 71938632401
+    licence: OpenMDW-1.1
+    licence_url: https://huggingface.co/poolside/Laguna-S-2.1-NVFP4/blob/07614121b31898586430f189d27a25a0be310843/LICENSE.md
+  - role: drafter
+    repository: poolside/Laguna-S-2.1-DFlash-NVFP4
+    revision: 4cdcc6e9b29105e8ff5790885cadccbeb4f33f54
+    expected_bytes: 2229973462
+    licence: OpenMDW-1.1
+    licence_url: https://huggingface.co/poolside/Laguna-S-2.1-NVFP4/blob/07614121b31898586430f189d27a25a0be310843/LICENSE.md
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  safety_margin_bytes: 20000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: poolside/Laguna-S-2.1-NVFP4
+  vllm:
+    tensor_parallel_size: 1
+    kv_cache_dtype: fp8
+    attention_backend: ""
+    moe_backend: ""
+    linear_backend: ""
+    gpu_memory_utilization: "0.85"
+    max_model_len: 262144
+    max_num_seqs: 32
+    max_num_batched_tokens: 0
+    multimodal_image_limit: 0
+    speculative_method: dflash
+    speculative_tokens: 15
+    speculative_moe_backend: ""
+    speculative_model_role: drafter
+    reasoning_parser: poolside_v1
+    tool_call_parser: poolside_v1
+    load_format: ""
+    chat_template_file: ""
+    chat_template:
+      enable_thinking: false
+      preserve_thinking: false
+    generation:
+      temperature: 0.7
+      top_p: 0.95
+    trust_remote_code: true
+    chunked_prefill: false
+    async_scheduling: false
+    prefix_caching: false
+    auto_tool_choice: true
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared

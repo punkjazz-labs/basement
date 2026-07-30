@@ -1,33 +1,32 @@
 schema_version: 1
-id: qwen36-35b-a3b-nvfp4-1s
-version: 2
-display_name: Qwen 3.6 35B-A3B (Unsloth)
-publisher: MiaAI Lab + Unsloth
+id: qwen36-27b-nvfp4-1s
+version: 1
+display_name: Qwen 3.6 27B
+publisher: MiaAI Lab + NVIDIA
 trust: runonspark-candidate
 verification: candidate
 source:
-  url: https://github.com/MiaAI-Lab/Unsloth-Qwen3.6-35b-NVFP4-DGX-Spark
-  revision: 79c9e6f359f6101cdacd0dfd6fe9861ae2493a4d
+  url: https://github.com/MiaAI-Lab/Qwen3.6-27B-NVFP4-vLLM
+  revision: f2e8f07f3813e62beb04761cf8715998f911df10
 topology:
   spark_count: 1
 runtime:
   kind: vllm
-  image: ghcr.io/miaai-lab/mia-vllm-gb10-linear-b12x
-  digest: sha256:19627342e1da2607f4db50745dca30e57d7dd0ebff06062f03fd69b43a252931
-  image_bytes: 9220559293
+  image: vllm/vllm-openai
+  digest: sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
+  image_bytes: 10617617438
   environment:
-    CUTE_DSL_ARCH: sm_121a
     VLLM_TARGET_DEVICE: cuda
-  shm_bytes: 34359738368
-  memory_lock: true
-  ipc_lock: true
+  shm_bytes: 0
+  memory_lock: false
+  ipc_lock: false
 artifacts:
   - role: primary
-    repository: unsloth/Qwen3.6-35B-A3B-NVFP4
-    revision: 739af1e7aac320af1682ed1e0cce369af4c5265d
-    expected_bytes: 26529057596
+    repository: nvidia/Qwen3.6-27B-NVFP4
+    revision: 0893e1606ff3d5f97a441f405d5fc541a6bdf404
+    expected_bytes: 21941623844
     licence: Apache-2.0
-    licence_url: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-NVFP4
+    licence_url: https://huggingface.co/nvidia/Qwen3.6-27B-NVFP4
 requirements:
   architecture: aarch64
   dgx_spark: true
@@ -39,26 +38,26 @@ requirements:
 service:
   internal_port: 8000
   default_host_port: 8000
-  served_model_id: unsloth/Qwen3.6-35B-A3B-NVFP4
+  served_model_id: nvidia/Qwen3.6-27B-NVFP4
   vllm:
     tensor_parallel_size: 1
     kv_cache_dtype: fp8
     attention_backend: flashinfer
-    moe_backend: auto
-    linear_backend: flashinfer_b12x
-    gpu_memory_utilization: "0.80"
+    moe_backend: marlin
+    linear_backend: ""
+    gpu_memory_utilization: "0.4"
     max_model_len: 262144
-    max_num_seqs: 24
-    max_num_batched_tokens: 32768
+    max_num_seqs: 4
+    max_num_batched_tokens: 8192
     multimodal_image_limit: 4
     speculative_method: mtp
-    speculative_tokens: 2
+    speculative_tokens: 3
     speculative_moe_backend: triton
     speculative_model_role: ""
     reasoning_parser: qwen3
     tool_call_parser: qwen3_coder
-    load_format: ""
-    chat_template_file: ""
+    load_format: fastsafetensors
+    chat_template_file: chat_template.jinja
     chat_template:
       enable_thinking: true
       preserve_thinking: true
@@ -72,7 +71,7 @@ service:
     trust_remote_code: true
     chunked_prefill: true
     async_scheduling: true
-    prefix_caching: false
+    prefix_caching: true
     auto_tool_choice: true
 operations:
   - type: verify_architecture
