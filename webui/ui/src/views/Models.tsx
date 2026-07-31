@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { Fragment, useMemo, useRef, useState } from 'react'
 import { api, idempotency, terminal, formatBytes, type Job, type Preflight, type Recipe } from '../api'
 import type { AppState } from '../App'
 
@@ -28,10 +28,11 @@ interface ConfirmState {
   switchFrom?: string
 }
 
-export default function Models({ system, recipes, models, jobs, refreshModelsAndJobs, openDeployment }: AppState) {
+export default function Models({ system, recipes, models, jobs, refreshModelsAndJobs, openDeployment, openPlayground }: AppState) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [licence, setLicence] = useState(false)
   const [pending, setPending] = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState('')
   const dialogRef = useRef<HTMLDialogElement>(null)
 
   const installed = useMemo(() => new Map(models.map(model => [model.recipe_id, model])), [models])
@@ -136,6 +137,124 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
     .find(check => !check.ok && check.operation === 'verify_disk')
     ?.receipt?.reclaim_candidates
 
+  const firstRun = models.length === 0
+  const featured = firstRun ? sorted.find(recipe => recipe.id === ORDER[0]) : undefined
+  const rows = featured ? sorted.filter(recipe => recipe.id !== featured.id) : sorted
+
+  const rowFor = (recipe: Recipe) => {
+    const model = installed.get(recipe.id)
+    const busy = pending.has(recipe.id) || jobs.some(job => job.recipe_id === recipe.id && !terminal(job.state))
+    const isActive = Boolean(model?.active && model.status === 'ready')
+    const fits = detected >= recipe.topology.spark_count
+    const statusText = busy ? 'Working' : isActive ? 'Serving' : model ? 'Installed' : 'Not installed'
+    const measured = model?.tokens_per_second
+    const reference = REFERENCE_TPS[recipe.id]
+    const open = expanded === recipe.id
+    const toggle = () => setExpanded(open ? '' : recipe.id)
+    return (
+      <Fragment key={recipe.id}>
+        <div
+          className={`mrow ${open ? 'open' : ''}`}
+          role="button"
+          tabIndex={0}
+          aria-expanded={open}
+          onClick={toggle}
+          onKeyDown={event => {
+            if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+              event.preventDefault()
+              toggle()
+            }
+          }}
+        >
+          <div className="m-id">
+            <img src={LOGOS[recipe.id] ?? '/logos/nvidia.webp'} alt="" width="28" height="28" />
+            <div>
+              <div className="nm">{recipe.display_name} {recipe.id === ORDER[0] && <span className="tag">Recommended</span>}</div>
+              <div className="use">{USE[recipe.id] ?? 'Local model for your Spark.'}</div>
+            </div>
+          </div>
+          <div className="m-num">
+            <span className="n">{measured ? measured.toFixed(1) : reference ? `~${reference}` : '—'}<small>tok/s</small></span>
+            <span className={`sub ${measured ? 'ok' : ''}`}>{measured ? 'measured here' : 'typical'}</span>
+          </div>
+          <div className="m-num">
+            <span className="n">{formatBytes(recipe.artifact_bytes)}</span>
+          </div>
+          <div className="m-status">
+            <span className={`sdot ${isActive ? 'on' : busy ? 'busy' : ''}`} aria-hidden="true" />
+            {statusText}
+          </div>
+          <div className="m-actions" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+            {!model && (
+              <button className="primary" disabled={busy || !fits} onClick={() => startInstall(recipe)}>
+                {busy ? 'Working' : fits ? 'Install' : 'Needs a Spark'}
+              </button>
+            )}
+            {model && isActive && (
+              <>
+                <button className="quiet" disabled={busy} onClick={() => simpleAction(recipe.id, 'smoke-test')}>Test</button>
+                <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'stop')}>Stop</button>
+                <button className="primary" disabled={busy} onClick={openPlayground}>Open</button>
+              </>
+            )}
+            {model && !isActive && model.status !== 'recovering' && (
+              <>
+                <button className="quiet" disabled={busy} onClick={() => remove(recipe)}>Remove</button>
+                <button className="primary" disabled={busy} onClick={() => startOrSwitch(recipe)}>
+                  {activeOther(recipe.id) ? 'Switch to' : 'Start'}
+                </button>
+              </>
+            )}
+            {model?.status === 'recovering' && <button className="ghost" disabled>Recovering</button>}
+          </div>
+        </div>
+        {open && (
+          <div className="mdetail">
+            <div className="board">
+              <div className="cell">
+                <div className="l">Speed</div>
+                <div className="v">{measured ? measured.toFixed(1) : reference ? `~${reference}` : '—'} <small>tok/s</small></div>
+                <div className={`q ${measured ? 'ok' : ''}`}>{measured ? 'measured on this Spark' : 'typical on a Spark'}</div>
+              </div>
+              <div className="cell">
+                <div className="l">First token</div>
+                <div className="v">{model?.time_to_first_token_ms ? model.time_to_first_token_ms : '—'} <small>ms</small></div>
+              </div>
+              <div className="cell">
+                <div className="l">Download</div>
+                <div className="v">{formatBytes(recipe.artifact_bytes)}</div>
+              </div>
+              <div className="cell">
+                <div className="l">Space needed</div>
+                <div className="v">{formatBytes(recipe.required_bytes)}</div>
+              </div>
+            </div>
+            <dl className="facts">
+              <dt>Publisher</dt><dd>{recipe.publisher}</dd>
+              <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
+              <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
+              <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
+              {recipe.artifacts.map(artifact => (
+                <Fragment key={artifact.role}>
+                  <dt>{artifact.role}</dt>
+                  <dd>
+                    <code>{artifact.repository}@{artifact.revision.slice(0, 12)}</code>{' '}
+                    <a href={artifact.licence_url} target="_blank" rel="noreferrer">{artifact.licence} licence ↗</a>
+                  </dd>
+                </Fragment>
+              ))}
+            </dl>
+            {model && isActive && (
+              <div className="row-tools">
+                <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
+              </div>
+            )}
+          </div>
+        )}
+      </Fragment>
+    )
+  }
+
   return (
     <div className="stack">
       {blockers.length > 0 && (
@@ -144,97 +263,50 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
           <ul>{blockers.map(item => <li key={item}>{item}</li>)}</ul>
         </div>
       )}
-      <div className="section-head">
-        <span className="muted">
-          {detected ? 'Curated for this Spark — every recipe pinned and verified before Ready.' : 'Connect a DGX Spark to unlock deployments.'}
-        </span>
-      </div>
-      {sorted.map(recipe => {
-        const model = installed.get(recipe.id)
-        const busy = pending.has(recipe.id) || jobs.some(job => job.recipe_id === recipe.id && !terminal(job.state))
-        const isActive = Boolean(model?.active && model.status === 'ready')
-        const fits = detected >= recipe.topology.spark_count
-        const statusText = busy ? 'Working' : model ? model.status : 'Not installed'
-        const measured = model?.tokens_per_second
-        const reference = REFERENCE_TPS[recipe.id]
-        return (
-          <article key={recipe.id} className={`model-row ${isActive ? 'active-model' : ''}`}>
-            <div className="model-main">
-              <img className="model-logo" src={LOGOS[recipe.id] ?? '/logos/nvidia.webp'} alt="" width="48" height="48" />
-              <div className="model-name">
-                <div className="title-line">
-                  <h3>{recipe.display_name}</h3>
-                  {recipe.id === ORDER[0] && <span className="pill reco">Recommended</span>}
-                </div>
-                <p className="use">{USE[recipe.id] ?? 'Local model for your Spark.'}</p>
-              </div>
-              <div className="model-stats">
-                <div className="stat">
-                  <span className="label">Speed</span>
-                  <span className="num">
-                    {measured ? measured.toFixed(1) : reference ? `~${reference}` : '—'} <small>tok/s</small>
-                  </span>
-                  <span className={`qual ${measured ? 'measured' : ''}`}>
-                    {measured ? 'measured on this Spark' : 'typical on a Spark'}
-                  </span>
-                </div>
-                <div className="stat">
-                  <span className="label">Disk</span>
-                  <span className="num">{formatBytes(recipe.required_bytes)}</span>
-                  {model?.time_to_first_token_ms ? (
-                    <span className="qual">first token {model.time_to_first_token_ms} ms</span>
-                  ) : null}
-                </div>
-              </div>
-              <div className="model-cta">
-                <span className={`model-status ${isActive ? 'on' : busy ? 'busy' : ''}`}>
-                  <i aria-hidden="true" />
-                  {statusText}
-                </span>
-                <div className="model-actions">
-                  {!model && (
-                    <button className="primary" disabled={busy || !fits} onClick={() => startInstall(recipe)}>
-                      {busy ? 'Working' : fits ? 'Install' : 'Needs a Spark'}
-                    </button>
-                  )}
-                  {model && isActive && (
-                    <>
-                      <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'stop')}>Stop</button>
-                      <button className="quiet" disabled={busy} onClick={() => simpleAction(recipe.id, 'smoke-test')}>Test</button>
-                      <button className="quiet" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
-                    </>
-                  )}
-                  {model && !isActive && model.status !== 'recovering' && (
-                    <>
-                      <button className="primary" disabled={busy} onClick={() => startOrSwitch(recipe)}>
-                        {activeOther(recipe.id) ? 'Switch to' : 'Start'}
-                      </button>
-                      <button className="danger" disabled={busy} onClick={() => remove(recipe)}>Remove</button>
-                    </>
-                  )}
-                  {model?.status === 'recovering' && <button className="ghost" disabled>Recovering</button>}
-                </div>
-              </div>
+
+      {featured && (
+        <section className="hero" aria-label="Recommended model">
+          <div className="hero-top">
+            <img src={LOGOS[featured.id] ?? '/logos/nvidia.webp'} alt="" width="68" height="68" />
+            <div className="hero-name">
+              <p className="kicker">Recommended for your Spark</p>
+              <h2>{featured.display_name}</h2>
+              <p className="pub">{featured.publisher}</p>
             </div>
-            <details className="model-more">
-              <summary>Details</summary>
-              <div className="detail-grid">
-                <div><span>Publisher</span>{recipe.publisher}</div>
-                <div><span>Model ID</span><code>{recipe.service.served_model_id}</code></div>
-                <div><span>Runtime</span><code>vLLM · pinned digest</code></div>
-                <div><span>Source</span><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url}</a></div>
-                {recipe.artifacts.map(artifact => (
-                  <div key={artifact.role}>
-                    <span>{artifact.role}</span>
-                    <code>{artifact.repository}@{artifact.revision.slice(0, 12)}</code>
-                    <a href={artifact.licence_url} target="_blank" rel="noreferrer">{artifact.licence} licence</a>
-                  </div>
-                ))}
-              </div>
-            </details>
-          </article>
-        )
-      })}
+            <div className="hero-get">
+              <button
+                className="brand"
+                disabled={pending.has(featured.id) || detected < featured.topology.spark_count}
+                onClick={() => startInstall(featured)}
+              >
+                {detected >= featured.topology.spark_count ? 'Install' : 'Needs a Spark'}
+              </button>
+              <small>{formatBytes(featured.artifact_bytes)} download</small>
+            </div>
+          </div>
+          <p className="hero-line">
+            {USE[featured.id]}{' '}
+            <span>Verified and pinned for a single Spark — RunOnSpark measures its real speed after install.</span>
+          </p>
+          <div className="hero-score">
+            <div className="cell"><div className="l">Speed</div><div className="v">~{REFERENCE_TPS[featured.id]}</div><div className="u">tok/s · typical</div></div>
+            <div className="cell"><div className="l">Download</div><div className="v">{formatBytes(featured.artifact_bytes)}</div><div className="u">one time</div></div>
+            <div className="cell"><div className="l">Licence</div><div className="v">{featured.artifacts[0]?.licence ?? '—'}</div><div className="u">open weights</div></div>
+            <div className="cell"><div className="l">Runtime</div><div className="v">vLLM</div><div className="u">pinned digest</div></div>
+          </div>
+        </section>
+      )}
+
+      <div className="mtable">
+        <div className="mthead" aria-hidden="true">
+          <span>Model</span><span className="r">Speed</span><span className="r">Disk</span><span style={{ paddingLeft: 20 }}>Status</span><span />
+        </div>
+        {rows.map(rowFor)}
+      </div>
+      <p className="table-note">
+        Speeds marked “typical” are community-reported for a DGX Spark; RunOnSpark measures the real number after install.
+        Click a row for weights, revisions and licences.
+      </p>
 
       <dialog ref={dialogRef} onClose={() => setConfirm(null)} aria-label="Confirm installation">
         {confirm && (

@@ -12,9 +12,8 @@ export default function Activity({ jobs, recipes, openDeployment }: AppState) {
   return (
     <div className="stack">
       <div className="section-head">
-        <span className="muted">Every job is persisted — click one for phases and receipts.</span>
         <span className="spacer" />
-        <a className="muted" href="/api/v1/diagnostics" style={{ fontSize: 13 }}>Download diagnostics</a>
+        <a className="muted" href="/api/v1/diagnostics" style={{ fontSize: 12.5 }}>Download diagnostics</a>
       </div>
       {jobs.length === 0 && <div className="empty">Nothing has run yet.</div>}
       {jobs.map(job => (
