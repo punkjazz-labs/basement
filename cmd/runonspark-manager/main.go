@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +31,14 @@ func main() {
 	cfg, err := config.Parse(version)
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
+		os.Exit(2)
+	}
+	if cfg.Command == "pairing-url" {
+		printPairingInfo(cfg)
+		return
+	}
+	if cfg.Command != "" {
+		logger.Error("unknown command", "command", cfg.Command)
 		os.Exit(2)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
@@ -79,3 +90,46 @@ func main() {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
 }
+
+// printPairingInfo re-prints the pairing card so nobody ever has to hunt for
+// the token file by hand after installation.
+func printPairingInfo(cfg config.Config) {
+	port := "7070"
+	if _, listenPort, err := net.SplitHostPort(cfg.Listen); err == nil && listenPort != "" {
+		port = listenPort
+	}
+	fmt.Println("RunOnSpark Manager — pairing")
+	fmt.Println()
+	if hostname, err := os.Hostname(); err == nil {
+		short, _, _ := strings.Cut(hostname, ".")
+		fmt.Printf("  Console:  http://%s.local:%s\n", short, port)
+	}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok || ipNet.IP.To4() == nil || ipNet.IP.IsLoopback() {
+				continue
+			}
+			label := "LAN"
+			if tailscaleRange.Contains(ipNet.IP) {
+				label = "Tailscale"
+			}
+			fmt.Printf("  %-9s http://%s:%s\n", label+":", ipNet.IP, port)
+		}
+	}
+	fmt.Println()
+	tokenPath := filepath.Join(cfg.DataDir, "pairing-token")
+	if token, err := os.ReadFile(tokenPath); err == nil {
+		fmt.Printf("  Pairing token: %s\n", strings.TrimSpace(string(token)))
+	} else {
+		fmt.Printf("  Pairing token: not created yet — start the service first (%s)\n", tokenPath)
+	}
+	fmt.Println()
+	fmt.Println("  The console is reachable only on the interface the service listens on.")
+}
+
+// tailscaleRange is the CGNAT block Tailscale assigns addresses from.
+var tailscaleRange = func() *net.IPNet {
+	_, block, _ := net.ParseCIDR("100.64.0.0/10")
+	return block
+}()

@@ -16,6 +16,8 @@ type Config struct {
 	Listen  string
 	DataDir string
 	Version string
+	// Command is an optional subcommand ("pairing-url") instead of serving.
+	Command string
 }
 
 func Parse(version string) (Config, error) {
@@ -24,6 +26,7 @@ func Parse(version string) (Config, error) {
 	flag.StringVar(&cfg.DataDir, "data-dir", defaultDataDir(), "persistent manager data directory")
 	flag.Parse()
 	cfg.Version = version
+	cfg.Command = flag.Arg(0)
 	if strings.TrimSpace(cfg.Listen) == "" {
 		return Config{}, errors.New("listen address cannot be empty")
 	}
