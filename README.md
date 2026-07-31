@@ -14,6 +14,8 @@ Only one model is active at a time. Starting another installed model performs a 
 
 Every recipe also carries enforced per-node resource guardrails. Preflight accounts for pinned artifacts, container image size, disk safety margin, vLLM's planned unified-memory allocation, KV/context settings, and reserved host memory. Memory is rechecked immediately before start, while disk headroom is rechecked throughout long transfers. The same evaluator requires every future multi-Spark node to pass independently; multi-Spark execution itself remains out of scope for the current release.
 
+The console derives hardware context from manager inventory instead of asking for a Spark count. The current release detects the local managed node. Secure paired-node discovery, independent placement, and distributed placement are specified in [`docs/decisions/0005-automatic-discovery-and-placement.md`](docs/decisions/0005-automatic-discovery-and-placement.md) but are not yet implemented. Lifecycle jobs open a persistent deployment detail modal with named phases and typed step receipts.
+
 ## Development
 
 The manager defaults to loopback until an operator deliberately chooses a LAN bind address.

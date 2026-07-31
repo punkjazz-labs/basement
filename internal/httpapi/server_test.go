@@ -129,6 +129,28 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	if len(cookies) != 1 || pairResult.CSRF == "" {
 		t.Fatal("pairing did not issue session and CSRF tokens")
 	}
+	systemResponse := doRequest(t, http.MethodGet, server.URL+"/api/v1/system", "", cookies, nil)
+	var systemResult struct {
+		HardwareScope struct {
+			Mode               string `json:"mode"`
+			DetectedSparkCount int    `json:"detected_spark_count"`
+			ManagedNodes       []struct {
+				Hostname string `json:"hostname"`
+				Local    bool   `json:"local"`
+				Ready    bool   `json:"ready"`
+			} `json:"managed_nodes"`
+		} `json:"hardware_scope"`
+	}
+	if err := json.NewDecoder(systemResponse.Body).Decode(&systemResult); err != nil {
+		t.Fatal(err)
+	}
+	systemResponse.Body.Close()
+	if systemResult.HardwareScope.Mode != "local-manager" || systemResult.HardwareScope.DetectedSparkCount != 1 || len(systemResult.HardwareScope.ManagedNodes) != 1 {
+		t.Fatalf("unexpected detected hardware scope: %#v", systemResult.HardwareScope)
+	}
+	if node := systemResult.HardwareScope.ManagedNodes[0]; node.Hostname != "spark-test" || !node.Local || !node.Ready {
+		t.Fatalf("unexpected managed node: %#v", node)
+	}
 	denied := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+recipes[0].ID+"/install", `{"confirmed":true,"accept_licence":true}`, cookies, map[string]string{"Origin": server.URL, "Idempotency-Key": "install-one"})
 	if denied.StatusCode != http.StatusForbidden {
 		t.Fatalf("missing CSRF status=%d", denied.StatusCode)

@@ -132,11 +132,40 @@ func (s *Server) system(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	models, _ := s.store.Models(r.Context())
+	type managedNode struct {
+		Hostname    string `json:"hostname"`
+		ProductName string `json:"product_name"`
+		DGXSpark    bool   `json:"dgx_spark"`
+		Local       bool   `json:"local"`
+		Ready       bool   `json:"ready"`
+	}
+	type hardwareScope struct {
+		Mode               string        `json:"mode"`
+		DetectedSparkCount int           `json:"detected_spark_count"`
+		ManagedNodes       []managedNode `json:"managed_nodes"`
+	}
+	detected := 0
+	if system.DGXSpark {
+		detected = 1
+	}
 	response := struct {
 		inventory.System
 		ManagerVersion  string                 `json:"manager_version"`
 		InstalledModels []store.InstalledModel `json:"installed_models"`
-	}{System: system, ManagerVersion: s.version, InstalledModels: models}
+		HardwareScope   hardwareScope          `json:"hardware_scope"`
+	}{
+		System:          system,
+		ManagerVersion:  s.version,
+		InstalledModels: models,
+		HardwareScope: hardwareScope{
+			Mode:               "local-manager",
+			DetectedSparkCount: detected,
+			ManagedNodes: []managedNode{{
+				Hostname: system.Hostname, ProductName: system.ProductName, DGXSpark: system.DGXSpark,
+				Local: true, Ready: system.DGXSpark && len(system.Blocking) == 0,
+			}},
+		},
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 

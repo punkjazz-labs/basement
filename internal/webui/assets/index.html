@@ -32,35 +32,24 @@
 
     <div id="console" class="hidden">
       <section class="hardware-step" aria-labelledby="hardware-title">
-        <h1 id="hardware-title">How many Sparks do you have?</h1>
-        <p>Pick your hardware. Install a model.</p>
-        <div class="hardware-rail" role="radiogroup" aria-label="Spark count">
-          <button class="hardware-choice" type="button" role="radio" data-sparks="1" aria-checked="true" aria-label="1 Spark, 128 GB">
-            <span class="spark-stack" data-count="1" aria-hidden="true"><i></i></span><strong>1</strong><small>128 GB</small>
-          </button>
-          <button class="hardware-choice" type="button" role="radio" data-sparks="2" aria-checked="false" aria-label="2 Sparks, 256 GB">
-            <span class="spark-stack" data-count="2" aria-hidden="true"><i></i><i></i></span><strong>2</strong><small>256 GB</small>
-          </button>
-          <button class="hardware-choice" type="button" role="radio" data-sparks="3" aria-checked="false" aria-label="3 Sparks, 384 GB">
-            <span class="spark-stack" data-count="3" aria-hidden="true"><i></i><i></i><i></i></span><strong>3</strong><small>384 GB</small>
-          </button>
-          <button class="hardware-choice" type="button" role="radio" data-sparks="4" aria-checked="false" aria-label="4 Sparks, 512 GB">
-            <span class="spark-stack" data-count="4" aria-hidden="true"><i></i><i></i><i></i><i></i></span><strong>4</strong><small>512 GB</small>
-          </button>
+        <div class="hardware-heading">
+          <div><p class="kicker">Detected hardware</p><h1 id="hardware-title">Finding your Sparks</h1><p id="hardware-copy">Checking local manager inventory.</p></div>
+          <span id="discovery-mode">Local discovery</span>
         </div>
+        <div id="detected-nodes" class="detected-nodes" aria-live="polite"><p class="empty-copy">Reading hardware.</p></div>
       </section>
 
       <section class="catalog" aria-labelledby="catalog-title">
         <div class="host-bar">
           <div class="host-identity"><i aria-hidden="true"></i><strong id="hostname">DGX Spark</strong><span id="system-summary">Reading system…</span></div>
-          <div class="host-meta"><span><strong id="memory">—</strong> RAM available</span><span><strong id="storage">—</strong> disk free</span><button id="refresh" class="quiet" type="button">Refresh</button></div>
+          <div class="host-meta"><span><strong id="memory">Unknown</strong> RAM available</span><span><strong id="storage">Unknown</strong> disk free</span><button id="refresh" class="quiet" type="button">Refresh</button></div>
         </div>
 
         <div id="blockers" class="alert hidden"><strong>Setup needed</strong><ul id="blocker-list"></ul></div>
 
         <div class="catalog-heading">
-          <div><h2 id="catalog-title">Available models</h2><p id="catalog-note">For 1 Spark</p></div>
-          <span id="recipe-count" class="count">—</span>
+          <div><h2 id="catalog-title">Available models</h2><p id="catalog-note">Matched to detected hardware</p></div>
+          <span id="recipe-count" class="count">0</span>
         </div>
         <div id="recipes" class="model-list" aria-live="polite"></div>
       </section>
@@ -81,6 +70,32 @@
       <label class="licence"><input id="licence" type="checkbox"> <span>I accept the model licence.</span></label>
       <menu><button value="cancel" class="secondary">Cancel</button><button id="confirm-install" value="default">Install</button></menu>
     </form>
+  </dialog>
+  <dialog id="deployment-dialog" class="deployment-dialog">
+    <div class="deployment-shell">
+      <div class="deployment-header">
+        <div><p class="kicker">Deployment</p><h2 id="deployment-title">Deploy model</h2></div>
+        <button id="close-deployment" class="dialog-close" type="button" aria-label="Close deployment">×</button>
+      </div>
+      <div class="deployment-summary">
+        <span id="deployment-status" class="deployment-status queued">Queued</span>
+        <div><strong id="deployment-current">Waiting for manager</strong><span>Updated <time id="deployment-updated"></time></span></div>
+        <code id="deployment-id"></code>
+      </div>
+      <div class="deployment-body">
+        <ol id="deployment-steps" class="deployment-steps"></ol>
+        <p id="deployment-error" class="deployment-error hidden" role="alert"></p>
+        <details class="deployment-details">
+          <summary>Technical receipts</summary>
+          <ul id="deployment-receipts"></ul>
+        </details>
+      </div>
+      <footer class="deployment-footer">
+        <p>Closing this window does not stop the deployment.</p>
+        <button id="cancel-deployment" class="danger" type="button">Cancel deployment</button>
+        <button id="done-deployment" class="secondary" type="button">Close</button>
+      </footer>
+    </div>
   </dialog>
   <script src="/assets/app.js" defer></script>
 </body>
