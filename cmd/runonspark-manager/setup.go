@@ -33,20 +33,24 @@ func runSetup(args []string) int {
 		return 2
 	}
 	ctx := context.Background()
-	prompter := &terminalPrompter{assumeYes: *assumeYes}
+	paint := newStyle()
+	prompter := &terminalPrompter{assumeYes: *assumeYes, paint: paint}
+
+	fmt.Println()
+	fmt.Println(paint.bold("RunOnSpark setup"))
 
 	// On a GB10 machine, setup means: install right here.
 	if runtime.GOOS == "linux" && *host == "" {
 		local := setup.LocalRunner{}
 		identity := setup.Probe(ctx, local)
 		if identity.IsGB10() {
-			fmt.Printf("This machine is a %s — installing RunOnSpark Manager locally.\n", identity.Product())
+			fmt.Printf("%s This machine is a %s — installing locally.\n", paint.green("✓"), paint.bold(identity.Product()))
 			executable, err := os.Executable()
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "cannot locate this binary:", err)
+				fmt.Fprintf(os.Stderr, "%s cannot locate this binary: %v\n", paint.red("✗"), err)
 				return 1
 			}
-			return finishInstall(ctx, local, setup.LocalFileSource{Path: executable}, prompter, *listen, nil)
+			return finishInstall(ctx, local, setup.LocalFileSource{Path: executable}, prompter, *listen, nil, paint)
 		}
 	}
 
@@ -54,38 +58,64 @@ func runSetup(args []string) int {
 	target := *host
 	var peers []string
 	if target == "" {
-		fmt.Println("Looking for GB10 machines on your network (DGX Spark, ASUS Ascent GX10, MSI EdgeXpert, …)")
-		candidates, err := discovery.Discover(ctx, func(format string, args ...any) {
-			fmt.Printf("  "+format+"\n", args...)
-		})
+		fmt.Println(paint.dim("Scanning your network for GB10 machines (DGX Spark, ASUS Ascent GX10, MSI EdgeXpert, …)"))
+		candidates, err := discovery.Discover(ctx, func(string, ...any) {})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "discovery failed:", err)
+			fmt.Fprintf(os.Stderr, "%s discovery failed: %v\n", paint.red("✗"), err)
 			return 1
 		}
 		if len(candidates) == 0 {
-			fmt.Fprintln(os.Stderr, "No SSH-reachable machines found. Is the GB10 machine on this network? You can also point setup directly: runonspark-manager setup --host <ip>")
+			fmt.Fprintf(os.Stderr, "%s No SSH-reachable machines found. Is the GB10 machine on this network?\n  You can also point setup directly:  runonspark-manager setup --host <ip>\n", paint.red("✗"))
 			return 1
 		}
+
 		fmt.Println()
-		fmt.Println("Machines found:")
-		for index, candidate := range candidates {
-			marker := " "
-			if discovery.LikelyGB10Name(candidate.Hostname) {
-				marker = "★" // likely GB10 by hostname; confirmed after connecting
+		nameWidth := 0
+		for _, candidate := range candidates {
+			if length := len(displayHost(candidate)); length > nameWidth {
+				nameWidth = length
 			}
-			fmt.Printf("  %d) %s %s (%s)\n", index+1, marker, candidate.DisplayName(), candidate.IP)
+		}
+		for index, candidate := range candidates {
+			likely := discovery.LikelyGB10Name(candidate.Hostname)
+			marker, label := " ", ""
+			if likely {
+				marker = paint.green("●")
+				label = paint.green("GB10-class")
+			}
+			line := fmt.Sprintf("  %d  %s %-*s  %-15s  %s", index+1, marker, nameWidth, displayHost(candidate), candidate.IP, label)
+			if !likely {
+				line = paint.dim(line)
+			}
+			fmt.Println(line)
 		}
 		fmt.Println()
-		choice, err := prompter.ask(fmt.Sprintf("Which machine should run RunOnSpark Manager (the master)? [1-%d]: ", len(candidates)))
+
+		choice, err := prompter.ask(paint.bold(fmt.Sprintf("Which machine should run RunOnSpark Manager? [1-%d]: ", len(candidates))))
 		if err != nil {
 			return 1
 		}
 		index, err := strconv.Atoi(strings.TrimSpace(choice))
 		if err != nil || index < 1 || index > len(candidates) {
-			fmt.Fprintln(os.Stderr, "not a valid choice")
+			fmt.Fprintf(os.Stderr, "%s not a valid choice\n", paint.red("✗"))
 			return 1
 		}
-		target = candidates[index-1].DisplayName()
+		picked := candidates[index-1]
+
+		// Stop the obvious mistake before any connection: hostname hints are
+		// not proof, so a custom-named GB10 can still proceed deliberately —
+		// but the default answer is no.
+		if !discovery.LikelyGB10Name(picked.Hostname) {
+			fmt.Printf("%s %s does not look like a GB10 machine — the %s entries do.\n",
+				paint.yellow("!"), paint.bold(displayHost(picked)), paint.green("● GB10-class"))
+			proceed, err := prompter.Confirm("Connect anyway to check its hardware?")
+			if err != nil || !proceed {
+				fmt.Println(paint.dim("Nothing was installed."))
+				return 1
+			}
+		}
+
+		target = picked.DisplayName()
 		for position, candidate := range candidates {
 			if position != index-1 {
 				peers = append(peers, candidate.DisplayName())
@@ -103,7 +133,7 @@ func runSetup(args []string) int {
 		}
 	})
 	if !userFlagSet {
-		answer, err := prompter.ask(fmt.Sprintf("Username on %s [%s]: ", target, *sshUser))
+		answer, err := prompter.ask(fmt.Sprintf("Username on %s [%s]: ", paint.bold(target), *sshUser))
 		if err != nil {
 			return 1
 		}
@@ -112,10 +142,10 @@ func runSetup(args []string) int {
 		}
 	}
 
-	fmt.Printf("Connecting to %s@%s…\n", *sshUser, target)
+	fmt.Printf("%s Connecting to %s…\n", paint.dim("→"), paint.bold(*sshUser+"@"+target))
 	runner, err := setup.DialSSH(ctx, target, *sshUser, prompter)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintf(os.Stderr, "%s %v\n", paint.red("✗"), err)
 		return 1
 	}
 	defer runner.Close()
@@ -126,13 +156,21 @@ func runSetup(args []string) int {
 		if gpu == "" {
 			gpu = "none detected"
 		}
-		fmt.Fprintf(os.Stderr, "%s is not a GB10 machine (GPU: %s) — RunOnSpark recipes are built for the GB10 superchip, so setup will not install here.\n", target, gpu)
+		fmt.Fprintf(os.Stderr, "%s %s is not a GB10 machine (GPU: %s) — RunOnSpark recipes are built for the GB10 superchip, so setup will not install here.\n", paint.red("✗"), target, gpu)
 		return 1
 	}
-	fmt.Printf("Confirmed: %s (%s, %s)\n", identity.Product(), identity.Hostname, identity.OSName)
+	descriptor := identity.Hostname
+	if identity.OSName != "" {
+		descriptor += ", " + identity.OSName
+	}
+	fmt.Printf("%s Confirmed: %s (%s)\n", paint.green("✓"), paint.bold(identity.Product()), descriptor)
 
 	source := pickSource(*binary)
-	return finishInstall(ctx, runner, source, prompter, *listen, peers)
+	return finishInstall(ctx, runner, source, prompter, *listen, peers, paint)
+}
+
+func displayHost(candidate discovery.Candidate) string {
+	return strings.TrimSuffix(candidate.DisplayName(), ".local")
 }
 
 // pickSource chooses how the linux/arm64 binary reaches the target.
@@ -148,48 +186,49 @@ func pickSource(binaryFlag string) setup.BinarySource {
 	return setup.ReleaseSource{}
 }
 
-func finishInstall(ctx context.Context, runner setup.Runner, source setup.BinarySource, prompter *terminalPrompter, listenFlag string, peers []string) int {
-	mode, err := chooseListen(prompter, listenFlag)
+func finishInstall(ctx context.Context, runner setup.Runner, source setup.BinarySource, prompter *terminalPrompter, listenFlag string, peers []string, paint style) int {
+	mode, err := chooseListen(prompter, listenFlag, paint)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s %v\n", paint.red("✗"), err)
 		return 1
 	}
 	result, err := setup.Install(ctx, runner, source, setup.Options{Listen: mode, DiscoveredPeers: peers}, func(format string, args ...any) {
-		fmt.Printf("  "+format+"\n", args...)
+		fmt.Println(paint.dim("  · " + fmt.Sprintf(format, args...)))
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "install failed:", err)
+		fmt.Fprintf(os.Stderr, "%s install failed: %v\n", paint.red("✗"), err)
 		return 1
 	}
 
+	rule := paint.dim(strings.Repeat("─", 62))
 	fmt.Println()
-	fmt.Println("==================================================================")
-	fmt.Println("  RunOnSpark Manager is running.")
+	fmt.Println(rule)
+	fmt.Printf("  %s %s\n", paint.green("✓"), paint.bold("RunOnSpark Manager is running"))
 	fmt.Println()
-	fmt.Printf("  Open the console:  %s\n", result.ConsoleURL)
+	fmt.Printf("    %-14s %s\n", "Console", paint.bold(result.ConsoleURL))
 	if result.AltURL != "" {
-		fmt.Printf("  Also try:          %s\n", result.AltURL)
-	}
-	if result.Loopback {
-		fmt.Println("  (loopback only — from another device use an SSH tunnel, or rerun")
-		fmt.Println("   setup and pick the tailscale or lan interface)")
+		fmt.Printf("    %-14s %s\n", "Also try", result.AltURL)
 	}
 	if result.Token != "" {
+		fmt.Printf("    %-14s %s\n", "Pairing token", paint.bold(result.Token))
+	}
+	if result.Loopback {
 		fmt.Println()
-		fmt.Printf("  Pairing token:     %s\n", result.Token)
+		fmt.Println(paint.dim("    Loopback only — from another device use an SSH tunnel, or rerun"))
+		fmt.Println(paint.dim("    setup and pick the tailscale or lan interface."))
 	}
 	fmt.Println()
-	fmt.Println("  Re-print this card on the machine anytime with:")
-	fmt.Println("    " + "/usr/lib/runonspark-manager/runonspark-manager pairing-url")
-	fmt.Println("==================================================================")
+	fmt.Println(paint.dim("    Re-print this card on the machine anytime:  runonspark-manager pairing-url"))
+	fmt.Println(rule)
 
 	if !result.Loopback {
-		openBrowser(result.ConsoleURL)
+		openBrowser(result.ConsoleURL, paint)
 	}
 	return 0
 }
 
 // chooseListen mirrors install.sh's interface prompt.
-func chooseListen(prompter *terminalPrompter, listenFlag string) (setup.ListenMode, error) {
+func chooseListen(prompter *terminalPrompter, listenFlag string, paint style) (setup.ListenMode, error) {
 	switch listenFlag {
 	case "loopback":
 		return setup.ListenLoopback, nil
@@ -205,10 +244,10 @@ func chooseListen(prompter *terminalPrompter, listenFlag string) (setup.ListenMo
 		return setup.ListenLoopback, nil
 	}
 	fmt.Println()
-	fmt.Println("Where should the RunOnSpark console be reachable?")
-	fmt.Println("  1) The machine itself only (127.0.0.1) [default]")
-	fmt.Println("  2) Your Tailscale network")
-	fmt.Println("  3) Your local network")
+	fmt.Println(paint.bold("Where should the RunOnSpark console be reachable?"))
+	fmt.Println("  1  The machine itself only (127.0.0.1)")
+	fmt.Println("  2  Your Tailscale network")
+	fmt.Println("  3  Your local network " + paint.dim("(opens in your browser when done)"))
 	answer, err := prompter.ask("Choice [1]: ")
 	if err != nil {
 		return "", err
@@ -230,7 +269,7 @@ func defaultSSHUser() string {
 	return "nvidia"
 }
 
-func openBrowser(url string) {
+func openBrowser(url string, paint style) {
 	var command *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
@@ -241,15 +280,38 @@ func openBrowser(url string) {
 		return
 	}
 	if err := command.Start(); err == nil {
-		fmt.Printf("  (opening %s in your browser)\n", url)
+		fmt.Println(paint.dim("  (opening " + url + " in your browser)"))
 	}
 }
+
+// style renders ANSI accents only on real terminals that want them.
+type style struct{ enabled bool }
+
+func newStyle() style {
+	enabled := term.IsTerminal(int(os.Stdout.Fd())) &&
+		os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
+	return style{enabled: enabled}
+}
+
+func (s style) wrap(code, text string) string {
+	if !s.enabled {
+		return text
+	}
+	return "\x1b[" + code + "m" + text + "\x1b[0m"
+}
+
+func (s style) bold(text string) string   { return s.wrap("1", text) }
+func (s style) dim(text string) string    { return s.wrap("2", text) }
+func (s style) green(text string) string  { return s.wrap("32", text) }
+func (s style) yellow(text string) string { return s.wrap("33", text) }
+func (s style) red(text string) string    { return s.wrap("31", text) }
 
 // terminalPrompter asks on the controlling terminal. Passwords are read
 // without echo and never persisted.
 type terminalPrompter struct {
 	assumeYes bool
 	reader    *bufio.Reader
+	paint     style
 }
 
 func (p *terminalPrompter) ask(prompt string) (string, error) {
