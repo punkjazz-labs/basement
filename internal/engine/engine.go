@@ -71,7 +71,7 @@ func (e *Engine) releaseRuntime() { <-e.runtime }
 var runtimeOperations = map[string]bool{
 	"stop_container": true, "create_container": true, "verify_memory": true,
 	"start_container": true, "wait_http": true, "verify_openai_inference": true,
-	"remove_container": true,
+	"remove_container": true, "measure_throughput": true,
 }
 
 func (e *Engine) ResumeInterrupted(ctx context.Context) error {
@@ -319,6 +319,8 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 		ops = []recipe.Operation{{Type: "stop_container"}}
 	case "smoke-test":
 		ops = []recipe.Operation{{Type: "wait_http"}, {Type: "verify_openai_inference"}}
+	case "benchmark":
+		ops = []recipe.Operation{{Type: "wait_http"}, {Type: "measure_throughput"}}
 	case "remove":
 		var payload RemovePayload
 		_ = json.Unmarshal(job.Payload, &payload)
@@ -482,7 +484,11 @@ func (e *Engine) finish(ctx context.Context, job store.Job, r recipe.Recipe) err
 		if err := e.store.ActivateExclusively(ctx, model); err != nil {
 			return err
 		}
-		return e.store.UpdateJobState(ctx, job.ID, "ready", "")
+		if err := e.store.UpdateJobState(ctx, job.ID, "ready", ""); err != nil {
+			return err
+		}
+		e.autoBenchmark(ctx, r)
+		return nil
 	case "stop":
 		model, err := e.store.Model(ctx, r.ID)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -502,9 +508,51 @@ func (e *Engine) finish(ctx context.Context, job store.Job, r recipe.Recipe) err
 		return e.store.UpdateJobState(ctx, job.ID, "removed", "")
 	case "smoke-test":
 		return e.store.UpdateJobState(ctx, job.ID, "ready", "")
+	case "benchmark":
+		if tps, ttft, ok := e.benchmarkResult(ctx, job.ID); ok {
+			if err := e.store.SetModelMetrics(ctx, r.ID, tps, ttft); err != nil {
+				return err
+			}
+		}
+		return e.store.UpdateJobState(ctx, job.ID, "ready", "")
 	default:
 		return fmt.Errorf("cannot finish job kind %s", job.Kind)
 	}
+}
+
+// autoBenchmark measures real throughput once per model after its first
+// successful activation, so the catalog can show numbers observed on this
+// device instead of editorial claims. Failures never affect the parent job.
+func (e *Engine) autoBenchmark(ctx context.Context, r recipe.Recipe) {
+	model, err := e.store.Model(ctx, r.ID)
+	if err != nil || model.MeasuredAt != "" {
+		return
+	}
+	job, created, err := e.store.CreateJob(ctx, "benchmark", r.ID, fmt.Sprintf("auto-benchmark-%s-v%d", r.ID, r.Version), map[string]any{"auto": true})
+	if err != nil || !created {
+		return
+	}
+	e.Start(job.ID)
+}
+
+func (e *Engine) benchmarkResult(ctx context.Context, jobID string) (float64, int64, bool) {
+	job, err := e.store.GetJob(ctx, jobID)
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, step := range job.Steps {
+		if step.Operation != "measure_throughput" {
+			continue
+		}
+		var receipt struct {
+			TokensPerSecond    float64 `json:"tokens_per_second"`
+			TimeToFirstTokenMS int64   `json:"time_to_first_token_ms"`
+		}
+		if json.Unmarshal(step.Receipt, &receipt) == nil && receipt.TokensPerSecond > 0 {
+			return receipt.TokensPerSecond, receipt.TimeToFirstTokenMS, true
+		}
+	}
+	return 0, 0, false
 }
 
 func (e *Engine) containerID(ctx context.Context, jobID string) string {
@@ -537,7 +585,7 @@ func stateFor(kind, operation string) string {
 	states := map[string]string{
 		"verify_architecture": "preflighting", "verify_dgx_spark": "preflighting", "verify_memory_capacity": "preflighting", "verify_memory": "checking_memory", "verify_disk": "preflighting", "verify_port": "preflighting", "verify_docker": "preflighting", "verify_nvidia_runtime": "preflighting", "verify_artifact_access": "preflighting",
 		"pull_image": "downloading_runtime", "download_artifact": "downloading_models", "write_generated_config": "configuring", "create_container": "configuring",
-		"start_container": "starting", "wait_http": "verifying_health", "verify_openai_inference": "verifying_inference", "stop_container": "stopping", "remove_container": "removing", "remove_artifact_if_unshared": "removing",
+		"start_container": "starting", "wait_http": "verifying_health", "verify_openai_inference": "verifying_inference", "stop_container": "stopping", "remove_container": "removing", "remove_artifact_if_unshared": "removing", "measure_throughput": "benchmarking",
 	}
 	if state := states[operation]; state != "" {
 		return state

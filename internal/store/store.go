@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -48,6 +50,17 @@ type InstalledModel struct {
 	ContainerID   string `json:"container_id,omitempty"`
 	Active        bool   `json:"active"`
 	UpdatedAt     string `json:"updated_at"`
+	// Measured on this device by a benchmark job; zero until measured.
+	TokensPerSecond    float64 `json:"tokens_per_second,omitempty"`
+	TimeToFirstTokenMS int64   `json:"time_to_first_token_ms,omitempty"`
+	MeasuredAt         string  `json:"measured_at,omitempty"`
+}
+
+type APIKey struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
 }
 
 func Open(path string) (*Store, error) {
@@ -124,6 +137,20 @@ CREATE TABLE IF NOT EXISTS accepted_licences (
   recipe_version INTEGER NOT NULL,
   accepted_at TEXT NOT NULL,
   PRIMARY KEY(recipe_id, recipe_version)
+);
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT NOT NULL DEFAULT '',
+  revoked_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS model_metrics (
+  recipe_id TEXT PRIMARY KEY,
+  tokens_per_second REAL NOT NULL,
+  time_to_first_token_ms INTEGER NOT NULL DEFAULT 0,
+  measured_at TEXT NOT NULL
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -386,16 +413,26 @@ func (s *Store) SetOnlyActive(ctx context.Context, recipeID string) error {
 	return tx.Commit()
 }
 
+const modelColumns = `m.recipe_id,m.recipe_version,m.status,m.artifact_path,m.container_id,m.active,m.updated_at,
+COALESCE(x.tokens_per_second,0),COALESCE(x.time_to_first_token_ms,0),COALESCE(x.measured_at,'')`
+
+func scanModel(row interface{ Scan(...any) error }) (InstalledModel, error) {
+	var model InstalledModel
+	err := row.Scan(&model.RecipeID, &model.RecipeVersion, &model.Status, &model.ArtifactPath, &model.ContainerID, &model.Active, &model.UpdatedAt,
+		&model.TokensPerSecond, &model.TimeToFirstTokenMS, &model.MeasuredAt)
+	return model, err
+}
+
 func (s *Store) Models(ctx context.Context) ([]InstalledModel, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT recipe_id,recipe_version,status,artifact_path,container_id,active,updated_at FROM installed_models ORDER BY updated_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+modelColumns+` FROM installed_models m LEFT JOIN model_metrics x ON x.recipe_id=m.recipe_id ORDER BY m.updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	result := []InstalledModel{}
 	for rows.Next() {
-		var model InstalledModel
-		if err := rows.Scan(&model.RecipeID, &model.RecipeVersion, &model.Status, &model.ArtifactPath, &model.ContainerID, &model.Active, &model.UpdatedAt); err != nil {
+		model, err := scanModel(rows)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, model)
@@ -404,13 +441,89 @@ func (s *Store) Models(ctx context.Context) ([]InstalledModel, error) {
 }
 
 func (s *Store) Model(ctx context.Context, recipeID string) (InstalledModel, error) {
-	var m InstalledModel
-	err := s.db.QueryRowContext(ctx, `SELECT recipe_id,recipe_version,status,artifact_path,container_id,active,updated_at FROM installed_models WHERE recipe_id=?`, recipeID).
-		Scan(&m.RecipeID, &m.RecipeVersion, &m.Status, &m.ArtifactPath, &m.ContainerID, &m.Active, &m.UpdatedAt)
+	model, err := scanModel(s.db.QueryRowContext(ctx, `SELECT `+modelColumns+` FROM installed_models m LEFT JOIN model_metrics x ON x.recipe_id=m.recipe_id WHERE m.recipe_id=?`, recipeID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return InstalledModel{}, os.ErrNotExist
 	}
-	return m, err
+	return model, err
+}
+
+func (s *Store) SetModelMetrics(ctx context.Context, recipeID string, tokensPerSecond float64, timeToFirstTokenMS int64) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO model_metrics(recipe_id,tokens_per_second,time_to_first_token_ms,measured_at) VALUES(?,?,?,?)
+ON CONFLICT(recipe_id) DO UPDATE SET tokens_per_second=excluded.tokens_per_second,time_to_first_token_ms=excluded.time_to_first_token_ms,measured_at=excluded.measured_at`,
+		recipeID, tokensPerSecond, timeToFirstTokenMS, now())
+	return err
+}
+
+// CreateAPIKey returns the stored record and the plaintext secret, which is
+// shown exactly once and persisted only as a SHA-256 hash.
+func (s *Store) CreateAPIKey(ctx context.Context, name string) (APIKey, string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 64 {
+		return APIKey{}, "", errors.New("a key name between 1 and 64 characters is required")
+	}
+	var raw [24]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return APIKey{}, "", err
+	}
+	secret := "rosk_" + hex.EncodeToString(raw[:])
+	id, err := randomID("key_")
+	if err != nil {
+		return APIKey{}, "", err
+	}
+	key := APIKey{ID: id, Name: name, CreatedAt: now()}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO api_keys(id,name,token_hash,created_at) VALUES(?,?,?,?)`, key.ID, key.Name, hashSecret(secret), key.CreatedAt); err != nil {
+		return APIKey{}, "", err
+	}
+	return key, secret, nil
+}
+
+func (s *Store) APIKeys(ctx context.Context) ([]APIKey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,created_at,last_used_at FROM api_keys WHERE revoked_at='' ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []APIKey{}
+	for rows.Next() {
+		var key APIKey
+		if err := rows.Scan(&key.ID, &key.Name, &key.CreatedAt, &key.LastUsedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, key)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) RevokeAPIKey(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE api_keys SET revoked_at=? WHERE id=? AND revoked_at=''`, now(), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+// VerifyAPIKey reports whether the supplied secret matches an unrevoked key.
+// Lookup is by hash, so timing reveals nothing about stored secrets.
+func (s *Store) VerifyAPIKey(ctx context.Context, secret string) bool {
+	if !strings.HasPrefix(secret, "rosk_") {
+		return false
+	}
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM api_keys WHERE token_hash=? AND revoked_at=''`, hashSecret(secret)).Scan(&id)
+	if err != nil {
+		return false
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE api_keys SET last_used_at=? WHERE id=?`, now(), id)
+	return true
+}
+
+func hashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Store) DeleteModel(ctx context.Context, recipeID string) error {

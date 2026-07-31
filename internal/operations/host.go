@@ -1,12 +1,14 @@
 package operations
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,22 +22,15 @@ import (
 )
 
 type HostExecutor struct {
-	dataDir     string
-	publishHost string
-	inventory   inventory.Provider
-	docker      *DockerClient
-	hf          *HFClient
-	http        *http.Client
+	dataDir   string
+	inventory inventory.Provider
+	docker    *DockerClient
+	hf        *HFClient
+	http      *http.Client
 }
 
-// publishHost is the host interface the model endpoint is published on; it
-// follows the manager's own listen interface so exposure stays a deliberate
-// operator choice rather than an unconditional 0.0.0.0.
-func NewHostExecutor(dataDir, dockerSocket, publishHost string, provider inventory.Provider) *HostExecutor {
-	if publishHost == "" {
-		publishHost = "127.0.0.1"
-	}
-	return &HostExecutor{dataDir: dataDir, publishHost: publishHost, inventory: provider, docker: NewDockerClient(dockerSocket), hf: NewHFClient(), http: &http.Client{Timeout: 30 * time.Second}}
+func NewHostExecutor(dataDir, dockerSocket string, provider inventory.Provider) *HostExecutor {
+	return &HostExecutor{dataDir: dataDir, inventory: provider, docker: NewDockerClient(dockerSocket), hf: NewHFClient(), http: &http.Client{Timeout: 30 * time.Second}}
 }
 
 func (h *HostExecutor) ArtifactPath(r recipe.Recipe) string {
@@ -172,7 +167,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := os.MkdirAll(cachePath, 0o750); err != nil {
 			return nil, err
 		}
-		id, err := h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, h.publishHost, r)
+		id, err := h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, r)
 		if err != nil {
 			return nil, err
 		}
@@ -206,6 +201,8 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		return h.waitHTTP(ctx, r, progress)
 	case "verify_openai_inference":
 		return h.verifyInference(ctx, r)
+	case "measure_throughput":
+		return h.measureThroughput(ctx, r)
 	case "remove_artifact_if_unshared":
 		if !execution.RemoveArtifacts {
 			return map[string]any{"retained": true, "bytes_retained": r.TotalArtifactBytes()}, nil
@@ -421,6 +418,93 @@ func (h *HostExecutor) verifyInference(ctx context.Context, r recipe.Recipe) (ma
 	return map[string]any{"endpoint": h.modelURL(r) + "/v1", "served_model_id": r.Service.ServedModelID, "response_non_empty": true, "reported_model": result.Model}, nil
 }
 
+// measureThroughput streams a fixed generation and reports device-measured
+// decode speed and time to first token, so the catalog shows numbers observed
+// on this Spark rather than editorial estimates.
+func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (map[string]any, error) {
+	body, _ := json.Marshal(map[string]any{
+		"model":          r.Service.ServedModelID,
+		"messages":       []map[string]string{{"role": "user", "content": "Explain, in about 200 plain-language words, why local inference on personal hardware matters."}},
+		"max_tokens":     256,
+		"temperature":    0,
+		"stream":         true,
+		"stream_options": map[string]bool{"include_usage": true},
+	})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, h.modelURL(r)+"/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	client := *h.http
+	client.Timeout = 5 * time.Minute
+	started := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("benchmark request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return nil, fmt.Errorf("benchmark returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	var firstToken time.Time
+	var completionTokens int64
+	var chunkCount int64
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content   string `json:"content"`
+					Reasoning string `json:"reasoning_content"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Usage *struct {
+				CompletionTokens int64 `json:"completion_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue
+		}
+		if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
+			completionTokens = chunk.Usage.CompletionTokens
+		}
+		if len(chunk.Choices) > 0 && (chunk.Choices[0].Delta.Content != "" || chunk.Choices[0].Delta.Reasoning != "") {
+			if firstToken.IsZero() {
+				firstToken = time.Now()
+			}
+			chunkCount++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read benchmark stream: %w", err)
+	}
+	finished := time.Now()
+	if firstToken.IsZero() || chunkCount == 0 {
+		return nil, errors.New("benchmark stream produced no tokens")
+	}
+	if completionTokens == 0 {
+		completionTokens = chunkCount
+	}
+	generation := finished.Sub(firstToken).Seconds()
+	if generation <= 0 {
+		generation = finished.Sub(started).Seconds()
+	}
+	tokensPerSecond := float64(completionTokens) / generation
+	return map[string]any{
+		"tokens_per_second":      math.Round(tokensPerSecond*10) / 10,
+		"time_to_first_token_ms": firstToken.Sub(started).Milliseconds(),
+		"completion_tokens":      completionTokens,
+		"measured":               true,
+	}, nil
+}
+
 func (h *HostExecutor) artifactPath(r recipe.Recipe, index int) string {
 	artifact := r.Artifacts[index]
 	return filepath.Join(h.dataDir, "artifacts", strings.ReplaceAll(artifact.Repository, "/", "--"), artifact.Revision)
@@ -433,11 +517,7 @@ func (h *HostExecutor) cachePath(r recipe.Recipe) string {
 	return filepath.Join(h.dataDir, "caches", r.ID, fmt.Sprint(r.Version))
 }
 func (h *HostExecutor) modelURL(r recipe.Recipe) string {
-	host := h.publishHost
-	if host == "" || host == "0.0.0.0" {
-		host = "127.0.0.1"
-	}
-	return fmt.Sprintf("http://%s:%d", host, r.Service.DefaultHostPort)
+	return fmt.Sprintf("http://127.0.0.1:%d", r.Service.DefaultHostPort)
 }
 func containerName(r recipe.Recipe) string { return fmt.Sprintf("runonspark-%s-v%d", r.ID, r.Version) }
 

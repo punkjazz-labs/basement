@@ -4,7 +4,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,18 +33,6 @@ func Parse(version string) (Config, error) {
 	}
 	cfg.DataDir = filepath.Clean(abs)
 	return cfg, nil
-}
-
-// ModelPublishHost is the interface model endpoints are published on. It
-// follows the manager's own listen interface so LAN exposure of the
-// unauthenticated model port stays the same deliberate choice as exposing the
-// manager itself; anything unparseable falls back to loopback.
-func (c Config) ModelPublishHost() string {
-	host, _, err := net.SplitHostPort(c.Listen)
-	if err != nil || net.ParseIP(host) == nil {
-		return "127.0.0.1"
-	}
-	return host
 }
 
 func defaultDataDir() string {

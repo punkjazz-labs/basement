@@ -35,7 +35,7 @@ func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"container-id"}`))}, nil
 	})}}
-	id, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", "127.0.0.1", r)
+	id, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,26 +66,8 @@ func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 	for _, value := range bindings {
 		binding := value.([]any)[0].(map[string]any)
 		if binding["HostIp"] != "127.0.0.1" {
-			t.Fatalf("model port published beyond requested interface: %#v", binding)
+			t.Fatalf("model port must stay loopback-only behind the manager proxy: %#v", binding)
 		}
-	}
-}
-
-func TestDockerCreateRejectsInvalidPublishHost(t *testing.T) {
-	recipes, err := recipe.Builtin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, ok := recipe.Find(recipes, "qwen36-35b-a3b-nvfp4-1s")
-	if !ok {
-		t.Fatal("Qwen 35 recipe missing")
-	}
-	client := &DockerClient{client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("docker must not be called with an invalid publish host")
-		return nil, nil
-	})}}
-	if _, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", "spark.local", r); err == nil {
-		t.Fatal("hostname publish address was accepted")
 	}
 }
 
@@ -105,7 +87,7 @@ func TestLagunaUsesSeparateReadOnlyDrafterMount(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"container-id"}`))}, nil
 	})}}
-	_, err = client.Create(context.Background(), "laguna", r.Runtime.Reference(), []string{"/owned/target", "/owned/draft"}, "/owned/cache", "127.0.0.1", r)
+	_, err = client.Create(context.Background(), "laguna", r.Runtime.Reference(), []string{"/owned/target", "/owned/draft"}, "/owned/cache", r)
 	if err != nil {
 		t.Fatal(err)
 	}

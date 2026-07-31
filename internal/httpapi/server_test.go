@@ -81,7 +81,7 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	}
 	executor := &apiExecutor{done: map[string]bool{}}
 	runner := engine.New(database, executor, recipes)
-	server := httptest.NewServer(New("test-version", authManager, database, readyInventory{}, executor, runner, recipes).Handler())
+	server := httptest.NewServer(New("test-version", dataDir, authManager, database, readyInventory{}, executor, runner, recipes).Handler())
 	defer server.Close()
 	response, err := http.Get(server.URL + "/")
 	if err != nil {

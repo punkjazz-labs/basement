@@ -120,12 +120,9 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels}, nil
 }
 
-func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath, publishHost string, r recipe.Recipe) (string, error) {
+func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, r recipe.Recipe) (string, error) {
 	if len(artifactPaths) != len(r.Artifacts) || cachePath == "" {
 		return "", errors.New("container artifact and cache paths are incomplete")
-	}
-	if net.ParseIP(publishHost) == nil {
-		return "", errors.New("model endpoint publish address must be a valid IP")
 	}
 	port := fmt.Sprintf("%d/tcp", r.Service.InternalPort)
 	binds := make([]string, 0, len(artifactPaths)+1)
@@ -138,9 +135,11 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 		environment = append(environment, name+"="+value)
 	}
 	sort.Strings(environment)
+	// The model endpoint is loopback-only; the manager's authenticated /v1
+	// proxy is the sole network path to it (ADR 0007).
 	hostConfig := map[string]any{
 		"Binds":          binds,
-		"PortBindings":   map[string]any{port: []map[string]string{{"HostIp": publishHost, "HostPort": fmt.Sprint(r.Service.DefaultHostPort)}}},
+		"PortBindings":   map[string]any{port: []map[string]string{{"HostIp": "127.0.0.1", "HostPort": fmt.Sprint(r.Service.DefaultHostPort)}}},
 		"DeviceRequests": []map[string]any{{"Driver": "nvidia", "Count": -1, "Capabilities": [][]string{{"gpu"}}}},
 		"ReadonlyRootfs": true,
 		"Tmpfs":          map[string]string{"/tmp": "rw,noexec,nosuid,size=8g"},

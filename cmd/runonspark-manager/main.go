@@ -51,7 +51,7 @@ func main() {
 		os.Exit(1)
 	}
 	provider := inventory.Host{DataDir: cfg.DataDir, DockerSocket: "/var/run/docker.sock"}
-	executor := operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", cfg.ModelPublishHost(), provider)
+	executor := operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider)
 	jobEngine := engine.New(db, executor, recipes)
 	if err := jobEngine.ResumeInterrupted(context.Background()); err != nil {
 		logger.Error("resume interrupted jobs", "error", err)
@@ -61,7 +61,7 @@ func main() {
 		logger.Error("reconcile active model", "error", err)
 		os.Exit(1)
 	}
-	api := httpapi.New(cfg.Version, authManager, db, provider, executor, jobEngine, recipes)
+	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, recipes)
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
 	go func() {
 		logger.Info("manager listening", "address", cfg.Listen, "pairing_token_path", authManager.PairingTokenPath(), "version", cfg.Version)
