@@ -230,8 +230,14 @@ input[type='text'], input[type='password'], textarea {
 
 .mtable { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
 .mthead, .mrow {
-  display: grid; grid-template-columns: minmax(240px, 1.5fr) 108px 84px 118px minmax(196px, auto);
+  display: grid; grid-template-columns: minmax(240px, 1.5fr) 108px 84px 118px minmax(196px, auto) 18px;
   align-items: center; padding: 0 16px; column-gap: 8px;
+}
+.m-caret { display: flex; justify-content: flex-end; color: var(--faint); transition: transform 0.15s ease; }
+.m-caret.open { transform: rotate(90deg); }
+.mrow:hover .m-caret { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) {
+  .m-caret { transition: none; }
 }
 .mthead {
   height: 32px; background: var(--panel); border-bottom: 1px solid var(--line);
@@ -413,6 +419,7 @@ dialog::backdrop { background: rgb(12 14 10 / 0.45); backdrop-filter: blur(2px);
   .m-num .sub { white-space: normal; }
   .m-status { padding-left: 0; }
   .m-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .m-caret { display: none; }
   .mdetail .board { flex-wrap: wrap; gap: 12px; }
   .mdetail .board .cell { flex: 1 1 40%; border-right: 0; padding: 0; }
   .facts { grid-template-columns: 1fr; }

@@ -151,6 +151,12 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
     const reference = REFERENCE_TPS[recipe.id]
     const open = expanded === recipe.id
     const toggle = () => setExpanded(open ? '' : recipe.id)
+    // Buttons act without toggling the row; empty space anywhere else in the
+    // row — including inside the actions column — expands it.
+    const act = (work: () => void) => (event: React.MouseEvent) => {
+      event.stopPropagation()
+      work()
+    }
     return (
       <Fragment key={recipe.id}>
         <div
@@ -184,29 +190,32 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             <span className={`sdot ${isActive ? 'on' : busy ? 'busy' : ''}`} aria-hidden="true" />
             {statusText}
           </div>
-          <div className="m-actions" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+          <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
             {!model && (
-              <button className="primary" disabled={busy || !fits} onClick={() => startInstall(recipe)}>
+              <button className="primary" disabled={busy || !fits} onClick={act(() => startInstall(recipe))}>
                 {busy ? 'Working' : fits ? 'Install' : 'Needs a Spark'}
               </button>
             )}
             {model && isActive && (
               <>
-                <button className="quiet" disabled={busy} onClick={() => simpleAction(recipe.id, 'smoke-test')}>Test</button>
-                <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'stop')}>Stop</button>
-                <button className="primary" disabled={busy} onClick={openPlayground}>Open</button>
+                <button className="quiet" disabled={busy} onClick={act(() => simpleAction(recipe.id, 'smoke-test'))}>Test</button>
+                <button className="ghost" disabled={busy} onClick={act(() => simpleAction(recipe.id, 'stop'))}>Stop</button>
+                <button className="primary" disabled={busy} onClick={act(openPlayground)}>Open</button>
               </>
             )}
             {model && !isActive && model.status !== 'recovering' && (
               <>
-                <button className="quiet" disabled={busy} onClick={() => remove(recipe)}>Remove</button>
-                <button className="primary" disabled={busy} onClick={() => startOrSwitch(recipe)}>
+                <button className="quiet" disabled={busy} onClick={act(() => remove(recipe))}>Remove</button>
+                <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
                   {activeOther(recipe.id) ? 'Switch to' : 'Start'}
                 </button>
               </>
             )}
-            {model?.status === 'recovering' && <button className="ghost" disabled>Recovering</button>}
+            {model?.status === 'recovering' && <button className="ghost" disabled onClick={act(() => {})}>Recovering</button>}
           </div>
+          <span className={`m-caret ${open ? 'open' : ''}`} aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+          </span>
         </div>
         {open && (
           <div className="mdetail">

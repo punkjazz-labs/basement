@@ -83,8 +83,11 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	fileServer := http.FileServer(http.FS(assets))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
+			// The entry document must revalidate on every load — a cached
+			// index keeps referencing old hashed bundles after an upgrade.
 			data, _ := fs.ReadFile(assets, "index.html")
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
 			_, _ = w.Write(data)
 			return
 		}
@@ -92,6 +95,13 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 		if _, err := fs.Stat(assets, name); err != nil {
 			http.NotFound(w, r)
 			return
+		}
+		// Hashed bundles are immutable by construction; logos and other
+		// stable files can revalidate cheaply.
+		if strings.HasPrefix(name, "static/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
 		}
 		fileServer.ServeHTTP(w, r)
 	})
