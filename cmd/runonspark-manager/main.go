@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -36,6 +37,9 @@ func main() {
 	if cfg.Command == "pairing-url" {
 		printPairingInfo(cfg)
 		return
+	}
+	if cfg.Command == "setup" {
+		os.Exit(runSetup(flag.Args()[1:]))
 	}
 	if cfg.Command != "" {
 		logger.Error("unknown command", "command", cfg.Command)
