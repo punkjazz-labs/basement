@@ -89,6 +89,69 @@ func TestOnlyOneModelIsActive(t *testing.T) {
 	}
 }
 
+func TestActivateExclusivelyDemotesOthersAtomically(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.SetInstalled(ctx, InstalledModel{RecipeID: "one", RecipeVersion: 1, Status: "ready", ArtifactPath: "/managed/one", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ActivateExclusively(ctx, InstalledModel{RecipeID: "two", RecipeVersion: 1, Status: "ready", ArtifactPath: "/managed/two", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	models, err := s.Models(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range models {
+		switch model.RecipeID {
+		case "two":
+			if !model.Active || model.Status != "ready" {
+				t.Fatalf("target model was not activated: %#v", model)
+			}
+		case "one":
+			if model.Active || model.Status != "stopped" {
+				t.Fatalf("previous model was not demoted: %#v", model)
+			}
+		}
+	}
+}
+
+func TestMarkCancellingNeverOverwritesTerminalStates(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	job, _, err := s.CreateJob(ctx, "install", "recipe-one", "cancel-intent", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked, err := s.MarkCancelling(ctx, job.ID)
+	if err != nil || !marked {
+		t.Fatalf("MarkCancelling()=%v %v", marked, err)
+	}
+	current, err := s.GetJob(ctx, job.ID)
+	if err != nil || current.State != "cancelling" {
+		t.Fatalf("state=%s err=%v", current.State, err)
+	}
+	if err := s.UpdateJobState(ctx, job.ID, "cancelled", "done"); err != nil {
+		t.Fatal(err)
+	}
+	marked, err = s.MarkCancelling(ctx, job.ID)
+	if err != nil || marked {
+		t.Fatalf("terminal state was overwritten: %v %v", marked, err)
+	}
+	final, _ := s.GetJob(ctx, job.ID)
+	if final.State != "cancelled" {
+		t.Fatalf("state=%s, want cancelled", final.State)
+	}
+}
+
 func TestRestartDoesNotExposeStaleReadyModel(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "manager.db")

@@ -6,13 +6,24 @@ usage() {
   exit 2
 }
 
-[ "$#" -ge 2 ] && [ "$#" -le 4 ] || usage
-manager_url=${1%/}
-recipe_id=$2
-receipt_dir=${3:-"$PWD/qualification-receipts"}
+# --remove is accepted in any position so omitting the optional RECEIPT_DIR
+# cannot silently swallow the flag into a directory name.
 remove_after=false
-[ "$#" -lt 4 ] || [ "$4" = "--remove" ] || usage
-[ "$#" -lt 4 ] || remove_after=true
+positional_count=0
+for argument in "$@"; do
+  case "$argument" in
+    --remove) remove_after=true ;;
+    --*) usage ;;
+    *)
+      positional_count=$((positional_count + 1))
+      eval "positional_${positional_count}=\$argument"
+      ;;
+  esac
+done
+[ "$positional_count" -ge 2 ] && [ "$positional_count" -le 3 ] || usage
+manager_url=${positional_1%/}
+recipe_id=$positional_2
+receipt_dir=${positional_3:-"$PWD/qualification-receipts"}
 
 case "$manager_url" in
   http://*|https://*) ;;

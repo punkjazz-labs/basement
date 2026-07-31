@@ -17,11 +17,12 @@ TimeoutStopSec=45s
 UMask=0027
 
 # Docker-group membership is privileged; keep every other host capability narrow.
+# PrivateDevices must stay off: inventory shells out to nvidia-smi, which needs
+# the real /dev/nvidia* nodes to report GPU visibility.
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 PrivateTmp=yes
-PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
 ProtectKernelTunables=yes

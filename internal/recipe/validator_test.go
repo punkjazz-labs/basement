@@ -62,6 +62,9 @@ func TestRecipePolicyRejectsUnsafeVariants(t *testing.T) {
 		{"compressed-only image budget", func(r *Recipe) { r.Runtime.ImageDiskBytes = r.Runtime.ImageBytes - 1 }, "expanded image storage"},
 		{"missing memory reserve", func(r *Recipe) { r.Requirements.MemoryReserveBytes = 0 }, "per-node memory"},
 		{"memory overcommit", func(r *Recipe) { r.Requirements.MemoryReserveBytes = 30_000_000_000 }, "does not preserve"},
+		{"licence url for another repository", func(r *Recipe) {
+			r.Artifacts[0].LicenceURL = "https://huggingface.co/someone-else/Other-Model/blob/main/LICENSE.md"
+		}, "artifact's own repository"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

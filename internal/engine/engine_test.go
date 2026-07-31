@@ -491,6 +491,158 @@ func TestRestartFinalizesAlreadyVerifiedRollback(t *testing.T) {
 	}
 }
 
+// gateExecutor blocks one operation until the test releases it; the gate
+// deliberately ignores ctx so cancellation timing stays under test control.
+type gateExecutor struct {
+	switchExecutor
+	gateOp      string
+	gateRecipe  string
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	captured    map[string]bool
+}
+
+func (g *gateExecutor) Execute(ctx context.Context, execution operations.Execution, op recipe.Operation, r recipe.Recipe, progress operations.Progress) (map[string]any, error) {
+	if op.Type == "remove_artifact_if_unshared" {
+		g.mu.Lock()
+		g.captured = execution.SharedArtifacts
+		g.mu.Unlock()
+	}
+	if op.Type == g.gateOp && r.ID == g.gateRecipe {
+		g.enteredOnce.Do(func() { close(g.entered) })
+		<-g.release
+	}
+	return g.switchExecutor.Execute(ctx, execution, op, r, progress)
+}
+
+func TestStopOfUnrelatedModelIsNotBlockedByLongInstall(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	active, target := recipes[0], recipes[1]
+	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: active.ID, RecipeVersion: active.Version, Status: "ready", ArtifactPath: "/managed/" + active.ID, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	executor := &gateExecutor{
+		switchExecutor: switchExecutor{running: map[string]bool{active.ID: true, target.ID: false}},
+		gateOp:         "download_artifact", gateRecipe: target.ID,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	runner := New(s, executor, recipes)
+	install, _, err := s.CreateJob(ctx, "install", target.ID, "slow-install", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(install.ID)
+	select {
+	case <-executor.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("install never reached the download gate")
+	}
+	stop, _, err := s.CreateJob(ctx, "stop", active.ID, "fast-stop", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(stop.ID)
+	waitJob(t, s, stop.ID, "stopped")
+	close(executor.release)
+	waitJob(t, s, install.ID, "ready")
+}
+
+func TestCancelDuringSwitchStaysNonTerminalUntilRollbackFinishes(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	previous, target := recipes[0], recipes[1]
+	for _, model := range []store.InstalledModel{
+		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+	} {
+		if err := s.SetInstalled(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &gateExecutor{
+		switchExecutor: switchExecutor{running: map[string]bool{previous.ID: true, target.ID: false}},
+		gateOp:         "wait_http", gateRecipe: target.ID,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "start", target.ID, "cancel-switch", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	select {
+	case <-executor.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("switch never reached the verification gate")
+	}
+	if err := runner.Cancel(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.State != "cancelling" {
+		t.Fatalf("state=%s, want non-terminal cancelling while rollback is outstanding", pending.State)
+	}
+	close(executor.release)
+	cancelled := waitJob(t, s, job.ID, "cancelled")
+	if !strings.Contains(cancelled.Error, "previous model "+previous.ID+" restored and verified") {
+		t.Fatalf("rollback outcome missing from cancelled job: %q", cancelled.Error)
+	}
+	assertActiveModel(t, s, previous.ID, target.ID, "stopped")
+}
+
+func TestRemovePassesSharedArtifactsFromOtherInstalledModels(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	removed, kept := recipes[0], recipes[1]
+	for _, model := range []store.InstalledModel{
+		{RecipeID: removed.ID, RecipeVersion: removed.Version, Status: "stopped", ArtifactPath: "/managed/shared-path"},
+		{RecipeID: kept.ID, RecipeVersion: kept.Version, Status: "stopped", ArtifactPath: "/managed/shared-path"},
+	} {
+		if err := s.SetInstalled(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &gateExecutor{switchExecutor: switchExecutor{running: map[string]bool{}}}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "remove", removed.ID, "remove-shared", RemovePayload{RemoveArtifacts: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	waitJob(t, s, job.ID, "removed")
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if !executor.captured["/managed/shared-path"] {
+		t.Fatalf("shared artifact path missing from removal guard: %#v", executor.captured)
+	}
+	if !executor.captured[operations.ArtifactKey(kept.Artifacts[0])] {
+		t.Fatalf("kept model's pinned artifact key missing from removal guard: %#v", executor.captured)
+	}
+	if executor.captured[operations.ArtifactKey(removed.Artifacts[0])] {
+		t.Fatalf("removed model's own artifact must stay deletable: %#v", executor.captured)
+	}
+}
+
 func assertActiveModel(t *testing.T, s *store.Store, activeID, inactiveID, inactiveStatus string) {
 	t.Helper()
 	active, err := s.Model(context.Background(), activeID)

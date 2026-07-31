@@ -126,6 +126,8 @@ func Validate(r Recipe) error {
 		licenceURL, err := url.Parse(artifact.LicenceURL)
 		if err != nil || licenceURL.Scheme != "https" || licenceURL.Host != "huggingface.co" {
 			problems = append(problems, prefix+" licence_url must be an HTTPS Hugging Face URL")
+		} else if licenceURL.Path != "/"+artifact.Repository && !strings.HasPrefix(licenceURL.Path, "/"+artifact.Repository+"/") {
+			problems = append(problems, prefix+" licence_url must reference the artifact's own repository")
 		}
 	}
 	if !roles["primary"] {

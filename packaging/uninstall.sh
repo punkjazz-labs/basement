@@ -6,11 +6,26 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# Model containers are detached from the manager service, so they survive the
+# service stop below and would otherwise keep holding the GPU with no supported
+# way left to stop them once the manager is gone.
+if command -v docker >/dev/null 2>&1; then
+  managed=$(docker ps --quiet --filter label=ai.runonspark.managed=true 2>/dev/null || true)
+  if [ -n "$managed" ]; then
+    echo "Stopping managed model containers..."
+    # shellcheck disable=SC2086
+    docker stop --time 30 $managed >/dev/null || echo "warning: a managed model container could not be stopped; stop it manually with: docker ps --filter label=ai.runonspark.managed=true" >&2
+  fi
+else
+  echo "warning: docker is unavailable; any running managed model container was left running (docker ps --filter label=ai.runonspark.managed=true)" >&2
+fi
+
 systemctl disable --now runonspark-manager.service 2>/dev/null || true
 rm -f /etc/systemd/system/runonspark-manager.service
 rm -f /usr/lib/runonspark-manager/runonspark-manager
 rmdir /usr/lib/runonspark-manager 2>/dev/null || true
 systemctl daemon-reload
 
-echo "Manager removed. /var/lib/runonspark-manager and downloaded model data were preserved."
+echo "Manager removed. Managed model containers were stopped but not deleted."
+echo "/var/lib/runonspark-manager and downloaded model data were preserved."
 echo "Use the authenticated manager removal flow before uninstalling if model artifacts should be deleted."

@@ -29,8 +29,25 @@ const stateCopy = {
   queued: 'Queued', preflighting: 'Checking system', downloading_runtime: 'Preparing runtime', downloading_models: 'Downloading model',
   configuring: 'Configuring', checking_memory: 'Reserving memory', starting: 'Starting model', stopping: 'Stopping model',
   verifying_health: 'Checking health', verifying_inference: 'Testing inference', removing: 'Removing model', ready: 'Ready',
-  stopped: 'Stopped', removed: 'Removed', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted'
+  stopped: 'Stopped', removed: 'Removed', failed: 'Failed', cancelled: 'Cancelled', cancelling: 'Cancelling', interrupted: 'Interrupted',
+  rolling_back: 'Restoring previous model'
 };
+
+async function copyText(value) {
+  // navigator.clipboard only exists in secure contexts; plain-HTTP LAN access
+  // (the documented deployment) needs the selection fallback.
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(value);
+  const holder = document.createElement('textarea');
+  holder.value = value;
+  holder.setAttribute('readonly', '');
+  holder.style.position = 'fixed';
+  holder.style.opacity = '0';
+  document.body.appendChild(holder);
+  holder.select();
+  try {
+    if (!document.execCommand('copy')) throw new Error('Copy is unavailable in this browser context.');
+  } finally { holder.remove(); }
+}
 
 async function api(path, options = {}) {
   options.headers = { ...(options.headers || {}) };
@@ -195,7 +212,7 @@ function renderRecipes() {
       primaryAction = `<button data-action="start" data-id="${item.id}" ${busy ? 'disabled' : ''}>${activeOther ? 'Switch' : 'Start'}</button>`;
       utilityActions = `<button class="danger" data-action="remove" data-id="${item.id}">Remove</button>`;
     }
-    const artifacts = item.artifacts.map(artifact => `<li><span>${escapeHTML(artifact.role)}</span><code>${escapeHTML(artifact.repository)}@${artifact.revision.slice(0, 12)}</code></li>`).join('');
+    const artifacts = item.artifacts.map(artifact => `<li><span>${escapeHTML(artifact.role)}</span><code>${escapeHTML(artifact.repository)}@${escapeHTML(artifact.revision.slice(0, 12))}</code></li>`).join('');
     return `<article class="model-row">
       <div class="model-row-main">
         <div class="model-mark" aria-hidden="true">${escapeHTML(copy.mark)}</div>
@@ -324,8 +341,8 @@ async function action(name, id) {
   try {
     if (name === 'install') return await confirmInstall(id);
     const item = state.recipes.find(recipe => recipe.id === id);
-    if (name === 'copy-endpoint') { await navigator.clipboard.writeText(`http://${location.hostname}:${item.service.default_host_port}/v1`); return; }
-    if (name === 'copy-model') { await navigator.clipboard.writeText(item.service.served_model_id); return; }
+    if (name === 'copy-endpoint') { await copyText(`http://${location.hostname}:${item.service.default_host_port}/v1`); return; }
+    if (name === 'copy-model') { await copyText(item.service.served_model_id); return; }
     if (name === 'start') {
       const active = state.models.find(model => model.active && model.recipe_id !== id);
       if (active) {
@@ -360,7 +377,7 @@ async function confirmInstall(id) {
   $('#confirm-title').textContent = item.display_name;
   const active = state.models.find(model => model.active && model.recipe_id !== id);
   const switchNotice = active ? `<p class="switch-notice"><strong>${escapeHTML(productCopy[active.recipe_id]?.name || active.recipe_id)} will stop after the download.</strong> If this model fails verification, RunOnSpark will try to restore it.</p>` : '';
-  $('#confirm-detail').innerHTML = `<dl class="install-facts"><div><dt>Download</dt><dd>${formatBytes(item.artifact_bytes)}</dd></div><div><dt>Space needed</dt><dd>${formatBytes(item.required_bytes)}</dd></div><div><dt>RAM kept free</dt><dd>${formatBytes(item.requirements.per_node_memory_reserve_bytes)}</dd></div><div><dt>Port</dt><dd>${item.service.default_host_port}</dd></div></dl>${switchNotice}<a href="${item.artifacts[0].licence_url}" target="_blank" rel="noreferrer">Read the ${escapeHTML(item.artifacts[0].licence)} licence ↗</a>`;
+  $('#confirm-detail').innerHTML = `<dl class="install-facts"><div><dt>Download</dt><dd>${formatBytes(item.artifact_bytes)}</dd></div><div><dt>Space needed</dt><dd>${formatBytes(item.required_bytes)}</dd></div><div><dt>RAM kept free</dt><dd>${formatBytes(item.requirements.per_node_memory_reserve_bytes)}</dd></div><div><dt>Port</dt><dd>${item.service.default_host_port}</dd></div></dl>${switchNotice}<a href="${escapeHTML(item.artifacts[0].licence_url)}" target="_blank" rel="noreferrer">Read the ${escapeHTML(item.artifacts[0].licence)} licence ↗</a>`;
   $('#licence').checked = false;
   $('#confirm-dialog').showModal();
   $('#confirm-install').onclick = async event => {

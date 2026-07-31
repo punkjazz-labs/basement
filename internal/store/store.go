@@ -229,6 +229,20 @@ func (s *Store) UpdateJobState(ctx context.Context, id, state, message string) e
 	return nil
 }
 
+// MarkCancelling records cancellation intent without claiming the terminal
+// state: the running goroutine may still need to roll back a partial switch
+// and stays the only writer of the final job state. Returns false when the
+// job already reached a terminal state.
+func (s *Store) MarkCancelling(ctx context.Context, id string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE jobs SET state='cancelling', error=?, updated_at=? WHERE id=? AND state NOT IN ('ready','failed','cancelled','stopped','removed')`,
+		"cancellation requested; finishing at a safe operation boundary", now(), id)
+	if err != nil {
+		return false, err
+	}
+	count, _ := result.RowsAffected()
+	return count == 1, nil
+}
+
 func (s *Store) BeginStep(ctx context.Context, jobID string, index int, operation string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO job_steps(job_id,step_index,operation,state,started_at) VALUES(?,?,?,?,?)
 ON CONFLICT(job_id,step_index) DO UPDATE SET operation=excluded.operation,state='running',error='',started_at=excluded.started_at,completed_at=''`, jobID, index, operation, "running", now())
@@ -298,6 +312,27 @@ func (s *Store) SetInstalled(ctx context.Context, model InstalledModel) error {
 ON CONFLICT(recipe_id) DO UPDATE SET recipe_version=excluded.recipe_version,status=excluded.status,artifact_path=excluded.artifact_path,container_id=excluded.container_id,active=excluded.active,updated_at=excluded.updated_at`,
 		model.RecipeID, model.RecipeVersion, model.Status, model.ArtifactPath, model.ContainerID, model.Active, model.UpdatedAt)
 	return err
+}
+
+// ActivateExclusively installs/updates the model and demotes every other
+// model in one transaction, so a crash or write error can never leave two
+// models marked active.
+func (s *Store) ActivateExclusively(ctx context.Context, model InstalledModel) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	model.UpdatedAt = now()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO installed_models(recipe_id,recipe_version,status,artifact_path,container_id,active,updated_at) VALUES(?,?,?,?,?,1,?)
+ON CONFLICT(recipe_id) DO UPDATE SET recipe_version=excluded.recipe_version,status=excluded.status,artifact_path=excluded.artifact_path,container_id=excluded.container_id,active=1,updated_at=excluded.updated_at`,
+		model.RecipeID, model.RecipeVersion, model.Status, model.ArtifactPath, model.ContainerID, model.UpdatedAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE installed_models SET status=CASE WHEN active=1 THEN 'stopped' ELSE status END,active=0,updated_at=? WHERE recipe_id<>?`, model.UpdatedAt, model.RecipeID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) BeginSwitch(ctx context.Context, previousRecipeID, targetRecipeID string) error {

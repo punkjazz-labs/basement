@@ -18,7 +18,7 @@ The console derives hardware context from manager inventory instead of asking fo
 
 ## Development
 
-The manager defaults to loopback until an operator deliberately chooses a LAN bind address.
+The manager defaults to loopback until an operator deliberately chooses a LAN bind address. The model endpoint is published on the same interface the manager listens on, so the unauthenticated OpenAI port is only exposed to the network when the manager itself is (see `docs/decisions/0006`).
 
 ```bash
 go run ./cmd/runonspark-manager --data-dir ./var --listen 127.0.0.1:7070

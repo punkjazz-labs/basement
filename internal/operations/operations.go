@@ -11,6 +11,10 @@ type Execution struct {
 	JobID           string
 	Kind            string
 	RemoveArtifacts bool
+	// SharedArtifacts holds artifact keys (repository@revision) and artifact
+	// paths still referenced by other installed models; removal must retain
+	// them instead of deleting shared data.
+	SharedArtifacts map[string]bool
 }
 
 type Progress func(receipt any) error

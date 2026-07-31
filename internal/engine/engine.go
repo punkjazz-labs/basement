@@ -17,12 +17,16 @@ import (
 )
 
 type Engine struct {
-	store     *store.Store
-	executor  operations.Executor
-	recipes   []recipe.Recipe
-	mu        sync.Mutex
-	running   map[string]context.CancelFunc
-	lifecycle sync.Mutex
+	store       *store.Store
+	executor    operations.Executor
+	recipes     []recipe.Recipe
+	mu          sync.Mutex
+	running     map[string]context.CancelFunc
+	recipeLocks map[string]*sync.Mutex
+	// runtime serializes container and activation mutations across recipes;
+	// downloads and preflight run outside it so a long install cannot block
+	// stopping an unrelated model.
+	runtime chan struct{}
 }
 
 type RemovePayload struct {
@@ -37,7 +41,37 @@ type plannedOperation struct {
 }
 
 func New(s *store.Store, executor operations.Executor, recipes []recipe.Recipe) *Engine {
-	return &Engine{store: s, executor: executor, recipes: recipes, running: map[string]context.CancelFunc{}}
+	return &Engine{store: s, executor: executor, recipes: recipes, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1)}
+}
+
+func (e *Engine) recipeLock(recipeID string) *sync.Mutex {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	lock, ok := e.recipeLocks[recipeID]
+	if !ok {
+		lock = &sync.Mutex{}
+		e.recipeLocks[recipeID] = lock
+	}
+	return lock
+}
+
+func (e *Engine) acquireRuntime(ctx context.Context) error {
+	select {
+	case e.runtime <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *Engine) releaseRuntime() { <-e.runtime }
+
+// runtimeOperations mutate or verify the shared runtime (containers, live
+// memory, the single active slot) and therefore take the runtime lock.
+var runtimeOperations = map[string]bool{
+	"stop_container": true, "create_container": true, "verify_memory": true,
+	"start_container": true, "wait_http": true, "verify_openai_inference": true,
+	"remove_container": true,
 }
 
 func (e *Engine) ResumeInterrupted(ctx context.Context) error {
@@ -82,8 +116,6 @@ func (e *Engine) Start(jobID string) {
 	e.mu.Unlock()
 	go func() {
 		defer func() { e.mu.Lock(); delete(e.running, jobID); e.mu.Unlock() }()
-		e.lifecycle.Lock()
-		defer e.lifecycle.Unlock()
 		e.run(ctx, jobID)
 	}()
 }
@@ -100,10 +132,18 @@ func (e *Engine) Cancel(ctx context.Context, jobID string) error {
 		if terminal(job.State) {
 			return errors.New("job is already complete")
 		}
-	} else {
-		cancel()
+		return e.store.UpdateJobState(ctx, jobID, "cancelled", "cancelled at a safe operation boundary")
 	}
-	return e.store.UpdateJobState(ctx, jobID, "cancelled", "cancelled at a safe operation boundary")
+	cancel()
+	// The running goroutine owns the final state: it may still need to roll
+	// back a partial switch, so only cancellation intent is recorded here and
+	// the job stays non-terminal until the goroutine finishes.
+	marked, err := e.store.MarkCancelling(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	_ = marked // false means the goroutine already wrote a terminal state
+	return nil
 }
 
 func (e *Engine) run(ctx context.Context, jobID string) {
@@ -116,11 +156,28 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		_ = e.store.UpdateJobState(ctx, jobID, "failed", "recipe is no longer available")
 		return
 	}
+	lock := e.recipeLock(r.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	runtimeHeld := false
+	defer func() {
+		if runtimeHeld {
+			e.releaseRuntime()
+		}
+	}()
 	execution := operations.Execution{JobID: job.ID, Kind: job.Kind}
 	if job.Kind == "remove" {
 		var payload RemovePayload
 		_ = json.Unmarshal(job.Payload, &payload)
 		execution.RemoveArtifacts = payload.RemoveArtifacts
+		if payload.RemoveArtifacts {
+			shared, sharedErr := e.sharedArtifacts(ctx, r.ID)
+			if sharedErr != nil {
+				_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(sharedErr.Error()))
+				return
+			}
+			execution.SharedArtifacts = shared
+		}
 	}
 	plans, previous, err := e.plan(ctx, job, r)
 	if err != nil {
@@ -145,6 +202,17 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 	}
 	switchStarted := false
 	for index, plan := range plans {
+		if !runtimeHeld && (plan.BeginSwitch || runtimeOperations[plan.Operation.Type]) {
+			if err := e.acquireRuntime(ctx); err != nil {
+				if switchStarted && previous != nil {
+					e.failSwitch(job, r, *previous, plans, index, err)
+				} else {
+					e.fail(ctx, jobID, index, err)
+				}
+				return
+			}
+			runtimeHeld = true
+		}
 		if plan.BeginSwitch {
 			if previous == nil {
 				e.fail(ctx, jobID, index, errors.New("switch plan lost the previous model"))
@@ -287,6 +355,30 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 	return plans, previous, nil
 }
 
+func (e *Engine) sharedArtifacts(ctx context.Context, excludeRecipeID string) (map[string]bool, error) {
+	models, err := e.store.Models(ctx)
+	if err != nil {
+		return nil, err
+	}
+	shared := map[string]bool{}
+	for _, model := range models {
+		if model.RecipeID == excludeRecipeID {
+			continue
+		}
+		if model.ArtifactPath != "" {
+			shared[model.ArtifactPath] = true
+		}
+		other, ok := recipe.Find(e.recipes, model.RecipeID)
+		if !ok {
+			continue
+		}
+		for _, artifact := range other.Artifacts {
+			shared[operations.ArtifactKey(artifact)] = true
+		}
+	}
+	return shared, nil
+}
+
 func (e *Engine) activeRecipe(ctx context.Context, targetID string) (*recipe.Recipe, error) {
 	models, err := e.store.Models(ctx)
 	if err != nil {
@@ -387,10 +479,7 @@ func (e *Engine) finish(ctx context.Context, job store.Job, r recipe.Recipe) err
 			containerID = existing.ContainerID
 		}
 		model := store.InstalledModel{RecipeID: r.ID, RecipeVersion: r.Version, Status: "ready", ArtifactPath: e.executor.ArtifactPath(r), ContainerID: containerID, Active: true}
-		if err := e.store.SetInstalled(ctx, model); err != nil {
-			return err
-		}
-		if err := e.store.SetOnlyActive(ctx, r.ID); err != nil {
+		if err := e.store.ActivateExclusively(ctx, model); err != nil {
 			return err
 		}
 		return e.store.UpdateJobState(ctx, job.ID, "ready", "")

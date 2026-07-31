@@ -30,3 +30,4 @@ Per-node evaluation also avoids a common distributed-systems error: summing heal
 - The current release still rejects multi-Spark recipes; this decision defines the safety contract for later orchestration but does not claim multi-node support.
 - Hardware qualification must record idle memory, planned allocation, host reserve, peak memory, OOM behavior, disk headroom, and results for every node.
 - Thresholds may be tightened after real GB10 measurements, but they cannot be relaxed without a recipe-version change and new evidence.
+- Adding these guardrail fields bumped the embedded recipe versions (Qwen 35B v2→v3, Qwen 27B v1→v2, Laguna v1→v2). This note was added retroactively so the recipe version audit trail stays complete.

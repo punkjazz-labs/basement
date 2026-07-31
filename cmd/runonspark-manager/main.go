@@ -51,7 +51,7 @@ func main() {
 		os.Exit(1)
 	}
 	provider := inventory.Host{DataDir: cfg.DataDir, DockerSocket: "/var/run/docker.sock"}
-	executor := operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider)
+	executor := operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", cfg.ModelPublishHost(), provider)
 	jobEngine := engine.New(db, executor, recipes)
 	if err := jobEngine.ResumeInterrupted(context.Background()); err != nil {
 		logger.Error("resume interrupted jobs", "error", err)

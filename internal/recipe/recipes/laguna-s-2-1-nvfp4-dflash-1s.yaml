@@ -1,6 +1,6 @@
 schema_version: 1
 id: laguna-s-2-1-nvfp4-dflash-1s
-version: 2
+version: 3
 display_name: Laguna S 2.1 + DFlash
 publisher: poolside
 trust: runonspark-candidate
@@ -34,7 +34,10 @@ artifacts:
     revision: 4cdcc6e9b29105e8ff5790885cadccbeb4f33f54
     expected_bytes: 2229973462
     licence: OpenMDW-1.1
-    licence_url: https://huggingface.co/poolside/Laguna-S-2.1-NVFP4/blob/07614121b31898586430f189d27a25a0be310843/LICENSE.md
+    # The drafter repository ships no licence file at this revision; the family
+    # licence text lives in the base repository. Link the drafter's own pinned
+    # tree so the user sees the artifact they are accepting (ADR 0006).
+    licence_url: https://huggingface.co/poolside/Laguna-S-2.1-DFlash-NVFP4/tree/4cdcc6e9b29105e8ff5790885cadccbeb4f33f54
 requirements:
   architecture: aarch64
   dgx_spark: true

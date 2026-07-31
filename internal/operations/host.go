@@ -20,15 +20,22 @@ import (
 )
 
 type HostExecutor struct {
-	dataDir   string
-	inventory inventory.Provider
-	docker    *DockerClient
-	hf        *HFClient
-	http      *http.Client
+	dataDir     string
+	publishHost string
+	inventory   inventory.Provider
+	docker      *DockerClient
+	hf          *HFClient
+	http        *http.Client
 }
 
-func NewHostExecutor(dataDir, dockerSocket string, provider inventory.Provider) *HostExecutor {
-	return &HostExecutor{dataDir: dataDir, inventory: provider, docker: NewDockerClient(dockerSocket), hf: NewHFClient(), http: &http.Client{Timeout: 30 * time.Second}}
+// publishHost is the host interface the model endpoint is published on; it
+// follows the manager's own listen interface so exposure stays a deliberate
+// operator choice rather than an unconditional 0.0.0.0.
+func NewHostExecutor(dataDir, dockerSocket, publishHost string, provider inventory.Provider) *HostExecutor {
+	if publishHost == "" {
+		publishHost = "127.0.0.1"
+	}
+	return &HostExecutor{dataDir: dataDir, publishHost: publishHost, inventory: provider, docker: NewDockerClient(dockerSocket), hf: NewHFClient(), http: &http.Client{Timeout: 30 * time.Second}}
 }
 
 func (h *HostExecutor) ArtifactPath(r recipe.Recipe) string {
@@ -165,7 +172,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := os.MkdirAll(cachePath, 0o750); err != nil {
 			return nil, err
 		}
-		id, err := h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, r)
+		id, err := h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, h.publishHost, r)
 		if err != nil {
 			return nil, err
 		}
@@ -203,9 +210,15 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if !execution.RemoveArtifacts {
 			return map[string]any{"retained": true, "bytes_retained": r.TotalArtifactBytes()}, nil
 		}
-		var reclaimed int64
+		var reclaimed, sharedRetained int64
+		sharedRepositories := make([]string, 0)
 		for i, artifact := range r.Artifacts {
 			target := h.artifactPath(r, i)
+			if execution.SharedArtifacts[artifactKey(artifact)] || execution.SharedArtifacts[target] {
+				sharedRetained += artifact.ExpectedBytes
+				sharedRepositories = append(sharedRepositories, artifact.Repository)
+				continue
+			}
 			if !h.hf.Complete(artifact, target) {
 				return nil, fmt.Errorf("refusing to remove unowned or incomplete artifact path %s", target)
 			}
@@ -214,7 +227,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 			}
 			reclaimed += artifact.ExpectedBytes
 		}
-		return map[string]any{"removed": true, "reclaimed_bytes": reclaimed}, nil
+		return map[string]any{"removed": reclaimed > 0, "reclaimed_bytes": reclaimed, "shared_retained_bytes": sharedRetained, "shared_retained_repositories": sharedRepositories}, nil
 	default:
 		return nil, fmt.Errorf("operation %s is not implemented", operation.Type)
 	}
@@ -326,7 +339,11 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 			return true
 		}
 		for i, artifact := range r.Artifacts {
-			if h.hf.Complete(artifact, h.artifactPath(r, i)) {
+			target := h.artifactPath(r, i)
+			if execution.SharedArtifacts[artifactKey(artifact)] || execution.SharedArtifacts[target] {
+				continue
+			}
+			if h.hf.Complete(artifact, target) {
 				return false
 			}
 		}
@@ -416,9 +433,19 @@ func (h *HostExecutor) cachePath(r recipe.Recipe) string {
 	return filepath.Join(h.dataDir, "caches", r.ID, fmt.Sprint(r.Version))
 }
 func (h *HostExecutor) modelURL(r recipe.Recipe) string {
-	return fmt.Sprintf("http://127.0.0.1:%d", r.Service.DefaultHostPort)
+	host := h.publishHost
+	if host == "" || host == "0.0.0.0" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s:%d", host, r.Service.DefaultHostPort)
 }
 func containerName(r recipe.Recipe) string { return fmt.Sprintf("runonspark-%s-v%d", r.ID, r.Version) }
+
+// ArtifactKey identifies a pinned artifact independently of the recipe that
+// references it, so removal can recognize artifacts shared across recipes.
+func ArtifactKey(a recipe.Artifact) string { return artifactKey(a) }
+
+func artifactKey(a recipe.Artifact) string { return a.Repository + "@" + a.Revision }
 
 func (h *HostExecutor) removeOwnedArtifact(target string) error {
 	root := filepath.Join(h.dataDir, "artifacts")

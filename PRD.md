@@ -63,20 +63,18 @@ The family name shown in the UI and the exact artifact installed are distinct fi
 
 ### 4.1 Qwen 3.6 35B-A3B
 
-- Display name: `Qwen 3.6 35B-A3B`
-- Artifact: `nvidia/Qwen3.6-35B-A3B-NVFP4`
-- Runtime: vLLM
+- Display name: `Qwen 3.6 35B-A3B (Unsloth)`
+- Artifact: `unsloth/Qwen3.6-35B-A3B-NVFP4` (community quantization; supersedes the originally planned `nvidia/Qwen3.6-35B-A3B-NVFP4`, see ADR 0001/0002)
+- Runtime: MiaAI Lab GB10 vLLM image `ghcr.io/miaai-lab/mia-vllm-gb10-linear-b12x`, pinned by digest
 - Topology: one DGX Spark, tensor parallel size 1
 - Quantization: NVFP4
 - Initial role: first vertical slice and default recommendation
-- Upstream reference: <https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4>
+- Upstream reference: <https://huggingface.co/unsloth/Qwen3.6-35B-A3B-NVFP4>
 - Important launch characteristics:
   - OpenAI-compatible server on port 8000
   - Qwen reasoning and tool-call parsers
   - MTP speculative decoding
   - DGX Spark-specific memory and attention settings
-
-The upstream example currently relies on a floating vLLM image. Implementation must identify and record a working immutable image digest before this recipe is verified.
 
 ### 4.2 Qwen 3.6 27B
 
@@ -87,7 +85,7 @@ The upstream example currently relies on a floating vLLM image. Implementation m
 - Quantization: NVFP4
 - Upstream reference: <https://huggingface.co/nvidia/Qwen3.6-27B-NVFP4>
 
-The initial recipe must use the official NVIDIA artifact. Community derivatives such as PrismaSCOUT can be evaluated later as separate recipes with a different trust label.
+Recipes are not restricted to official first-party artifacts. Community-published artifacts (Unsloth, PrismaSCOUT, and similar) are acceptable recipe sources on equal footing, provided every artifact and image is pinned, passes the same validator, displays its true publisher and provenance in the UI, and carries a trust label that reflects its verification state rather than its publisher. Trust is earned through DGX qualification evidence, not through who published the weights.
 
 ### 4.3 Laguna S 2.1
 
@@ -326,6 +324,10 @@ Initial operation categories:
 - `remove_artifact_if_unshared`
 
 An escape-hatch `run_shell` operation must not be introduced for convenience. If a model requires a new kind of operation, implement and test that operation explicitly.
+
+### 7.4 Recorded direction: automated recipe discovery
+
+A future ingestion agent may scan public sources (X/Twitter announcements, Hugging Face releases, community benchmark threads) on a schedule and draft candidate recipes for newly published Spark-capable models automatically. This is a recorded product direction, not scheduled work. Any such agent produces *draft* recipes only: drafts must pass the same strict validator, pin exact digests and revisions, carry a `candidate` trust label, and require explicit human approval before entering the embedded recipe set. Decision 9 (no remote recipe execution until signing and trust controls exist) is unaffected — discovery automates authoring, never installation.
 
 ## 8. Job model and recovery
 
@@ -596,7 +598,7 @@ These require evidence during implementation and should be resolved in decision 
 - Exact tested vLLM container digest shared by the first two recipes, or whether they require separate digests
 - Exact immutable Hugging Face revisions and verified expected download sizes
 - Best supported download mechanism for resumable Hugging Face artifacts without leaking tokens
-- Whether the service should bind only to LAN/Tailscale interfaces or default to localhost until pairing changes it
+- Whether the service should bind only to LAN/Tailscale interfaces or default to localhost until pairing changes it (partially resolved: the model endpoint now follows the manager's listen interface, ADR 0006)
 - Initial local authentication mechanism and recovery flow
 - Safest Docker permission model compatible with a simple DGX Spark installation
 - Default data directory and policy for Hugging Face cache interoperability

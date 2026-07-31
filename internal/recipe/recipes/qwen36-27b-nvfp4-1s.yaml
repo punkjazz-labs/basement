@@ -1,6 +1,6 @@
 schema_version: 1
 id: qwen36-27b-nvfp4-1s
-version: 2
+version: 3
 display_name: Qwen 3.6 27B
 publisher: MiaAI Lab + NVIDIA
 trust: runonspark-candidate
@@ -18,7 +18,9 @@ runtime:
   image_disk_bytes: 31852852314
   environment:
     VLLM_TARGET_DEVICE: cuda
-  shm_bytes: 0
+  # Containers now run with isolated IPC (ADR 0006); size /dev/shm explicitly
+  # instead of relying on the host namespace.
+  shm_bytes: 34359738368
   memory_lock: false
   ipc_lock: false
 artifacts:
