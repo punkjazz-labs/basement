@@ -52,7 +52,7 @@ chmod +x "${dir}/runonspark-manager"
 status=0
 if [ -t 0 ]; then
   "${dir}/runonspark-manager" setup "$@" || status=$?
-elif [ -e /dev/tty ]; then
+elif (: </dev/tty) 2>/dev/null; then
   "${dir}/runonspark-manager" setup "$@" </dev/tty || status=$?
 else
   echo "no interactive terminal available; download the binary and run: runonspark-manager setup" >&2
