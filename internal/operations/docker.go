@@ -155,9 +155,15 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 		binds = append(binds, artifactPath+":"+artifactMountPath(r.Artifacts[index].Role)+":ro")
 	}
 	binds = append(binds, cachePath+":/root/.cache:rw")
-	environment := make([]string, 0, len(r.Runtime.Environment))
+	environment := make([]string, 0, len(r.Runtime.Environment)+1)
 	for name, value := range r.Runtime.Environment {
 		environment = append(environment, name+"="+value)
+	}
+	// The root filesystem is read-only and /root/.cache is the one writable
+	// mount; Triton defaults to /root/.triton and crashes the engine on a
+	// read-only rootfs, so steer it into the persistent cache.
+	if _, overridden := r.Runtime.Environment["TRITON_CACHE_DIR"]; !overridden {
+		environment = append(environment, "TRITON_CACHE_DIR=/root/.cache/triton")
 	}
 	sort.Strings(environment)
 	// The model endpoint is loopback-only; the manager's authenticated /v1

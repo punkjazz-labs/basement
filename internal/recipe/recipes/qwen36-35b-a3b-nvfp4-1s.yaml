@@ -1,6 +1,6 @@
 schema_version: 1
 id: qwen36-35b-a3b-nvfp4-1s
-version: 3
+version: 4
 display_name: Qwen 3.6 35B-A3B (Unsloth)
 publisher: MiaAI Lab + Unsloth
 trust: runonspark-candidate

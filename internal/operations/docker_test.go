@@ -58,6 +58,16 @@ func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 	if id != "container-id" {
 		t.Fatalf("id=%s", id)
 	}
+	environment, _ := body["Env"].([]any)
+	tritonSteered := false
+	for _, entry := range environment {
+		if entry == "TRITON_CACHE_DIR=/root/.cache/triton" {
+			tritonSteered = true
+		}
+	}
+	if !tritonSteered {
+		t.Fatalf("Triton cache is not steered into the writable mount (read-only rootfs would crash vLLM): %#v", body["Env"])
+	}
 	if body["Image"] != r.Runtime.Reference() {
 		t.Fatalf("image is not digest pinned: %#v", body["Image"])
 	}
