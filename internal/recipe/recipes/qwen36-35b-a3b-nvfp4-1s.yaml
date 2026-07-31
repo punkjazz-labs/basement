@@ -1,6 +1,6 @@
 schema_version: 1
 id: qwen36-35b-a3b-nvfp4-1s
-version: 2
+version: 3
 display_name: Qwen 3.6 35B-A3B (Unsloth)
 publisher: MiaAI Lab + Unsloth
 trust: runonspark-candidate
@@ -15,6 +15,7 @@ runtime:
   image: ghcr.io/miaai-lab/mia-vllm-gb10-linear-b12x
   digest: sha256:19627342e1da2607f4db50745dca30e57d7dd0ebff06062f03fd69b43a252931
   image_bytes: 9220559293
+  image_disk_bytes: 27661677879
   environment:
     CUTE_DSL_ARCH: sm_121a
     VLLM_TARGET_DEVICE: cuda
@@ -33,6 +34,8 @@ requirements:
   dgx_spark: true
   docker: true
   nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 16000000000
   safety_margin_bytes: 10000000000
   secrets: []
   required_licence_acceptance: true
@@ -77,6 +80,7 @@ service:
 operations:
   - type: verify_architecture
   - type: verify_dgx_spark
+  - type: verify_memory_capacity
   - type: verify_disk
   - type: verify_port
   - type: verify_docker
@@ -86,6 +90,7 @@ operations:
   - type: download_artifact
   - type: write_generated_config
   - type: create_container
+  - type: verify_memory
   - type: start_container
   - type: wait_http
   - type: verify_openai_inference

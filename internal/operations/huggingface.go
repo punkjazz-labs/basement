@@ -190,6 +190,9 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 			offset = 0
 		}
 	}
+	if err := progress(offset); err != nil {
+		return fmt.Errorf("check download capacity: %w", err)
+	}
 	endpoint := h.baseURL + "/" + escapeRepository(artifact.Repository) + "/resolve/" + url.PathEscape(artifact.Revision) + "/" + escapeFilePath(file.Name) + "?download=true"
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if token := os.Getenv("HF_TOKEN"); token != "" {

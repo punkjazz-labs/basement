@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/punkjazz-labs/runonspark-manager/internal/inventory"
 	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
+	"github.com/punkjazz-labs/runonspark-manager/internal/resourceguard"
 )
 
 type HostExecutor struct {
@@ -55,15 +57,15 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 			return nil, errors.New("DGX Spark hardware identity was not detected")
 		}
 		return map[string]any{"product_name": system.ProductName, "dgx_spark": true}, nil
+	case "verify_memory_capacity", "verify_memory":
+		if operation.Type == "verify_memory" {
+			if state, err := h.docker.Container(ctx, containerName(r)); err == nil && state.Running {
+				return map[string]any{"already_running": true, "container_id": state.ID}, nil
+			}
+		}
+		return h.verifyMemory(ctx, r, operation.Type == "verify_memory")
 	case "verify_disk":
-		system, err := h.inventory.Inspect(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if system.StorageAvailable < r.RequiredBytes() {
-			return nil, fmt.Errorf("insufficient storage: %d available, %d required including safety margin", system.StorageAvailable, r.RequiredBytes())
-		}
-		return map[string]any{"available_bytes": system.StorageAvailable, "required_bytes": r.RequiredBytes(), "safety_margin_bytes": r.Requirements.SafetyMarginBytes}, nil
+		return h.verifyDisk(ctx, r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes)
 	case "verify_port":
 		if err := inventory.CheckPort(r.Service.DefaultHostPort); err != nil {
 			return nil, err
@@ -97,12 +99,43 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if h.docker.ImageExists(ctx, r.Runtime.Reference()) {
 			return map[string]any{"image": r.Runtime.Reference(), "reused": true}, nil
 		}
-		return h.docker.Pull(ctx, r.Runtime.Reference(), progress)
+		if _, err := h.verifyDisk(ctx, r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes); err != nil {
+			return nil, fmt.Errorf("refusing image pull: %w", err)
+		}
+		guarded := func(value any) error {
+			if _, err := h.verifyDisk(ctx, r, r.TotalArtifactBytes(), 0); err != nil {
+				return fmt.Errorf("disk reserve reached during image pull: %w", err)
+			}
+			if progress != nil {
+				return progress(value)
+			}
+			return nil
+		}
+		return h.docker.Pull(ctx, r.Runtime.Reference(), guarded)
 	case "download_artifact":
 		var receipts []map[string]any
 		for i, artifact := range r.Artifacts {
 			target := h.artifactPath(r, i)
-			receipt, err := h.hf.Download(ctx, artifact, target, progress)
+			var laterBytes int64
+			for _, later := range r.Artifacts[i+1:] {
+				laterBytes += later.ExpectedBytes
+			}
+			guarded := func(value any) error {
+				completed := receiptInt64(value, "bytes_complete")
+				remaining := artifact.ExpectedBytes - completed
+				if remaining < 0 {
+					remaining = 0
+				}
+				remainingArtifacts := remaining + laterBytes
+				if _, err := h.verifyDisk(ctx, r, remainingArtifacts, 0); err != nil {
+					return fmt.Errorf("disk reserve reached during model download: %w", err)
+				}
+				if progress != nil {
+					return progress(value)
+				}
+				return nil
+			}
+			receipt, err := h.hf.Download(ctx, artifact, target, guarded)
 			if err != nil {
 				return nil, err
 			}
@@ -184,6 +217,66 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		return map[string]any{"removed": true, "reclaimed_bytes": reclaimed}, nil
 	default:
 		return nil, fmt.Errorf("operation %s is not implemented", operation.Type)
+	}
+}
+
+func (h *HostExecutor) verifyMemory(ctx context.Context, r recipe.Recipe, requireLive bool) (map[string]any, error) {
+	system, err := h.inventory.Inspect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	utilization, err := strconv.ParseFloat(r.Service.VLLM.GPUMemoryUtil, 64)
+	if err != nil {
+		return nil, fmt.Errorf("parse GPU memory utilization: %w", err)
+	}
+	node := resourceguard.Node{
+		Name: system.Hostname, SystemMemoryTotal: system.MemoryTotal, SystemMemoryAvailable: system.MemoryAvailable,
+		GPUMemoryTotal: system.GPUMemoryTotal, GPUMemoryFree: system.GPUMemoryFree,
+	}
+	results, err := resourceguard.CheckMemory([]resourceguard.Node{node}, r.Topology.SparkCount, resourceguard.MemoryPolicy{
+		MinimumTotalBytes: r.Requirements.MinimumMemoryBytes, HostReserveBytes: r.Requirements.MemoryReserveBytes,
+		GPUUtilization: utilization, RequireLiveCapacity: requireLive,
+	})
+	receipt := map[string]any{"per_node": results, "live_capacity": requireLive, "kv_cache_dtype": r.Service.VLLM.KVCacheDType, "max_model_len": r.Service.VLLM.MaxModelLen, "max_num_seqs": r.Service.VLLM.MaxNumSeqs}
+	if err != nil {
+		return receipt, err
+	}
+	return receipt, nil
+}
+
+func (h *HostExecutor) verifyDisk(ctx context.Context, r recipe.Recipe, artifactBytes, runtimeBytes int64) (map[string]any, error) {
+	system, err := h.inventory.Inspect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	node := resourceguard.Node{
+		Name: system.Hostname, DataDiskAvailable: system.StorageAvailable, RuntimeDiskAvailable: system.DockerStorageAvailable,
+		SharedDataRuntimeDisk: system.DockerSharesDataDisk,
+	}
+	results, err := resourceguard.CheckDisk([]resourceguard.Node{node}, r.Topology.SparkCount, resourceguard.DiskPolicy{
+		ArtifactBytes: artifactBytes, RuntimeBytes: runtimeBytes, SafetyMarginBytes: r.Requirements.SafetyMarginBytes,
+	})
+	receipt := map[string]any{"per_node": results, "artifact_bytes": artifactBytes, "runtime_disk_bytes": runtimeBytes, "safety_margin_bytes": r.Requirements.SafetyMarginBytes}
+	if err != nil {
+		return receipt, err
+	}
+	return receipt, nil
+}
+
+func receiptInt64(value any, key string) int64 {
+	receipt, ok := value.(map[string]any)
+	if !ok {
+		return 0
+	}
+	switch number := receipt[key].(type) {
+	case int64:
+		return number
+	case int:
+		return int64(number)
+	case float64:
+		return int64(number)
+	default:
+		return 0
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"path"
 	"path/filepath"
@@ -23,7 +24,7 @@ var (
 )
 
 var allowedOperations = map[string]bool{
-	"verify_architecture": true, "verify_dgx_spark": true, "verify_disk": true,
+	"verify_architecture": true, "verify_dgx_spark": true, "verify_memory_capacity": true, "verify_memory": true, "verify_disk": true,
 	"verify_port": true, "verify_docker": true, "verify_nvidia_runtime": true,
 	"verify_artifact_access": true,
 	"pull_image":             true, "download_artifact": true, "write_generated_config": true,
@@ -87,6 +88,9 @@ func Validate(r Recipe) error {
 	if r.Runtime.ImageBytes <= 0 {
 		problems = append(problems, "runtime image_bytes must be positive")
 	}
+	if r.Runtime.ImageDiskBytes < r.Runtime.ImageBytes || r.Runtime.ImageDiskBytes > r.Runtime.ImageBytes*10 {
+		problems = append(problems, "runtime image_disk_bytes must safely bound expanded image storage")
+	}
 	if r.Runtime.ShmBytes < 0 || r.Runtime.ShmBytes > 64<<30 {
 		problems = append(problems, "runtime shm_bytes is outside the safe limit")
 	}
@@ -136,6 +140,9 @@ func Validate(r Recipe) error {
 	if r.Requirements.SafetyMarginBytes <= 0 {
 		problems = append(problems, "a positive disk safety margin is required")
 	}
+	if r.Requirements.MinimumMemoryBytes <= 0 || r.Requirements.MemoryReserveBytes <= 0 || r.Requirements.MemoryReserveBytes >= r.Requirements.MinimumMemoryBytes {
+		problems = append(problems, "positive per-node memory capacity and reserve are required")
+	}
 	seenSecrets := map[string]bool{}
 	for _, secret := range r.Requirements.Secrets {
 		if secret != "HF_TOKEN" || seenSecrets[secret] {
@@ -155,6 +162,12 @@ func Validate(r Recipe) error {
 	if err := validateVLLM(r.Service.VLLM, roles); err != nil {
 		problems = append(problems, err.Error())
 	}
+	if util, err := strconv.ParseFloat(r.Service.VLLM.GPUMemoryUtil, 64); err == nil && r.Requirements.MinimumMemoryBytes > 0 {
+		nominalHeadroom := int64(math.Floor(float64(r.Requirements.MinimumMemoryBytes) * (1 - util)))
+		if nominalHeadroom < r.Requirements.MemoryReserveBytes {
+			problems = append(problems, "vllm GPU utilization does not preserve the per-node memory reserve")
+		}
+	}
 	if len(r.Operations) == 0 || len(r.Uninstall) == 0 {
 		problems = append(problems, "operations and uninstall operations are required")
 	}
@@ -166,7 +179,7 @@ func Validate(r Recipe) error {
 			problems = append(problems, "run_shell is forbidden")
 		}
 	}
-	installSequence := []string{"verify_architecture", "verify_dgx_spark", "verify_disk", "verify_port", "verify_docker", "verify_nvidia_runtime", "verify_artifact_access", "pull_image", "download_artifact", "write_generated_config", "create_container", "start_container", "wait_http", "verify_openai_inference"}
+	installSequence := []string{"verify_architecture", "verify_dgx_spark", "verify_memory_capacity", "verify_disk", "verify_port", "verify_docker", "verify_nvidia_runtime", "verify_artifact_access", "pull_image", "download_artifact", "write_generated_config", "create_container", "verify_memory", "start_container", "wait_http", "verify_openai_inference"}
 	uninstallSequence := []string{"stop_container", "remove_container", "remove_artifact_if_unshared"}
 	if !operationSequenceEqual(r.Operations, installSequence) {
 		problems = append(problems, "install operations must use the complete verified lifecycle in order")

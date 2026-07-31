@@ -12,6 +12,8 @@ All three remain candidates until their complete install, inference, restart, an
 
 Only one model is active at a time. Starting another installed model performs a transactional switch: the manager stops the previous runtime, verifies the target with health and inference checks, and attempts to restore and re-verify the previous model if the target fails. An authenticated redacted diagnostic bundle is available from the console.
 
+Every recipe also carries enforced per-node resource guardrails. Preflight accounts for pinned artifacts, container image size, disk safety margin, vLLM's planned unified-memory allocation, KV/context settings, and reserved host memory. Memory is rechecked immediately before start, while disk headroom is rechecked throughout long transfers. The same evaluator requires every future multi-Spark node to pass independently; multi-Spark execution itself remains out of scope for the current release.
+
 ## Development
 
 The manager defaults to loopback until an operator deliberately chooses a LAN bind address.

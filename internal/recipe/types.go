@@ -28,14 +28,15 @@ type Topology struct {
 }
 
 type Runtime struct {
-	Kind        string            `yaml:"kind" json:"kind"`
-	Image       string            `yaml:"image" json:"image"`
-	Digest      string            `yaml:"digest" json:"digest"`
-	ImageBytes  int64             `yaml:"image_bytes" json:"image_bytes"`
-	Environment map[string]string `yaml:"environment" json:"environment"`
-	ShmBytes    int64             `yaml:"shm_bytes" json:"shm_bytes"`
-	MemoryLock  bool              `yaml:"memory_lock" json:"memory_lock"`
-	IPCLock     bool              `yaml:"ipc_lock" json:"ipc_lock"`
+	Kind           string            `yaml:"kind" json:"kind"`
+	Image          string            `yaml:"image" json:"image"`
+	Digest         string            `yaml:"digest" json:"digest"`
+	ImageBytes     int64             `yaml:"image_bytes" json:"image_bytes"`
+	ImageDiskBytes int64             `yaml:"image_disk_bytes" json:"image_disk_bytes"`
+	Environment    map[string]string `yaml:"environment" json:"environment"`
+	ShmBytes       int64             `yaml:"shm_bytes" json:"shm_bytes"`
+	MemoryLock     bool              `yaml:"memory_lock" json:"memory_lock"`
+	IPCLock        bool              `yaml:"ipc_lock" json:"ipc_lock"`
 }
 
 func (r Runtime) Reference() string { return r.Image + "@" + r.Digest }
@@ -54,6 +55,8 @@ type Requirements struct {
 	DGXSpark              bool     `yaml:"dgx_spark" json:"dgx_spark"`
 	Docker                bool     `yaml:"docker" json:"docker"`
 	NvidiaRuntime         bool     `yaml:"nvidia_container_runtime" json:"nvidia_container_runtime"`
+	MinimumMemoryBytes    int64    `yaml:"per_node_minimum_memory_bytes" json:"per_node_minimum_memory_bytes"`
+	MemoryReserveBytes    int64    `yaml:"per_node_memory_reserve_bytes" json:"per_node_memory_reserve_bytes"`
 	SafetyMarginBytes     int64    `yaml:"safety_margin_bytes" json:"safety_margin_bytes"`
 	Secrets               []string `yaml:"secrets" json:"secrets"`
 	RequiredLicenceAccept bool     `yaml:"required_licence_acceptance" json:"required_licence_acceptance"`
@@ -130,5 +133,5 @@ func (r Recipe) TotalArtifactBytes() int64 {
 }
 
 func (r Recipe) RequiredBytes() int64 {
-	return r.TotalArtifactBytes() + r.Runtime.ImageBytes + r.Requirements.SafetyMarginBytes
+	return r.TotalArtifactBytes() + r.Runtime.ImageDiskBytes + r.Requirements.SafetyMarginBytes
 }

@@ -246,7 +246,7 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 	case "install":
 		ops = target.Operations
 	case "start":
-		ops = []recipe.Operation{{Type: "start_container"}, {Type: "wait_http"}, {Type: "verify_openai_inference"}}
+		ops = []recipe.Operation{{Type: "verify_memory"}, {Type: "start_container"}, {Type: "wait_http"}, {Type: "verify_openai_inference"}}
 	case "stop":
 		ops = []recipe.Operation{{Type: "stop_container"}}
 	case "smoke-test":
@@ -272,13 +272,15 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 		}
 		return plans, previous, err
 	}
+	switchStopPlanned := false
 	for _, op := range ops {
 		if job.Kind == "install" && op.Type == "verify_port" && previous.Service.DefaultHostPort == target.Service.DefaultHostPort {
 			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Receipt: map[string]any{"host_port": target.Service.DefaultHostPort, "occupied_by_managed_recipe": previous.ID, "available_after_switch": true}})
 			continue
 		}
-		if op.Type == "start_container" {
+		if !switchStopPlanned && (op.Type == "verify_memory" || op.Type == "start_container") {
 			plans = append(plans, plannedOperation{Operation: recipe.Operation{Type: "stop_container"}, Recipe: *previous, BeginSwitch: true})
+			switchStopPlanned = true
 		}
 		plans = append(plans, plannedOperation{Operation: op, Recipe: target})
 	}
@@ -321,6 +323,7 @@ func (e *Engine) failSwitch(job store.Job, target, previous recipe.Recipe, plans
 	execution := operations.Execution{JobID: job.ID, Kind: "rollback"}
 	rollback := []plannedOperation{
 		{Operation: recipe.Operation{Type: "stop_container"}, Recipe: target},
+		{Operation: recipe.Operation{Type: "verify_memory"}, Recipe: previous},
 		{Operation: recipe.Operation{Type: "start_container"}, Recipe: previous},
 		{Operation: recipe.Operation{Type: "wait_http"}, Recipe: previous},
 		{Operation: recipe.Operation{Type: "verify_openai_inference"}, Recipe: previous},
@@ -443,7 +446,7 @@ func (e *Engine) fail(ctx context.Context, jobID string, index int, err error) {
 
 func stateFor(kind, operation string) string {
 	states := map[string]string{
-		"verify_architecture": "preflighting", "verify_dgx_spark": "preflighting", "verify_disk": "preflighting", "verify_port": "preflighting", "verify_docker": "preflighting", "verify_nvidia_runtime": "preflighting", "verify_artifact_access": "preflighting",
+		"verify_architecture": "preflighting", "verify_dgx_spark": "preflighting", "verify_memory_capacity": "preflighting", "verify_memory": "checking_memory", "verify_disk": "preflighting", "verify_port": "preflighting", "verify_docker": "preflighting", "verify_nvidia_runtime": "preflighting", "verify_artifact_access": "preflighting",
 		"pull_image": "downloading_runtime", "download_artifact": "downloading_models", "write_generated_config": "configuring", "create_container": "configuring",
 		"start_container": "starting", "wait_http": "verifying_health", "verify_openai_inference": "verifying_inference", "stop_container": "stopping", "remove_container": "removing", "remove_artifact_if_unshared": "removing",
 	}

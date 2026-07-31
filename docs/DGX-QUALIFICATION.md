@@ -42,5 +42,10 @@ Run these after the basic lifecycle passes, one machine at a time:
 5. Block registry or Hugging Face access temporarily and confirm the job fails with a redacted actionable error, then resumes with the same idempotency identity after access returns.
 6. Run with `--remove` and verify the receipt's reclaimed bytes match the recipe's owned artifacts while unrelated data remains.
 7. Scan the JSONL receipt, diagnostic bundle, manager API, and `journalctl -u runonspark-manager` output for credentials before promoting any recipe.
+8. Consume unified memory with a controlled manager-owned test process until live preflight blocks the start. Confirm no model container start is attempted and the process can be removed without rebooting the Spark.
+9. During a switch, force the target's live-memory check to fail after the previous model stops. Confirm rollback restores and re-verifies the previous model.
+10. Begin a controlled download with sufficient space, then consume only the manager-owned test volume until the declared safety margin would be crossed. Confirm the job fails with a resumable partial download before the filesystem is exhausted.
 
-Record performance separately from acceptance: cold-start time, prompt length, output tokens, tokens per second, peak storage, and whether compilation cache was warm. Tuning changes require a new recipe version and another complete lifecycle run.
+For future multi-Spark qualification, capture the memory and disk receipt for every node. Deliberately constrain one node while leaving aggregate cluster capacity above the recipe total; preflight must still fail and identify the exact node. Do not promote multi-Spark support from aggregate-only evidence.
+
+Record performance separately from acceptance: cold-start time, prompt length, output tokens, tokens per second, idle and peak unified memory, GPU-visible free memory, planned runtime allocation, host reserve, peak storage, minimum disk headroom, and whether compilation cache was warm. Tuning changes require a new recipe version and another complete lifecycle run.

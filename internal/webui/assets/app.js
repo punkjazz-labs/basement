@@ -138,6 +138,7 @@ function syncJobStreams() {
 function renderSystem(system) {
   $('#hostname').textContent = system.hostname || 'DGX Spark';
   $('#system-summary').textContent = `${system.product_name || 'Unknown hardware'} · ${system.architecture}`;
+  $('#memory').textContent = formatBytes(system.memory_available_bytes);
   $('#storage').textContent = formatBytes(system.storage_available_bytes);
   const blockers = system.blocking_conditions || [];
   $('#blockers').classList.toggle('hidden', !blockers.length);
@@ -259,7 +260,7 @@ async function confirmInstall(id) {
   $('#confirm-title').textContent = item.display_name;
   const active = state.models.find(model => model.active && model.recipe_id !== id);
   const switchNotice = active ? `<p class="switch-notice"><strong>${escapeHTML(productCopy[active.recipe_id]?.name || active.recipe_id)} will stop after the download.</strong> If this model fails verification, RunOnSpark will try to restore it.</p>` : '';
-  $('#confirm-detail').innerHTML = `<dl class="install-facts"><div><dt>Download</dt><dd>${formatBytes(item.artifact_bytes)}</dd></div><div><dt>Space needed</dt><dd>${formatBytes(item.required_bytes)}</dd></div><div><dt>Port</dt><dd>${item.service.default_host_port}</dd></div></dl>${switchNotice}<a href="${item.artifacts[0].licence_url}" target="_blank" rel="noreferrer">Read the ${escapeHTML(item.artifacts[0].licence)} licence ↗</a>`;
+  $('#confirm-detail').innerHTML = `<dl class="install-facts"><div><dt>Download</dt><dd>${formatBytes(item.artifact_bytes)}</dd></div><div><dt>Space needed</dt><dd>${formatBytes(item.required_bytes)}</dd></div><div><dt>RAM kept free</dt><dd>${formatBytes(item.requirements.per_node_memory_reserve_bytes)}</dd></div><div><dt>Port</dt><dd>${item.service.default_host_port}</dd></div></dl>${switchNotice}<a href="${item.artifacts[0].licence_url}" target="_blank" rel="noreferrer">Read the ${escapeHTML(item.artifacts[0].licence)} licence ↗</a>`;
   $('#licence').checked = false;
   $('#confirm-dialog').showModal();
   $('#confirm-install').onclick = async event => {

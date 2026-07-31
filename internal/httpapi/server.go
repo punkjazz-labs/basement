@@ -156,6 +156,7 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) preflightResponse {
 	response := preflightResponse{RecipeID: selected.ID, Ready: true, Secrets: map[string]bool{}}
+	checkedLiveMemory := false
 	for _, op := range selected.Operations {
 		if !strings.HasPrefix(op.Type, "verify_") {
 			break
@@ -168,6 +169,24 @@ func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) prefl
 			}
 		}
 		check := preflightCheck{Operation: op.Type, OK: err == nil, Receipt: receipt}
+		if op.Type == "verify_memory" {
+			checkedLiveMemory = true
+		}
+		if err != nil {
+			check.Error = err.Error()
+			response.Ready = false
+		}
+		response.Checks = append(response.Checks, check)
+	}
+	if !checkedLiveMemory {
+		receipt, err := s.executor.Execute(ctx, operations.Execution{Kind: "preflight"}, recipe.Operation{Type: "verify_memory"}, selected, nil)
+		if err != nil {
+			if owner := s.managedPortOwner(ctx, selected); owner != "" {
+				receipt = map[string]any{"occupied_by_managed_recipe": owner, "rechecked_after_switch_stop": true}
+				err = nil
+			}
+		}
+		check := preflightCheck{Operation: "verify_memory", OK: err == nil, Receipt: receipt}
 		if err != nil {
 			check.Error = err.Error()
 			response.Ready = false

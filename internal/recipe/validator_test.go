@@ -59,6 +59,9 @@ func TestRecipePolicyRejectsUnsafeVariants(t *testing.T) {
 		{"false verification", func(r *Recipe) { r.Trust = "runonspark-verified" }, "real DGX verification"},
 		{"mutable source", func(r *Recipe) { r.Source.Revision = "main" }, "immutable revision"},
 		{"unsafe environment", func(r *Recipe) { r.Runtime.Environment["LD_PRELOAD"] = "/tmp/hook.so" }, "allowlist"},
+		{"compressed-only image budget", func(r *Recipe) { r.Runtime.ImageDiskBytes = r.Runtime.ImageBytes - 1 }, "expanded image storage"},
+		{"missing memory reserve", func(r *Recipe) { r.Requirements.MemoryReserveBytes = 0 }, "per-node memory"},
+		{"memory overcommit", func(r *Recipe) { r.Requirements.MemoryReserveBytes = 30_000_000_000 }, "does not preserve"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

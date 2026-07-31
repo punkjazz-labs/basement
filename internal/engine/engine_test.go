@@ -27,6 +27,7 @@ type switchExecutor struct {
 	running      map[string]bool
 	failVerifyID string
 	failStartID  string
+	failMemoryID string
 	events       []string
 }
 
@@ -36,6 +37,10 @@ func (s *switchExecutor) Execute(_ context.Context, _ operations.Execution, op r
 	defer s.mu.Unlock()
 	s.events = append(s.events, op.Type+":"+r.ID)
 	switch op.Type {
+	case "verify_memory":
+		if r.ID == s.failMemoryID {
+			return nil, errors.New("insufficient unified memory for guarded start")
+		}
 	case "stop_container":
 		s.running[r.ID] = false
 	case "start_container":
@@ -276,11 +281,11 @@ func TestSwitchMakesOnlyVerifiedTargetActive(t *testing.T) {
 	}
 	runner.Start(job.ID)
 	completed := waitJob(t, s, job.ID, "ready")
-	if len(completed.Steps) != 4 || completed.Steps[0].Operation != "stop_container" {
+	if len(completed.Steps) != 5 || completed.Steps[0].Operation != "stop_container" || completed.Steps[1].Operation != "verify_memory" {
 		t.Fatalf("switch steps=%#v", completed.Steps)
 	}
 	assertActiveModel(t, s, target.ID, previous.ID, "stopped")
-	if got := strings.Join(executor.events, ","); !strings.HasPrefix(got, "stop_container:"+previous.ID+",start_container:"+target.ID) {
+	if got := strings.Join(executor.events, ","); !strings.HasPrefix(got, "stop_container:"+previous.ID+",verify_memory:"+target.ID+",start_container:"+target.ID) {
 		t.Fatalf("unsafe switch order: %s", got)
 	}
 }
@@ -313,7 +318,7 @@ func TestSwitchFailureRestoresPreviousModel(t *testing.T) {
 	if !strings.Contains(failed.Error, "previous model "+previous.ID+" restored and verified") {
 		t.Fatalf("rollback outcome missing from job: %q", failed.Error)
 	}
-	if len(failed.Steps) < 8 || failed.Steps[4].Operation != "rollback_stop_container" {
+	if len(failed.Steps) < 10 || failed.Steps[5].Operation != "rollback_stop_container" || failed.Steps[6].Operation != "rollback_verify_memory" {
 		t.Fatalf("rollback receipts missing: %#v", failed.Steps)
 	}
 	assertActiveModel(t, s, previous.ID, target.ID, "stopped")
@@ -404,6 +409,43 @@ func TestSwitchReportsWhenRollbackAlsoFails(t *testing.T) {
 	}
 }
 
+func TestSwitchMemoryGuardFailsBeforeTargetStartAndRollsBack(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	previous, target := recipes[0], recipes[1]
+	for _, model := range []store.InstalledModel{
+		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+	} {
+		if err := s.SetInstalled(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &switchExecutor{running: map[string]bool{previous.ID: true, target.ID: false}, failMemoryID: target.ID}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "start", target.ID, "switch-memory-guard", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	failed := waitJob(t, s, job.ID, "failed")
+	if !strings.Contains(failed.Error, "previous model "+previous.ID+" restored and verified") {
+		t.Fatalf("rollback outcome missing: %q", failed.Error)
+	}
+	executor.mu.Lock()
+	events := strings.Join(executor.events, ",")
+	executor.mu.Unlock()
+	if strings.Contains(events, "start_container:"+target.ID) || !strings.Contains(events, "start_container:"+previous.ID) {
+		t.Fatalf("target started despite memory guard or rollback missing: %s", events)
+	}
+	assertActiveModel(t, s, previous.ID, target.ID, "stopped")
+}
+
 func TestRestartFinalizesAlreadyVerifiedRollback(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
@@ -425,10 +467,10 @@ func TestRestartFinalizesAlreadyVerifiedRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.BeginStep(ctx, job.ID, 7, "rollback_verify_openai_inference"); err != nil {
+	if err := s.BeginStep(ctx, job.ID, 9, "rollback_verify_openai_inference"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteStep(ctx, job.ID, 7, map[string]any{"response_non_empty": true}); err != nil {
+	if err := s.CompleteStep(ctx, job.ID, 9, map[string]any{"response_non_empty": true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateJobState(ctx, job.ID, "interrupted", "target inference verification failed"); err != nil {

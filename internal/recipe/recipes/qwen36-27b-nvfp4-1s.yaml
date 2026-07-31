@@ -1,6 +1,6 @@
 schema_version: 1
 id: qwen36-27b-nvfp4-1s
-version: 1
+version: 2
 display_name: Qwen 3.6 27B
 publisher: MiaAI Lab + NVIDIA
 trust: runonspark-candidate
@@ -15,6 +15,7 @@ runtime:
   image: vllm/vllm-openai
   digest: sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
   image_bytes: 10617617438
+  image_disk_bytes: 31852852314
   environment:
     VLLM_TARGET_DEVICE: cuda
   shm_bytes: 0
@@ -32,6 +33,8 @@ requirements:
   dgx_spark: true
   docker: true
   nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 16000000000
   safety_margin_bytes: 10000000000
   secrets: []
   required_licence_acceptance: true
@@ -76,6 +79,7 @@ service:
 operations:
   - type: verify_architecture
   - type: verify_dgx_spark
+  - type: verify_memory_capacity
   - type: verify_disk
   - type: verify_port
   - type: verify_docker
@@ -85,6 +89,7 @@ operations:
   - type: download_artifact
   - type: write_generated_config
   - type: create_container
+  - type: verify_memory
   - type: start_container
   - type: wait_http
   - type: verify_openai_inference

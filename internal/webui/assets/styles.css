@@ -161,7 +161,7 @@ dialog::backdrop { background: rgba(21,23,26,.52); backdrop-filter: blur(5px); }
 dialog form { padding: 30px; }
 .dialog-close { float: right; width: 38px; height: 38px; border: 0; border-radius: 50%; background: var(--surface); color: var(--muted); font-size: 22px; }
 dialog h2 { margin: 8px 46px 24px 0; font-size: 34px; font-weight: 550; line-height: 1; letter-spacing: -.04em; }
-.install-facts { display: grid; grid-template-columns: repeat(3, 1fr); margin-bottom: 18px; padding: 18px; border-radius: 14px; background: var(--surface); }
+.install-facts { display: grid; grid-template-columns: repeat(4, 1fr); margin-bottom: 18px; padding: 18px; border-radius: 14px; background: var(--surface); }
 .install-facts div + div { padding-left: 14px; border-left: 1px solid var(--line); }
 .install-facts dt { color: var(--faint); font-size: 11px; }
 .install-facts dd { margin-top: 4px; font-size: 14px; font-weight: 650; }

@@ -89,6 +89,31 @@ func TestHuggingFaceManifestPathTraversalIsRejected(t *testing.T) {
 	}
 }
 
+func TestHuggingFaceChecksCapacityBeforeStartingFileTransfer(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	fileRequested := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/models/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "model.bin", "size": 10, "blobId": strings.Repeat("b", 40)}}})
+			return
+		}
+		fileRequested = true
+		_, _ = w.Write(make([]byte, 10))
+	}))
+	defer server.Close()
+	client := &HFClient{client: server.Client(), baseURL: server.URL}
+	artifact := recipe.Artifact{Repository: "owner/model", Revision: revision, ExpectedBytes: 10}
+	_, err := client.Download(context.Background(), artifact, filepath.Join(t.TempDir(), "artifact"), func(any) error {
+		return fmt.Errorf("disk reserve reached")
+	})
+	if err == nil || !strings.Contains(err.Error(), "disk reserve reached") {
+		t.Fatalf("Download()=%v", err)
+	}
+	if fileRequested {
+		t.Fatal("file transfer began before capacity guard passed")
+	}
+}
+
 func TestVLLMArgumentsAreStructuredAndPinned(t *testing.T) {
 	recipes, err := recipe.Builtin()
 	if err != nil {

@@ -19,24 +19,32 @@ import (
 )
 
 type System struct {
-	Hostname              string   `json:"hostname"`
-	Architecture          string   `json:"architecture"`
-	OS                    string   `json:"os"`
-	Kernel                string   `json:"kernel"`
-	ProductName           string   `json:"product_name"`
-	DGXSpark              bool     `json:"dgx_spark"`
-	DockerReady           bool     `json:"docker_ready"`
-	DockerVersion         string   `json:"docker_version,omitempty"`
-	NvidiaRuntimeReady    bool     `json:"nvidia_runtime_ready"`
-	GPUVisible            bool     `json:"gpu_visible"`
-	GPUDescription        string   `json:"gpu_description,omitempty"`
-	DataDirectory         string   `json:"data_directory"`
-	DataDirectoryWritable bool     `json:"data_directory_writable"`
-	StorageAvailable      int64    `json:"storage_available_bytes"`
-	StorageTotal          int64    `json:"storage_total_bytes"`
-	Ready                 bool     `json:"ready"`
-	Blocking              []string `json:"blocking_conditions"`
-	ObservedAt            string   `json:"observed_at"`
+	Hostname               string   `json:"hostname"`
+	Architecture           string   `json:"architecture"`
+	OS                     string   `json:"os"`
+	Kernel                 string   `json:"kernel"`
+	ProductName            string   `json:"product_name"`
+	DGXSpark               bool     `json:"dgx_spark"`
+	DockerReady            bool     `json:"docker_ready"`
+	DockerVersion          string   `json:"docker_version,omitempty"`
+	NvidiaRuntimeReady     bool     `json:"nvidia_runtime_ready"`
+	GPUVisible             bool     `json:"gpu_visible"`
+	GPUDescription         string   `json:"gpu_description,omitempty"`
+	DataDirectory          string   `json:"data_directory"`
+	DataDirectoryWritable  bool     `json:"data_directory_writable"`
+	StorageAvailable       int64    `json:"storage_available_bytes"`
+	StorageTotal           int64    `json:"storage_total_bytes"`
+	DockerDataDirectory    string   `json:"docker_data_directory,omitempty"`
+	DockerStorageAvailable int64    `json:"docker_storage_available_bytes"`
+	DockerStorageTotal     int64    `json:"docker_storage_total_bytes"`
+	DockerSharesDataDisk   bool     `json:"docker_shares_data_disk"`
+	MemoryAvailable        int64    `json:"memory_available_bytes"`
+	MemoryTotal            int64    `json:"memory_total_bytes"`
+	GPUMemoryFree          int64    `json:"gpu_memory_free_bytes"`
+	GPUMemoryTotal         int64    `json:"gpu_memory_total_bytes"`
+	Ready                  bool     `json:"ready"`
+	Blocking               []string `json:"blocking_conditions"`
+	ObservedAt             string   `json:"observed_at"`
 }
 
 type Provider interface {
@@ -59,14 +67,19 @@ func (h Host) Inspect(ctx context.Context) (System, error) {
 	s.DGXSpark = strings.Contains(product, "dgx spark") || strings.Contains(product, "gb10")
 	s.DataDirectoryWritable = directoryWritable(h.DataDir)
 	s.StorageAvailable, s.StorageTotal = diskSpace(h.DataDir)
+	s.MemoryAvailable, s.MemoryTotal = memorySpace()
 	docker, err := inspectDocker(ctx, h.socket())
 	if err == nil {
 		s.DockerReady, s.DockerVersion = true, docker.ServerVersion
 		s.NvidiaRuntimeReady = docker.HasNvidiaRuntime
+		s.DockerDataDirectory = docker.RootDirectory
+		s.DockerStorageAvailable, s.DockerStorageTotal = diskSpace(docker.RootDirectory)
+		s.DockerSharesDataDisk = sameFilesystem(h.DataDir, docker.RootDirectory)
 	}
 	gpu := commandOutput(ctx, "nvidia-smi", "--query-gpu=name", "--format=csv,noheader")
 	s.GPUVisible = gpu != ""
 	s.GPUDescription = gpu
+	s.GPUMemoryFree, s.GPUMemoryTotal = gpuMemory(ctx)
 	if s.Architecture != "aarch64" {
 		s.Blocking = append(s.Blocking, "Linux ARM64 architecture is required")
 	}
@@ -82,8 +95,17 @@ func (h Host) Inspect(ctx context.Context) (System, error) {
 	if !s.GPUVisible {
 		s.Blocking = append(s.Blocking, "GPU is not visible through nvidia-smi")
 	}
+	if s.MemoryAvailable <= 0 || s.MemoryTotal <= 0 {
+		s.Blocking = append(s.Blocking, "system memory capacity is unavailable")
+	}
+	if s.GPUMemoryFree <= 0 || s.GPUMemoryTotal <= 0 {
+		s.Blocking = append(s.Blocking, "GPU memory capacity is unavailable")
+	}
 	if !s.DataDirectoryWritable {
 		s.Blocking = append(s.Blocking, "manager data directory is not writable")
+	}
+	if s.DockerReady && (s.DockerStorageAvailable <= 0 || s.DockerStorageTotal <= 0) {
+		s.Blocking = append(s.Blocking, "Docker storage capacity is unavailable")
 	}
 	s.Ready = len(s.Blocking) == 0
 	return s, nil
@@ -99,6 +121,7 @@ func (h Host) socket() string {
 type dockerInfo struct {
 	ServerVersion    string
 	HasNvidiaRuntime bool
+	RootDirectory    string
 }
 
 func inspectDocker(ctx context.Context, socket string) (dockerInfo, error) {
@@ -113,13 +136,17 @@ func inspectDocker(ctx context.Context, socket string) (dockerInfo, error) {
 		return dockerInfo{}, err
 	}
 	var info struct {
-		Runtimes map[string]json.RawMessage `json:"Runtimes"`
+		Runtimes      map[string]json.RawMessage `json:"Runtimes"`
+		DockerRootDir string                     `json:"DockerRootDir"`
 	}
 	if err := dockerJSON(ctx, client, "/info", &info); err != nil {
 		return dockerInfo{}, err
 	}
+	if strings.TrimSpace(info.DockerRootDir) == "" {
+		return dockerInfo{}, errors.New("docker data root is unavailable")
+	}
 	_, hasNvidia := info.Runtimes["nvidia"]
-	return dockerInfo{ServerVersion: version.Version, HasNvidiaRuntime: hasNvidia}, nil
+	return dockerInfo{ServerVersion: version.Version, HasNvidiaRuntime: hasNvidia, RootDirectory: info.DockerRootDir}, nil
 }
 
 func dockerJSON(ctx context.Context, client *http.Client, path string, target any) error {
@@ -208,6 +235,72 @@ func diskSpace(path string) (int64, int64) {
 		}
 		probe = parent
 	}
+}
+
+func sameFilesystem(first, second string) bool {
+	firstDevice, firstOK := filesystemDevice(first)
+	secondDevice, secondOK := filesystemDevice(second)
+	return firstOK && secondOK && firstDevice == secondDevice
+}
+
+func filesystemDevice(path string) (uint64, bool) {
+	probe := path
+	for {
+		if stat, err := os.Stat(probe); err == nil {
+			if system, ok := stat.Sys().(*syscall.Stat_t); ok {
+				return uint64(system.Dev), true
+			}
+			return 0, false
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return 0, false
+		}
+		probe = parent
+	}
+}
+
+func memorySpace() (available int64, total int64) {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		value, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch strings.TrimSuffix(fields[0], ":") {
+		case "MemAvailable":
+			available = value * 1024
+		case "MemTotal":
+			total = value * 1024
+		}
+	}
+	return available, total
+}
+
+func gpuMemory(ctx context.Context) (free int64, total int64) {
+	output := commandOutput(ctx, "nvidia-smi", "--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits")
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Split(line, ",")
+		if len(fields) != 2 {
+			continue
+		}
+		freeMiB, freeErr := strconv.ParseInt(strings.TrimSpace(fields[0]), 10, 64)
+		totalMiB, totalErr := strconv.ParseInt(strings.TrimSpace(fields[1]), 10, 64)
+		if freeErr == nil && totalErr == nil {
+			free += freeMiB * 1024 * 1024
+			total += totalMiB * 1024 * 1024
+		}
+	}
+	return free, total
 }
 
 func CheckPort(port int) error {
