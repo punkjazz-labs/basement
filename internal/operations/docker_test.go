@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
@@ -15,6 +19,18 @@ import (
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// withoutNegotiation answers the client's /version negotiation probe with a
+// 404 so it falls back to unversioned paths, keeping request expectations
+// in these tests version-free.
+func withoutNegotiation(inner roundTripFunc) roundTripFunc {
+	return func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/version" {
+			return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+		}
+		return inner(r)
+	}
+}
 
 func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 	recipes, err := recipe.Builtin()
@@ -26,7 +42,7 @@ func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 		t.Fatal("Qwen 35 recipe missing")
 	}
 	var body map[string]any
-	client := &DockerClient{client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodPost || !strings.Contains(request.URL.Path, "/containers/create") {
 			t.Fatalf("unexpected Docker request: %s %s", request.Method, request.URL)
 		}
@@ -81,7 +97,7 @@ func TestLagunaUsesSeparateReadOnlyDrafterMount(t *testing.T) {
 		t.Fatal("Laguna recipe missing")
 	}
 	var body map[string]any
-	client := &DockerClient{client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
@@ -110,11 +126,59 @@ func toStrings(values []any) []string {
 }
 
 func TestDockerNotFoundIsDistinguishableFromDaemonFailure(t *testing.T) {
-	client := &DockerClient{client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"message":"missing"}`))}, nil
 	})}}
 	_, err := client.Container(context.Background(), "missing")
 	if !errors.Is(err, ErrContainerNotFound) {
 		t.Fatalf("Container()=%v", err)
+	}
+}
+
+// The client must never pin a Docker API version: it negotiates the daemon's
+// own ApiVersion via the unversioned /version endpoint and uses that for
+// every call. A pinned version breaks either new daemons ("client version
+// too old") or old ones.
+func TestDockerClientNegotiatesAPIVersion(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rosm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	socket := filepath.Join(dir, "d.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var paths []string
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		switch {
+		case r.URL.Path == "/version":
+			json.NewEncoder(w).Encode(map[string]string{"ApiVersion": "1.51"})
+		case strings.HasSuffix(r.URL.Path, "/_ping"):
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})}
+	go server.Serve(listener)
+	defer server.Close()
+
+	client := NewDockerClient(socket)
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 3 || paths[0] != "/version" || paths[1] != "/v1.51/_ping" || paths[2] != "/v1.51/_ping" {
+		t.Fatalf("negotiation requests were %v; want unversioned /version once, then /v1.51-prefixed calls", paths)
 	}
 }

@@ -10,6 +10,12 @@ From any macOS or Linux machine on the same network as your GB10 machine (or on 
 curl -fsSL https://github.com/punkjazz-labs/runonspark-manager/releases/latest/download/setup.sh | sh
 ```
 
+On Windows (PowerShell):
+
+```powershell
+irm https://github.com/punkjazz-labs/runonspark-manager/releases/latest/download/setup.ps1 | iex
+```
+
 The installer discovers GB10 machines on your network, lets you pick one, installs the manager over SSH using your existing credentials (nothing is stored), and opens the paired console in your browser. Run it on the GB10 machine itself and it installs locally instead. See [`docs/decisions/0010-network-setup-and-gb10-discovery.md`](docs/decisions/0010-network-setup-and-gb10-discovery.md) for the security posture.
 
 The embedded candidate pack contains:

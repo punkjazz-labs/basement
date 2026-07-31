@@ -13,11 +13,16 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
 )
 
-type DockerClient struct{ client *http.Client }
+type DockerClient struct {
+	client        *http.Client
+	negotiateOnce sync.Once
+	negotiated    string
+}
 
 var ErrContainerNotFound = errors.New("container not found")
 
@@ -233,7 +238,7 @@ func (d *DockerClient) action(ctx context.Context, method, path string, accepted
 }
 
 func (d *DockerClient) request(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, "http://docker/v1.41"+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, "http://docker"+d.apiPrefix(ctx)+path, body)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +246,34 @@ func (d *DockerClient) request(ctx context.Context, method, path string, body io
 		req.Header.Set("Content-Type", "application/json")
 	}
 	return d.client.Do(req)
+}
+
+// apiPrefix negotiates the API version once per client: the daemon's own
+// ApiVersion from the unversioned /version endpoint (accepted by every
+// daemon) becomes the prefix for all calls. Never pin a literal version —
+// old pins are rejected by new daemons ("client version too old") and new
+// pins are rejected by old daemons.
+func (d *DockerClient) apiPrefix(ctx context.Context) string {
+	d.negotiateOnce.Do(func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/version", nil)
+		if err != nil {
+			return
+		}
+		resp, err := d.client.Do(req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+		var version struct {
+			APIVersion string `json:"ApiVersion"`
+		}
+		if resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&version) == nil && version.APIVersion != "" {
+			d.negotiated = "/v" + version.APIVersion
+		}
+		// On any failure the prefix stays empty: unversioned paths mean
+		// "latest supported" and work on every daemon.
+	})
+	return d.negotiated
 }
 
 func dockerError(resp *http.Response) error {

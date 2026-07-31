@@ -281,7 +281,12 @@ func chooseListen(prompter *terminalPrompter, listenFlag string, paint style, re
 
 func defaultSSHUser() string {
 	if current, err := user.Current(); err == nil && current.Username != "" {
-		return current.Username
+		// Windows reports DOMAIN\name; only the name part is a useful default.
+		name := current.Username
+		if index := strings.LastIndexByte(name, '\\'); index >= 0 {
+			name = name[index+1:]
+		}
+		return name
 	}
 	return "nvidia"
 }
@@ -293,6 +298,8 @@ func openBrowser(url string, paint style) {
 		command = exec.Command("open", url)
 	case "linux":
 		command = exec.Command("xdg-open", url)
+	case "windows":
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	default:
 		return
 	}

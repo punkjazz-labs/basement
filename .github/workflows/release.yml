@@ -20,9 +20,11 @@ jobs:
       - name: Build release binaries
         run: |
           mkdir -p dist
-          for os in linux darwin; do
+          for os in linux darwin windows; do
             for arch in arm64 amd64; do
-              out="dist/runonspark-manager-${os}-${arch}"
+              ext=""
+              [ "$os" = windows ] && ext=".exe"
+              out="dist/runonspark-manager-${os}-${arch}${ext}"
               GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
                 -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
                 -o "$out" ./cmd/runonspark-manager
@@ -30,6 +32,7 @@ jobs:
             done
           done
           cp packaging/setup.sh dist/setup.sh
+          cp packaging/setup.ps1 dist/setup.ps1
           tar -C packaging -czf dist/packaging.tar.gz .
 
       - name: Publish release
