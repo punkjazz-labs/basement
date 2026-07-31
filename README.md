@@ -18,13 +18,15 @@ The console derives hardware context from manager inventory instead of asking fo
 
 ## Development
 
-The manager defaults to loopback until an operator deliberately chooses a LAN bind address. The model endpoint is published on the same interface the manager listens on, so the unauthenticated OpenAI port is only exposed to the network when the manager itself is (see `docs/decisions/0006`).
+The manager defaults to loopback until an operator deliberately chooses a LAN or Tailscale bind address (`install.sh` asks). Model containers always bind loopback: the manager's own authenticated `/v1` endpoint — with console-managed API keys — is the only network path to inference, so the base URL never changes when models switch (see `docs/decisions/0007`).
+
+The console (React + TypeScript, embedded in the binary) includes a streaming playground, integration snippets, API key management, live vLLM telemetry, a storage view, and per-model speed measured on the actual device by an automatic benchmark job.
 
 ```bash
 go run ./cmd/runonspark-manager --data-dir ./var --listen 127.0.0.1:7070
 ```
 
-On first launch, read `./var/pairing-token` and enter it in the browser. Production installation should place the data directory under `/var/lib/runonspark-manager` and bind only to an explicitly selected LAN or Tailscale interface.
+On first launch, `install.sh` prints a pairing card (URL, token, QR); re-print it anytime with `runonspark-manager pairing-url`. Production installation places the data directory under `/var/lib/runonspark-manager`.
 
 Run the local verification suite with:
 
@@ -32,6 +34,12 @@ Run the local verification suite with:
 go test ./...
 go vet ./...
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/runonspark-manager
+```
+
+After changing the console, rebuild the embedded assets (CI fails if they drift from source):
+
+```bash
+cd webui/ui && npm ci && npm run build
 ```
 
 Local tests use deterministic fakes and do not pull model weights, mutate Docker, or exercise GB10 kernels. A passing local suite and registry metadata checks are not proof of the real-DGX acceptance criteria in `PRD.md`.

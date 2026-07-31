@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/ui/package-lock.json
+      - name: Build console
+        working-directory: webui/ui
+        run: |
+          npm ci
+          npm run build
+      - name: Committed console assets must match source
+        run: git diff --exit-code internal/webui/assets
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
+      - name: Shellcheck packaging scripts
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          shellcheck packaging/*.sh
+
+      - name: Build ARM64 release binary
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o dist/runonspark-manager ./cmd/runonspark-manager
+          sha256sum dist/runonspark-manager > dist/runonspark-manager.sha256
+          cp -r packaging dist/packaging
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runonspark-manager-arm64
+          path: dist/
+          if-no-files-found: error

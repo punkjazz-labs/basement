@@ -21,7 +21,9 @@ for argument in "$@"; do
   esac
 done
 [ "$positional_count" -ge 2 ] && [ "$positional_count" -le 3 ] || usage
+# shellcheck disable=SC2154 # positional_N are assigned via eval above
 manager_url=${positional_1%/}
+# shellcheck disable=SC2154
 recipe_id=$positional_2
 receipt_dir=${positional_3:-"$PWD/qualification-receipts"}
 

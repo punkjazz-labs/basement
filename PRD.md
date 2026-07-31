@@ -396,6 +396,12 @@ The exact URL structure may evolve, but the first implementation needs these cap
 - `POST /api/v1/jobs/{job_id}/cancel`
 - `GET /api/v1/jobs/{job_id}/events`
 - `POST /api/v1/models/{recipe_id}/smoke-test`
+- `POST /api/v1/models/{recipe_id}/benchmark`
+- `GET/POST /api/v1/keys`, `DELETE /api/v1/keys/{id}`
+- `GET /api/v1/telemetry`
+- `GET /api/v1/storage`
+- `GET /api/v1/update`
+- `/v1/*` — the stable OpenAI-compatible endpoint, reverse-proxied to the active model and authenticated by API key or console session (ADR 0007)
 
 Mutating endpoints require authentication and CSRF/origin protection. Job creation endpoints must accept an idempotency key so duplicate clicks do not start duplicate installations.
 
