@@ -61,8 +61,12 @@ signing them is ADR 0008's follow-up.
 ### Security posture
 
 - SSH is the only authentication boundary: agent first, then default key
-  files, then password. Passwords and passphrases are prompted without echo,
-  held in memory for the session, and never persisted or logged.
+  files, then password, then keyboard-interactive (for sshd configurations
+  that disable plain password auth). Passwords and passphrases are prompted
+  without echo, held in memory for the session, and never persisted or
+  logged. The remote username is always prompted (the GB10 account is set
+  at the machine's first boot and rarely matches the operator's local
+  username); `--user` skips the prompt.
 - Host keys verify against `~/.ssh/known_hosts` with trust-on-first-use:
   unknown hosts show the SHA256 fingerprint and require explicit consent; a
   **changed** key is a hard failure, never re-promptable.

@@ -93,6 +93,25 @@ func runSetup(args []string) int {
 		}
 	}
 
+	// The account on the GB10 machine is whatever its owner created during
+	// first boot (often not the operator's local username), so always ask —
+	// unless --user was given explicitly.
+	userFlagSet := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "user" {
+			userFlagSet = true
+		}
+	})
+	if !userFlagSet {
+		answer, err := prompter.ask(fmt.Sprintf("Username on %s [%s]: ", target, *sshUser))
+		if err != nil {
+			return 1
+		}
+		if answer != "" {
+			*sshUser = answer
+		}
+	}
+
 	fmt.Printf("Connecting to %s@%s…\n", *sshUser, target)
 	runner, err := setup.DialSSH(ctx, target, *sshUser, prompter)
 	if err != nil {

@@ -61,6 +61,27 @@ func DialSSH(ctx context.Context, addr, user string, prompter Prompter) (*SSHRun
 	methods = append(methods, ssh.RetryableAuthMethod(ssh.PasswordCallback(func() (string, error) {
 		return prompter.Password(fmt.Sprintf("%s@%s password: ", user, addr))
 	}), 3))
+	// Some sshd configurations offer keyboard-interactive instead of plain
+	// password auth; answer its prompts the same way.
+	methods = append(methods, ssh.RetryableAuthMethod(ssh.KeyboardInteractive(
+		func(_, instruction string, questions []string, echos []bool) ([]string, error) {
+			if instruction != "" {
+				fmt.Println(strings.TrimSpace(instruction))
+			}
+			answers := make([]string, len(questions))
+			for index, question := range questions {
+				prompt := strings.TrimSpace(question)
+				if prompt == "" {
+					prompt = fmt.Sprintf("%s@%s response", user, addr)
+				}
+				answer, err := prompter.Password(prompt + " ")
+				if err != nil {
+					return nil, err
+				}
+				answers[index] = answer
+			}
+			return answers, nil
+		}), 3))
 
 	config := &ssh.ClientConfig{
 		User:            user,
