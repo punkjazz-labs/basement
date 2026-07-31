@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -133,12 +135,18 @@ func runSetup(args []string) int {
 		}
 	})
 	if !userFlagSet {
-		answer, err := prompter.ask(fmt.Sprintf("Username on %s [%s]: ", paint.bold(target), *sshUser))
+		suggested := *sshUser
+		if known := rememberedUser(target); known != "" {
+			suggested = known
+		}
+		answer, err := prompter.ask(fmt.Sprintf("Username on %s [%s]: ", paint.bold(target), suggested))
 		if err != nil {
 			return 1
 		}
 		if answer != "" {
 			*sshUser = answer
+		} else {
+			*sshUser = suggested
 		}
 	}
 
@@ -149,6 +157,7 @@ func runSetup(args []string) int {
 		return 1
 	}
 	defer runner.Close()
+	rememberUser(target, *sshUser)
 
 	identity := setup.Probe(ctx, runner)
 	if !identity.IsGB10() {
@@ -276,6 +285,50 @@ func chooseListen(prompter *terminalPrompter, listenFlag string, paint style, re
 		return defaultMode, nil
 	default:
 		return "", fmt.Errorf("%q is not one of the choices", strings.TrimSpace(answer))
+	}
+}
+
+// Usernames that connected successfully are remembered per machine — never
+// passwords or keys, only the account name.
+func knownUsersPath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(configDir, "runonspark-manager", "known-users.json")
+}
+
+func rememberedUser(target string) string {
+	path := knownUsersPath()
+	if path == "" {
+		return ""
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var users map[string]string
+	if json.Unmarshal(payload, &users) != nil {
+		return ""
+	}
+	return users[strings.ToLower(target)]
+}
+
+func rememberUser(target, username string) {
+	path := knownUsersPath()
+	if path == "" {
+		return
+	}
+	users := map[string]string{}
+	if payload, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(payload, &users)
+	}
+	users[strings.ToLower(target)] = username
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	if payload, err := json.MarshalIndent(users, "", "  "); err == nil {
+		_ = os.WriteFile(path, payload, 0o600)
 	}
 }
 
