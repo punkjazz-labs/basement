@@ -37,6 +37,9 @@ type apiExecutor struct {
 }
 
 func (a *apiExecutor) ArtifactPath(r recipe.Recipe) string { return "/managed/" + r.ID }
+func (a *apiExecutor) RuntimeImageBytes(_ context.Context, r recipe.Recipe) (int64, bool) {
+	return r.Runtime.ImageDiskBytes, true
+}
 func (a *apiExecutor) Execute(_ context.Context, _ operations.Execution, op recipe.Operation, _ recipe.Recipe, progress operations.Progress) (map[string]any, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -233,6 +236,44 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	}
 	if !bytes.Contains(diagnosticBody, []byte(`"format": "runonspark-diagnostics-v1"`)) || !bytes.Contains(diagnosticBody, []byte("[REDACTED]")) || bytes.Contains(diagnosticBody, []byte(secret)) {
 		t.Fatalf("diagnostic export was incomplete or leaked a secret: %s", diagnosticBody)
+	}
+
+	// Storage accounting must attribute runtime images with their recipes and
+	// count them toward the managed total.
+	storage := doRequest(t, http.MethodGet, server.URL+"/api/v1/storage", "", cookies, nil)
+	var storageInfo struct {
+		TotalManaged int64 `json:"total_managed_bytes"`
+		Images       []struct {
+			Reference string   `json:"reference"`
+			Bytes     int64    `json:"bytes"`
+			RecipeIDs []string `json:"recipe_ids"`
+		} `json:"images"`
+	}
+	if err := json.NewDecoder(storage.Body).Decode(&storageInfo); err != nil {
+		t.Fatal(err)
+	}
+	storage.Body.Close()
+	if len(storageInfo.Images) == 0 {
+		t.Fatal("storage breakdown reported no runtime images")
+	}
+	var imageTotal int64
+	attributed := map[string]bool{}
+	for _, image := range storageInfo.Images {
+		if image.Reference == "" || image.Bytes <= 0 || len(image.RecipeIDs) == 0 {
+			t.Fatalf("incomplete image attribution: %#v", image)
+		}
+		imageTotal += image.Bytes
+		for _, id := range image.RecipeIDs {
+			attributed[id] = true
+		}
+	}
+	for _, item := range recipes {
+		if !attributed[item.ID] {
+			t.Errorf("recipe %s is not attributed to any runtime image", item.ID)
+		}
+	}
+	if storageInfo.TotalManaged < imageTotal {
+		t.Fatalf("managed total %d does not include image bytes %d", storageInfo.TotalManaged, imageTotal)
 	}
 }
 

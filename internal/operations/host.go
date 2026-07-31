@@ -33,6 +33,11 @@ func NewHostExecutor(dataDir, dockerSocket string, provider inventory.Provider) 
 	return &HostExecutor{dataDir: dataDir, inventory: provider, docker: NewDockerClient(dockerSocket), hf: NewHFClient(), http: &http.Client{Timeout: 30 * time.Second}}
 }
 
+// RuntimeImageBytes asks Docker for the pinned runtime image's on-disk size.
+func (h *HostExecutor) RuntimeImageBytes(ctx context.Context, r recipe.Recipe) (int64, bool) {
+	return h.docker.ImageSize(ctx, r.Runtime.Reference())
+}
+
 func (h *HostExecutor) ArtifactPath(r recipe.Recipe) string {
 	index, _ := r.ArtifactIndex("primary")
 	artifact := r.Artifacts[index]

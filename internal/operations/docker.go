@@ -47,6 +47,26 @@ func (d *DockerClient) Ping(ctx context.Context) error {
 	return nil
 }
 
+// ImageSize reports the on-disk size Docker records for an image, when the
+// image is present locally.
+func (d *DockerClient) ImageSize(ctx context.Context, ref string) (int64, bool) {
+	resp, err := d.request(ctx, http.MethodGet, "/images/"+url.PathEscape(ref)+"/json", nil)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	var payload struct {
+		Size int64 `json:"Size"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || payload.Size <= 0 {
+		return 0, false
+	}
+	return payload.Size, true
+}
+
 func (d *DockerClient) ImageExists(ctx context.Context, ref string) bool {
 	resp, err := d.request(ctx, http.MethodGet, "/images/"+url.PathEscape(ref)+"/json", nil)
 	if err != nil {

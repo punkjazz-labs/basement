@@ -23,4 +23,7 @@ type Executor interface {
 	Execute(context.Context, Execution, recipe.Operation, recipe.Recipe, Progress) (map[string]any, error)
 	Completed(context.Context, Execution, recipe.Operation, recipe.Recipe, json.RawMessage) bool
 	ArtifactPath(recipe.Recipe) string
+	// RuntimeImageBytes reports the on-disk size of the recipe's pinned
+	// runtime image when Docker holds it locally, for storage accounting.
+	RuntimeImageBytes(context.Context, recipe.Recipe) (int64, bool)
 }

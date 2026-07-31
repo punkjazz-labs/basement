@@ -849,6 +849,30 @@ func (s *Server) storageBreakdown(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Runtime images live in Docker's own store, but they are ours: pulled by
+	// install jobs against pinned digests. Attribute them so the storage page
+	// accounts for every byte the product is responsible for.
+	type imageUse struct {
+		Reference string   `json:"reference"`
+		Bytes     int64    `json:"bytes"`
+		RecipeIDs []string `json:"recipe_ids"`
+	}
+	images := []imageUse{}
+	seenImages := map[string]int{}
+	for _, item := range s.recipes {
+		reference := item.Runtime.Reference()
+		if index, ok := seenImages[reference]; ok {
+			images[index].RecipeIDs = append(images[index].RecipeIDs, item.ID)
+			continue
+		}
+		size, present := s.executor.RuntimeImageBytes(r.Context(), item)
+		if !present {
+			continue
+		}
+		seenImages[reference] = len(images)
+		images = append(images, imageUse{Reference: reference, Bytes: size, RecipeIDs: []string{item.ID}})
+	}
+	sort.Slice(images, func(i, j int) bool { return images[i].Bytes > images[j].Bytes })
 	databaseBytes := int64(0)
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		if info, err := os.Stat(filepath.Join(s.dataDir, "manager.db"+suffix)); err == nil {
@@ -862,6 +886,9 @@ func (s *Server) storageBreakdown(w http.ResponseWriter, r *http.Request) {
 	for _, cache := range caches {
 		total += cache.Bytes
 	}
+	for _, image := range images {
+		total += image.Bytes
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data_dir":            s.dataDir,
 		"storage_total":       system.StorageTotal,
@@ -870,6 +897,7 @@ func (s *Server) storageBreakdown(w http.ResponseWriter, r *http.Request) {
 		"database_bytes":      databaseBytes,
 		"artifacts":           artifacts,
 		"caches":              caches,
+		"images":              images,
 	})
 }
 

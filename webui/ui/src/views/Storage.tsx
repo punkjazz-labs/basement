@@ -34,7 +34,7 @@ export default function Storage({ recipes }: AppState) {
           <span style={{ width: pct(free), background: 'var(--surface-2)' }} />
         </div>
         <div className="disk-legend">
-          <span><i style={{ background: 'var(--green)' }} />Models &amp; caches · {formatBytes(managed)}</span>
+          <span><i style={{ background: 'var(--green)' }} />Models, caches &amp; runtimes · {formatBytes(managed)}</span>
           <span><i style={{ background: 'var(--line-strong)' }} />Everything else · {formatBytes(otherUsed)}</span>
           <span><i style={{ background: 'var(--surface-2)', border: '1px solid var(--line-strong)' }} />Free · {formatBytes(free)}</span>
         </div>
@@ -62,6 +62,28 @@ export default function Storage({ recipes }: AppState) {
         ))}
         {info.artifacts.length === 0 && <p className="muted">No model downloads yet.</p>}
       </section>
+
+      {(info.images ?? []).length > 0 && (
+        <section className="card">
+          <div className="section-head" style={{ marginBottom: 4 }}>
+            <h2 style={{ fontSize: 16 }}>Runtime images</h2>
+            <span className="muted">Pulled by installs; removed with their last model</span>
+          </div>
+          {info.images.map(image => (
+            <div className="storage-row" key={image.reference}>
+              <div className="grow">
+                <code>{image.reference.split('@')[0]}</code>
+                <div className="faint" style={{ fontSize: 12 }}>
+                  {image.recipe_ids.length ? `Used by ${image.recipe_ids.map(recipeName).join(', ')}` : 'Not referenced by any current recipe'}
+                  {' · '}
+                  <span className="mono">{(image.reference.split('@')[1] ?? '').slice(0, 19)}</span>
+                </div>
+              </div>
+              <span className="bytes">{formatBytes(image.bytes)}</span>
+            </div>
+          ))}
+        </section>
+      )}
 
       <section className="card">
         <div className="section-head" style={{ marginBottom: 4 }}>

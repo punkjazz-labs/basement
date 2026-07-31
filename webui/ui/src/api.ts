@@ -135,6 +135,7 @@ export interface StorageInfo {
   database_bytes: number
   artifacts: { repository: string; revision: string; bytes: number; recipe_ids: string[] }[]
   caches: { recipe_id: string; bytes: number }[]
+  images: { reference: string; bytes: number; recipe_ids: string[] }[]
 }
 
 export interface APIKey {

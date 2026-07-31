@@ -32,6 +32,9 @@ type switchExecutor struct {
 }
 
 func (s *switchExecutor) ArtifactPath(r recipe.Recipe) string { return "/managed/" + r.ID }
+func (s *switchExecutor) RuntimeImageBytes(context.Context, recipe.Recipe) (int64, bool) {
+	return 0, false
+}
 func (s *switchExecutor) Execute(_ context.Context, _ operations.Execution, op recipe.Operation, r recipe.Recipe, _ operations.Progress) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -78,6 +81,9 @@ func (s *switchExecutor) Completed(_ context.Context, _ operations.Execution, op
 }
 
 func (f *fakeExecutor) ArtifactPath(r recipe.Recipe) string { return "/managed/" + r.ID }
+func (f *fakeExecutor) RuntimeImageBytes(context.Context, recipe.Recipe) (int64, bool) {
+	return 0, false
+}
 func (f *fakeExecutor) Execute(_ context.Context, execution operations.Execution, op recipe.Operation, _ recipe.Recipe, progress operations.Progress) (map[string]any, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
