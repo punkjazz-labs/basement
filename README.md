@@ -1,6 +1,16 @@
 # RunOnSpark Manager
 
-RunOnSpark Manager is a local-first DGX Spark service that installs and manages curated vLLM recipes. One Go binary serves the API and embedded console, persists jobs in SQLite, validates immutable recipes, and executes an allowlisted lifecycle through Docker's structured API.
+RunOnSpark Manager is a local-first service for GB10 machines (NVIDIA DGX Spark and OEM equivalents such as the ASUS Ascent GX10 and MSI EdgeXpert) that installs and manages curated vLLM recipes. One Go binary serves the API and embedded console, persists jobs in SQLite, validates immutable recipes, and executes an allowlisted lifecycle through Docker's structured API.
+
+## Install
+
+From any macOS or Linux machine on the same network as your GB10 machine (or on the machine itself):
+
+```bash
+curl -fsSL https://github.com/punkjazz-labs/runonspark-manager/releases/latest/download/setup.sh | sh
+```
+
+The installer discovers GB10 machines on your network, lets you pick one, installs the manager over SSH using your existing credentials (nothing is stored), and opens the paired console in your browser. Run it on the GB10 machine itself and it installs locally instead. See [`docs/decisions/0010-network-setup-and-gb10-discovery.md`](docs/decisions/0010-network-setup-and-gb10-discovery.md) for the security posture.
 
 The embedded candidate pack contains:
 

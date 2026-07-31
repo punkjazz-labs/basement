@@ -1,0 +1,41 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build release binaries
+        run: |
+          mkdir -p dist
+          for os in linux darwin; do
+            for arch in arm64 amd64; do
+              out="dist/runonspark-manager-${os}-${arch}"
+              GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+                -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+                -o "$out" ./cmd/runonspark-manager
+              (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
+            done
+          done
+          cp packaging/setup.sh dist/setup.sh
+          tar -C packaging -czf dist/packaging.tar.gz .
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "RunOnSpark Manager ${GITHUB_REF_NAME}" \
+            --generate-notes
