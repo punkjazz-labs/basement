@@ -43,4 +43,3 @@ Deployment progress is represented by one persistent job. The modal reads only p
 - Query parameters and user-selected Spark counts no longer affect recipe availability.
 - Multi-node recipes remain unavailable until authenticated membership, leases, topology validation, and failure tests exist.
 - Existing per-node OOM and disk guards are reusable by the future scheduler and remain non-aggregating.
-
