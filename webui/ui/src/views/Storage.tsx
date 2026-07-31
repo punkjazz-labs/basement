@@ -25,7 +25,6 @@ export default function Storage({ recipes }: AppState) {
   return (
     <div className="stack">
       <div className="section-head">
-        <h2>Storage</h2>
         <span className="muted">{formatBytes(info.storage_available)} free of {formatBytes(info.storage_total)}</span>
       </div>
       <section className="card">

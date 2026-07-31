@@ -116,7 +116,6 @@ export default function Playground({ ready, modelID, modelName }: {
   return (
     <div className="playground">
       <div className="section-head">
-        <h2>Playground</h2>
         <span className="muted">Talking to {modelName} through your own endpoint</span>
         <span className="spacer" />
         {messages.length > 0 && (

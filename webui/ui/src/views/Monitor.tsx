@@ -9,6 +9,9 @@ interface Series {
   waiting: number[]
   kv: number[]
   gpuFree: number[]
+  power: number[]
+  clock: number[]
+  temperature: number[]
 }
 
 function Sparkline({ points, max }: { points: number[]; max?: number }) {
@@ -48,7 +51,7 @@ function Tile({ label, value, unit, points, max }: {
 }
 
 export default function Monitor({ telemetry, activeName }: { telemetry: Telemetry | null; activeName?: string }) {
-  const [series, setSeries] = useState<Series>({ tps: [], running: [], waiting: [], kv: [], gpuFree: [] })
+  const [series, setSeries] = useState<Series>({ tps: [], running: [], waiting: [], kv: [], gpuFree: [], power: [], clock: [], temperature: [] })
   const lastTotal = useRef<{ at: number; total: number } | null>(null)
   const lastSample = useRef('')
 
@@ -73,6 +76,9 @@ export default function Monitor({ telemetry, activeName }: { telemetry: Telemetr
       waiting: vllm ? push(previous.waiting, vllm.requests_waiting ?? 0) : previous.waiting,
       kv: vllm ? push(previous.kv, (vllm.kv_cache_usage ?? 0) * 100) : previous.kv,
       gpuFree: push(previous.gpuFree, telemetry.gpu_memory_free),
+      power: telemetry.gpu_power_draw_watts > 0 ? push(previous.power, telemetry.gpu_power_draw_watts) : previous.power,
+      clock: telemetry.gpu_clock_mhz > 0 ? push(previous.clock, telemetry.gpu_clock_mhz) : previous.clock,
+      temperature: telemetry.gpu_temperature_c > 0 ? push(previous.temperature, telemetry.gpu_temperature_c) : previous.temperature,
     }))
   }, [telemetry])
 
@@ -86,7 +92,6 @@ export default function Monitor({ telemetry, activeName }: { telemetry: Telemetr
   return (
     <div className="stack">
       <div className="section-head">
-        <h2>Monitor</h2>
         <span className="muted">
           {serving ? `${activeName ?? telemetry.active_model?.recipe_id} · sampled every few seconds` : 'No model serving — system metrics only'}
         </span>
@@ -118,6 +123,31 @@ export default function Monitor({ telemetry, activeName }: { telemetry: Telemetr
               max={100}
             />
           </>
+        )}
+        {telemetry.gpu_power_draw_watts > 0 && (
+          <Tile
+            label="Power draw"
+            value={telemetry.gpu_power_draw_watts.toFixed(0)}
+            unit="W"
+            points={series.power}
+          />
+        )}
+        {telemetry.gpu_temperature_c > 0 && (
+          <Tile
+            label="GPU temperature"
+            value={String(telemetry.gpu_temperature_c)}
+            unit="°C"
+            points={series.temperature}
+            max={100}
+          />
+        )}
+        {telemetry.gpu_clock_mhz > 0 && (
+          <Tile
+            label="GPU clock"
+            value={String(telemetry.gpu_clock_mhz)}
+            unit="MHz"
+            points={series.clock}
+          />
         )}
         {telemetry.gpu_memory_total > 0 && (
           <Tile

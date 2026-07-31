@@ -42,6 +42,9 @@ type System struct {
 	MemoryTotal            int64    `json:"memory_total_bytes"`
 	GPUMemoryFree          int64    `json:"gpu_memory_free_bytes"`
 	GPUMemoryTotal         int64    `json:"gpu_memory_total_bytes"`
+	GPUPowerDrawWatts      float64  `json:"gpu_power_draw_watts,omitempty"`
+	GPUClockMHz            int64    `json:"gpu_clock_mhz,omitempty"`
+	GPUTemperatureC        int64    `json:"gpu_temperature_c,omitempty"`
 	Ready                  bool     `json:"ready"`
 	Blocking               []string `json:"blocking_conditions"`
 	ObservedAt             string   `json:"observed_at"`
@@ -79,7 +82,7 @@ func (h Host) Inspect(ctx context.Context) (System, error) {
 	gpu := commandOutput(ctx, "nvidia-smi", "--query-gpu=name", "--format=csv,noheader")
 	s.GPUVisible = gpu != ""
 	s.GPUDescription = gpu
-	s.GPUMemoryFree, s.GPUMemoryTotal = gpuMemory(ctx)
+	s.GPUMemoryFree, s.GPUMemoryTotal, s.GPUPowerDrawWatts, s.GPUClockMHz, s.GPUTemperatureC = gpuTelemetry(ctx)
 	if s.Architecture != "aarch64" {
 		s.Blocking = append(s.Blocking, "Linux ARM64 architecture is required")
 	}
@@ -286,11 +289,14 @@ func memorySpace() (available int64, total int64) {
 	return available, total
 }
 
-func gpuMemory(ctx context.Context) (free int64, total int64) {
-	output := commandOutput(ctx, "nvidia-smi", "--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits")
+// gpuTelemetry samples memory plus device health in one nvidia-smi call.
+// Memory sums across GPUs; power sums; clock and temperature report the
+// hottest/fastest device. Fields a driver does not expose parse as zero.
+func gpuTelemetry(ctx context.Context) (free, total int64, powerWatts float64, clockMHz, temperatureC int64) {
+	output := commandOutput(ctx, "nvidia-smi", "--query-gpu=memory.free,memory.total,power.draw,clocks.sm,temperature.gpu", "--format=csv,noheader,nounits")
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Split(line, ",")
-		if len(fields) != 2 {
+		if len(fields) < 2 {
 			continue
 		}
 		freeMiB, freeErr := strconv.ParseInt(strings.TrimSpace(fields[0]), 10, 64)
@@ -299,8 +305,23 @@ func gpuMemory(ctx context.Context) (free int64, total int64) {
 			free += freeMiB * 1024 * 1024
 			total += totalMiB * 1024 * 1024
 		}
+		if len(fields) >= 3 {
+			if watts, err := strconv.ParseFloat(strings.TrimSpace(fields[2]), 64); err == nil {
+				powerWatts += watts
+			}
+		}
+		if len(fields) >= 4 {
+			if clock, err := strconv.ParseInt(strings.TrimSpace(fields[3]), 10, 64); err == nil && clock > clockMHz {
+				clockMHz = clock
+			}
+		}
+		if len(fields) >= 5 {
+			if temperature, err := strconv.ParseInt(strings.TrimSpace(fields[4]), 10, 64); err == nil && temperature > temperatureC {
+				temperatureC = temperature
+			}
+		}
 	}
-	return free, total
+	return free, total, powerWatts, clockMHz, temperatureC
 }
 
 func CheckPort(port int) error {

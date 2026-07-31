@@ -15,6 +15,23 @@ import DeploymentDialog from './views/Deployment'
 const TABS = ['Models', 'Playground', 'Connect', 'Monitor', 'Storage', 'Activity'] as const
 type Tab = (typeof TABS)[number]
 
+// Minimal 18px stroke icons, one per section.
+function Icon({ name }: { name: Tab }) {
+  const paths: Record<Tab, React.ReactNode> = {
+    Models: <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>,
+    Playground: <path d="M21 12a8 8 0 0 1-8 8H4l2.5-2.5A8 8 0 1 1 21 12z" />,
+    Connect: <><path d="M9 12h6" /><path d="M8 7H6a5 5 0 0 0 0 10h2" /><path d="M16 7h2a5 5 0 0 1 0 10h-2" /></>,
+    Monitor: <path d="M3 12h4l2-6 4 12 2-6h6" />,
+    Storage: <><ellipse cx="12" cy="5.5" rx="8" ry="2.8" /><path d="M4 5.5V18c0 1.6 3.6 2.8 8 2.8s8-1.2 8-2.8V5.5" /><path d="M4 12c0 1.6 3.6 2.8 8 2.8s8-1.2 8-2.8" /></>,
+    Activity: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></>,
+  }
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {paths[name]}
+    </svg>
+  )
+}
+
 export interface AppState {
   system: SystemInfo | null
   recipes: Recipe[]
@@ -189,63 +206,66 @@ export default function App() {
   const selectedJob = jobs.find(job => job.id === selectedJobID) ?? null
 
   return (
-    <>
+    <div className="shell">
       <a className="skip-link" href="#main">Skip to content</a>
-      <header className="rail">
-        <a className="rail-mark" href="/" aria-label="RunOnSpark Manager">
-          <strong>RunOnSpark</strong>
-          <span>manager</span>
+      <aside className="side">
+        <a className="side-mark" href="/" aria-label="RunOnSpark Manager">
+          <span className="dot" aria-hidden="true" />
+          <span>
+            <strong>RunOnSpark</strong>
+            <small>DGX Spark manager</small>
+          </span>
         </a>
-        <div className="rail-host">
+        <nav aria-label="Console sections">
+          {TABS.map(name => (
+            <button key={name} aria-current={tab === name} onClick={() => setTab(name)}>
+              <Icon name={name} />
+              {name}
+              {name === 'Activity' && runningJobs > 0 && <span className="badge">{runningJobs}</span>}
+            </button>
+          ))}
+        </nav>
+        <div className="side-foot">
           <code>{system?.hostname ?? '…'}</code>
           {system && system.memory_available_bytes > 0 && (
             <span>{formatBytes(system.memory_available_bytes)} RAM free</span>
           )}
-        </div>
-        <div className={`rail-live ${railClass}`} role="status" aria-live="polite">
+          <span>manager {system?.manager_version ?? ''}</span>
           {update?.update_available && update.release_url && (
-            <a className="rail-update" href={update.release_url} target="_blank" rel="noreferrer">
-              Update <b>{update.latest_version}</b>
+            <a className="side-update" href={update.release_url} target="_blank" rel="noreferrer">
+              Update {update.latest_version} available
             </a>
           )}
-          <i className="led" aria-hidden="true" />
-          <span>{railLabel}</span>
-          {liveTPS !== null && activeModel?.status === 'ready' && (
-            <span className="rail-tps">
-              {liveTPS.toFixed(1)} <small>tok/s</small>
-            </span>
-          )}
-          {!connected && <span className="error-text">Disconnected</span>}
         </div>
-      </header>
-      <nav className="tabs" role="tablist" aria-label="Console sections">
-        {TABS.map(name => (
-          <button
-            key={name}
-            role="tab"
-            aria-selected={tab === name}
-            onClick={() => setTab(name)}
-          >
-            {name}
-            {name === 'Activity' && runningJobs > 0 && <span className="badge">{runningJobs}</span>}
-          </button>
-        ))}
-      </nav>
-      <main id="main">
-        {tab === 'Models' && <Models {...state} />}
-        {tab === 'Playground' && (
-          <Playground
-            ready={activeModel?.status === 'ready'}
-            modelID={activeRecipe?.service.served_model_id}
-            modelName={activeRecipe?.display_name}
-          />
-        )}
-        {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
-        {tab === 'Monitor' && <Monitor telemetry={telemetry} activeName={activeRecipe?.display_name} />}
-        {tab === 'Storage' && <Storage {...state} />}
-        {tab === 'Activity' && <Activity {...state} />}
-      </main>
+      </aside>
+      <div className="content">
+        <header className="content-head">
+          <h1>{tab}</h1>
+          <div className={`live-chip ${railClass}`} role="status" aria-live="polite">
+            <i className="led" aria-hidden="true" />
+            <span>{railLabel}</span>
+            {liveTPS !== null && activeModel?.status === 'ready' && (
+              <span className="tps">{liveTPS.toFixed(1)} <small>tok/s</small></span>
+            )}
+            {!connected && <span className="error-text">Disconnected</span>}
+          </div>
+        </header>
+        <main id="main">
+          {tab === 'Models' && <Models {...state} />}
+          {tab === 'Playground' && (
+            <Playground
+              ready={activeModel?.status === 'ready'}
+              modelID={activeRecipe?.service.served_model_id}
+              modelName={activeRecipe?.display_name}
+            />
+          )}
+          {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
+          {tab === 'Monitor' && <Monitor telemetry={telemetry} activeName={activeRecipe?.display_name} />}
+          {tab === 'Storage' && <Storage {...state} />}
+          {tab === 'Activity' && <Activity {...state} />}
+        </main>
+      </div>
       <DeploymentDialog job={selectedJob} recipes={recipes} onClose={() => setSelectedJobID('')} />
-    </>
+    </div>
   )
 }

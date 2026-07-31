@@ -109,6 +109,9 @@ export interface Telemetry {
   memory_available: number
   gpu_memory_total: number
   gpu_memory_free: number
+  gpu_power_draw_watts: number
+  gpu_clock_mhz: number
+  gpu_temperature_c: number
   storage_total: number
   storage_available: number
   active_model?: {

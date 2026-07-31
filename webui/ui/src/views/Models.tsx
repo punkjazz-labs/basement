@@ -9,9 +9,16 @@ const LOGOS: Record<string, string> = {
   'laguna-s-2-1-nvfp4-dflash-1s': '/logos/poolside.webp',
 }
 const USE: Record<string, string> = {
-  'qwen36-35b-a3b-nvfp4-1s': 'Best all-rounder',
-  'qwen36-27b-nvfp4-1s': 'Coding',
-  'laguna-s-2-1-nvfp4-dflash-1s': 'Agentic work',
+  'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
+  'qwen36-27b-nvfp4-1s': 'Flagship-level coding in a smaller footprint.',
+  'laguna-s-2-1-nvfp4-dflash-1s': 'Built for long, independent agent runs.',
+}
+// Community-reported typical speeds on a DGX Spark, shown until this device
+// measures its own number.
+const REFERENCE_TPS: Record<string, number> = {
+  'qwen36-35b-a3b-nvfp4-1s': 80,
+  'qwen36-27b-nvfp4-1s': 33,
+  'laguna-s-2-1-nvfp4-dflash-1s': 19.4,
 }
 const ORDER = ['qwen36-35b-a3b-nvfp4-1s', 'qwen36-27b-nvfp4-1s', 'laguna-s-2-1-nvfp4-dflash-1s']
 
@@ -138,9 +145,8 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
         </div>
       )}
       <div className="section-head">
-        <h2>Models</h2>
         <span className="muted">
-          {detected ? 'Matched to this Spark' : 'Connect a DGX Spark to unlock deployments'}
+          {detected ? 'Curated for this Spark — every recipe pinned and verified before Ready.' : 'Connect a DGX Spark to unlock deployments.'}
         </span>
       </div>
       {sorted.map(recipe => {
@@ -149,69 +155,72 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
         const isActive = Boolean(model?.active && model.status === 'ready')
         const fits = detected >= recipe.topology.spark_count
         const statusText = busy ? 'Working' : model ? model.status : 'Not installed'
+        const measured = model?.tokens_per_second
+        const reference = REFERENCE_TPS[recipe.id]
         return (
           <article key={recipe.id} className={`model-row ${isActive ? 'active-model' : ''}`}>
-            <img className="model-logo" src={LOGOS[recipe.id] ?? '/logos/nvidia.webp'} alt="" width="44" height="44" />
-            <div className="model-head">
-              <div className="model-title">
-                <h3>{recipe.display_name}</h3>
-                {recipe.id === ORDER[0] && <span className="pill reco">Recommended</span>}
-                <span className="pill">{recipe.publisher}</span>
+            <div className="model-main">
+              <img className="model-logo" src={LOGOS[recipe.id] ?? '/logos/nvidia.webp'} alt="" width="48" height="48" />
+              <div className="model-name">
+                <div className="title-line">
+                  <h3>{recipe.display_name}</h3>
+                  {recipe.id === ORDER[0] && <span className="pill reco">Recommended</span>}
+                </div>
+                <p className="use">{USE[recipe.id] ?? 'Local model for your Spark.'}</p>
               </div>
-              <p className="model-sub">{USE[recipe.id] ?? 'Local model'} · {recipe.service.served_model_id}</p>
-              <dl className="model-facts">
-                <div>
-                  <dt>Speed on this Spark</dt>
-                  <dd>
-                    {model?.tokens_per_second
-                      ? <>{model.tokens_per_second.toFixed(1)} <small>tok/s measured</small></>
-                      : <small>not measured yet</small>}
-                  </dd>
+              <div className="model-stats">
+                <div className="stat">
+                  <span className="label">Speed</span>
+                  <span className="num">
+                    {measured ? measured.toFixed(1) : reference ? `~${reference}` : '—'} <small>tok/s</small>
+                  </span>
+                  <span className={`qual ${measured ? 'measured' : ''}`}>
+                    {measured ? 'measured on this Spark' : 'typical on a Spark'}
+                  </span>
                 </div>
-                {model?.time_to_first_token_ms ? (
-                  <div>
-                    <dt>First token</dt>
-                    <dd>{model.time_to_first_token_ms} <small>ms</small></dd>
-                  </div>
-                ) : null}
-                <div>
-                  <dt>Disk</dt>
-                  <dd>{formatBytes(recipe.required_bytes)}</dd>
+                <div className="stat">
+                  <span className="label">Disk</span>
+                  <span className="num">{formatBytes(recipe.required_bytes)}</span>
+                  {model?.time_to_first_token_ms ? (
+                    <span className="qual">first token {model.time_to_first_token_ms} ms</span>
+                  ) : null}
                 </div>
-              </dl>
-            </div>
-            <div className="model-side">
-              <span className={`model-status ${isActive ? 'on' : busy ? 'busy' : ''}`}>
-                <i aria-hidden="true" />
-                {statusText}
-              </span>
-              <div className="model-actions">
-                {!model && (
-                  <button className="primary" disabled={busy || !fits} onClick={() => startInstall(recipe)}>
-                    {busy ? 'Working' : fits ? 'Install' : 'Needs a Spark'}
-                  </button>
-                )}
-                {model && isActive && (
-                  <>
-                    <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'stop')}>Stop</button>
-                    <button className="quiet" disabled={busy} onClick={() => simpleAction(recipe.id, 'smoke-test')}>Test</button>
-                    <button className="quiet" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
-                  </>
-                )}
-                {model && !isActive && model.status !== 'recovering' && (
-                  <>
-                    <button className="primary" disabled={busy} onClick={() => startOrSwitch(recipe)}>
-                      {activeOther(recipe.id) ? 'Switch to' : 'Start'}
+              </div>
+              <div className="model-cta">
+                <span className={`model-status ${isActive ? 'on' : busy ? 'busy' : ''}`}>
+                  <i aria-hidden="true" />
+                  {statusText}
+                </span>
+                <div className="model-actions">
+                  {!model && (
+                    <button className="primary" disabled={busy || !fits} onClick={() => startInstall(recipe)}>
+                      {busy ? 'Working' : fits ? 'Install' : 'Needs a Spark'}
                     </button>
-                    <button className="danger" disabled={busy} onClick={() => remove(recipe)}>Remove</button>
-                  </>
-                )}
-                {model?.status === 'recovering' && <button className="ghost" disabled>Recovering</button>}
+                  )}
+                  {model && isActive && (
+                    <>
+                      <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'stop')}>Stop</button>
+                      <button className="quiet" disabled={busy} onClick={() => simpleAction(recipe.id, 'smoke-test')}>Test</button>
+                      <button className="quiet" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
+                    </>
+                  )}
+                  {model && !isActive && model.status !== 'recovering' && (
+                    <>
+                      <button className="primary" disabled={busy} onClick={() => startOrSwitch(recipe)}>
+                        {activeOther(recipe.id) ? 'Switch to' : 'Start'}
+                      </button>
+                      <button className="danger" disabled={busy} onClick={() => remove(recipe)}>Remove</button>
+                    </>
+                  )}
+                  {model?.status === 'recovering' && <button className="ghost" disabled>Recovering</button>}
+                </div>
               </div>
             </div>
             <details className="model-more">
               <summary>Details</summary>
               <div className="detail-grid">
+                <div><span>Publisher</span>{recipe.publisher}</div>
+                <div><span>Model ID</span><code>{recipe.service.served_model_id}</code></div>
                 <div><span>Runtime</span><code>vLLM · pinned digest</code></div>
                 <div><span>Source</span><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url}</a></div>
                 {recipe.artifacts.map(artifact => (
