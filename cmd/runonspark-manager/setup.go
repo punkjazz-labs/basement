@@ -121,16 +121,15 @@ func runSetup(args []string) int {
 	defer runner.Close()
 
 	identity := setup.Probe(ctx, runner)
-	if identity.IsGB10() {
-		fmt.Printf("Confirmed: %s (%s, %s)\n", identity.Product(), identity.Hostname, identity.OSName)
-	} else {
-		accept, err := prompter.Confirm(fmt.Sprintf(
-			"%s does not look like a GB10 machine (GPU: %q). Install anyway?",
-			target, identity.GPUName))
-		if err != nil || !accept {
-			return 1
+	if !identity.IsGB10() {
+		gpu := identity.GPUName
+		if gpu == "" {
+			gpu = "none detected"
 		}
+		fmt.Fprintf(os.Stderr, "%s is not a GB10 machine (GPU: %s) — RunOnSpark recipes are built for the GB10 superchip, so setup will not install here.\n", target, gpu)
+		return 1
 	}
+	fmt.Printf("Confirmed: %s (%s, %s)\n", identity.Product(), identity.Hostname, identity.OSName)
 
 	source := pickSource(*binary)
 	return finishInstall(ctx, runner, source, prompter, *listen, peers)

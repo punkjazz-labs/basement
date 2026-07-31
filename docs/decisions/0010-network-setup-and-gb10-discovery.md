@@ -39,7 +39,8 @@ One subcommand, two modes:
   `aitop`, `veriton`, `pgx`, `promax`, `gb10`) **rank** the list only. They
   never filter: identity is confirmed after connecting, by `nvidia-smi`
   reporting the GB10 chip or the device tree naming a known product. A
-  non-GB10 pick warns and asks before continuing.
+  non-GB10 pick is a hard refusal — the recipes are built for the GB10
+  superchip and installing elsewhere can only produce broken deployments.
 
 ### Install engine (internal/setup)
 
