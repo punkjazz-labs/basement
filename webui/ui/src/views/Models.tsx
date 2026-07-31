@@ -334,6 +334,11 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                   <div><dt>Space needed</dt><dd>{formatBytes(confirm.recipe.required_bytes)}</dd></div>
                   <div><dt>RAM kept free</dt><dd>{formatBytes(confirm.recipe.requirements.per_node_memory_reserve_bytes)}</dd></div>
                 </dl>
+                <p className="muted" style={{ fontSize: 12.5 }}>
+                  After the download, the first start loads the model into memory and typically takes
+                  5–15 minutes — the deployment view shows live progress the whole way, and later
+                  starts are much faster. Cancelling is always safe: downloads resume where they left off.
+                </p>
                 {confirm.switchFrom && (
                   <p className="muted">
                     <strong>{recipes.find(item => item.id === confirm.switchFrom)?.display_name} stops after the download.</strong>{' '}

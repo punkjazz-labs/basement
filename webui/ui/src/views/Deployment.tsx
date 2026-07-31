@@ -9,9 +9,14 @@ const CHECKS = [
 interface Phase {
   title: string
   note: string
+  // activeNote replaces note while the phase runs — the honest time
+  // expectation, so a long wait reads as normal instead of stuck.
+  activeNote?: string
   states: string[]
   operations: string[]
 }
+
+const FIRST_START_NOTE = 'Loading the model into memory — the first start typically takes 5–15 minutes, never more than 20. Later starts are much faster.'
 
 function phasePlan(job: Job): Phase[] {
   if (job.kind === 'install') {
@@ -20,15 +25,15 @@ function phasePlan(job: Job): Phase[] {
       { title: 'Prepare runtime', note: 'Pinned vLLM image', states: ['downloading_runtime'], operations: ['pull_image'] },
       { title: 'Download model', note: 'Resumable model files', states: ['downloading_models'], operations: ['download_artifact'] },
       { title: 'Configure service', note: 'Owned configuration and container', states: ['configuring'], operations: ['write_generated_config', 'create_container'] },
-      { title: 'Start model', note: 'Safe memory reservation', states: ['checking_memory', 'starting', 'stopping'], operations: ['stop_container', 'verify_memory', 'start_container'] },
-      { title: 'Verify endpoint', note: 'Health and real inference', states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
+      { title: 'Start model', note: 'Safe memory reservation', activeNote: FIRST_START_NOTE, states: ['checking_memory', 'starting', 'stopping'], operations: ['stop_container', 'verify_memory', 'start_container'] },
+      { title: 'Verify endpoint', note: 'Health and real inference', activeNote: FIRST_START_NOTE, states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
     ]
   }
   if (job.kind === 'start') {
     return [
       { title: 'Reserve hardware', note: 'Stop the active model, check memory', states: ['queued', 'stopping', 'checking_memory'], operations: ['stop_container', 'verify_memory'] },
       { title: 'Start model', note: 'Launch the pinned runtime', states: ['starting'], operations: ['start_container'] },
-      { title: 'Verify endpoint', note: 'Health and real inference', states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
+      { title: 'Verify endpoint', note: 'Health and real inference', activeNote: 'Waiting for the model to load and answer — takes a few minutes when memory is cold.', states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
     ]
   }
   if (job.kind === 'remove') {
@@ -90,6 +95,16 @@ function LiveProgress({ step }: { step: Step }) {
           {remaining > 1 && ` · about ${formatDuration(remaining)} left`}
         </span>
         {typeof receipt.file === 'string' && receipt.file && <span className="file">{receipt.file}</span>}
+      </div>
+    )
+  }
+
+  if (step.operation === 'wait_http') {
+    const attempt = asNumber(receipt.attempt)
+    if (attempt <= 0) return null
+    return (
+      <div className="sub-progress">
+        <span className="mono nums">Health check #{attempt} — the model is still loading, this is normal.</span>
       </div>
     )
   }
@@ -214,7 +229,7 @@ export default function DeploymentDialog({ job, recipes, onClose }: {
                 <i aria-hidden="true" />
                 <div>
                   <strong>{phase.title}</strong>
-                  <span>{phase.note}</span>
+                  <span>{status === 'active' && phase.activeNote ? phase.activeNote : phase.note}</span>
                   {showsProgress && <LiveProgress step={current} />}
                 </div>
                 <b>
