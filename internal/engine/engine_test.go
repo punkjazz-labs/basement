@@ -681,3 +681,58 @@ func waitJob(t *testing.T, s *store.Store, id, want string) store.Job {
 	t.Fatalf("job state=%s, want %s", job.State, want)
 	return store.Job{}
 }
+
+// A cancelled install must stop the container it already started; otherwise
+// the leftover keeps the host port and the next install fails preflight on
+// the manager's own debris.
+func TestCancelledInstallStopsItsContainer(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	target := recipes[0]
+	executor := &gateExecutor{
+		switchExecutor: switchExecutor{running: map[string]bool{}},
+		gateOp:         "wait_http", gateRecipe: target.ID,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "install", target.ID, "cancel-cleanup", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	select {
+	case <-executor.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("install never reached the health gate")
+	}
+	if err := runner.Cancel(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(executor.release)
+	waitJob(t, s, job.ID, "cancelled")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		executor.mu.Lock()
+		events := append([]string(nil), executor.events...)
+		executor.mu.Unlock()
+		cleaned := false
+		for _, event := range events {
+			if event == "stop_container:"+target.ID {
+				cleaned = true
+			}
+		}
+		if cleaned {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cancelled install never stopped its container; events=%v", events)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

@@ -219,6 +219,51 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 	return result.ID, nil
 }
 
+// ManagedContainer is a container this manager created, in any lifecycle
+// state, identified by its labels.
+type ManagedContainer struct {
+	Name     string
+	Running  bool
+	RecipeID string
+	Version  string
+}
+
+// ManagedContainers lists every container carrying the managed label,
+// including stopped ones — leftovers from cancelled or superseded jobs.
+func (d *DockerClient) ManagedContainers(ctx context.Context) ([]ManagedContainer, error) {
+	filters := url.QueryEscape(`{"label":["ai.runonspark.managed=true"]}`)
+	resp, err := d.request(ctx, http.MethodGet, "/containers/json?all=1&filters="+filters, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, dockerError(resp)
+	}
+	var body []struct {
+		Names  []string
+		State  string
+		Labels map[string]string
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	containers := make([]ManagedContainer, 0, len(body))
+	for _, entry := range body {
+		name := ""
+		if len(entry.Names) > 0 {
+			name = strings.TrimPrefix(entry.Names[0], "/")
+		}
+		containers = append(containers, ManagedContainer{
+			Name:     name,
+			Running:  entry.State == "running",
+			RecipeID: entry.Labels["ai.runonspark.recipe-id"],
+			Version:  entry.Labels["ai.runonspark.recipe-version"],
+		})
+	}
+	return containers, nil
+}
+
 // Logs returns the last lines of a container's output, for diagnostics when
 // a model fails to come up. Docker multiplexes streams with an 8-byte frame
 // header; strip those and keep printable text.

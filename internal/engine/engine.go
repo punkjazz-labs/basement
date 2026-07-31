@@ -132,7 +132,11 @@ func (e *Engine) Cancel(ctx context.Context, jobID string) error {
 		if terminal(job.State) {
 			return errors.New("job is already complete")
 		}
-		return e.store.UpdateJobState(ctx, jobID, "cancelled", "cancelled at a safe operation boundary")
+		if err := e.store.UpdateJobState(ctx, jobID, "cancelled", "cancelled at a safe operation boundary"); err != nil {
+			return err
+		}
+		e.cleanupAfterCancel(jobID)
+		return nil
 	}
 	cancel()
 	// The running goroutine owns the final state: it may still need to roll
@@ -229,6 +233,7 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 				e.failSwitch(job, r, *previous, plans, index, ctx.Err())
 			} else {
 				_ = e.store.UpdateJobState(context.Background(), jobID, "cancelled", "cancelled at a safe operation boundary")
+				e.cleanupAfterCancel(jobID)
 			}
 			return
 		}
@@ -295,6 +300,7 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 			e.failSwitch(job, r, *previous, plans, len(plans)-1, ctx.Err())
 		} else {
 			_ = e.store.UpdateJobState(context.Background(), jobID, "cancelled", "cancelled at a safe operation boundary")
+			e.cleanupAfterCancel(jobID)
 		}
 		return
 	}
@@ -579,6 +585,26 @@ func (e *Engine) fail(ctx context.Context, jobID string, index int, err error) {
 		state = "cancelled"
 	}
 	_ = e.store.UpdateJobState(context.Background(), jobID, state, message)
+	if state == "cancelled" {
+		e.cleanupAfterCancel(jobID)
+	}
+}
+
+// cleanupAfterCancel frees what a cancelled install or start left running: a
+// started container otherwise keeps holding its port and memory, and the
+// next install fails preflight on its own leftovers. Best-effort by design.
+func (e *Engine) cleanupAfterCancel(jobID string) {
+	background, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	job, err := e.store.GetJob(background, jobID)
+	if err != nil || (job.Kind != "install" && job.Kind != "start") {
+		return
+	}
+	r, ok := recipe.Find(e.recipes, job.RecipeID)
+	if !ok {
+		return
+	}
+	_, _ = e.executor.Execute(background, operations.Execution{Kind: job.Kind}, recipe.Operation{Type: "stop_container"}, r, nil)
 }
 
 func stateFor(kind, operation string) string {

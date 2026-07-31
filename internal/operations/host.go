@@ -75,6 +75,25 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		return h.verifyDisk(ctx, r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes)
 	case "verify_port":
 		if err := inventory.CheckPort(r.Service.DefaultHostPort); err != nil {
+			// Our own leftover container (a cancelled install, an old recipe
+			// version) is not a blocker: the start phase stops it. A foreign
+			// process is.
+			if managed, listErr := h.docker.ManagedContainers(ctx); listErr == nil {
+				for _, container := range managed {
+					if !container.Running {
+						continue
+					}
+					if container.RecipeID == r.ID {
+						return map[string]any{
+							"host_port": r.Service.DefaultHostPort, "occupied_by_previous_install": container.Name, "freed_during_start": true,
+						}, nil
+					}
+					// Every current recipe publishes the same host port; when
+					// multi-model serving lands this needs the holder's real
+					// port instead of assuming a conflict.
+					return nil, fmt.Errorf("port %d is held by the container of another model (%s, recipe %s); stop that model first", r.Service.DefaultHostPort, container.Name, container.RecipeID)
+				}
+			}
 			return nil, err
 		}
 		return map[string]any{"host_port": r.Service.DefaultHostPort, "available": true}, nil
@@ -190,7 +209,19 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := h.docker.Stop(ctx, containerName(r)); err != nil {
 			return nil, err
 		}
-		return map[string]any{"container_name": containerName(r), "stopped": true}, nil
+		// Containers from earlier recipe versions (cancelled installs,
+		// upgrades) hold the same host port; stop them too.
+		stopped := []string{containerName(r)}
+		if managed, err := h.docker.ManagedContainers(ctx); err == nil {
+			for _, container := range managed {
+				if container.RecipeID == r.ID && container.Running && container.Name != containerName(r) {
+					if err := h.docker.Stop(ctx, container.Name); err == nil {
+						stopped = append(stopped, container.Name)
+					}
+				}
+			}
+		}
+		return map[string]any{"container_name": containerName(r), "stopped": true, "stopped_containers": stopped}, nil
 	case "remove_container":
 		if err := h.docker.Remove(ctx, containerName(r)); err != nil {
 			return nil, err
