@@ -81,15 +81,19 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/v1/", server.proxyModel)
 	assets, _ := fs.Sub(webui.Assets, "assets")
 	fileServer := http.FileServer(http.FS(assets))
-	mux.Handle("/assets/", http.StripPrefix("/assets/", fileServer))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
+		if r.URL.Path == "/" {
+			data, _ := fs.ReadFile(assets, "index.html")
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write(data)
+			return
+		}
+		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		if _, err := fs.Stat(assets, name); err != nil {
 			http.NotFound(w, r)
 			return
 		}
-		data, _ := fs.ReadFile(assets, "index.html")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(data)
+		fileServer.ServeHTTP(w, r)
 	})
 	server.handler = securityHeaders(mux)
 	return server
