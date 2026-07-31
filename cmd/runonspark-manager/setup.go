@@ -50,7 +50,7 @@ func runSetup(args []string) int {
 				fmt.Fprintf(os.Stderr, "%s cannot locate this binary: %v\n", paint.red("✗"), err)
 				return 1
 			}
-			return finishInstall(ctx, local, setup.LocalFileSource{Path: executable}, prompter, *listen, nil, paint)
+			return finishInstall(ctx, local, setup.LocalFileSource{Path: executable}, prompter, *listen, nil, paint, false)
 		}
 	}
 
@@ -166,7 +166,7 @@ func runSetup(args []string) int {
 	fmt.Printf("%s Confirmed: %s (%s)\n", paint.green("✓"), paint.bold(identity.Product()), descriptor)
 
 	source := pickSource(*binary)
-	return finishInstall(ctx, runner, source, prompter, *listen, peers, paint)
+	return finishInstall(ctx, runner, source, prompter, *listen, peers, paint, true)
 }
 
 func displayHost(candidate discovery.Candidate) string {
@@ -186,8 +186,8 @@ func pickSource(binaryFlag string) setup.BinarySource {
 	return setup.ReleaseSource{}
 }
 
-func finishInstall(ctx context.Context, runner setup.Runner, source setup.BinarySource, prompter *terminalPrompter, listenFlag string, peers []string, paint style) int {
-	mode, err := chooseListen(prompter, listenFlag, paint)
+func finishInstall(ctx context.Context, runner setup.Runner, source setup.BinarySource, prompter *terminalPrompter, listenFlag string, peers []string, paint style, remote bool) int {
+	mode, err := chooseListen(prompter, listenFlag, paint, remote)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %v\n", paint.red("✗"), err)
 		return 1
@@ -227,8 +227,11 @@ func finishInstall(ctx context.Context, runner setup.Runner, source setup.Binary
 	return 0
 }
 
-// chooseListen mirrors install.sh's interface prompt.
-func chooseListen(prompter *terminalPrompter, listenFlag string, paint style) (setup.ListenMode, error) {
+// chooseListen asks which network the console should be reachable from.
+// Installing from another machine defaults to the local network (that is
+// where the operator is); installing on the machine itself defaults to
+// loopback, the conservative choice.
+func chooseListen(prompter *terminalPrompter, listenFlag string, paint style, remote bool) (setup.ListenMode, error) {
 	switch listenFlag {
 	case "loopback":
 		return setup.ListenLoopback, nil
@@ -240,25 +243,39 @@ func chooseListen(prompter *terminalPrompter, listenFlag string, paint style) (s
 	default:
 		return "", fmt.Errorf("unknown --listen value %q", listenFlag)
 	}
+	defaultChoice, defaultMode := "1", setup.ListenLoopback
+	if remote {
+		defaultChoice, defaultMode = "3", setup.ListenLAN
+	}
+	recommended := func(choice string) string {
+		if choice == defaultChoice {
+			return " " + paint.green("(recommended)")
+		}
+		return ""
+	}
 	if prompter.assumeYes {
-		return setup.ListenLoopback, nil
+		return defaultMode, nil
 	}
 	fmt.Println()
-	fmt.Println(paint.bold("Where should the RunOnSpark console be reachable?"))
-	fmt.Println("  1  The machine itself only (127.0.0.1)")
-	fmt.Println("  2  Your Tailscale network")
-	fmt.Println("  3  Your local network " + paint.dim("(opens in your browser when done)"))
-	answer, err := prompter.ask("Choice [1]: ")
+	fmt.Println(paint.bold("Who should be able to open the console?"))
+	fmt.Println("  1  Only this machine itself" + recommended("1") + "\n     " + paint.dim("Other devices would need an SSH tunnel."))
+	fmt.Println("  2  Your Tailscale devices" + recommended("2") + "\n     " + paint.dim("Reachable from anywhere via your tailnet."))
+	fmt.Println("  3  Any device on your local network" + recommended("3") + "\n     " + paint.dim("Phones, laptops — and it opens in your browser when done."))
+	answer, err := prompter.ask(fmt.Sprintf("Type 1, 2 or 3 — or press Enter for %s: ", defaultChoice))
 	if err != nil {
 		return "", err
 	}
 	switch strings.TrimSpace(answer) {
+	case "1":
+		return setup.ListenLoopback, nil
 	case "2":
 		return setup.ListenTailscale, nil
 	case "3":
 		return setup.ListenLAN, nil
+	case "":
+		return defaultMode, nil
 	default:
-		return setup.ListenLoopback, nil
+		return "", fmt.Errorf("%q is not one of the choices", strings.TrimSpace(answer))
 	}
 }
 

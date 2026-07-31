@@ -139,6 +139,21 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	if _, err := runner.Run(ctx, "getent group docker", nil); err != nil {
 		return Result{}, fmt.Errorf("Docker is not installed on %s; install Docker first, then rerun setup", runner.Describe())
 	}
+	// Fresh OEM GB10 machines often ship Docker without the NVIDIA runtime
+	// registered; models cannot start without it, so register it here.
+	runtimes, err := runner.RunPrivileged(ctx, "docker info --format '{{range $name, $ignored := .Runtimes}}{{$name}} {{end}}'", nil)
+	if err != nil {
+		return Result{}, fmt.Errorf("Docker daemon is not reachable on %s: %w", runner.Describe(), err)
+	}
+	if !strings.Contains(runtimes, "nvidia") {
+		if _, err := runner.Run(ctx, "command -v nvidia-ctk", nil); err != nil {
+			return Result{}, fmt.Errorf("the NVIDIA Container Toolkit is missing on %s; install nvidia-container-toolkit, then rerun setup", runner.Describe())
+		}
+		logf("registering the NVIDIA container runtime with Docker")
+		if _, err := runner.RunPrivileged(ctx, "nvidia-ctk runtime configure --runtime=docker && systemctl restart docker", nil); err != nil {
+			return Result{}, fmt.Errorf("register NVIDIA container runtime: %w", err)
+		}
+	}
 
 	staged, err := source.Stage(ctx, runner, logf)
 	if err != nil {

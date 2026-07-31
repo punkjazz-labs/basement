@@ -61,7 +61,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 			return nil, err
 		}
 		if !system.DGXSpark {
-			return nil, errors.New("DGX Spark hardware identity was not detected")
+			return nil, errors.New("GB10 hardware identity was not detected (DGX Spark or an OEM GB10 machine)")
 		}
 		return map[string]any{"product_name": system.ProductName, "dgx_spark": true}, nil
 	case "verify_memory_capacity", "verify_memory":

@@ -236,7 +236,7 @@ export const stateCopy: Record<string, string> = {
 
 export const operationCopy: Record<string, string> = {
   verify_architecture: 'Check system architecture',
-  verify_dgx_spark: 'Detect DGX Spark',
+  verify_dgx_spark: 'Detect GB10 hardware',
   verify_memory_capacity: 'Check memory capacity',
   verify_disk: 'Reserve disk space',
   verify_port: 'Check endpoint port',

@@ -66,8 +66,17 @@ func (h Host) Inspect(ctx context.Context) (System, error) {
 		Kernel: commandOutput(ctx, "uname", "-r"), ProductName: readFirst("/sys/devices/virtual/dmi/id/product_name", "/sys/class/dmi/id/product_name"),
 		DataDirectory: h.DataDir, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	product := strings.ToLower(s.ProductName)
-	s.DGXSpark = strings.Contains(product, "dgx spark") || strings.Contains(product, "gb10")
+	gpu := commandOutput(ctx, "nvidia-smi", "--query-gpu=name", "--format=csv,noheader")
+	s.GPUVisible = gpu != ""
+	s.GPUDescription = gpu
+	// GB10-class identity: DGX Spark and its OEM equivalents (ASUS Ascent
+	// GX10, MSI EdgeXpert, …) carry vendor DMI strings, so the GPU name and
+	// the device tree are checked too — nvidia-smi naming the GB10 chip is
+	// the authoritative signal.
+	identity := strings.ToLower(strings.Join([]string{
+		s.ProductName, gpu, readFirst("/proc/device-tree/model"),
+	}, "\n"))
+	s.DGXSpark = strings.Contains(identity, "dgx spark") || strings.Contains(identity, "gb10")
 	s.DataDirectoryWritable = directoryWritable(h.DataDir)
 	s.StorageAvailable, s.StorageTotal = diskSpace(h.DataDir)
 	s.MemoryAvailable, s.MemoryTotal = memorySpace()
@@ -79,21 +88,23 @@ func (h Host) Inspect(ctx context.Context) (System, error) {
 		s.DockerStorageAvailable, s.DockerStorageTotal = diskSpace(docker.RootDirectory)
 		s.DockerSharesDataDisk = sameFilesystem(h.DataDir, docker.RootDirectory)
 	}
-	gpu := commandOutput(ctx, "nvidia-smi", "--query-gpu=name", "--format=csv,noheader")
-	s.GPUVisible = gpu != ""
-	s.GPUDescription = gpu
 	s.GPUMemoryFree, s.GPUMemoryTotal, s.GPUPowerDrawWatts, s.GPUClockMHz, s.GPUTemperatureC = gpuTelemetry(ctx)
+	// GB10 machines have unified memory: nvidia-smi reports memory.total as
+	// [N/A], so system memory is the real GPU-visible capacity.
+	if s.DGXSpark && s.GPUMemoryTotal <= 0 && s.MemoryTotal > 0 {
+		s.GPUMemoryFree, s.GPUMemoryTotal = s.MemoryAvailable, s.MemoryTotal
+	}
 	if s.Architecture != "aarch64" {
 		s.Blocking = append(s.Blocking, "Linux ARM64 architecture is required")
 	}
 	if !s.DGXSpark {
-		s.Blocking = append(s.Blocking, "DGX Spark hardware identity was not detected")
+		s.Blocking = append(s.Blocking, "GB10 hardware identity was not detected (DGX Spark or an OEM GB10 machine)")
 	}
 	if !s.DockerReady {
 		s.Blocking = append(s.Blocking, "Docker daemon is not reachable")
 	}
 	if !s.NvidiaRuntimeReady {
-		s.Blocking = append(s.Blocking, "NVIDIA Container Runtime is not registered with Docker")
+		s.Blocking = append(s.Blocking, "NVIDIA Container Runtime is not registered with Docker — run: sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker")
 	}
 	if !s.GPUVisible {
 		s.Blocking = append(s.Blocking, "GPU is not visible through nvidia-smi")

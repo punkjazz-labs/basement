@@ -99,6 +99,7 @@ func TestValidateARM64ELF(t *testing.T) {
 
 func TestInstallRunsFullPlanForLAN(t *testing.T) {
 	runner := newFakeRunner()
+	runner.outputs["docker info"] = "io.containerd.runc.v2 nvidia runc \n"
 	runner.outputs["hostname -I"] = "192.168.99.134 \n"
 	runner.outputs["pairing-token"] = "tok-abc\n"
 	runner.outputs["hostname -s"] = "spark-head\n"
@@ -157,8 +158,34 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 	}
 }
 
+// A fresh OEM machine with Docker but no registered NVIDIA runtime gets the
+// runtime configured during install.
+func TestInstallRegistersNvidiaRuntimeWhenMissing(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "io.containerd.runc.v2 runc \n"
+	runner.outputs["pairing-token"] = "tok\n"
+	if _, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"}, Options{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.privileged, "\n")
+	if !strings.Contains(joined, "nvidia-ctk runtime configure --runtime=docker && systemctl restart docker") {
+		t.Error("install did not register the NVIDIA runtime")
+	}
+}
+
+func TestInstallExplainsMissingContainerToolkit(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "runc \n"
+	runner.failures["command -v nvidia-ctk"] = "not found"
+	_, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"}, Options{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "nvidia-container-toolkit") {
+		t.Fatalf("expected a toolkit guidance error, got %v", err)
+	}
+}
+
 func TestInstallLoopbackRemovesDropInAndReportsTunnelURL(t *testing.T) {
 	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
 	runner.outputs["pairing-token"] = "tok\n"
 	result, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"}, Options{Listen: ListenLoopback}, nil)
 	if err != nil {
@@ -184,6 +211,7 @@ func TestInstallRefusesWithoutDocker(t *testing.T) {
 
 func TestInstallTailscaleModeNeedsTailscaleAddress(t *testing.T) {
 	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
 	runner.outputs["tailscale ip -4"] = "\n"
 	if _, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"}, Options{Listen: ListenTailscale}, nil); err == nil {
 		t.Fatal("tailscale mode succeeded without a tailscale address")
