@@ -213,6 +213,37 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 	return result.ID, nil
 }
 
+// Logs returns the last lines of a container's output, for diagnostics when
+// a model fails to come up. Docker multiplexes streams with an 8-byte frame
+// header; strip those and keep printable text.
+func (d *DockerClient) Logs(ctx context.Context, name string, tail int) string {
+	resp, err := d.request(ctx, http.MethodGet, "/containers/"+url.PathEscape(name)+"/logs?stdout=1&stderr=1&tail="+fmt.Sprint(tail), nil)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if err != nil {
+		return ""
+	}
+	var text strings.Builder
+	for offset := 0; offset+8 <= len(raw); {
+		size := int(raw[offset+4])<<24 | int(raw[offset+5])<<16 | int(raw[offset+6])<<8 | int(raw[offset+7])
+		start := offset + 8
+		end := start + size
+		if size < 0 || end > len(raw) {
+			// Not stream-multiplexed (tty container): return as-is.
+			return strings.TrimSpace(string(raw))
+		}
+		text.Write(raw[start:end])
+		offset = end
+	}
+	return strings.TrimSpace(text.String())
+}
+
 func (d *DockerClient) Start(ctx context.Context, name string) error {
 	return d.action(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/start", http.StatusNoContent, http.StatusNotModified)
 }

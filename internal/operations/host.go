@@ -363,6 +363,18 @@ func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress P
 		if err := h.health(ctx, r); err == nil {
 			return map[string]any{"url": h.modelURL(r) + "/health", "attempts": attempt, "status": "ready"}, nil
 		}
+		// A dead container never becomes healthy — fail immediately with its
+		// exit state and last output instead of burning the whole deadline.
+		if attempt%5 == 0 {
+			if state, err := h.docker.Container(ctx, containerName(r)); err == nil && !state.Running {
+				logs := h.docker.Logs(ctx, containerName(r), 40)
+				detail := ""
+				if logs != "" {
+					detail = "; last container output:\n" + logs
+				}
+				return nil, fmt.Errorf("the model container exited during startup (%s)%s", state.Status, detail)
+			}
+		}
 		if progress != nil {
 			if err := progress(map[string]any{"url": h.modelURL(r) + "/health", "attempt": attempt, "status": "waiting"}); err != nil {
 				return nil, fmt.Errorf("persist health progress: %w", err)
@@ -373,6 +385,10 @@ func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress P
 			return nil, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
+	}
+	logs := h.docker.Logs(ctx, containerName(r), 40)
+	if logs != "" {
+		return nil, fmt.Errorf("vLLM did not become HTTP-ready within 20 minutes; last container output:\n%s", logs)
 	}
 	return nil, errors.New("vLLM did not become HTTP-ready within 20 minutes")
 }
