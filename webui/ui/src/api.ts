@@ -15,6 +15,8 @@ export interface Recipe {
   version: number
   display_name: string
   publisher: string
+  model_by?: string
+  recipe_by?: string
   trust: string
   verification: string
   source: { url: string; revision: string }

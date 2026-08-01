@@ -3,6 +3,8 @@ id: qwen36-27b-nvfp4-1s
 version: 4
 display_name: Qwen 3.6 27B
 publisher: MiaAI Lab + NVIDIA
+model_by: Qwen team, Alibaba
+recipe_by: MiaAI Lab
 trust: runonspark-candidate
 verification: candidate
 source:

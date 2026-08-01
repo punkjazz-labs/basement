@@ -6,6 +6,11 @@ type Recipe struct {
 	Version       int          `yaml:"version" json:"version"`
 	DisplayName   string       `yaml:"display_name" json:"display_name"`
 	Publisher     string       `yaml:"publisher" json:"publisher"`
+	// Attribution is three separate facts: the lab that made the model, and
+	// the author of this serving recipe. The weights builder is derived from
+	// the artifact repository owner. Publisher remains the display byline.
+	ModelBy  string `yaml:"model_by" json:"model_by"`
+	RecipeBy string `yaml:"recipe_by" json:"recipe_by"`
 	Trust         string       `yaml:"trust" json:"trust"`
 	Verification  string       `yaml:"verification" json:"verification"`
 	Source        Source       `yaml:"source" json:"source"`

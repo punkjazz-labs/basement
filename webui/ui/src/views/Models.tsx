@@ -277,14 +277,14 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
               </div>
             </div>
             <dl className="facts">
-              <dt>Model by</dt><dd>{recipe.publisher.split(' + ')[0]}</dd>
+              <dt>Model by</dt><dd>{recipe.model_by || recipe.publisher}</dd>
               <dt>Weights build</dt>
               <dd>
                 {recipe.artifacts[0]
                   ? `${readableWeights(recipe.artifacts[0].repository).quant ?? 'Original'} by ${ownerName(recipe.artifacts[0].repository)}`
                   : 'n/a'}
               </dd>
-              <dt>Recipe</dt><dd>RunOnSpark, pinned and verified</dd>
+              <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
               <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
               <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
@@ -331,7 +331,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             <div className="hero-name">
               <p className="kicker">Recommended for your Spark</p>
               <h2>{featured.display_name}</h2>
-              <p className="pub">{featured.publisher}</p>
+              <p className="pub">{featured.model_by || featured.publisher}</p>
             </div>
             <div className="hero-get">
               <button
