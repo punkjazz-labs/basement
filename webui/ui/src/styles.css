@@ -243,6 +243,11 @@ input[type='text'], input[type='password'], textarea {
   height: 32px; background: var(--panel); border-bottom: 1px solid var(--line);
   font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
 }
+.mgroup {
+  padding: 10px 16px 6px; background: var(--panel); border-bottom: 1px solid var(--line);
+  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+}
+.mgroup + .mgroup, .mrow + .mgroup, .mdetail + .mgroup { border-top: 1px solid var(--line); margin-top: 0; }
 .mthead .r { text-align: right; }
 .mrow { min-height: 62px; border-bottom: 1px solid var(--line); padding-block: 10px; cursor: pointer; }
 .mrow:hover { background: var(--hover); }

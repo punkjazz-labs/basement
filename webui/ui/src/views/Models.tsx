@@ -140,6 +140,10 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
   const firstRun = models.length === 0
   const featured = firstRun ? sorted.find(recipe => recipe.id === ORDER[0]) : undefined
   const rows = featured ? sorted.filter(recipe => recipe.id !== featured.id) : sorted
+  // Installed models are the user's own shelf; they always sit above the
+  // remaining catalog, each group keeping the curated order.
+  const installedRows = rows.filter(recipe => installed.has(recipe.id))
+  const availableRows = rows.filter(recipe => !installed.has(recipe.id))
 
   const rowFor = (recipe: Recipe) => {
     const model = installed.get(recipe.id)
@@ -316,7 +320,16 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
         <div className="mthead" aria-hidden="true">
           <span>Model</span><span className="r">Speed</span><span className="r">Disk</span><span style={{ paddingLeft: 20 }}>Status</span><span />
         </div>
-        {rows.map(rowFor)}
+        {installedRows.length > 0 && availableRows.length > 0 ? (
+          <>
+            <div className="mgroup">On this Spark</div>
+            {installedRows.map(rowFor)}
+            <div className="mgroup">Available to install</div>
+            {availableRows.map(rowFor)}
+          </>
+        ) : (
+          rows.map(rowFor)
+        )}
       </div>
       <p className="table-note">
         Speeds marked “typical” are community-reported for a DGX Spark; RunOnSpark measures the real number after install.
