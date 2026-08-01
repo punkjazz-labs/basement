@@ -1,25 +1,14 @@
 import { useEffect, useState } from 'react'
 import { api, idempotency, formatBytes, type StorageInfo } from '../api'
 import type { AppState } from '../App'
-import { logoFor } from '../catalog'
+import { logoFor, ownerName, readableWeights } from '../catalog'
 import { confirmBox, noticeBox } from '../confirm'
 
-const QUANTS = new Set(['NVFP4', 'FP8', 'FP4', 'INT8', 'INT4', 'BF16', 'FP16', 'AWQ', 'GPTQ', 'GGUF'])
-const PUBLISHERS: Record<string, string> = { nvidia: 'NVIDIA', poolside: 'poolside', unsloth: 'Unsloth', qwen: 'Qwen' }
-
-// "poolside/Laguna-S-2.1-NVFP4" reads as "Laguna S 2.1" with NVFP4 called out
-// as the quantization, so the row speaks the model's name, not its repo path.
-function readableWeights(repository: string): { name: string; quant?: string } {
-  const basename = repository.split('/').pop() ?? repository
-  let quant: string | undefined
-  const words = basename.split(/[-_]/).filter(word => {
-    if (QUANTS.has(word.toUpperCase())) {
-      quant = word.toUpperCase()
-      return false
-    }
-    return true
-  })
-  return { name: words.join(' ').replace(/^([A-Za-z]+?)(\d)/, '$1 $2'), quant }
+type Artifact = StorageInfo['artifacts'][number]
+interface ModelGroup {
+  recipeID: string
+  artifacts: Artifact[]
+  bytes: number
 }
 
 export default function Storage({ recipes, models, openDeployment, refreshModelsAndJobs }: AppState) {
@@ -70,24 +59,25 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
     }
   }
 
-  const deleteFiles = async (artifact: StorageInfo['artifacts'][number]) => {
-    const { name } = readableWeights(artifact.repository)
+  const deleteArtifacts = async (title: string, artifacts: Artifact[], bytes: number) => {
     const { ok } = await confirmBox({
-      title: `Delete the ${name} files?`,
-      body: `Frees ${formatBytes(artifact.bytes)}. A future install downloads them again.`,
+      title: `Delete the ${title} files?`,
+      body: `Frees ${formatBytes(bytes)}. A future install downloads them again.`,
       confirmLabel: 'Delete files',
       danger: true,
     })
     if (!ok) return
     try {
-      await api('/api/v1/storage/artifacts', {
-        method: 'DELETE',
-        body: JSON.stringify({ repository: artifact.repository, revision: artifact.revision }),
-      })
-      load()
+      for (const artifact of artifacts) {
+        await api('/api/v1/storage/artifacts', {
+          method: 'DELETE',
+          body: JSON.stringify({ repository: artifact.repository, revision: artifact.revision }),
+        })
+      }
     } catch (problem) {
       noticeBox('Could not delete the files', problem instanceof Error ? problem.message : undefined)
     }
+    load()
   }
 
   if (error) return <div className="empty">{error}</div>
@@ -123,31 +113,72 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
           <h2 style={{ fontSize: 16 }}>Downloaded models</h2>
           <span className="muted">Uninstall a model or delete leftover downloads to reclaim space</span>
         </div>
-        {info.artifacts.map(artifact => {
-          const { name, quant } = readableWeights(artifact.repository)
-          const owner = artifact.repository.split('/')[0] ?? ''
-          const publisher = PUBLISHERS[owner.toLowerCase()] ?? owner
-          const usedBy = artifact.recipe_ids.map(recipeName).join(', ')
-          const installedRecipe = artifact.recipe_ids.find(id => models.some(model => model.recipe_id === id))
+        {(() => {
+          // One row per model: people think in models, not weight repositories.
+          // Files with no owning recipe stay as their own rows below.
+          const groups: ModelGroup[] = []
+          const orphans: Artifact[] = []
+          for (const artifact of info.artifacts) {
+            const recipeID = artifact.recipe_ids[0]
+            if (!recipeID) {
+              orphans.push(artifact)
+              continue
+            }
+            const group = groups.find(item => item.recipeID === recipeID)
+            if (group) {
+              group.artifacts.push(artifact)
+              group.bytes += artifact.bytes
+            } else {
+              groups.push({ recipeID, artifacts: [artifact], bytes: artifact.bytes })
+            }
+          }
+          groups.sort((a, b) => b.bytes - a.bytes)
           return (
-            <div className="storage-row" key={`${artifact.repository}@${artifact.revision}`}>
-              <img src={logoFor(artifact.recipe_ids)} alt="" width="24" height="24" />
-              <div className="grow">
-                <strong>{name}</strong>
-                <div className="faint" style={{ fontSize: 12 }}>
-                  {quant ? `${quant} weights by ${publisher}` : `Weights by ${publisher}`}
-                  {usedBy ? ` · Used by ${usedBy}` : ' · Not used by any current model'}
-                </div>
-              </div>
-              <span className="bytes">{formatBytes(artifact.bytes)}</span>
-              {installedRecipe ? (
-                <button className="quiet" onClick={() => uninstall(installedRecipe)}>Uninstall</button>
-              ) : (
-                <button className="quiet" onClick={() => deleteFiles(artifact)}>Delete</button>
-              )}
-            </div>
+            <>
+              {groups.map(group => {
+                const primary = group.artifacts[0]
+                const { quant } = readableWeights(primary.repository)
+                const publisher = ownerName(primary.repository)
+                const installed = models.some(model => model.recipe_id === group.recipeID)
+                return (
+                  <div className="storage-row" key={group.recipeID}>
+                    <img src={logoFor([group.recipeID])} alt="" width="24" height="24" />
+                    <div className="grow">
+                      <strong>{recipeName(group.recipeID)}</strong>
+                      <div className="faint" style={{ fontSize: 12 }}>
+                        {quant ? `${quant} weights by ${publisher}` : `Weights by ${publisher}`}
+                        {group.artifacts.length > 1 ? ` · ${group.artifacts.length} parts` : ''}
+                      </div>
+                    </div>
+                    <span className="bytes">{formatBytes(group.bytes)}</span>
+                    {installed ? (
+                      <button className="quiet" onClick={() => uninstall(group.recipeID)}>Uninstall</button>
+                    ) : (
+                      <button className="quiet" onClick={() => deleteArtifacts(recipeName(group.recipeID), group.artifacts, group.bytes)}>Delete</button>
+                    )}
+                  </div>
+                )
+              })}
+              {orphans.map(artifact => {
+                const { name, quant } = readableWeights(artifact.repository)
+                return (
+                  <div className="storage-row" key={`${artifact.repository}@${artifact.revision}`}>
+                    <img src={logoFor([])} alt="" width="24" height="24" />
+                    <div className="grow">
+                      <strong>{name}</strong>
+                      <div className="faint" style={{ fontSize: 12 }}>
+                        {quant ? `${quant} weights by ${ownerName(artifact.repository)}` : `Weights by ${ownerName(artifact.repository)}`}
+                        {' · Not used by any current model'}
+                      </div>
+                    </div>
+                    <span className="bytes">{formatBytes(artifact.bytes)}</span>
+                    <button className="quiet" onClick={() => deleteArtifacts(name, [artifact], artifact.bytes)}>Delete</button>
+                  </div>
+                )
+              })}
+            </>
           )
-        })}
+        })()}
         {info.artifacts.length === 0 && <p className="muted">No model downloads yet.</p>}
       </section>
 

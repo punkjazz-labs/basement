@@ -205,7 +205,7 @@ export default function App() {
       <a className="skip-link" href="#main">Skip to content</a>
       <aside className="side">
         <a className="side-mark" href="/" aria-label="RunOnSpark Manager">
-          <span className="dot" aria-hidden="true" />
+          <img src="/favicon.svg" alt="" width="20" height="20" />
           <strong>RunOnSpark</strong>
         </a>
         <nav aria-label="Console sections">

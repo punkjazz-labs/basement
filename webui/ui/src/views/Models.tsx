@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { api, idempotency, terminal, formatBytes, type Job, type Preflight, type Recipe, type StorageInfo } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
-import { LOGOS } from '../catalog'
+import { LOGOS, ownerName, readableWeights } from '../catalog'
 
 const USE: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
@@ -277,13 +277,20 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
               </div>
             </div>
             <dl className="facts">
-              <dt>Publisher</dt><dd>{recipe.publisher}</dd>
+              <dt>Model by</dt><dd>{recipe.publisher.split(' + ')[0]}</dd>
+              <dt>Weights build</dt>
+              <dd>
+                {recipe.artifacts[0]
+                  ? `${readableWeights(recipe.artifacts[0].repository).quant ?? 'Original'} by ${ownerName(recipe.artifacts[0].repository)}`
+                  : 'n/a'}
+              </dd>
+              <dt>Recipe</dt><dd>RunOnSpark, pinned and verified</dd>
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
               <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
               <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
               {recipe.artifacts.map(artifact => (
                 <Fragment key={artifact.role}>
-                  <dt>{artifact.role}</dt>
+                  <dt>{artifact.role === 'primary' ? 'Weights' : artifact.role === 'drafter' ? 'Draft weights' : artifact.role}</dt>
                   <dd>
                     <code>{artifact.repository}@{artifact.revision.slice(0, 12)}</code>{' '}
                     <a href={artifact.licence_url} target="_blank" rel="noreferrer">{artifact.licence} licence ↗</a>

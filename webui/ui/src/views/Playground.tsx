@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { logoFor } from '../catalog'
 
 interface Message {
@@ -14,6 +16,11 @@ const visibleText = (text: string) =>
     .replace(/<think>[\s\S]*?(?:<\/think>|$)/g, '')
     .replace(/^\s*<\/think>/, '')
     .replace(/^\s+/, '')
+
+// Models speak markdown; render it, sanitized, so replies read like answers
+// rather than markup.
+const renderMarkdown = (text: string) =>
+  DOMPurify.sanitize(marked.parse(text, { async: false }) as string)
 
 // Streams straight through the manager's own /v1 proxy using the console
 // session — the same endpoint and behavior an API-key client gets.
@@ -137,25 +144,36 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
           <strong>{modelName}</strong>
           <div className="faint">Serving on this Spark, through your own endpoint</div>
         </div>
-        <span className="spacer" />
-        {messages.length > 0 && (
-          <button className="quiet" onClick={() => { setMessages([]); setStats('') }}>Clear</button>
-        )}
       </div>
       <div className="chat card" ref={chatRef} aria-live="polite">
         {messages.length === 0 && (
           <p className="chat-hint">Send a message. The reply streams from your Spark, token by token.</p>
         )}
-        {messages.map((message, index) => (
-          <div
-            key={index}
-            className={`msg ${message.role} ${streaming && index === messages.length - 1 ? 'streaming' : ''}`}
-          >
-            {message.role === 'assistant' ? visibleText(message.content) : message.content}
-          </div>
-        ))}
+        {messages.map((message, index) => {
+          const last = index === messages.length - 1
+          if (message.role === 'user') {
+            return <div key={index} className="msg user">{message.content}</div>
+          }
+          const text = visibleText(message.content)
+          const waiting = streaming && last && !text
+          return (
+            <div key={index} className={`msg assistant ${streaming && last ? 'streaming' : ''} ${waiting ? 'waiting' : ''}`}>
+              {waiting
+                ? <span className="thinking">Thinking</span>
+                : <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />}
+            </div>
+          )
+        })}
       </div>
-      {stats && <p className="chat-meta">{stats}</p>}
+      {messages.length > 0 && (
+        <div className="chat-foot">
+          {stats && <p className="chat-meta">{stats}</p>}
+          <span className="spacer" />
+          {!streaming && (
+            <button className="quiet" onClick={() => { setMessages([]); setStats('') }}>Clear conversation</button>
+          )}
+        </div>
+      )}
       <div className="composer">
         <textarea
           value={draft}
