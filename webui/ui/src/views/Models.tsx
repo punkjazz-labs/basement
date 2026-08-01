@@ -1,5 +1,5 @@
-import { Fragment, useMemo, useRef, useState } from 'react'
-import { api, idempotency, terminal, formatBytes, type Job, type Preflight, type Recipe } from '../api'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { api, idempotency, terminal, formatBytes, type Job, type Preflight, type Recipe, type StorageInfo } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 
@@ -34,7 +34,14 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
   const [licence, setLicence] = useState(false)
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState('')
+  const [storage, setStorage] = useState<StorageInfo | null>(null)
   const dialogRef = useRef<HTMLDialogElement>(null)
+
+  // Storage tells us which recipes already have model files on disk, so a
+  // partially downloaded model can offer to resume instead of start over.
+  useEffect(() => {
+    api<StorageInfo>('/api/v1/storage').then(setStorage).catch(() => {})
+  }, [jobs.length])
 
   const installed = useMemo(() => new Map(models.map(model => [model.recipe_id, model])), [models])
   const sorted = useMemo(
@@ -44,6 +51,20 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
   const detected = system?.hardware_scope.detected_spark_count ?? 0
   const blockers = system?.blocking_conditions ?? []
   const activeOther = (id: string) => models.find(model => model.active && model.recipe_id !== id)
+  const downloadedBytes = (recipe: Recipe) =>
+    storage?.artifacts.filter(a => a.recipe_ids.includes(recipe.id)).reduce((sum, a) => sum + a.bytes, 0) ?? 0
+  // Label honesty for a not-installed model with files already on disk:
+  // partial data resumes, a kept complete download reinstalls quickly.
+  const installVerb = (recipe: Recipe) => {
+    if (installed.has(recipe.id)) return 'Install'
+    const bytes = downloadedBytes(recipe)
+    if (bytes <= 0) return 'Install'
+    return bytes >= recipe.artifact_bytes * 0.99 ? 'Reinstall' : 'Resume install'
+  }
+  // The licence was accepted when the first install of this recipe was
+  // confirmed; a resume or reinstall never asks again.
+  const licenceAccepted = (recipe: Recipe) =>
+    jobs.some(job => job.recipe_id === recipe.id && job.kind === 'install')
 
   const setBusy = (id: string, busy: boolean) => {
     setPending(previous => {
@@ -75,7 +96,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
     run(recipe.id, async () => {
       const preflight = await api<Preflight>(`/api/v1/preflight?recipe_id=${encodeURIComponent(recipe.id)}`)
       setConfirm({ recipe, preflight, switchFrom: activeOther(recipe.id)?.recipe_id })
-      setLicence(false)
+      setLicence(licenceAccepted(recipe))
       requestAnimationFrame(() => dialogRef.current?.showModal())
     })
 
@@ -219,7 +240,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
           <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
             {!model && (
               <button className="primary" disabled={busy || !fits} onClick={act(() => startInstall(recipe))}>
-                {busy ? 'Working' : fits ? 'Install' : 'Needs a Spark'}
+                {busy ? 'Working' : fits ? installVerb(recipe) : 'Needs a Spark'}
               </button>
             )}
             {model && isActive && (
@@ -317,7 +338,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                 disabled={pending.has(featured.id) || detected < featured.topology.spark_count}
                 onClick={() => startInstall(featured)}
               >
-                {detected >= featured.topology.spark_count ? 'Install' : 'Needs a Spark'}
+                {detected >= featured.topology.spark_count ? installVerb(featured) : 'Needs a Spark'}
               </button>
               <small>{formatBytes(featured.artifact_bytes)} download</small>
             </div>
@@ -360,7 +381,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
           <form method="dialog" className="dialog-pad" onSubmit={event => event.preventDefault()}>
             <div className="dialog-head">
               <div>
-                <p className="kicker">Install model</p>
+                <p className="kicker">{installVerb(confirm.recipe) === 'Install' ? 'Install model' : installVerb(confirm.recipe)}</p>
                 <h2>{confirm.recipe.display_name}</h2>
               </div>
               <button type="button" className="dialog-close" onClick={() => dialogRef.current?.close()} aria-label="Close">×</button>
@@ -368,7 +389,14 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             {confirm.preflight.ready ? (
               <>
                 <dl className="model-facts">
-                  <div><dt>Download</dt><dd>{formatBytes(confirm.recipe.artifact_bytes)}</dd></div>
+                  <div>
+                    <dt>Download</dt>
+                    <dd>
+                      {installVerb(confirm.recipe) === 'Resume install'
+                        ? `${formatBytes(Math.max(confirm.recipe.artifact_bytes - downloadedBytes(confirm.recipe), 0))} to go`
+                        : formatBytes(confirm.recipe.artifact_bytes)}
+                    </dd>
+                  </div>
                   <div><dt>Space needed</dt><dd>{formatBytes(confirm.recipe.required_bytes)}</dd></div>
                   <div><dt>RAM kept free</dt><dd>{formatBytes(confirm.recipe.requirements.per_node_memory_reserve_bytes)}</dd></div>
                 </dl>
@@ -386,14 +414,20 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                 <a href={confirm.recipe.artifacts[0].licence_url} target="_blank" rel="noreferrer">
                   Read the {confirm.recipe.artifacts[0].licence} licence ↗
                 </a>
-                <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <input type="checkbox" checked={licence} onChange={event => setLicence(event.target.checked)} />
-                  I accept the model licence
-                </label>
+                {licenceAccepted(confirm.recipe) ? (
+                  <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+                    Licence already accepted with the first install of this model.
+                  </p>
+                ) : (
+                  <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input type="checkbox" checked={licence} onChange={event => setLicence(event.target.checked)} />
+                    I accept the model licence
+                  </label>
+                )}
                 <div className="dialog-foot">
                   <button type="button" className="ghost" onClick={() => dialogRef.current?.close()}>Cancel</button>
                   <button type="button" className="primary" disabled={!licence} onClick={confirmInstall}>
-                    Install
+                    {installVerb(confirm.recipe)}
                   </button>
                 </div>
               </>

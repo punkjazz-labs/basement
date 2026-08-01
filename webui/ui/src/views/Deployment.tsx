@@ -92,7 +92,7 @@ function LiveProgress({ step }: { step: Step }) {
       )}
       <div className="stats">
         <span className="mono nums">{left}</span>
-        {right && <span className="mono nums side">{right}</span>}
+        {right && <span className="mono nums eta">{right}</span>}
       </div>
     </div>
   )
