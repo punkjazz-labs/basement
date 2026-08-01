@@ -39,6 +39,11 @@ type Server struct {
 	recipes   []recipe.Recipe
 	handler   http.Handler
 	metrics   *http.Client
+	// closing releases long-lived SSE streams the moment shutdown starts, so
+	// a service restart never waits out the graceful-drain timeout on
+	// progress streams that would otherwise stay open forever.
+	closing   chan struct{}
+	closeOnce sync.Once
 
 	updateMu      sync.Mutex
 	updateResult  map[string]any
@@ -60,7 +65,7 @@ type preflightResponse struct {
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, recipes: recipes, metrics: &http.Client{Timeout: 3 * time.Second}}
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, recipes: recipes, metrics: &http.Client{Timeout: 3 * time.Second}, closing: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.health)
 	mux.HandleFunc("/api/v1/auth/pair", server.pair)
@@ -542,9 +547,17 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, jobID string) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-s.closing:
+			return
 		case <-ticker.C:
 		}
 	}
+}
+
+// Close releases every long-lived stream so graceful shutdown completes
+// immediately. Registered with the HTTP server's shutdown hooks.
+func (s *Server) Close() {
+	s.closeOnce.Do(func() { close(s.closing) })
 }
 
 func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {

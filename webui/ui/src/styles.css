@@ -307,6 +307,8 @@ input[type='text'], input[type='password'], textarea {
 dialog {
   background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong);
   border-radius: 12px; box-shadow: 0 20px 60px rgb(10 14 8 / 0.2); padding: 0; max-width: 560px; width: calc(100vw - 40px);
+  /* A modal must never scroll sideways; sub-pixel spill clips instead. */
+  overflow-x: hidden;
 }
 dialog::backdrop { background: rgb(12 14 10 / 0.45); backdrop-filter: blur(2px); }
 .dialog-pad { padding: 20px 24px; display: grid; gap: 14px; }
@@ -352,9 +354,9 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .phase-list b { width: 126px; text-align: right; flex: none; font-weight: 500; font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 .sub-progress { display: grid; gap: 4px; margin-top: 6px; max-width: 420px; }
-.sub-progress .stats { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.sub-progress .stats { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; min-width: 0; overflow: hidden; }
 .sub-progress .stats span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sub-progress .stats .eta { color: var(--faint); flex: none; }
+.sub-progress .stats .eta { color: var(--faint); flex: 0 1 auto; }
 .sub-progress .bar {
   height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden;
 }

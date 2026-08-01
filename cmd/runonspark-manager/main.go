@@ -78,6 +78,9 @@ func main() {
 	}
 	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, recipes)
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
+	// Progress streams stay open indefinitely by design; without this hook a
+	// restart waits out the whole drain timeout whenever a console is open.
+	server.RegisterOnShutdown(api.Close)
 	go func() {
 		logger.Info("manager listening", "address", cfg.Listen, "pairing_token_path", authManager.PairingTokenPath(), "version", cfg.Version)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
