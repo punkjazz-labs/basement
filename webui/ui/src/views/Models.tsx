@@ -111,7 +111,11 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
   }
 
   const remove = (recipe: Recipe) => {
-    if (!window.confirm(`Remove the ${recipe.display_name} runtime and configuration?`)) return
+    const serving = installed.get(recipe.id)?.active
+    const intro = serving
+      ? `Uninstall ${recipe.display_name}?\n\nIt is currently serving and will be stopped first.`
+      : `Uninstall the ${recipe.display_name} runtime and configuration?`
+    if (!window.confirm(intro)) return
     const removeArtifacts = window.confirm(
       `Also delete ${formatBytes(recipe.artifact_bytes)} of downloaded model data? Cancel keeps the download for a fast reinstall.`,
     )
@@ -215,7 +219,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             )}
             {model && !isActive && model.status !== 'recovering' && (
               <>
-                <button className="quiet" disabled={busy} onClick={act(() => remove(recipe))}>Remove</button>
+                <button className="quiet" disabled={busy} onClick={act(() => remove(recipe))}>Uninstall</button>
                 <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
                   {activeOther(recipe.id) ? 'Switch to' : 'Start'}
                 </button>
@@ -263,9 +267,12 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                 </Fragment>
               ))}
             </dl>
-            {model && isActive && (
+            {model && (
               <div className="row-tools">
-                <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
+                {isActive && (
+                  <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
+                )}
+                <button className="danger" disabled={busy} onClick={() => remove(recipe)}>Uninstall</button>
               </div>
             )}
           </div>

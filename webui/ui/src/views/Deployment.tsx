@@ -189,11 +189,21 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
   const succeeded = terminal(job.state) && job.state !== 'failed' && job.state !== 'cancelled'
   const recipe = recipes.find(item => item.id === job.recipe_id)
   const verb = { install: 'Deploy', start: 'Start', stop: 'Stop', remove: 'Remove', 'smoke-test': 'Test', benchmark: 'Measure' }[job.kind] ?? 'Manage'
+  // A benchmark or smoke test is not a deployment; every piece of copy in
+  // this dialog follows the job's own noun.
+  const noun = { install: 'deployment', start: 'start', stop: 'stop', remove: 'removal', 'smoke-test': 'test', benchmark: 'measurement' }[job.kind] ?? 'job'
+  const kicker = { 'smoke-test': 'Model test', benchmark: 'Speed measurement' }[job.kind] ?? 'Deployment'
   const current = [...job.steps].reverse().find(step => step.state === 'running')
     ?? [...job.steps].reverse().find(step => step.state === 'failed')
+  const benchReceipt = succeeded && job.kind === 'benchmark'
+    ? [...job.steps].reverse().find(step => step.operation === 'measure_throughput' && step.state === 'completed')?.receipt
+    : undefined
 
   const cancel = async () => {
-    if (!window.confirm('Cancel this deployment?\n\nDownloads are resumable — installing again later picks up where this left off.')) return
+    const question = job.kind === 'install'
+      ? 'Cancel this deployment?\n\nDownloads are resumable — installing again later picks up where this left off.'
+      : `Cancel this ${noun}?`
+    if (!window.confirm(question)) return
     try {
       await api(`/api/v1/jobs/${encodeURIComponent(job.id)}/cancel`, { method: 'POST', body: '{}' })
     } catch (problem) {
@@ -206,7 +216,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
       <div className="dialog-pad">
         <div className="dialog-head">
           <div>
-            <p className="kicker">Deployment</p>
+            <p className="kicker">{kicker}</p>
             <h2>{verb} {recipe?.display_name ?? job.recipe_id}</h2>
           </div>
           <button className="dialog-close" onClick={onClose} aria-label="Close">×</button>
@@ -243,6 +253,22 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
           })}
         </ol>
         {job.error && <p className="error-text" role="alert">{job.error}</p>}
+        {benchReceipt && (
+          <div className="dialog-result" role="status">
+            <div className="cell">
+              <div className="l">Generation speed</div>
+              <div className="v">{typeof benchReceipt.tokens_per_second === 'number' ? benchReceipt.tokens_per_second.toFixed(1) : '—'} <small>tok/s</small></div>
+            </div>
+            <div className="cell">
+              <div className="l">First token</div>
+              <div className="v">{typeof benchReceipt.time_to_first_token_ms === 'number' ? Math.round(benchReceipt.time_to_first_token_ms) : '—'} <small>ms</small></div>
+            </div>
+            <div className="cell">
+              <div className="l">Sample</div>
+              <div className="v">{typeof benchReceipt.completion_tokens === 'number' ? benchReceipt.completion_tokens : '—'} <small>tokens</small></div>
+            </div>
+          </div>
+        )}
         <details>
           <summary className="muted">Technical receipts</summary>
           <ul className="receipts">
@@ -258,11 +284,18 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
         </details>
         <div className="dialog-foot">
           <span className="note">
-            {succeeded && (job.kind === 'install' || job.kind === 'start')
-              ? `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`
-              : 'Closing this window does not stop the deployment.'}
+            {succeeded
+              ? {
+                  install: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
+                  start: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
+                  benchmark: 'Measured with a real request on this Spark.',
+                  'smoke-test': 'The model answered a real inference request.',
+                  stop: 'The model has stopped.',
+                  remove: 'The model has been removed.',
+                }[job.kind] ?? 'Finished.'
+              : `Closing this window does not stop the ${noun}.`}
           </span>
-          {!terminal(job.state) && <button className="danger" onClick={cancel}>Cancel deployment</button>}
+          {!terminal(job.state) && <button className="danger" onClick={cancel}>Cancel {noun}</button>}
           {succeeded && (job.kind === 'install' || job.kind === 'start') && (
             <button className="brand" onClick={onOpenPlayground}>Try it in the playground</button>
           )}
