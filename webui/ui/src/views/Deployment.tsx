@@ -122,9 +122,7 @@ function LiveProgress({ step }: { step: Step }) {
     const total = asNumber(receipt.bytes_total)
     if (total <= 0) return null
     const rate = smoothedRate(`artifact:${step.index}:${receipt.repository ?? ''}`, done)
-    const file = typeof receipt.file === 'string' ? fileLabel(receipt.file) : ''
-    const left = `${file ? `${file} · ` : ''}${bytePair(done, total)}`
-    return row(Math.min((done / total) * 100, 100), left, speedAndETA(rate, total - done))
+    return row(Math.min((done / total) * 100, 100), bytePair(done, total), speedAndETA(rate, total - done))
   }
 
   if (step.operation === 'wait_http') {
@@ -153,7 +151,7 @@ function LiveProgress({ step }: { step: Step }) {
       const rate = smoothedRate(`pull:${step.index}`, done)
       return row(
         Math.min((done / total) * 100, 100),
-        `Runtime image · ${bytePair(done, total)}`,
+        bytePair(done, total),
         speedAndETA(rate, total - done),
       )
     }
@@ -161,14 +159,6 @@ function LiveProgress({ step }: { step: Step }) {
   }
 
   return null
-}
-
-// fileLabel turns sharded artifact names like model-00003-of-00015.safetensors
-// into "File 3 of 15"; anything else keeps its own name.
-function fileLabel(name: string): string {
-  const shard = name.match(/(\d+)-of-0*(\d+)/)
-  if (shard) return `File ${parseInt(shard[1], 10)} of ${parseInt(shard[2], 10)}`
-  return name
 }
 
 function formatDuration(seconds: number): string {
@@ -181,7 +171,7 @@ function formatDuration(seconds: number): string {
 // formatETA speaks the way downloads do: never seconds-precise, always an
 // approachable remaining time.
 function formatETA(seconds: number): string {
-  if (seconds < 60) return 'under a minute left'
+  if (seconds < 60) return 'almost done'
   if (seconds < 3600) return `${Math.round(seconds / 60)} min left`
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.round((seconds % 3600) / 60)
