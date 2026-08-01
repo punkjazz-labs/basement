@@ -159,24 +159,26 @@ main { flex: 1; width: 100%; max-width: 1032px; padding: 18px 36px 80px; }
   padding: 30px; text-align: center;
 }
 
+/* One button family: pills. Green marks the single primary action; everything
+   else stays quiet so the green always means "the thing to do next". */
 button.primary {
-  background: var(--ink); color: var(--bg); border: 1px solid var(--ink); border-radius: 6px;
-  padding: 5px 13px; font-weight: 550; font-size: 12.5px;
+  background: var(--green); color: var(--green-ink); border: 1px solid var(--green); border-radius: 999px;
+  padding: 5px 16px; font-weight: 650; font-size: 12.5px;
 }
-button.primary:hover { opacity: 0.88; }
-button.primary:disabled { opacity: 0.35; cursor: default; }
+button.primary:hover { filter: brightness(1.05); }
+button.primary:disabled { background: var(--surface-2); color: var(--faint); border-color: var(--line-strong); cursor: default; filter: none; }
 button.ghost {
   background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink);
-  border-radius: 6px; padding: 5px 13px; font-weight: 500; font-size: 12.5px;
+  border-radius: 999px; padding: 5px 16px; font-weight: 500; font-size: 12.5px;
 }
 button.ghost:hover { border-color: var(--faint); }
 button.ghost:disabled { opacity: 0.4; cursor: default; }
 button.danger {
   background: none; border: 1px solid color-mix(in srgb, var(--fail) 45%, var(--line));
-  color: var(--fail); border-radius: 6px; padding: 5px 13px; font-size: 12.5px;
+  color: var(--fail); border-radius: 999px; padding: 5px 16px; font-size: 12.5px;
 }
 button.danger:hover { background: color-mix(in srgb, var(--fail) 7%, transparent); }
-button.quiet { background: none; border: 0; color: var(--muted); padding: 5px 8px; border-radius: 6px; font-size: 12.5px; font-weight: 500; }
+button.quiet { background: none; border: 0; color: var(--muted); padding: 5px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 500; }
 button.quiet:hover { color: var(--ink); background: var(--surface-2); }
 button.quiet:disabled { opacity: 0.4; cursor: default; }
 button.brand {
@@ -439,6 +441,11 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .storage-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .storage-row img { width: 24px; height: 24px; border-radius: 6px; flex: none; }
 .storage-row .grow strong { font-weight: 600; }
+
+.play-head { align-items: center; gap: 12px; }
+.play-head img { border-radius: 8px; flex: none; }
+.play-head strong { font-size: 14px; font-weight: 600; display: block; }
+.play-head .faint { font-size: 12px; }
 .storage-row:last-child { border-bottom: 0; }
 .storage-row .grow { flex: 1; min-width: 140px; overflow-wrap: anywhere; }
 .storage-row > code { overflow-wrap: anywhere; text-align: right; max-width: 72%; }

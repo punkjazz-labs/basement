@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { logoFor } from '../catalog'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -16,10 +17,11 @@ const visibleText = (text: string) =>
 
 // Streams straight through the manager's own /v1 proxy using the console
 // session — the same endpoint and behavior an API-key client gets.
-export default function Playground({ ready, modelID, modelName }: {
+export default function Playground({ ready, modelID, modelName, recipeID }: {
   ready: boolean
   modelID?: string
   modelName?: string
+  recipeID?: string
 }) {
   const [messages, setMessages] = useState<Message[]>([])
   const [draft, setDraft] = useState('')
@@ -129,8 +131,12 @@ export default function Playground({ ready, modelID, modelName }: {
 
   return (
     <div className="playground">
-      <div className="section-head">
-        <span className="muted">Talking to {modelName} through your own endpoint</span>
+      <div className="section-head play-head">
+        <img src={logoFor(recipeID ? [recipeID] : [])} alt="" width="30" height="30" />
+        <div>
+          <strong>{modelName}</strong>
+          <div className="faint">Serving on this Spark, through your own endpoint</div>
+        </div>
         <span className="spacer" />
         {messages.length > 0 && (
           <button className="quiet" onClick={() => { setMessages([]); setStats('') }}>Clear</button>
