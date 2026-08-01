@@ -104,13 +104,26 @@ function LiveProgress({ step }: { step: Step }) {
     return parts.join(' · ')
   }
 
+  // "4.2 of 71.9 GB" — one unit, chosen from the total, so the line stays
+  // short enough to never wrap.
+  const bytePair = (done: number, total: number) => {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB']
+    let unit = 0
+    let scale = 1
+    while (total / scale >= 1000 && unit < units.length - 1) {
+      scale *= 1000
+      unit += 1
+    }
+    return `${(done / scale).toFixed(1)} of ${(total / scale).toFixed(1)} ${units[unit]}`
+  }
+
   if (step.operation === 'download_artifact') {
     const done = asNumber(receipt.bytes_complete)
     const total = asNumber(receipt.bytes_total)
     if (total <= 0) return null
     const rate = smoothedRate(`artifact:${step.index}:${receipt.repository ?? ''}`, done)
     const file = typeof receipt.file === 'string' ? fileLabel(receipt.file) : ''
-    const left = `${file ? `${file} · ` : ''}${formatBytes(done)} of ${formatBytes(total)}`
+    const left = `${file ? `${file} · ` : ''}${bytePair(done, total)}`
     return row(Math.min((done / total) * 100, 100), left, speedAndETA(rate, total - done))
   }
 
@@ -140,7 +153,7 @@ function LiveProgress({ step }: { step: Step }) {
       const rate = smoothedRate(`pull:${step.index}`, done)
       return row(
         Math.min((done / total) * 100, 100),
-        `Runtime image · ${formatBytes(done)} of ${formatBytes(total)}`,
+        `Runtime image · ${bytePair(done, total)}`,
         speedAndETA(rate, total - done),
       )
     }

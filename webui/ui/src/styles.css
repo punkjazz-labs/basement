@@ -350,6 +350,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 
 .sub-progress { display: grid; gap: 4px; margin-top: 6px; max-width: 420px; }
 .sub-progress .stats { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.sub-progress .stats span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sub-progress .stats .eta { color: var(--faint); flex: none; }
 .sub-progress .bar {
   height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden;
