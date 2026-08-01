@@ -2,13 +2,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { api, idempotency, terminal, formatBytes, type Job, type Preflight, type Recipe, type StorageInfo } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
+import { LOGOS } from '../catalog'
 
-// Family identity: official publisher logos, embedded so the console works offline.
-const LOGOS: Record<string, string> = {
-  'qwen36-35b-a3b-nvfp4-1s': '/logos/qwen.webp',
-  'qwen36-27b-nvfp4-1s': '/logos/qwen.webp',
-  'laguna-s-2-1-nvfp4-dflash-1s': '/logos/poolside.webp',
-}
 const USE: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
   'qwen36-27b-nvfp4-1s': 'Flagship-level coding in a smaller footprint.',
@@ -245,18 +240,14 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             )}
             {model && isActive && (
               <>
-                <button className="quiet" disabled={busy} onClick={act(() => simpleAction(recipe.id, 'smoke-test'))}>Test</button>
                 <button className="ghost" disabled={busy} onClick={act(() => simpleAction(recipe.id, 'stop'))}>Stop</button>
                 <button className="primary" disabled={busy} onClick={act(openPlayground)}>Open</button>
               </>
             )}
             {model && !isActive && model.status !== 'recovering' && (
-              <>
-                <button className="quiet" disabled={busy} onClick={act(() => remove(recipe))}>Uninstall</button>
-                <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
-                  {activeOther(recipe.id) ? 'Switch to' : 'Start'}
-                </button>
-              </>
+              <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
+                {activeOther(recipe.id) ? 'Switch to' : 'Start'}
+              </button>
             )}
             {model?.status === 'recovering' && <button className="ghost" disabled onClick={act(() => {})}>Recovering</button>}
           </div>
@@ -303,7 +294,10 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             {model && (
               <div className="row-tools">
                 {isActive && (
-                  <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
+                  <>
+                    <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
+                    <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'smoke-test')}>Check health</button>
+                  </>
                 )}
                 <button className="danger" disabled={busy} onClick={() => remove(recipe)}>Uninstall</button>
               </div>

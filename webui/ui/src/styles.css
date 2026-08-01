@@ -437,6 +437,8 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .disk-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); margin-top: 10px; }
 .disk-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
 .storage-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.storage-row img { width: 24px; height: 24px; border-radius: 6px; flex: none; }
+.storage-row .grow strong { font-weight: 600; }
 .storage-row:last-child { border-bottom: 0; }
 .storage-row .grow { flex: 1; min-width: 140px; overflow-wrap: anywhere; }
 .storage-row > code { overflow-wrap: anywhere; text-align: right; max-width: 72%; }

@@ -5,6 +5,15 @@ interface Message {
   content: string
 }
 
+// Thinking models sometimes leak reasoning markup into the text stream, for
+// example a stray "</think>" before the answer. Only the answer is shown, and
+// only the answer is sent back as conversation history.
+const visibleText = (text: string) =>
+  text
+    .replace(/<think>[\s\S]*?(?:<\/think>|$)/g, '')
+    .replace(/^\s*<\/think>/, '')
+    .replace(/^\s+/, '')
+
 // Streams straight through the manager's own /v1 proxy using the console
 // session — the same endpoint and behavior an API-key client gets.
 export default function Playground({ ready, modelID, modelName }: {
@@ -27,7 +36,12 @@ export default function Playground({ ready, modelID, modelName }: {
   const send = async () => {
     const content = draft.trim()
     if (!content || streaming || !ready) return
-    const history = [...messages, { role: 'user' as const, content }]
+    const history = [
+      ...messages.map(message =>
+        message.role === 'assistant' ? { ...message, content: visibleText(message.content) } : message,
+      ),
+      { role: 'user' as const, content },
+    ]
     setMessages([...history, { role: 'assistant', content: '' }])
     setDraft('')
     setStreaming(true)
@@ -93,7 +107,7 @@ export default function Playground({ ready, modelID, modelName }: {
           const next = [...previous]
           next[next.length - 1] = {
             role: 'assistant',
-            content: `⚠ ${problem instanceof Error ? problem.message : 'The request failed.'}`,
+            content: problem instanceof Error ? problem.message : 'The request failed.',
           }
           return next
         })
@@ -131,7 +145,7 @@ export default function Playground({ ready, modelID, modelName }: {
             key={index}
             className={`msg ${message.role} ${streaming && index === messages.length - 1 ? 'streaming' : ''}`}
           >
-            {message.content}
+            {message.role === 'assistant' ? visibleText(message.content) : message.content}
           </div>
         ))}
       </div>

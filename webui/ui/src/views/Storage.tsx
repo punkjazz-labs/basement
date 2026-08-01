@@ -1,6 +1,25 @@
 import { useEffect, useState } from 'react'
 import { api, formatBytes, type StorageInfo } from '../api'
 import type { AppState } from '../App'
+import { logoFor } from '../catalog'
+
+const QUANTS = new Set(['NVFP4', 'FP8', 'FP4', 'INT8', 'INT4', 'BF16', 'FP16', 'AWQ', 'GPTQ', 'GGUF'])
+const PUBLISHERS: Record<string, string> = { nvidia: 'NVIDIA', poolside: 'poolside', unsloth: 'Unsloth', qwen: 'Qwen' }
+
+// "poolside/Laguna-S-2.1-NVFP4" reads as "Laguna S 2.1" with NVFP4 called out
+// as the quantization, so the row speaks the model's name, not its repo path.
+function readableWeights(repository: string): { name: string; quant?: string } {
+  const basename = repository.split('/').pop() ?? repository
+  let quant: string | undefined
+  const words = basename.split(/[-_]/).filter(word => {
+    if (QUANTS.has(word.toUpperCase())) {
+      quant = word.toUpperCase()
+      return false
+    }
+    return true
+  })
+  return { name: words.join(' ').replace(/^([A-Za-z]+?)(\d)/, '$1 $2'), quant }
+}
 
 export default function Storage({ recipes }: AppState) {
   const [info, setInfo] = useState<StorageInfo | null>(null)
@@ -45,21 +64,25 @@ export default function Storage({ recipes }: AppState) {
           <h2 style={{ fontSize: 16 }}>Downloaded models</h2>
           <span className="muted">Remove models from the Models tab to reclaim space</span>
         </div>
-        {info.artifacts.map(artifact => (
-          <div className="storage-row" key={`${artifact.repository}@${artifact.revision}`}>
-            <div className="grow">
-              <code>{artifact.repository}</code>
-              <div className="faint" style={{ fontSize: 12 }}>
-                {artifact.recipe_ids.length
-                  ? `Used by ${artifact.recipe_ids.map(recipeName).join(', ')}`
-                  : 'Not referenced by any current recipe'}
-                {' · '}
-                <span className="mono">{artifact.revision.slice(0, 12)}</span>
+        {info.artifacts.map(artifact => {
+          const { name, quant } = readableWeights(artifact.repository)
+          const owner = artifact.repository.split('/')[0] ?? ''
+          const publisher = PUBLISHERS[owner.toLowerCase()] ?? owner
+          const usedBy = artifact.recipe_ids.map(recipeName).join(', ')
+          return (
+            <div className="storage-row" key={`${artifact.repository}@${artifact.revision}`}>
+              <img src={logoFor(artifact.recipe_ids)} alt="" width="24" height="24" />
+              <div className="grow">
+                <strong>{name}</strong>
+                <div className="faint" style={{ fontSize: 12 }}>
+                  {quant ? `${quant} weights by ${publisher}` : `Weights by ${publisher}`}
+                  {usedBy ? ` · Used by ${usedBy}` : ' · Not used by any current model'}
+                </div>
               </div>
+              <span className="bytes">{formatBytes(artifact.bytes)}</span>
             </div>
-            <span className="bytes">{formatBytes(artifact.bytes)}</span>
-          </div>
-        ))}
+          )
+        })}
         {info.artifacts.length === 0 && <p className="muted">No model downloads yet.</p>}
       </section>
 
@@ -69,19 +92,25 @@ export default function Storage({ recipes }: AppState) {
             <h2 style={{ fontSize: 16 }}>Runtime images</h2>
             <span className="muted">Pulled by installs; removed with their last model</span>
           </div>
-          {info.images.map(image => (
-            <div className="storage-row" key={image.reference}>
-              <div className="grow">
-                <code>{image.reference.split('@')[0]}</code>
-                <div className="faint" style={{ fontSize: 12 }}>
-                  {image.recipe_ids.length ? `Used by ${image.recipe_ids.map(recipeName).join(', ')}` : 'Not referenced by any current recipe'}
-                  {' · '}
-                  <span className="mono">{(image.reference.split('@')[1] ?? '').slice(0, 19)}</span>
+          {info.images.map(image => {
+            const shortRef = image.reference.split('@')[0]
+            const title = shortRef.includes('vllm') ? 'vLLM runtime' : shortRef
+            const usedBy = image.recipe_ids.map(recipeName).join(', ')
+            return (
+              <div className="storage-row" key={image.reference}>
+                <img src={logoFor(image.recipe_ids)} alt="" width="24" height="24" />
+                <div className="grow">
+                  <strong>{title}</strong>
+                  <div className="faint" style={{ fontSize: 12 }}>
+                    {usedBy
+                      ? `The exact version pinned for ${usedBy}`
+                      : 'Not used by any current model'}
+                  </div>
                 </div>
+                <span className="bytes">{formatBytes(image.bytes)}</span>
               </div>
-              <span className="bytes">{formatBytes(image.bytes)}</span>
-            </div>
-          ))}
+            )
+          })}
         </section>
       )}
 
