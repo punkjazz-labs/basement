@@ -438,7 +438,10 @@ func (h *HostExecutor) health(ctx context.Context, r recipe.Recipe) error {
 }
 
 func (h *HostExecutor) verifyInference(ctx context.Context, r recipe.Recipe) (map[string]any, error) {
-	body, _ := json.Marshal(map[string]any{"model": r.Service.ServedModelID, "messages": []map[string]string{{"role": "user", "content": "Reply with the single word ready."}}, "max_tokens": 16, "temperature": 0})
+	// Reasoning models spend their first tokens inside a think block before
+	// any visible answer, so the budget must be large enough to finish
+	// thinking; a small cap makes a healthy model look like it said nothing.
+	body, _ := json.Marshal(map[string]any{"model": r.Service.ServedModelID, "messages": []map[string]string{{"role": "user", "content": "Reply with the single word ready."}}, "max_tokens": 512, "temperature": 0})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, h.modelURL(r)+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	client := *h.http
@@ -448,26 +451,47 @@ func (h *HostExecutor) verifyInference(ctx context.Context, r recipe.Recipe) (ma
 		return nil, fmt.Errorf("inference request: %w", err)
 	}
 	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read inference response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return nil, fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
+		return nil, fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(raw)))
 	}
 	var result struct {
 		Model   string `json:"model"`
 		Choices []struct {
-			Message struct {
-				Content   string `json:"content"`
-				Reasoning string `json:"reasoning_content"`
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content    string `json:"content"`
+				Reasoning  string `json:"reasoning_content"`
+				Reasoning2 string `json:"reasoning"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&result); err != nil {
-		return nil, err
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode inference response: %w; body: %s", err, truncateForError(raw, 2048))
 	}
-	if len(result.Choices) == 0 || strings.TrimSpace(result.Choices[0].Message.Content+result.Choices[0].Message.Reasoning) == "" {
-		return nil, errors.New("inference returned an empty model response")
+	if len(result.Choices) == 0 {
+		return nil, fmt.Errorf("inference returned no choices; body: %s", truncateForError(raw, 2048))
 	}
-	return map[string]any{"endpoint": h.modelURL(r) + "/v1", "served_model_id": r.Service.ServedModelID, "response_non_empty": true, "reported_model": result.Model}, nil
+	msg := result.Choices[0].Message
+	answer := strings.TrimSpace(msg.Content)
+	reasoning := strings.TrimSpace(msg.Reasoning + msg.Reasoning2)
+	if answer == "" && reasoning == "" {
+		return nil, fmt.Errorf("inference returned an empty model response (finish_reason %q); body: %s", result.Choices[0].FinishReason, truncateForError(raw, 2048))
+	}
+	return map[string]any{"endpoint": h.modelURL(r) + "/v1", "served_model_id": r.Service.ServedModelID, "response_non_empty": true, "answered": answer != "", "reasoning_only": answer == "" && reasoning != "", "finish_reason": result.Choices[0].FinishReason, "reported_model": result.Model}, nil
+}
+
+// truncateForError keeps error payloads readable while preserving enough of
+// the raw body to diagnose an unexpected response shape.
+func truncateForError(raw []byte, limit int) string {
+	s := strings.TrimSpace(string(raw))
+	if len(s) > limit {
+		return s[:limit] + "… (truncated)"
+	}
+	return s
 }
 
 // measureThroughput streams a fixed generation and reports device-measured
