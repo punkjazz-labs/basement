@@ -60,13 +60,15 @@ export default function Monitor({ telemetry, activeName }: { telemetry: Telemetr
     lastSample.current = telemetry.sampled_at
     const vllm = telemetry.active_model?.vllm
     const push = (values: number[], value: number) => [...values.slice(-(WINDOW - 1)), value]
+    // Rate from the server's own sample timestamps: the client's polling
+    // jitter must not distort tokens-per-second.
     let tps = -1
     const total = vllm?.generation_tokens_total
     if (typeof total === 'number') {
-      const now = Date.now()
+      const at = Date.parse(telemetry.sampled_at)
       const last = lastTotal.current
-      if (last && now > last.at && total >= last.total) tps = ((total - last.total) / (now - last.at)) * 1000
-      lastTotal.current = { at: now, total }
+      if (last && at > last.at && total >= last.total) tps = ((total - last.total) / (at - last.at)) * 1000
+      lastTotal.current = { at, total }
     } else {
       lastTotal.current = null
     }

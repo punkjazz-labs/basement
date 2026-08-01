@@ -64,7 +64,9 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
       const response = await fetch('/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: modelID, messages: history, stream: true, max_tokens: 2048 }),
+        // No token cap: thinking models spend freely before the visible answer,
+        // and a cap cuts replies mid-sentence. The stop button is the limit.
+        body: JSON.stringify({ model: modelID, messages: history, stream: true }),
         signal: controller.signal,
       })
       if (!response.ok || !response.body) {

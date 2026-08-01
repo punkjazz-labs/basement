@@ -383,14 +383,29 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .playground { display: grid; gap: 12px; }
 .chat {
   min-height: 320px; max-height: 55dvh; overflow-y: auto; display: grid; gap: 12px;
-  align-content: start; padding: 4px 2px;
+  align-content: start; padding: 16px 18px;
 }
 .msg { max-width: 85%; padding: 9px 13px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: break-word; font-size: 13.5px; }
 .msg.user { justify-self: end; background: var(--surface-2); border: 1px solid var(--line); }
 .msg.assistant { justify-self: start; background: none; border: 1px solid transparent; padding-left: 0; }
 .msg.assistant.streaming::after { content: '▍'; color: var(--green-deep); animation: breathe 1s infinite; }
 .msg.assistant.waiting::after { content: none; }
-.thinking { color: var(--faint); animation: breathe 1.2s infinite; }
+.thinking {
+  font-weight: 550;
+  background: linear-gradient(90deg, var(--green-deep), var(--green) 50%, var(--green-deep));
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.4s linear infinite;
+}
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: 0% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thinking { animation: none; background: none; color: var(--green-deep); }
+}
 /* Markdown replies: normal flow inside the bubble, quiet code and lists. */
 .msg .md { white-space: normal; display: grid; gap: 8px; }
 .msg .md :is(p, ul, ol, h1, h2, h3, h4, pre, blockquote, table) { margin: 0; }

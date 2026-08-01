@@ -245,14 +245,16 @@ export default function App() {
         </header>
         <main id="main">
           {tab === 'Models' && <Models {...state} />}
-          {tab === 'Playground' && (
+          {/* The playground stays mounted so switching tabs never wipes the
+              conversation and a streaming reply keeps flowing. */}
+          <div style={{ display: tab === 'Playground' ? 'contents' : 'none' }}>
             <Playground
               ready={activeModel?.status === 'ready'}
               modelID={activeRecipe?.service.served_model_id}
               modelName={activeRecipe?.display_name}
               recipeID={activeRecipe?.id}
             />
-          )}
+          </div>
           {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
           {tab === 'Monitor' && <Monitor telemetry={telemetry} activeName={activeRecipe?.display_name} />}
           {tab === 'Storage' && <Storage {...state} />}
