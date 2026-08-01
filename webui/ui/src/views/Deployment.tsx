@@ -274,12 +274,8 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
           </div>
           <button className="dialog-close" onClick={onClose} aria-label="Close">×</button>
         </div>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <span className={`deployment-status ${job.state}`}>{stateCopy[job.state] ?? job.state}</span>
-          <span className="muted">
-            {current ? operationCopy[current.operation] ?? current.operation : terminal(job.state) ? '' : 'Waiting for manager'}
-          </span>
-          <code className="faint" style={{ marginLeft: 'auto', fontSize: 11 }}>{job.id.slice(0, 12)}</code>
         </div>
         <ol className="phase-list">
           {phases.map((phase, index) => {
@@ -338,6 +334,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
         <details>
           <summary className="muted">Technical receipts</summary>
           <ul className="receipts">
+            <li className="faint">Job reference <code>{job.id}</code></li>
             {job.steps.map(step => (
               <li key={step.index}>
                 <strong style={{ fontSize: 13 }}>{operationCopy[step.operation] ?? step.operation}</strong>{' '}

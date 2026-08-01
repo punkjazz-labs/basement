@@ -339,6 +339,9 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 
 .phase-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 .phase-list li { display: flex; gap: 12px; align-items: center; padding: 7px 4px; }
+/* The text column fills and the status column is fixed, so a growing timer
+   or ETA never changes the dialog's internal layout. */
+.phase-list li > div { flex: 1; min-width: 0; }
 .phase-list i { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line-strong); flex: none; }
 .phase-list li.complete i { background: var(--green); border-color: var(--green); }
 .phase-list li.active i { border-color: var(--warn); animation: breathe 1.4s ease-in-out infinite; }
@@ -346,7 +349,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .phase-list li.cancelled i { background: var(--faint); border-color: var(--faint); }
 .phase-list strong { font-weight: 600; font-size: 13px; }
 .phase-list span { color: var(--faint); font-size: 12px; display: block; }
-.phase-list b { margin-left: auto; font-weight: 500; font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.phase-list b { width: 126px; text-align: right; flex: none; font-weight: 500; font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 .sub-progress { display: grid; gap: 4px; margin-top: 6px; max-width: 420px; }
 .sub-progress .stats { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }

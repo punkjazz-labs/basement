@@ -398,7 +398,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                     </dd>
                   </div>
                   <div><dt>Space needed</dt><dd>{formatBytes(confirm.recipe.required_bytes)}</dd></div>
-                  <div><dt>RAM kept free</dt><dd>{formatBytes(confirm.recipe.requirements.per_node_memory_reserve_bytes)}</dd></div>
+                  <div><dt>Left for the system</dt><dd>{formatBytes(confirm.recipe.requirements.per_node_memory_reserve_bytes)}</dd></div>
                 </dl>
                 <p className="muted" style={{ fontSize: 12.5 }}>
                   After the download, the first start loads the model into memory and typically takes
