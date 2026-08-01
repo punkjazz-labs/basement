@@ -389,9 +389,27 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .msg.user { justify-self: end; background: var(--surface-2); border: 1px solid var(--line); }
 .msg.assistant { justify-self: start; background: none; border: 1px solid transparent; padding-left: 0; }
 .msg.assistant.streaming::after { content: '▍'; color: var(--green-deep); animation: breathe 1s infinite; }
+.chat-hint { color: var(--faint); text-align: center; margin: 0; }
+.chat:has(.chat-hint) { align-content: center; justify-items: center; }
 .chat-meta { color: var(--faint); font-size: 11.5px; font-family: var(--mono); }
-.composer { display: flex; gap: 10px; align-items: end; }
-.composer textarea { flex: 1; resize: none; min-height: 44px; max-height: 160px; }
+/* The composer people already know: one rounded field, round send inside. */
+.composer {
+  display: flex; gap: 10px; align-items: flex-end;
+  border: 1px solid var(--line-strong); background: var(--surface);
+  border-radius: 16px; padding: 8px 8px 8px 16px;
+}
+.composer:focus-within { border-color: var(--faint); }
+.composer textarea {
+  flex: 1; resize: none; border: 0; background: none; outline: none;
+  min-height: 24px; max-height: 160px; padding: 5px 0;
+  font: inherit; font-size: 13.5px; color: var(--text);
+}
+.composer .send {
+  width: 32px; height: 32px; flex: none; border-radius: 999px; border: 0;
+  background: var(--green); color: var(--green-ink); display: grid; place-items: center;
+}
+.composer .send:hover { filter: brightness(1.05); }
+.composer .send:disabled { background: var(--surface-2); color: var(--faint); cursor: default; filter: none; }
 
 /* ---- Connect -------------------------------------------------------------- */
 
@@ -453,14 +471,21 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 
 /* ---- Activity ------------------------------------------------------------- */
 
-.job-row {
-  display: flex; align-items: center; gap: 14px; width: 100%; text-align: left;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
-  box-shadow: var(--shadow); padding: 11px 16px; color: var(--ink); font-size: 13px;
+.job-day { padding-top: 10px; padding-bottom: 6px; }
+.day-label {
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--faint); font-weight: 600; padding: 2px 0 8px;
 }
-.job-row:hover { border-color: var(--line-strong); background: var(--hover); }
-.job-row .grow { flex: 1; min-width: 0; }
-.job-row small { color: var(--faint); display: block; }
+.job-line {
+  display: flex; align-items: center; gap: 12px; width: calc(100% + 40px);
+  margin: 0 -20px; padding: 8px 20px; text-align: left;
+  background: none; border: 0; border-top: 1px solid var(--line);
+  color: var(--ink); font-size: 13px; border-radius: 0;
+}
+.job-line:hover { background: var(--hover); }
+.job-line strong { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.job-line .spacer { flex: 1; }
+.job-line .when { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .job-state { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
 .job-state.failed { color: var(--fail); }
 .job-state.ready { color: var(--green-deep); }

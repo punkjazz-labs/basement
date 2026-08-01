@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { api, formatBytes, type StorageInfo } from '../api'
+import { api, idempotency, formatBytes, type StorageInfo } from '../api'
 import type { AppState } from '../App'
 import { logoFor } from '../catalog'
+import { confirmBox, noticeBox } from '../confirm'
 
 const QUANTS = new Set(['NVFP4', 'FP8', 'FP4', 'INT8', 'INT4', 'BF16', 'FP16', 'AWQ', 'GPTQ', 'GGUF'])
 const PUBLISHERS: Record<string, string> = { nvidia: 'NVIDIA', poolside: 'poolside', unsloth: 'Unsloth', qwen: 'Qwen' }
@@ -21,15 +22,73 @@ function readableWeights(repository: string): { name: string; quant?: string } {
   return { name: words.join(' ').replace(/^([A-Za-z]+?)(\d)/, '$1 $2'), quant }
 }
 
-export default function Storage({ recipes }: AppState) {
+export default function Storage({ recipes, models, openDeployment, refreshModelsAndJobs }: AppState) {
   const [info, setInfo] = useState<StorageInfo | null>(null)
   const [error, setError] = useState('')
 
-  useEffect(() => {
+  const load = () =>
     api<StorageInfo>('/api/v1/storage')
       .then(setInfo)
       .catch(problem => setError(problem instanceof Error ? problem.message : 'Could not read storage'))
+  useEffect(() => {
+    load()
   }, [])
+
+  // Reclaiming space is this screen's whole job, so every row acts in place.
+  // Files of an installed model leave through the same uninstall flow as the
+  // Models tab; leftover downloads can be deleted directly.
+  const uninstall = async (recipeID: string) => {
+    const selected = recipes.find(recipe => recipe.id === recipeID)
+    if (!selected) return
+    const serving = models.find(model => model.recipe_id === recipeID)?.active
+    const { ok, checked } = await confirmBox({
+      title: `Uninstall ${selected.display_name}?`,
+      body: serving
+        ? 'It is currently serving and will be stopped first. The runtime and configuration are removed.'
+        : 'The runtime and configuration are removed.',
+      confirmLabel: 'Uninstall',
+      danger: true,
+      checkbox: {
+        label: `Also delete ${formatBytes(selected.artifact_bytes)} of downloaded model files`,
+        note: 'Keeping them makes a future reinstall much faster.',
+      },
+    })
+    if (!ok) return
+    try {
+      const result = await api<{ job: { id: string } }>(`/api/v1/models/${recipeID}`, {
+        method: 'DELETE',
+        headers: idempotency(),
+        body: JSON.stringify({
+          remove_artifacts: checked,
+          expected_reclaim_bytes: checked ? selected.artifact_bytes : 0,
+        }),
+      })
+      openDeployment(result.job.id)
+      refreshModelsAndJobs()
+    } catch (problem) {
+      noticeBox('Could not uninstall', problem instanceof Error ? problem.message : undefined)
+    }
+  }
+
+  const deleteFiles = async (artifact: StorageInfo['artifacts'][number]) => {
+    const { name } = readableWeights(artifact.repository)
+    const { ok } = await confirmBox({
+      title: `Delete the ${name} files?`,
+      body: `Frees ${formatBytes(artifact.bytes)}. A future install downloads them again.`,
+      confirmLabel: 'Delete files',
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await api('/api/v1/storage/artifacts', {
+        method: 'DELETE',
+        body: JSON.stringify({ repository: artifact.repository, revision: artifact.revision }),
+      })
+      load()
+    } catch (problem) {
+      noticeBox('Could not delete the files', problem instanceof Error ? problem.message : undefined)
+    }
+  }
 
   if (error) return <div className="empty">{error}</div>
   if (!info) return <div className="empty">Reading storage…</div>
@@ -62,13 +121,14 @@ export default function Storage({ recipes }: AppState) {
       <section className="card">
         <div className="section-head" style={{ marginBottom: 4 }}>
           <h2 style={{ fontSize: 16 }}>Downloaded models</h2>
-          <span className="muted">Remove models from the Models tab to reclaim space</span>
+          <span className="muted">Uninstall a model or delete leftover downloads to reclaim space</span>
         </div>
         {info.artifacts.map(artifact => {
           const { name, quant } = readableWeights(artifact.repository)
           const owner = artifact.repository.split('/')[0] ?? ''
           const publisher = PUBLISHERS[owner.toLowerCase()] ?? owner
           const usedBy = artifact.recipe_ids.map(recipeName).join(', ')
+          const installedRecipe = artifact.recipe_ids.find(id => models.some(model => model.recipe_id === id))
           return (
             <div className="storage-row" key={`${artifact.repository}@${artifact.revision}`}>
               <img src={logoFor(artifact.recipe_ids)} alt="" width="24" height="24" />
@@ -80,6 +140,11 @@ export default function Storage({ recipes }: AppState) {
                 </div>
               </div>
               <span className="bytes">{formatBytes(artifact.bytes)}</span>
+              {installedRecipe ? (
+                <button className="quiet" onClick={() => uninstall(installedRecipe)}>Uninstall</button>
+              ) : (
+                <button className="quiet" onClick={() => deleteFiles(artifact)}>Delete</button>
+              )}
             </div>
           )
         })}

@@ -144,7 +144,7 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
       </div>
       <div className="chat card" ref={chatRef} aria-live="polite">
         {messages.length === 0 && (
-          <p className="faint">Send a message. The reply streams from your Spark, token by token.</p>
+          <p className="chat-hint">Send a message. The reply streams from your Spark, token by token.</p>
         )}
         {messages.map((message, index) => (
           <div
@@ -159,9 +159,9 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
       <div className="composer">
         <textarea
           value={draft}
-          rows={2}
-          placeholder="Message your model"
-          aria-label="Message your model"
+          rows={1}
+          placeholder={`Message ${modelName ?? 'your model'}`}
+          aria-label={`Message ${modelName ?? 'your model'}`}
           onChange={event => setDraft(event.target.value)}
           onKeyDown={event => {
             if (event.key === 'Enter' && !event.shiftKey) {
@@ -171,9 +171,13 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
           }}
         />
         {streaming ? (
-          <button className="ghost" onClick={() => abortRef.current?.abort()}>Stop</button>
+          <button className="send" aria-label="Stop generating" title="Stop generating" onClick={() => abortRef.current?.abort()}>
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="2.5" fill="currentColor" /></svg>
+          </button>
         ) : (
-          <button className="primary" onClick={send} disabled={!draft.trim()}>Send</button>
+          <button className="send" aria-label="Send" title="Send" onClick={send} disabled={!draft.trim()}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+          </button>
         )}
       </div>
     </div>

@@ -82,6 +82,7 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/keys/", server.keyAction)
 	mux.HandleFunc("/api/v1/telemetry", server.withReadAuth(server.telemetry))
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
+	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
 	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateCheck))
 	mux.HandleFunc("/v1/", server.proxyModel)
 	assets, _ := fs.Sub(webui.Assets, "assets")
@@ -922,6 +923,92 @@ func (s *Server) storageBreakdown(w http.ResponseWriter, r *http.Request) {
 		"caches":              caches,
 		"images":              images,
 	})
+}
+
+// deleteArtifact removes one downloaded weights directory. Installed models
+// keep their files (they leave through uninstall, which also clears runtime
+// and configuration), and a running job is never pulled out from under.
+func (s *Server) deleteArtifact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		methodNotAllowed(w)
+		return
+	}
+	if err := s.auth.AuthorizeMutation(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	var request struct {
+		Repository string `json:"repository"`
+		Revision   string `json:"revision"`
+	}
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	// Resolve against the real on-disk layout so nothing from the request body
+	// ever reaches the filesystem as a path.
+	target := ""
+	artifactRoot := filepath.Join(s.dataDir, "artifacts")
+	if repoDirs, err := os.ReadDir(artifactRoot); err == nil {
+		for _, repoDir := range repoDirs {
+			if !repoDir.IsDir() || strings.ReplaceAll(repoDir.Name(), "--", "/") != request.Repository {
+				continue
+			}
+			revisions, err := os.ReadDir(filepath.Join(artifactRoot, repoDir.Name()))
+			if err != nil {
+				continue
+			}
+			for _, revision := range revisions {
+				if revision.IsDir() && revision.Name() == request.Revision {
+					target = filepath.Join(artifactRoot, repoDir.Name(), revision.Name())
+				}
+			}
+		}
+	}
+	if target == "" {
+		writeError(w, 404, errors.New("no downloaded files match that model"))
+		return
+	}
+	referencesArtifact := func(recipeID string) bool {
+		selected, ok := recipe.Find(s.recipes, recipeID)
+		if !ok {
+			return false
+		}
+		for _, artifact := range selected.Artifacts {
+			if artifact.Repository == request.Repository && artifact.Revision == request.Revision {
+				return true
+			}
+		}
+		return false
+	}
+	models, err := s.store.Models(r.Context())
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	for _, model := range models {
+		if referencesArtifact(model.RecipeID) {
+			selected, _ := recipe.Find(s.recipes, model.RecipeID)
+			writeError(w, http.StatusConflict, fmt.Errorf("%s is installed and uses these files, so uninstall it instead", selected.DisplayName))
+			return
+		}
+	}
+	if jobs, err := s.store.ListJobs(r.Context(), 200); err == nil {
+		terminal := map[string]bool{"ready": true, "failed": true, "cancelled": true, "stopped": true, "removed": true}
+		for _, job := range jobs {
+			if !terminal[job.State] && referencesArtifact(job.RecipeID) {
+				writeError(w, http.StatusConflict, errors.New("a job is using these files right now, so wait for it to finish"))
+				return
+			}
+		}
+	}
+	reclaimed := dirBytes(target)
+	if err := os.RemoveAll(target); err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	_ = os.Remove(filepath.Dir(target)) // clears the repo folder when this was its last revision
+	writeJSON(w, http.StatusOK, map[string]any{"reclaimed_bytes": reclaimed})
 }
 
 func dirBytes(root string) int64 {
