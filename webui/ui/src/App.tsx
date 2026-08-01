@@ -11,6 +11,7 @@ import Monitor from './views/Monitor'
 import Storage from './views/Storage'
 import Activity from './views/Activity'
 import DeploymentDialog from './views/Deployment'
+import { ConfirmHost } from './confirm'
 
 const TABS = ['Models', 'Playground', 'Connect', 'Monitor', 'Storage', 'Activity'] as const
 type Tab = (typeof TABS)[number]
@@ -266,6 +267,7 @@ export default function App() {
           setTab('Playground')
         }}
       />
+      <ConfirmHost />
     </div>
   )
 }

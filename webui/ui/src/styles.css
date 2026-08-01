@@ -147,6 +147,13 @@ main { flex: 1; width: 100%; max-width: 1032px; padding: 18px 36px 80px; }
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
 .error-text { color: var(--fail); }
+.error-note {
+  border: 1px solid color-mix(in srgb, var(--fail) 28%, transparent);
+  background: color-mix(in srgb, var(--fail) 6%, transparent);
+  border-radius: 8px; padding: 11px 14px;
+}
+.error-note strong { display: block; font-size: 13px; }
+.error-note p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty {
   color: var(--faint); border: 1px dashed var(--line-strong); border-radius: 10px;
   padding: 30px; text-align: center;
@@ -311,6 +318,14 @@ dialog::backdrop { background: rgb(12 14 10 / 0.45); backdrop-filter: blur(2px);
 .dialog-foot button { white-space: nowrap; }
 .dialog-foot .note { margin-right: auto; color: var(--faint); font-size: 12px; }
 
+dialog.confirm-box { width: min(440px, calc(100vw - 48px)); }
+dialog.confirm-box h2 { font-size: 15.5px; }
+.confirm-body { color: var(--muted); white-space: pre-line; margin: 0; }
+.confirm-check { display: flex; gap: 9px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+.confirm-check input { margin-top: 2px; accent-color: var(--green); }
+.confirm-check span { display: block; font-weight: 500; }
+.confirm-check small { display: block; color: var(--faint); font-weight: 400; margin-top: 1px; }
+
 .dialog-result { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .dialog-result .cell { background: var(--green-tint); border: 1px solid var(--green-line); border-radius: 8px; padding: 12px 14px; }
 .dialog-result .l { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
@@ -334,6 +349,8 @@ dialog::backdrop { background: rgb(12 14 10 / 0.45); backdrop-filter: blur(2px);
 .phase-list b { margin-left: auto; font-weight: 500; font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 .sub-progress { display: grid; gap: 4px; margin-top: 6px; max-width: 420px; }
+.sub-progress .stats { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.sub-progress .stats .side { color: var(--faint); flex: none; }
 .sub-progress .bar {
   height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden;
 }

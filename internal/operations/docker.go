@@ -93,11 +93,19 @@ func (d *DockerClient) Pull(ctx context.Context, ref string, progress Progress) 
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	// Docker reports one layer per event; a bar drawn from a single layer
+	// shrinks and jumps as the reported layer changes. Aggregate every layer
+	// into one monotonic total instead.
+	type layerState struct {
+		current, total int64
+		done           bool
+	}
+	layers := map[string]*layerState{}
 	last := map[string]any{"image": ref, "status": "pulling"}
 	for scanner.Scan() {
 		var event struct {
 			Status, ID, Error string
-			ProgressDetail    map[string]any `json:"progressDetail"`
+			ProgressDetail    struct{ Current, Total int64 } `json:"progressDetail"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			continue
@@ -105,7 +113,51 @@ func (d *DockerClient) Pull(ctx context.Context, ref string, progress Progress) 
 		if event.Error != "" {
 			return nil, errors.New(event.Error)
 		}
-		last = map[string]any{"image": ref, "status": event.Status, "layer": event.ID, "progress": event.ProgressDetail}
+		if event.ID != "" {
+			layer, ok := layers[event.ID]
+			if !ok {
+				layer = &layerState{}
+				layers[event.ID] = layer
+			}
+			switch event.Status {
+			case "Downloading":
+				if event.ProgressDetail.Current > layer.current {
+					layer.current = event.ProgressDetail.Current
+				}
+				if event.ProgressDetail.Total > layer.total {
+					layer.total = event.ProgressDetail.Total
+				}
+			case "Download complete", "Already exists", "Pull complete":
+				if layer.total > 0 {
+					layer.current = layer.total
+				}
+				if event.Status != "Download complete" {
+					layer.done = true
+				}
+			}
+		}
+		var bytesComplete, bytesTotal int64
+		var layersDone int
+		downloaded := true
+		for _, layer := range layers {
+			bytesComplete += layer.current
+			bytesTotal += layer.total
+			if layer.done {
+				layersDone++
+			}
+			if layer.total > 0 && layer.current < layer.total {
+				downloaded = false
+			}
+		}
+		status := "Downloading"
+		if len(layers) > 0 && downloaded {
+			status = "Extracting"
+		}
+		last = map[string]any{
+			"image": ref, "status": status,
+			"bytes_complete": bytesComplete, "bytes_total": bytesTotal,
+			"layers_done": layersDone, "layers_total": len(layers),
+		}
 		if progress != nil {
 			if err := progress(last); err != nil {
 				return nil, fmt.Errorf("persist image progress: %w", err)

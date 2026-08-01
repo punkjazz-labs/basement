@@ -1,6 +1,7 @@
 import { Fragment, useMemo, useRef, useState } from 'react'
 import { api, idempotency, terminal, formatBytes, type Job, type Preflight, type Recipe } from '../api'
 import type { AppState } from '../App'
+import { confirmBox, noticeBox } from '../confirm'
 
 // Family identity: official publisher logos, embedded so the console works offline.
 const LOGOS: Record<string, string> = {
@@ -64,7 +65,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
     try {
       await work()
     } catch (problem) {
-      alert(problem instanceof Error ? problem.message : String(problem))
+      noticeBox('That did not work', problem instanceof Error ? problem.message : String(problem))
     } finally {
       setBusy(id, false)
     }
@@ -101,31 +102,42 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
       acceptJob(result)
     })
 
-  const startOrSwitch = (recipe: Recipe) => {
+  const startOrSwitch = async (recipe: Recipe) => {
     const active = activeOther(recipe.id)
     if (active) {
       const from = recipes.find(item => item.id === active.recipe_id)?.display_name ?? active.recipe_id
-      if (!window.confirm(`Switch to ${recipe.display_name}?\n\n${from} will stop. If the new model fails verification, RunOnSpark restores the previous one.`)) return
+      const { ok } = await confirmBox({
+        title: `Switch to ${recipe.display_name}?`,
+        body: `${from} will stop. If the new model fails verification, RunOnSpark restores the previous one.`,
+        confirmLabel: 'Switch model',
+      })
+      if (!ok) return
     }
     simpleAction(recipe.id, 'start')
   }
 
-  const remove = (recipe: Recipe) => {
+  const remove = async (recipe: Recipe) => {
     const serving = installed.get(recipe.id)?.active
-    const intro = serving
-      ? `Uninstall ${recipe.display_name}?\n\nIt is currently serving and will be stopped first.`
-      : `Uninstall the ${recipe.display_name} runtime and configuration?`
-    if (!window.confirm(intro)) return
-    const removeArtifacts = window.confirm(
-      `Also delete ${formatBytes(recipe.artifact_bytes)} of downloaded model data? Cancel keeps the download for a fast reinstall.`,
-    )
+    const { ok, checked } = await confirmBox({
+      title: `Uninstall ${recipe.display_name}?`,
+      body: serving
+        ? 'It is currently serving and will be stopped first. The runtime and configuration are removed.'
+        : 'The runtime and configuration are removed.',
+      confirmLabel: 'Uninstall',
+      danger: true,
+      checkbox: {
+        label: `Also delete ${formatBytes(recipe.artifact_bytes)} of downloaded model files`,
+        note: 'Keeping them makes a future reinstall much faster.',
+      },
+    })
+    if (!ok) return
     run(recipe.id, async () => {
       const result = await api<{ job: Job }>(`/api/v1/models/${recipe.id}`, {
         method: 'DELETE',
         headers: idempotency(),
         body: JSON.stringify({
-          remove_artifacts: removeArtifacts,
-          expected_reclaim_bytes: removeArtifacts ? recipe.artifact_bytes : 0,
+          remove_artifacts: checked,
+          expected_reclaim_bytes: checked ? recipe.artifact_bytes : 0,
         }),
       })
       acceptJob(result)

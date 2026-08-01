@@ -579,11 +579,14 @@ func (e *Engine) containerID(ctx context.Context, jobID string) string {
 
 func (e *Engine) fail(ctx context.Context, jobID string, index int, err error) {
 	message := redact.String(err.Error())
-	_ = e.store.FailStep(context.Background(), jobID, index, message)
 	state := "failed"
 	if errors.Is(err, context.Canceled) {
 		state = "cancelled"
+		// A cancellation is the user's own decision, not a fault; the raw
+		// "context canceled" chain reads like a crash in the console.
+		message = "cancelled while this step was running"
 	}
+	_ = e.store.FailStep(context.Background(), jobID, index, message)
 	_ = e.store.UpdateJobState(context.Background(), jobID, state, message)
 	if state == "cancelled" {
 		e.cleanupAfterCancel(jobID)

@@ -192,3 +192,53 @@ func TestDockerClientNegotiatesAPIVersion(t *testing.T) {
 		t.Fatalf("negotiation requests were %v; want unversioned /version once, then /v1.51-prefixed calls", paths)
 	}
 }
+
+func TestPullAggregatesLayersIntoMonotonicProgress(t *testing.T) {
+	// Docker reports one layer per event; the receipt must aggregate them so
+	// the console bar never shrinks when the reported layer switches.
+	events := []string{
+		`{"status":"Downloading","id":"aaa","progressDetail":{"current":100,"total":1000}}`,
+		`{"status":"Downloading","id":"bbb","progressDetail":{"current":50,"total":500}}`,
+		`{"status":"Downloading","id":"aaa","progressDetail":{"current":900,"total":1000}}`,
+		`{"status":"Download complete","id":"aaa","progressDetail":{}}`,
+		`{"status":"Downloading","id":"bbb","progressDetail":{"current":500,"total":500}}`,
+		`{"status":"Pull complete","id":"aaa","progressDetail":{}}`,
+		`{"status":"Pull complete","id":"bbb","progressDetail":{}}`,
+	}
+	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		if !strings.Contains(request.URL.Path, "/images/create") {
+			t.Fatalf("unexpected Docker request: %s %s", request.Method, request.URL)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(strings.Join(events, "\n")))}, nil
+	})}}
+	var receipts []map[string]any
+	last, err := client.Pull(context.Background(), "vllm/vllm-openai@sha256:abc", func(update any) error {
+		receipt, ok := update.(map[string]any)
+		if !ok {
+			t.Fatalf("unexpected receipt type %T", update)
+		}
+		copied := map[string]any{}
+		for k, v := range receipt {
+			copied[k] = v
+		}
+		receipts = append(receipts, copied)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := int64(-1)
+	for _, receipt := range receipts {
+		complete := receipt["bytes_complete"].(int64)
+		if complete < previous {
+			t.Fatalf("aggregate bytes went backwards: %d -> %d", previous, complete)
+		}
+		previous = complete
+	}
+	if last["bytes_complete"].(int64) != 1500 || last["bytes_total"].(int64) != 1500 {
+		t.Fatalf("final aggregate wrong: %v", last)
+	}
+	if last["status"] != "Extracting" || last["layers_done"] != 2 {
+		t.Fatalf("final status wrong: %v", last)
+	}
+}

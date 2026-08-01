@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, idempotency, copyText, type APIKey } from '../api'
+import { confirmBox, noticeBox } from '../confirm'
 
 const SNIPPETS = ['curl', 'Python', 'JavaScript', 'LiteLLM'] as const
 type Snippet = (typeof SNIPPETS)[number]
@@ -78,17 +79,23 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
       setNewName('')
       load()
     } catch (problem) {
-      alert(problem instanceof Error ? problem.message : 'Could not create the key')
+      noticeBox('Could not create the key', problem instanceof Error ? problem.message : undefined)
     }
   }
 
   const revoke = async (key: APIKey) => {
-    if (!window.confirm(`Revoke "${key.name}"? Clients using it stop working immediately.`)) return
+    const { ok } = await confirmBox({
+      title: `Revoke “${key.name}”?`,
+      body: 'Clients using this key stop working immediately.',
+      confirmLabel: 'Revoke key',
+      danger: true,
+    })
+    if (!ok) return
     try {
       await api(`/api/v1/keys/${encodeURIComponent(key.id)}`, { method: 'DELETE', body: '{}' })
       load()
     } catch (problem) {
-      alert(problem instanceof Error ? problem.message : 'Could not revoke the key')
+      noticeBox('Could not revoke the key', problem instanceof Error ? problem.message : undefined)
     }
   }
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, formatBytes, terminal, stateCopy, operationCopy, type Job, type Recipe, type Step } from '../api'
+import { confirmBox, noticeBox } from '../confirm'
 
 const CHECKS = [
   'verify_architecture', 'verify_dgx_spark', 'verify_memory_capacity', 'verify_disk',
@@ -58,45 +59,59 @@ function phasePlan(job: Job): Phase[] {
   return [{ title: 'Stop model', note: 'End the running service', states: ['queued', 'stopping'], operations: ['stop_container'] }]
 }
 
-// LiveProgress renders the running step's receipt as human progress: a byte
-// bar for the model download, layer status for the image pull. Transfer rate
-// is derived client-side from receipt deltas.
+// LiveProgress renders the running step's receipt as human progress. The
+// layout follows the classic download pattern: one bar, then one line with
+// what is transferring on the left and speed plus time remaining on the
+// right. Transfer rate is derived client-side from receipt deltas.
 function LiveProgress({ step }: { step: Step }) {
   const receipt = (step.receipt ?? {}) as Record<string, unknown>
   const rateRef = useRef<{ key: string; at: number; bytes: number; rate: number } | null>(null)
 
   const asNumber = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
 
+  // Smoothed bytes-per-second across receipt updates, reset when the
+  // measured stream changes.
+  const smoothedRate = (key: string, bytes: number) => {
+    const now = performance.now()
+    const last = rateRef.current
+    if (!last || last.key !== key || bytes < last.bytes) {
+      rateRef.current = { key, at: now, bytes, rate: 0 }
+    } else if (bytes > last.bytes && now > last.at) {
+      const instant = ((bytes - last.bytes) / (now - last.at)) * 1000
+      rateRef.current = { key, at: now, bytes, rate: last.rate > 0 ? last.rate * 0.7 + instant * 0.3 : instant }
+    }
+    return rateRef.current?.rate ?? 0
+  }
+
+  const row = (percent: number | null, left: string, right?: string) => (
+    <div className="sub-progress">
+      {percent !== null && (
+        <div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}>
+          <span style={{ width: `${Math.max(percent, 0.5)}%` }} />
+        </div>
+      )}
+      <div className="stats">
+        <span className="mono nums">{left}</span>
+        {right && <span className="mono nums side">{right}</span>}
+      </div>
+    </div>
+  )
+
+  const speedAndETA = (rate: number, remainingBytes: number) => {
+    if (rate <= 1) return undefined
+    const parts = [`${formatBytes(rate)}/s`]
+    if (remainingBytes > 0) parts.push(formatETA(remainingBytes / rate))
+    return parts.join(' · ')
+  }
+
   if (step.operation === 'download_artifact') {
     const done = asNumber(receipt.bytes_complete)
     const total = asNumber(receipt.bytes_total)
     if (total <= 0) return null
-    const key = `${step.index}:${receipt.repository ?? ''}`
-    const now = performance.now()
-    const last = rateRef.current
-    if (!last || last.key !== key || done < last.bytes) {
-      rateRef.current = { key, at: now, bytes: done, rate: 0 }
-    } else if (done > last.bytes && now > last.at) {
-      const instant = ((done - last.bytes) / (now - last.at)) * 1000
-      const smoothed = last.rate > 0 ? last.rate * 0.7 + instant * 0.3 : instant
-      rateRef.current = { key, at: now, bytes: done, rate: smoothed }
-    }
-    const rate = rateRef.current?.rate ?? 0
-    const remaining = rate > 0 ? (total - done) / rate : 0
-    const percent = Math.min((done / total) * 100, 100)
-    return (
-      <div className="sub-progress">
-        <div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}>
-          <span style={{ width: `${Math.max(percent, 0.5)}%` }} />
-        </div>
-        <span className="mono nums">
-          {formatBytes(done)} of {formatBytes(total)} · {percent.toFixed(0)}%
-          {rate > 1 && ` · ${formatBytes(rate)}/s`}
-          {remaining > 1 && ` · about ${formatDuration(remaining)} left`}
-        </span>
-        {typeof receipt.file === 'string' && receipt.file && <span className="file">{receipt.file}</span>}
-      </div>
-    )
+    const rate = smoothedRate(`artifact:${step.index}:${receipt.repository ?? ''}`, done)
+    const file = typeof receipt.file === 'string' ? fileLabel(receipt.file) : ''
+    const left = `${file ? `${file} · ` : ''}${formatBytes(done)} of ${formatBytes(total)}`
+    return row(Math.min((done / total) * 100, 100), left, speedAndETA(rate, total - done))
   }
 
   if (step.operation === 'wait_http') {
@@ -110,28 +125,37 @@ function LiveProgress({ step }: { step: Step }) {
   }
 
   if (step.operation === 'pull_image') {
-    const detail = (receipt.progress ?? {}) as Record<string, unknown>
-    const current = asNumber(detail.current)
-    const total = asNumber(detail.total)
-    const status = typeof receipt.status === 'string' && receipt.status ? receipt.status : 'Pulling'
-    const layer = typeof receipt.layer === 'string' && receipt.layer ? receipt.layer : ''
-    return (
-      <div className="sub-progress">
-        {total > 0 && (
-          <div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((current / total) * 100)}>
-            <span style={{ width: `${Math.min((current / total) * 100, 100)}%` }} />
-          </div>
-        )}
-        <span className="mono nums">
-          {status}
-          {layer && ` · layer ${layer}`}
-          {total > 0 && ` · ${formatBytes(current)} of ${formatBytes(total)}`}
-        </span>
-      </div>
-    )
+    const done = asNumber(receipt.bytes_complete)
+    const total = asNumber(receipt.bytes_total)
+    const layersDone = asNumber(receipt.layers_done)
+    const layersTotal = asNumber(receipt.layers_total)
+    const status = typeof receipt.status === 'string' ? receipt.status : ''
+    if (status === 'Extracting' && layersTotal > 0) {
+      return row(
+        Math.min((layersDone / layersTotal) * 100, 100),
+        `Unpacking layers · ${layersDone} of ${layersTotal}`,
+      )
+    }
+    if (total > 0) {
+      const rate = smoothedRate(`pull:${step.index}`, done)
+      return row(
+        Math.min((done / total) * 100, 100),
+        `Runtime image · ${formatBytes(done)} of ${formatBytes(total)}`,
+        speedAndETA(rate, total - done),
+      )
+    }
+    return row(null, 'Contacting the registry…')
   }
 
   return null
+}
+
+// fileLabel turns sharded artifact names like model-00003-of-00015.safetensors
+// into "File 3 of 15"; anything else keeps its own name.
+function fileLabel(name: string): string {
+  const shard = name.match(/(\d+)-of-0*(\d+)/)
+  if (shard) return `File ${parseInt(shard[1], 10)} of ${parseInt(shard[2], 10)}`
+  return name
 }
 
 function formatDuration(seconds: number): string {
@@ -139,6 +163,16 @@ function formatDuration(seconds: number): string {
   if (whole < 60) return `${whole}s`
   if (whole < 3600) return `${Math.floor(whole / 60)}m ${whole % 60}s`
   return `${Math.floor(whole / 3600)}h ${Math.floor((whole % 3600) / 60)}m`
+}
+
+// formatETA speaks the way downloads do: never seconds-precise, always an
+// approachable remaining time.
+function formatETA(seconds: number): string {
+  if (seconds < 60) return 'under a minute left'
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min left`
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.round((seconds % 3600) / 60)
+  return `${hours} h ${minutes} min left`
 }
 
 // Elapsed ticks up from when this step was first observed running, so even
@@ -200,14 +234,20 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
     : undefined
 
   const cancel = async () => {
-    const question = job.kind === 'install'
-      ? 'Cancel this deployment?\n\nDownloads are resumable — installing again later picks up where this left off.'
-      : `Cancel this ${noun}?`
-    if (!window.confirm(question)) return
+    const { ok } = await confirmBox({
+      title: `Cancel this ${noun}?`,
+      body: job.kind === 'install'
+        ? 'Downloads are resumable — installing again later picks up where this left off.'
+        : undefined,
+      confirmLabel: `Cancel ${noun}`,
+      cancelLabel: 'Keep going',
+      danger: true,
+    })
+    if (!ok) return
     try {
       await api(`/api/v1/jobs/${encodeURIComponent(job.id)}/cancel`, { method: 'POST', body: '{}' })
     } catch (problem) {
-      alert(problem instanceof Error ? problem.message : 'Cancel failed')
+      noticeBox('Could not cancel', problem instanceof Error ? problem.message : undefined)
     }
   }
 
@@ -252,7 +292,20 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
             )
           })}
         </ol>
-        {job.error && <p className="error-text" role="alert">{job.error}</p>}
+        {job.state === 'cancelled' ? (
+          <p className="muted" role="status">
+            {job.kind === 'install'
+              ? 'Cancelled. Everything downloaded so far is kept — installing again resumes where this left off.'
+              : `The ${noun} was cancelled.`}
+          </p>
+        ) : (
+          job.error && (
+            <div className="error-note" role="alert">
+              <strong>This {noun} stopped before finishing.</strong>
+              <p>{job.error}</p>
+            </div>
+          )
+        )}
         {benchReceipt && (
           <div className="dialog-result" role="status">
             <div className="cell">
@@ -284,16 +337,18 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
         </details>
         <div className="dialog-foot">
           <span className="note">
-            {succeeded
-              ? {
-                  install: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
-                  start: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
-                  benchmark: 'Measured with a real request on this Spark.',
-                  'smoke-test': 'The model answered a real inference request.',
-                  stop: 'The model has stopped.',
-                  remove: 'The model has been removed.',
-                }[job.kind] ?? 'Finished.'
-              : `Closing this window does not stop the ${noun}.`}
+            {!terminal(job.state)
+              ? `Closing this window does not stop the ${noun}.`
+              : succeeded
+                ? {
+                    install: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
+                    start: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
+                    benchmark: 'Measured with a real request on this Spark.',
+                    'smoke-test': 'The model answered a real inference request.',
+                    stop: 'The model has stopped.',
+                    remove: 'The model has been removed.',
+                  }[job.kind] ?? 'Finished.'
+                : ''}
           </span>
           {!terminal(job.state) && <button className="danger" onClick={cancel}>Cancel {noun}</button>}
           {succeeded && (job.kind === 'install' || job.kind === 'start') && (
