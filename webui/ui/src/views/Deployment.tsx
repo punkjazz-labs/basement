@@ -284,6 +284,9 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
             if (activeIndex === phases.length) status = 'complete'
             const label = { complete: 'Complete', active: 'In progress', failed: 'Failed', cancelled: 'Cancelled', pending: 'Waiting' }[status]
             const showsProgress = status === 'active' && current && phase.operations.includes(current.operation.replace(/^rollback_/, ''))
+            // Transfers estimate their own remaining time; elapsed time is
+            // only for steps with no ETA, where it proves liveness.
+            const showsElapsed = showsProgress && current && !['download_artifact', 'pull_image'].includes(current.operation)
             return (
               <li key={phase.title} className={status}>
                 <i aria-hidden="true" />
@@ -294,7 +297,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
                 </div>
                 <b>
                   {label}
-                  {showsProgress && <Elapsed stepKey={`${job.id}:${current.index}:${current.operation}`} />}
+                  {showsElapsed && <Elapsed stepKey={`${job.id}:${current.index}:${current.operation}`} />}
                 </b>
               </li>
             )
