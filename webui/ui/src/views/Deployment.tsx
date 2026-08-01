@@ -130,8 +130,15 @@ function LiveProgress({ step }: { step: Step }) {
     const done = asNumber(receipt.bytes_complete)
     const total = asNumber(receipt.bytes_total)
     if (total <= 0) return null
+    const percent = Math.min((done / total) * 100, 100)
+    // Resume verification reads existing files at disk speed; those bytes
+    // must never enter the transfer-rate average.
+    if (receipt.checking_existing === true) {
+      rateRef.current = null
+      return row(percent, bytePair(done, total), 'checking files already on disk')
+    }
     const rate = smoothedRate(`artifact:${step.index}:${receipt.repository ?? ''}`, done)
-    return row(Math.min((done / total) * 100, 100), bytePair(done, total), speedAndETA(rate, total - done))
+    return row(percent, bytePair(done, total), speedAndETA(rate, total - done))
   }
 
   if (step.operation === 'wait_http') {

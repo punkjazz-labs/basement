@@ -80,7 +80,7 @@ func (h *HFClient) Download(ctx context.Context, artifact recipe.Artifact, targe
 		if ok := verifyFile(path, file); ok {
 			completed += file.Size
 			if progress != nil {
-				if err := progress(downloadReceipt(artifact, file.Name, completed, total)); err != nil {
+				if err := progress(downloadReceipt(artifact, file.Name, completed, total, true)); err != nil {
 					return nil, err
 				}
 			}
@@ -89,9 +89,9 @@ func (h *HFClient) Download(ctx context.Context, artifact recipe.Artifact, targe
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return nil, err
 		}
-		delta := func(written int64) error {
+		delta := func(written int64, existing bool) error {
 			if progress != nil {
-				return progress(downloadReceipt(artifact, file.Name, completed+written, total))
+				return progress(downloadReceipt(artifact, file.Name, completed+written, total, existing))
 			}
 			return nil
 		}
@@ -174,7 +174,7 @@ func (h *HFClient) manifest(ctx context.Context, artifact recipe.Artifact) (hfMa
 	return manifest, nil
 }
 
-func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, file hfFile, finalPath string, progress func(int64) error) error {
+func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, file hfFile, finalPath string, progress func(written int64, existing bool) error) error {
 	tempPath := finalPath + ".part"
 	var offset int64
 	if stat, err := os.Stat(tempPath); err == nil {
@@ -183,14 +183,14 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 			if err := os.Rename(tempPath, finalPath); err != nil {
 				return err
 			}
-			return progress(offset)
+			return progress(offset, true)
 		}
 		if offset > file.Size {
 			_ = os.Remove(tempPath)
 			offset = 0
 		}
 	}
-	if err := progress(offset); err != nil {
+	if err := progress(offset, true); err != nil {
 		return fmt.Errorf("check download capacity: %w", err)
 	}
 	endpoint := h.baseURL + "/" + escapeRepository(artifact.Repository) + "/resolve/" + url.PathEscape(artifact.Revision) + "/" + escapeFilePath(file.Name) + "?download=true"
@@ -232,7 +232,7 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 			}
 			written += int64(n)
 			if time.Since(lastReport) >= time.Second {
-				if err := progress(written); err != nil {
+				if err := progress(written, false); err != nil {
 					return err
 				}
 				lastReport = time.Now()
@@ -251,7 +251,7 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 	if err := out.Close(); err != nil {
 		return err
 	}
-	if err := progress(written); err != nil {
+	if err := progress(written, false); err != nil {
 		return err
 	}
 	return os.Rename(tempPath, finalPath)
@@ -283,12 +283,15 @@ func verifyFile(path string, file hfFile) bool {
 	return strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), expected)
 }
 
-func downloadReceipt(artifact recipe.Artifact, file string, completed, total int64) map[string]any {
+// downloadReceipt reports transfer progress; checkingExisting marks bytes
+// that were already on disk (resume verification), which move at disk speed
+// and must not be mistaken for network throughput.
+func downloadReceipt(artifact recipe.Artifact, file string, completed, total int64, checkingExisting bool) map[string]any {
 	percent := float64(0)
 	if total > 0 {
 		percent = float64(completed) * 100 / float64(total)
 	}
-	return map[string]any{"repository": artifact.Repository, "revision": artifact.Revision, "file": file, "bytes_complete": completed, "bytes_total": total, "percent": percent}
+	return map[string]any{"repository": artifact.Repository, "revision": artifact.Revision, "file": file, "bytes_complete": completed, "bytes_total": total, "percent": percent, "checking_existing": checkingExisting}
 }
 
 func safeJoin(root, name string) (string, error) {
