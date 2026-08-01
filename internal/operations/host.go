@@ -520,9 +520,10 @@ func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		return nil, fmt.Errorf("benchmark returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
 	}
-	var firstToken time.Time
+	var firstToken, firstChunk time.Time
 	var completionTokens int64
 	var chunkCount int64
+	var samples []string
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -534,11 +535,15 @@ func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (
 		if payload == "[DONE]" {
 			break
 		}
+		if len(samples) < 3 {
+			samples = append(samples, truncateForError([]byte(payload), 512))
+		}
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string `json:"content"`
-					Reasoning string `json:"reasoning_content"`
+					Content    string `json:"content"`
+					Reasoning  string `json:"reasoning_content"`
+					Reasoning2 string `json:"reasoning"`
 				} `json:"delta"`
 			} `json:"choices"`
 			Usage *struct {
@@ -551,19 +556,32 @@ func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (
 		if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
 			completionTokens = chunk.Usage.CompletionTokens
 		}
-		if len(chunk.Choices) > 0 && (chunk.Choices[0].Delta.Content != "" || chunk.Choices[0].Delta.Reasoning != "") {
-			if firstToken.IsZero() {
-				firstToken = time.Now()
+		if len(chunk.Choices) > 0 {
+			if firstChunk.IsZero() {
+				firstChunk = time.Now()
 			}
-			chunkCount++
+			delta := chunk.Choices[0].Delta
+			if delta.Content != "" || delta.Reasoning != "" || delta.Reasoning2 != "" {
+				if firstToken.IsZero() {
+					firstToken = time.Now()
+				}
+				chunkCount++
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read benchmark stream: %w", err)
 	}
 	finished := time.Now()
+	// Some servers deliver text under delta fields this parser does not know;
+	// the usage frame still proves tokens were generated, so measure from the
+	// first delta rather than failing a working model.
+	if chunkCount == 0 && completionTokens > 0 && !firstChunk.IsZero() {
+		firstToken = firstChunk
+		chunkCount = completionTokens
+	}
 	if firstToken.IsZero() || chunkCount == 0 {
-		return nil, errors.New("benchmark stream produced no tokens")
+		return nil, fmt.Errorf("benchmark stream produced no tokens; first stream chunks: %s", strings.Join(samples, " | "))
 	}
 	if completionTokens == 0 {
 		completionTokens = chunkCount

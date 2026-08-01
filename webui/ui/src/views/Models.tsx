@@ -143,10 +143,16 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
 
   const rowFor = (recipe: Recipe) => {
     const model = installed.get(recipe.id)
-    const busy = pending.has(recipe.id) || jobs.some(job => job.recipe_id === recipe.id && !terminal(job.state))
+    // Only jobs that change what is running should lock the row. Smoke tests
+    // and benchmarks run against a serving model — Open must stay available.
+    const disruptive = new Set(['install', 'start', 'stop', 'remove'])
+    const running = (kinds: (kind: string) => boolean) =>
+      jobs.some(job => job.recipe_id === recipe.id && !terminal(job.state) && kinds(job.kind))
+    const busy = pending.has(recipe.id) || running(kind => disruptive.has(kind))
+    const measuring = running(kind => kind === 'benchmark' || kind === 'smoke-test')
     const isActive = Boolean(model?.active && model.status === 'ready')
     const fits = detected >= recipe.topology.spark_count
-    const statusText = busy ? 'Working' : isActive ? 'Serving' : model ? 'Installed' : 'Not installed'
+    const statusText = busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
     const measured = model?.tokens_per_second
     const reference = REFERENCE_TPS[recipe.id]
     const open = expanded === recipe.id

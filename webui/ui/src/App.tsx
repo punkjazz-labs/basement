@@ -257,7 +257,15 @@ export default function App() {
           {tab === 'Activity' && <Activity {...state} />}
         </main>
       </div>
-      <DeploymentDialog job={selectedJob} recipes={recipes} onClose={() => setSelectedJobID('')} />
+      <DeploymentDialog
+        job={selectedJob}
+        recipes={recipes}
+        onClose={() => setSelectedJobID('')}
+        onOpenPlayground={() => {
+          setSelectedJobID('')
+          setTab('Playground')
+        }}
+      />
     </div>
   )
 }

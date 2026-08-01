@@ -122,3 +122,72 @@ func TestVerifyInferenceRequestsGenerousTokenBudget(t *testing.T) {
 		t.Fatalf("max_tokens %v is too small for reasoning models", got["max_tokens"])
 	}
 }
+
+func fakeVLLMStream(t *testing.T, lines []string) (*HostExecutor, recipe.Recipe) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, line := range lines {
+			_, _ = w.Write([]byte("data: " + line + "\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	t.Cleanup(server.Close)
+	port, err := strconv.Atoi(server.URL[strings.LastIndex(server.URL, ":")+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := recipes[0]
+	r.Service.DefaultHostPort = port
+	return &HostExecutor{http: server.Client()}, r
+}
+
+func TestBenchmarkCountsReasoningDeltas(t *testing.T) {
+	// A thinking model streams its output as reasoning deltas (under either
+	// field name) long before any visible content appears.
+	executor, r := fakeVLLMStream(t, []string{
+		`{"choices":[{"delta":{"role":"assistant"}}]}`,
+		`{"choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+		`{"choices":[{"delta":{"reasoning":"more"}}]}`,
+		`{"choices":[{"delta":{"content":"ready"}}]}`,
+		`{"choices":[],"usage":{"completion_tokens":42}}`,
+	})
+	receipt, err := executor.measureThroughput(context.Background(), r)
+	if err != nil {
+		t.Fatalf("reasoning stream rejected: %v", err)
+	}
+	if receipt["completion_tokens"] != int64(42) {
+		t.Fatalf("usage tokens not used: %v", receipt)
+	}
+}
+
+func TestBenchmarkFallsBackToUsageWhenDeltasUnrecognized(t *testing.T) {
+	// If a future server renames the delta text fields again, the usage frame
+	// still proves generation happened; the benchmark must not fail.
+	executor, r := fakeVLLMStream(t, []string{
+		`{"choices":[{"delta":{"some_future_field":"ready"}}]}`,
+		`{"choices":[],"usage":{"completion_tokens":17}}`,
+	})
+	receipt, err := executor.measureThroughput(context.Background(), r)
+	if err != nil {
+		t.Fatalf("usage fallback failed: %v", err)
+	}
+	if receipt["completion_tokens"] != int64(17) {
+		t.Fatalf("unexpected receipt: %v", receipt)
+	}
+}
+
+func TestBenchmarkEmptyStreamErrorCarriesSamples(t *testing.T) {
+	executor, r := fakeVLLMStream(t, []string{`{"choices":[]}`})
+	_, err := executor.measureThroughput(context.Background(), r)
+	if err == nil {
+		t.Fatal("empty stream passed")
+	}
+	if !strings.Contains(err.Error(), `{"choices":[]}`) {
+		t.Fatalf("error lacks stream sample: %v", err)
+	}
+}

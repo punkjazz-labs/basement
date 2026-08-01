@@ -167,10 +167,11 @@ function activePhaseIndex(job: Job, phases: Phase[]): number {
   return index >= 0 ? index : 0
 }
 
-export default function DeploymentDialog({ job, recipes, onClose }: {
+export default function DeploymentDialog({ job, recipes, onClose, onOpenPlayground }: {
   job: Job | null
   recipes: Recipe[]
   onClose: () => void
+  onOpenPlayground: () => void
 }) {
   const ref = useRef<HTMLDialogElement>(null)
 
@@ -185,6 +186,7 @@ export default function DeploymentDialog({ job, recipes, onClose }: {
 
   const phases = phasePlan(job)
   const activeIndex = activePhaseIndex(job, phases)
+  const succeeded = terminal(job.state) && job.state !== 'failed' && job.state !== 'cancelled'
   const recipe = recipes.find(item => item.id === job.recipe_id)
   const verb = { install: 'Deploy', start: 'Start', stop: 'Stop', remove: 'Remove', 'smoke-test': 'Test', benchmark: 'Measure' }[job.kind] ?? 'Manage'
   const current = [...job.steps].reverse().find(step => step.state === 'running')
@@ -255,8 +257,15 @@ export default function DeploymentDialog({ job, recipes, onClose }: {
           </ul>
         </details>
         <div className="dialog-foot">
-          <span className="note">Closing this window does not stop the deployment.</span>
+          <span className="note">
+            {succeeded && (job.kind === 'install' || job.kind === 'start')
+              ? `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`
+              : 'Closing this window does not stop the deployment.'}
+          </span>
           {!terminal(job.state) && <button className="danger" onClick={cancel}>Cancel deployment</button>}
+          {succeeded && (job.kind === 'install' || job.kind === 'start') && (
+            <button className="brand" onClick={onOpenPlayground}>Try it in the playground</button>
+          )}
           <button className="ghost" onClick={onClose}>Close</button>
         </div>
       </div>
