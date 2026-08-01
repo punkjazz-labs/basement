@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, idempotency, formatBytes, type StorageInfo } from '../api'
 import type { AppState } from '../App'
-import { logoFor, ownerName, readableWeights } from '../catalog'
+import { logoFor, readableWeights } from '../catalog'
 import { confirmBox, noticeBox } from '../confirm'
 
 type Artifact = StorageInfo['artifacts'][number]
@@ -138,7 +138,6 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
               {groups.map(group => {
                 const primary = group.artifacts[0]
                 const { quant } = readableWeights(primary.repository)
-                const publisher = ownerName(primary.repository)
                 const installed = models.some(model => model.recipe_id === group.recipeID)
                 return (
                   <div className="storage-row" key={group.recipeID}>
@@ -146,7 +145,7 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
                     <div className="grow">
                       <strong>{recipeName(group.recipeID)}</strong>
                       <div className="faint" style={{ fontSize: 12 }}>
-                        {quant ? `${quant} weights by ${publisher}` : `Weights by ${publisher}`}
+                        {quant ? `${quant} weights` : 'Model weights'}
                         {group.artifacts.length > 1 ? ` · ${group.artifacts.length} parts` : ''}
                       </div>
                     </div>
@@ -167,7 +166,7 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
                     <div className="grow">
                       <strong>{name}</strong>
                       <div className="faint" style={{ fontSize: 12 }}>
-                        {quant ? `${quant} weights by ${ownerName(artifact.repository)}` : `Weights by ${ownerName(artifact.repository)}`}
+                        {quant ? `${quant} weights` : 'Model weights'}
                         {' · Not used by any current model'}
                       </div>
                     </div>

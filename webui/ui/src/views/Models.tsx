@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { api, idempotency, terminal, formatBytes, type Job, type Preflight, type Recipe, type StorageInfo } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
-import { LOGOS, ownerName, readableWeights } from '../catalog'
+import { LOGOS, readableWeights } from '../catalog'
 
 const USE: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
@@ -278,12 +278,8 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             </div>
             <dl className="facts">
               <dt>Model by</dt><dd>{recipe.model_by || recipe.publisher}</dd>
-              <dt>Weights build</dt>
-              <dd>
-                {recipe.artifacts[0]
-                  ? `${readableWeights(recipe.artifacts[0].repository).quant ?? 'Original'} by ${ownerName(recipe.artifacts[0].repository)}`
-                  : 'n/a'}
-              </dd>
+              <dt>Quantization</dt>
+              <dd>{recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
               <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
               <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
