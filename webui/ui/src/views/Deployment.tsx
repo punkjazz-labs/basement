@@ -65,20 +65,29 @@ function phasePlan(job: Job): Phase[] {
 // right. Transfer rate is derived client-side from receipt deltas.
 function LiveProgress({ step }: { step: Step }) {
   const receipt = (step.receipt ?? {}) as Record<string, unknown>
-  const rateRef = useRef<{ key: string; at: number; bytes: number; rate: number } | null>(null)
+  const rateRef = useRef<{ key: string; at: number; bytes: number; rate: number; since: number } | null>(null)
 
   const asNumber = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
 
   // Smoothed bytes-per-second across receipt updates, reset when the
-  // measured stream changes.
+  // measured stream changes. A resumed download first sweeps the bytes
+  // already on disk, which looks like an absurd transfer rate; the warm-up
+  // window ignores those readings so the ETA never lies low.
+  const WARMUP_MS = 6000
   const smoothedRate = (key: string, bytes: number) => {
     const now = performance.now()
     const last = rateRef.current
     if (!last || last.key !== key || bytes < last.bytes) {
-      rateRef.current = { key, at: now, bytes, rate: 0 }
-    } else if (bytes > last.bytes && now > last.at) {
+      rateRef.current = { key, at: now, bytes, rate: 0, since: now }
+      return 0
+    }
+    if (now - last.since < WARMUP_MS) {
+      rateRef.current = { ...last, at: now, bytes }
+      return 0
+    }
+    if (bytes > last.bytes && now > last.at) {
       const instant = ((bytes - last.bytes) / (now - last.at)) * 1000
-      rateRef.current = { key, at: now, bytes, rate: last.rate > 0 ? last.rate * 0.7 + instant * 0.3 : instant }
+      rateRef.current = { ...last, at: now, bytes, rate: last.rate > 0 ? last.rate * 0.7 + instant * 0.3 : instant }
     }
     return rateRef.current?.rate ?? 0
   }
@@ -98,7 +107,7 @@ function LiveProgress({ step }: { step: Step }) {
   )
 
   const speedAndETA = (rate: number, remainingBytes: number) => {
-    if (rate <= 1) return undefined
+    if (rate <= 1) return 'calculating time left'
     const parts = [`${formatBytes(rate)}/s`]
     if (remainingBytes > 0) parts.push(formatETA(remainingBytes / rate))
     return parts.join(' · ')
