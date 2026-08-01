@@ -19,7 +19,7 @@ func TestMemoryGuardPreservesRuntimeAndHostHeadroom(t *testing.T) {
 func TestMemoryGuardRejectsLiveOOMRisk(t *testing.T) {
 	node := Node{Name: "spark-low", SystemMemoryTotal: 128_000_000_000, SystemMemoryAvailable: 110_000_000_000, GPUMemoryTotal: 128_000_000_000, GPUMemoryFree: 90_000_000_000}
 	_, err := CheckMemory([]Node{node}, 1, MemoryPolicy{MinimumTotalBytes: 120_000_000_000, HostReserveBytes: 16_000_000_000, GPUUtilization: 0.8, RequireLiveCapacity: true})
-	if err == nil || !strings.Contains(err.Error(), "weights, KV cache, and context") || !strings.Contains(err.Error(), "host reserve") {
+	if err == nil || !strings.Contains(err.Error(), "weights, KV cache, and context") || !strings.Contains(err.Error(), "system reserve") {
 		t.Fatalf("CheckMemory()=%v", err)
 	}
 }

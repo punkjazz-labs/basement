@@ -17,12 +17,12 @@ const TABS = ['Models', 'Playground', 'Connect', 'Monitor', 'Storage', 'Activity
 type Tab = (typeof TABS)[number]
 
 const DESC: Record<Tab, string> = {
-  Models: 'Curated for this Spark — every recipe pinned and verified before Ready.',
+  Models: 'The best open models, tuned for your Spark. Pick one and click Install.',
   Playground: 'Talk to the model that is serving right now.',
   Connect: 'Endpoint, API keys and client snippets for this Spark.',
   Monitor: 'Live GPU health and serving metrics.',
   Storage: 'What is on disk and how to reclaim it.',
-  Activity: 'Every job, persisted — open one for phases and receipts.',
+  Activity: 'Every job, persisted. Open one for phases and receipts.',
 }
 
 export interface AppState {

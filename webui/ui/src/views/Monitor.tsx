@@ -93,7 +93,7 @@ export default function Monitor({ telemetry, activeName }: { telemetry: Telemetr
     <div className="stack">
       <div className="section-head">
         <span className="muted">
-          {serving ? `${activeName ?? telemetry.active_model?.recipe_id} · sampled every few seconds` : 'No model serving — system metrics only'}
+          {serving ? `${activeName ?? telemetry.active_model?.recipe_id} · sampled every few seconds` : 'No model serving. System metrics only.'}
         </span>
       </div>
       <div className="tiles">
@@ -101,7 +101,7 @@ export default function Monitor({ telemetry, activeName }: { telemetry: Telemetr
           <>
             <Tile
               label="Generation speed"
-              value={latest(series.tps)?.toFixed(1) ?? '—'}
+              value={latest(series.tps)?.toFixed(1) ?? 'n/a'}
               unit="tok/s"
               points={series.tps}
             />

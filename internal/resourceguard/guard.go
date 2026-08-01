@@ -71,22 +71,22 @@ func CheckMemory(nodes []Node, expectedNodes int, policy MemoryPolicy) ([]Memory
 		}
 		results = append(results, result)
 		if node.SystemMemoryTotal < policy.MinimumTotalBytes {
-			problems = append(problems, fmt.Sprintf("%s has %d system memory bytes; %d required", name, node.SystemMemoryTotal, policy.MinimumTotalBytes))
+			problems = append(problems, fmt.Sprintf("%s has %s of system memory; this model needs %s", name, humanBytes(node.SystemMemoryTotal), humanBytes(policy.MinimumTotalBytes)))
 		}
 		if node.GPUMemoryTotal < policy.MinimumTotalBytes {
-			problems = append(problems, fmt.Sprintf("%s has %d unified GPU memory bytes; %d required", name, node.GPUMemoryTotal, policy.MinimumTotalBytes))
+			problems = append(problems, fmt.Sprintf("%s has %s of unified GPU memory; this model needs %s", name, humanBytes(node.GPUMemoryTotal), humanBytes(policy.MinimumTotalBytes)))
 		}
 		if result.NominalGPUHeadroomBytes < policy.HostReserveBytes {
-			problems = append(problems, fmt.Sprintf("%s vLLM budget leaves %d bytes outside the GPU allocation; %d host reserve required", name, result.NominalGPUHeadroomBytes, policy.HostReserveBytes))
+			problems = append(problems, fmt.Sprintf("%s: the vLLM budget leaves %s outside the GPU allocation; %s must stay reserved for the system", name, humanBytes(result.NominalGPUHeadroomBytes), humanBytes(policy.HostReserveBytes)))
 		}
 		if !policy.RequireLiveCapacity {
 			continue
 		}
 		if node.GPUMemoryFree < runtimeBudget {
-			problems = append(problems, fmt.Sprintf("%s has %d free GPU memory bytes; %d required for weights, KV cache, and context", name, node.GPUMemoryFree, runtimeBudget))
+			problems = append(problems, fmt.Sprintf("%s has %s of free GPU memory; %s is needed for weights, KV cache, and context", name, humanBytes(node.GPUMemoryFree), humanBytes(runtimeBudget)))
 		}
 		if node.SystemMemoryAvailable < result.RequiredAvailableBytes {
-			problems = append(problems, fmt.Sprintf("%s has %d available unified memory bytes; %d required including %d host reserve", name, node.SystemMemoryAvailable, result.RequiredAvailableBytes, policy.HostReserveBytes))
+			problems = append(problems, fmt.Sprintf("%s has %s of unified memory available; %s is needed including the %s system reserve", name, humanBytes(node.SystemMemoryAvailable), humanBytes(result.RequiredAvailableBytes), humanBytes(policy.HostReserveBytes)))
 		}
 	}
 	if len(problems) > 0 {
@@ -116,10 +116,10 @@ func CheckDisk(nodes []Node, expectedNodes int, policy DiskPolicy) ([]DiskResult
 		results = append(results, result)
 		name := nodeName(node, index)
 		if node.DataDiskAvailable < result.DataRequiredBytes {
-			problems = append(problems, fmt.Sprintf("%s has %d model-data disk bytes available; %d required including safety margin", name, node.DataDiskAvailable, result.DataRequiredBytes))
+			problems = append(problems, fmt.Sprintf("%s has %s free for model data, but %s must stay free (including the safety margin)", name, humanBytes(node.DataDiskAvailable), humanBytes(result.DataRequiredBytes)))
 		}
 		if !node.SharedDataRuntimeDisk && node.RuntimeDiskAvailable < result.RuntimeRequiredBytes {
-			problems = append(problems, fmt.Sprintf("%s has %d Docker disk bytes available; %d required including safety margin", name, node.RuntimeDiskAvailable, result.RuntimeRequiredBytes))
+			problems = append(problems, fmt.Sprintf("%s has %s free on the Docker disk, but %s must stay free (including the safety margin)", name, humanBytes(node.RuntimeDiskAvailable), humanBytes(result.RuntimeRequiredBytes)))
 		}
 	}
 	if len(problems) > 0 {
@@ -133,4 +133,23 @@ func nodeName(node Node, index int) string {
 		return node.Name
 	}
 	return fmt.Sprintf("node-%d", index+1)
+}
+
+// humanBytes renders sizes the way the console does, so guard errors read
+// as product copy instead of raw byte counts.
+func humanBytes(value int64) string {
+	if value <= 0 {
+		return "0 B"
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	amount := float64(value)
+	unit := 0
+	for amount >= 1000 && unit < len(units)-1 {
+		amount /= 1000
+		unit++
+	}
+	if amount >= 100 {
+		return fmt.Sprintf("%.0f %s", amount, units[unit])
+	}
+	return fmt.Sprintf("%.1f %s", amount, units[unit])
 }

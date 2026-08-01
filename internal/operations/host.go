@@ -130,7 +130,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		}
 		guarded := func(value any) error {
 			if _, err := h.verifyDisk(ctx, r, r.TotalArtifactBytes(), 0); err != nil {
-				return fmt.Errorf("disk reserve reached during image pull: %w", err)
+				return fmt.Errorf("the image pull paused to protect free disk space: %w", err)
 			}
 			if progress != nil {
 				return progress(value)
@@ -154,7 +154,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 				}
 				remainingArtifacts := remaining + laterBytes
 				if _, err := h.verifyDisk(ctx, r, remainingArtifacts, 0); err != nil {
-					return fmt.Errorf("disk reserve reached during model download: %w", err)
+					return fmt.Errorf("the download paused to protect free disk space: %w", err)
 				}
 				if progress != nil {
 					return progress(value)
@@ -299,10 +299,19 @@ func (h *HostExecutor) verifyDisk(ctx context.Context, r recipe.Recipe, artifact
 		Name: system.Hostname, DataDiskAvailable: system.StorageAvailable, RuntimeDiskAvailable: system.DockerStorageAvailable,
 		SharedDataRuntimeDisk: system.DockerSharesDataDisk,
 	}
+	// A transient Docker-inspect failure reads as zero bytes, which is not
+	// the same as a full disk; failing a running download on it would be
+	// wrong. GB10 machines have a single disk, so the data-disk reading is
+	// the honest fallback.
+	dockerDiskUnknown := system.DockerStorageAvailable <= 0
+	if dockerDiskUnknown {
+		node.RuntimeDiskAvailable = system.StorageAvailable
+		node.SharedDataRuntimeDisk = true
+	}
 	results, err := resourceguard.CheckDisk([]resourceguard.Node{node}, r.Topology.SparkCount, resourceguard.DiskPolicy{
 		ArtifactBytes: artifactBytes, RuntimeBytes: runtimeBytes, SafetyMarginBytes: r.Requirements.SafetyMarginBytes,
 	})
-	receipt := map[string]any{"per_node": results, "artifact_bytes": artifactBytes, "runtime_disk_bytes": runtimeBytes, "safety_margin_bytes": r.Requirements.SafetyMarginBytes}
+	receipt := map[string]any{"per_node": results, "artifact_bytes": artifactBytes, "runtime_disk_bytes": runtimeBytes, "safety_margin_bytes": r.Requirements.SafetyMarginBytes, "docker_disk_unknown": dockerDiskUnknown}
 	if err != nil {
 		return receipt, err
 	}

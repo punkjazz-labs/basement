@@ -17,7 +17,7 @@ interface Phase {
   operations: string[]
 }
 
-const FIRST_START_NOTE = 'Loading the model into memory — the first start typically takes 5–15 minutes, never more than 20. Later starts are much faster.'
+const FIRST_START_NOTE = 'Loading the model into memory. The first start typically takes 5 to 15 minutes, never more than 20. Later starts are much faster.'
 
 function phasePlan(job: Job): Phase[] {
   if (job.kind === 'install') {
@@ -34,7 +34,7 @@ function phasePlan(job: Job): Phase[] {
     return [
       { title: 'Reserve hardware', note: 'Stop the active model, check memory', states: ['queued', 'stopping', 'checking_memory'], operations: ['stop_container', 'verify_memory'] },
       { title: 'Start model', note: 'Launch the pinned runtime', states: ['starting'], operations: ['start_container'] },
-      { title: 'Verify endpoint', note: 'Health and real inference', activeNote: 'Waiting for the model to load and answer — takes a few minutes when memory is cold.', states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
+      { title: 'Verify endpoint', note: 'Health and real inference', activeNote: 'Waiting for the model to load and answer. This takes a few minutes when memory is cold.', states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
     ]
   }
   if (job.kind === 'remove') {
@@ -130,7 +130,7 @@ function LiveProgress({ step }: { step: Step }) {
     if (attempt <= 0) return null
     return (
       <div className="sub-progress">
-        <span className="mono nums">Health check #{attempt} — the model is still loading, this is normal.</span>
+        <span className="mono nums">Health check #{attempt}. The model is still loading, this is normal.</span>
       </div>
     )
   }
@@ -240,7 +240,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
     const { ok } = await confirmBox({
       title: `Cancel this ${noun}?`,
       body: job.kind === 'install'
-        ? 'Downloads are resumable — installing again later picks up where this left off.'
+        ? 'Downloads are resumable. Installing again later picks up where this left off.'
         : undefined,
       confirmLabel: `Cancel ${noun}`,
       cancelLabel: 'Keep going',
@@ -294,7 +294,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
         {job.state === 'cancelled' ? (
           <p className="muted" role="status">
             {job.kind === 'install'
-              ? 'Cancelled. Everything downloaded so far is kept — installing again resumes where this left off.'
+              ? 'Cancelled. Everything downloaded so far is kept, and installing again resumes where this left off.'
               : `The ${noun} was cancelled.`}
           </p>
         ) : (
@@ -309,15 +309,15 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
           <div className="dialog-result" role="status">
             <div className="cell">
               <div className="l">Generation speed</div>
-              <div className="v">{typeof benchReceipt.tokens_per_second === 'number' ? benchReceipt.tokens_per_second.toFixed(1) : '—'} <small>tok/s</small></div>
+              <div className="v">{typeof benchReceipt.tokens_per_second === 'number' ? benchReceipt.tokens_per_second.toFixed(1) : 'n/a'} <small>tok/s</small></div>
             </div>
             <div className="cell">
               <div className="l">First token</div>
-              <div className="v">{typeof benchReceipt.time_to_first_token_ms === 'number' ? Math.round(benchReceipt.time_to_first_token_ms) : '—'} <small>ms</small></div>
+              <div className="v">{typeof benchReceipt.time_to_first_token_ms === 'number' ? Math.round(benchReceipt.time_to_first_token_ms) : 'n/a'} <small>ms</small></div>
             </div>
             <div className="cell">
               <div className="l">Sample</div>
-              <div className="v">{typeof benchReceipt.completion_tokens === 'number' ? benchReceipt.completion_tokens : '—'} <small>tokens</small></div>
+              <div className="v">{typeof benchReceipt.completion_tokens === 'number' ? benchReceipt.completion_tokens : 'n/a'} <small>tokens</small></div>
             </div>
           </div>
         )}

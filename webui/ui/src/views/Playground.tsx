@@ -84,7 +84,7 @@ export default function Playground({ ready, modelID, modelName }: {
       }
       if (firstToken) {
         const generation = (performance.now() - firstToken) / 1000
-        const rate = generation > 0 ? (chunks / generation).toFixed(1) : '—'
+        const rate = generation > 0 ? (chunks / generation).toFixed(1) : 'n/a'
         setStats(`${chunks} tokens · ${rate} tok/s · first token in ${Math.round(firstToken - started)} ms`)
       }
     } catch (problem) {
@@ -124,7 +124,7 @@ export default function Playground({ ready, modelID, modelName }: {
       </div>
       <div className="chat card" ref={chatRef} aria-live="polite">
         {messages.length === 0 && (
-          <p className="faint">Send a message — the reply streams from your Spark, token by token.</p>
+          <p className="faint">Send a message. The reply streams from your Spark, token by token.</p>
         )}
         {messages.map((message, index) => (
           <div

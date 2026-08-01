@@ -60,7 +60,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
   const [copied, setCopied] = useState('')
 
   const base = `${window.location.origin}/v1`
-  const model = activeModelID ?? '<model id — shown when a model is active>'
+  const model = activeModelID ?? '<model id, shown when a model is active>'
 
   const load = () => api<APIKey[]>('/api/v1/keys').then(setKeys).catch(() => {})
   useEffect(() => {
@@ -116,7 +116,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
           </button>
         </div>
         <p className="muted" style={{ marginBottom: 0 }}>
-          One address, always. Switching models never changes it — clients keep working.
+          One address, always. Switching models never changes it, so clients keep working.
           {activeModelID && (
             <>
               {' '}Current model ID:{' '}
@@ -136,7 +136,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
         </div>
         {freshSecret && (
           <div className="secret-reveal" role="alert">
-            <strong>“{freshSecret.name}” created — copy the key now.</strong>
+            <strong>“{freshSecret.name}” created. Copy the key now.</strong>
             <span className="muted">For security it is never shown again.</span>
             <code>{freshSecret.secret}</code>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -194,7 +194,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
           <pre><code>{snippetFor(snippet, base, model)}</code></pre>
         </div>
         <p className="faint" style={{ fontSize: 12.5, marginBottom: 0 }}>
-          Set <code>RUNONSPARK_API_KEY</code> to a key from above. Works with the OpenAI SDKs, Cursor, Continue, LiteLLM, Open WebUI — anything OpenAI-compatible.
+          Set <code>RUNONSPARK_API_KEY</code> to a key from above. Works with the OpenAI SDKs, Cursor, Continue, LiteLLM, Open WebUI, and anything else OpenAI-compatible.
         </p>
       </section>
     </div>

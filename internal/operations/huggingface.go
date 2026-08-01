@@ -81,7 +81,7 @@ func (h *HFClient) Download(ctx context.Context, artifact recipe.Artifact, targe
 			completed += file.Size
 			if progress != nil {
 				if err := progress(downloadReceipt(artifact, file.Name, completed, total)); err != nil {
-					return nil, fmt.Errorf("persist download progress: %w", err)
+					return nil, err
 				}
 			}
 			continue
@@ -233,7 +233,7 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 			written += int64(n)
 			if time.Since(lastReport) >= time.Second {
 				if err := progress(written); err != nil {
-					return fmt.Errorf("persist download progress: %w", err)
+					return err
 				}
 				lastReport = time.Now()
 			}
@@ -252,7 +252,7 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 		return err
 	}
 	if err := progress(written); err != nil {
-		return fmt.Errorf("persist download progress: %w", err)
+		return err
 	}
 	return os.Rename(tempPath, finalPath)
 }

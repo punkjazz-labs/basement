@@ -227,7 +227,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             </div>
           </div>
           <div className="m-num">
-            <span className="n">{measured ? measured.toFixed(1) : reference ? `~${reference}` : '—'}<small>tok/s</small></span>
+            <span className="n">{measured ? measured.toFixed(1) : reference ? `~${reference}` : 'n/a'}<small>tok/s</small></span>
             <span className={`sub ${measured ? 'ok' : ''}`}>{measured ? 'measured here' : 'typical'}</span>
           </div>
           <div className="m-num">
@@ -269,12 +269,12 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             <div className="board">
               <div className="cell">
                 <div className="l">Speed</div>
-                <div className="v">{measured ? measured.toFixed(1) : reference ? `~${reference}` : '—'} <small>tok/s</small></div>
+                <div className="v">{measured ? measured.toFixed(1) : reference ? `~${reference}` : 'n/a'} <small>tok/s</small></div>
                 <div className={`q ${measured ? 'ok' : ''}`}>{measured ? 'measured on this Spark' : 'typical on a Spark'}</div>
               </div>
               <div className="cell">
                 <div className="l">First token</div>
-                <div className="v">{model?.time_to_first_token_ms ? model.time_to_first_token_ms : '—'} <small>ms</small></div>
+                <div className="v">{model?.time_to_first_token_ms ? model.time_to_first_token_ms : 'n/a'} <small>ms</small></div>
               </div>
               <div className="cell">
                 <div className="l">Download</div>
@@ -345,12 +345,12 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
           </div>
           <p className="hero-line">
             {USE[featured.id]}{' '}
-            <span>Verified and pinned for a single Spark — RunOnSpark measures its real speed after install.</span>
+            <span>Verified and pinned for a single Spark. RunOnSpark measures its real speed after install.</span>
           </p>
           <div className="hero-score">
             <div className="cell"><div className="l">Speed</div><div className="v">~{REFERENCE_TPS[featured.id]}</div><div className="u">tok/s · typical</div></div>
             <div className="cell"><div className="l">Download</div><div className="v">{formatBytes(featured.artifact_bytes)}</div><div className="u">one time</div></div>
-            <div className="cell"><div className="l">Licence</div><div className="v">{featured.artifacts[0]?.licence ?? '—'}</div><div className="u">open weights</div></div>
+            <div className="cell"><div className="l">Licence</div><div className="v">{featured.artifacts[0]?.licence ?? 'n/a'}</div><div className="u">open weights</div></div>
             <div className="cell"><div className="l">Runtime</div><div className="v">vLLM</div><div className="u">pinned digest</div></div>
           </div>
         </section>
@@ -398,11 +398,11 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                     </dd>
                   </div>
                   <div><dt>Space needed</dt><dd>{formatBytes(confirm.recipe.required_bytes)}</dd></div>
-                  <div><dt>Typical speed</dt><dd>{REFERENCE_TPS[confirm.recipe.id] ? `~${REFERENCE_TPS[confirm.recipe.id]} tok/s` : '—'}</dd></div>
+                  <div><dt>Typical speed</dt><dd>{REFERENCE_TPS[confirm.recipe.id] ? `~${REFERENCE_TPS[confirm.recipe.id]} tok/s` : 'n/a'}</dd></div>
                 </dl>
                 <p className="muted" style={{ fontSize: 12.5 }}>
                   After the download, the first start loads the model into memory and typically takes
-                  5–15 minutes — the deployment view shows live progress the whole way, and later
+                  5 to 15 minutes, with live progress the whole way, and later
                   starts are much faster. Cancelling is always safe: downloads resume where they left off.
                 </p>
                 {confirm.switchFrom && (

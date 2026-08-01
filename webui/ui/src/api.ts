@@ -194,7 +194,7 @@ const randomUUID = (): string => {
 export const idempotency = () => ({ 'Idempotency-Key': randomUUID() })
 
 export function formatBytes(value?: number): string {
-  if (!value) return '—'
+  if (!value) return 'n/a'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   let unit = 0
   let amount = value
