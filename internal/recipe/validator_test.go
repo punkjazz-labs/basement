@@ -14,7 +14,7 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 		t.Fatalf("got %d recipes, want 3", len(recipes))
 	}
 	for _, r := range recipes {
-		if r.Verification != "candidate" || r.Trust != "runonspark-candidate" {
+		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
 			t.Fatalf("recipe falsely verified: %#v", r)
 		}
 	}
@@ -56,7 +56,7 @@ func TestRecipePolicyRejectsUnsafeVariants(t *testing.T) {
 		{"missing inference gate", func(r *Recipe) { r.Operations = r.Operations[:len(r.Operations)-1] }, "complete verified lifecycle"},
 		{"unsafe repository", func(r *Recipe) { r.Artifacts[0].Repository = "../../etc/passwd" }, "role/repository"},
 		{"undeclared secret", func(r *Recipe) { r.Requirements.Secrets = []string{"AWS_SECRET_ACCESS_KEY"} }, "allowlisted"},
-		{"false verification", func(r *Recipe) { r.Trust = "runonspark-verified" }, "real DGX verification"},
+		{"false verification", func(r *Recipe) { r.Trust = "basement-verified" }, "real DGX verification"},
 		{"mutable source", func(r *Recipe) { r.Source.Revision = "main" }, "immutable revision"},
 		{"unsafe environment", func(r *Recipe) { r.Runtime.Environment["LD_PRELOAD"] = "/tmp/hook.so" }, "allowlist"},
 		{"compressed-only image budget", func(r *Recipe) { r.Runtime.ImageDiskBytes = r.Runtime.ImageBytes - 1 }, "expanded image storage"},

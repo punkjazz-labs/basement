@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const cookieName = "runonspark_session"
+const cookieName = "basement_session"
 
 type Manager struct {
 	pairingToken string

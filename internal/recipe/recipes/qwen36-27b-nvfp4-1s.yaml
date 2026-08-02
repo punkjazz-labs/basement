@@ -6,7 +6,7 @@ publisher: MiaAI Lab + NVIDIA
 model_by: Qwen team, Alibaba
 model_released: April 2026
 recipe_by: MiaAI Lab
-trust: runonspark-candidate
+trust: basement-candidate
 verification: candidate
 source:
   url: https://github.com/MiaAI-Lab/Qwen3.6-27B-NVFP4-vLLM

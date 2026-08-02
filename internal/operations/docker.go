@@ -24,6 +24,22 @@ type DockerClient struct {
 	negotiated    string
 }
 
+// Container labels this manager sets on everything it creates, and reads
+// back to recognize its own containers.
+const (
+	labelManaged       = "ai.basement.managed"
+	labelRecipeID      = "ai.basement.recipe-id"
+	labelRecipeVersion = "ai.basement.recipe-version"
+
+	// Pre-rename (spec 10) label namespace. Containers created before the
+	// rename still carry it — live containers are never relabeled — so
+	// ManagedContainers keeps reading both namespaces; new containers only
+	// ever get the current one.
+	legacyLabelManaged       = "ai.runonspark.managed"
+	legacyLabelRecipeID      = "ai.runonspark.recipe-id"
+	legacyLabelRecipeVersion = "ai.runonspark.recipe-version"
+)
+
 var ErrContainerNotFound = errors.New("container not found")
 
 type ContainerState struct {
@@ -241,7 +257,7 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 		"Entrypoint":   []string{"vllm"},
 		"Cmd":          vllmArgs(r),
 		"Env":          environment,
-		"Labels":       map[string]string{"ai.runonspark.managed": "true", "ai.runonspark.recipe-id": r.ID, "ai.runonspark.recipe-version": fmt.Sprint(r.Version)},
+		"Labels":       map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: fmt.Sprint(r.Version)},
 		"ExposedPorts": map[string]any{port: map[string]any{}},
 		"HostConfig":   hostConfig,
 	}
@@ -256,7 +272,7 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 		if inspectErr != nil {
 			return "", dockerError(resp)
 		}
-		if existing.Labels["ai.runonspark.recipe-id"] != r.ID || existing.Labels["ai.runonspark.recipe-version"] != fmt.Sprint(r.Version) {
+		if existing.Labels[labelRecipeID] != r.ID || existing.Labels[labelRecipeVersion] != fmt.Sprint(r.Version) {
 			return "", errors.New("container name is owned by another installation")
 		}
 		return existing.ID, nil
@@ -281,9 +297,13 @@ type ManagedContainer struct {
 }
 
 // ManagedContainers lists every container carrying the managed label,
-// including stopped ones — leftovers from cancelled or superseded jobs.
+// including stopped ones — leftovers from cancelled or superseded jobs. Both
+// the current and the pre-rename (spec 10) label namespace are matched
+// (repeated "label" filter values are ORed by the Docker API), so a
+// container created before the rename is still recognized as ours; it is
+// never relabeled in place.
 func (d *DockerClient) ManagedContainers(ctx context.Context) ([]ManagedContainer, error) {
-	filters := url.QueryEscape(`{"label":["ai.runonspark.managed=true"]}`)
+	filters := url.QueryEscape(`{"label":["` + labelManaged + `=true","` + legacyLabelManaged + `=true"]}`)
 	resp, err := d.request(ctx, http.MethodGet, "/containers/json?all=1&filters="+filters, nil)
 	if err != nil {
 		return nil, err
@@ -306,11 +326,19 @@ func (d *DockerClient) ManagedContainers(ctx context.Context) ([]ManagedContaine
 		if len(entry.Names) > 0 {
 			name = strings.TrimPrefix(entry.Names[0], "/")
 		}
+		recipeID := entry.Labels[labelRecipeID]
+		if recipeID == "" {
+			recipeID = entry.Labels[legacyLabelRecipeID]
+		}
+		version := entry.Labels[labelRecipeVersion]
+		if version == "" {
+			version = entry.Labels[legacyLabelRecipeVersion]
+		}
 		containers = append(containers, ManagedContainer{
 			Name:     name,
 			Running:  entry.State == "running",
-			RecipeID: entry.Labels["ai.runonspark.recipe-id"],
-			Version:  entry.Labels["ai.runonspark.recipe-version"],
+			RecipeID: recipeID,
+			Version:  version,
 		})
 	}
 	return containers, nil

@@ -104,14 +104,27 @@ func (h *HFClient) Download(ctx context.Context, artifact recipe.Artifact, targe
 		completed += file.Size
 	}
 	marker := completionMarker{Repository: artifact.Repository, Revision: artifact.Revision, Bytes: total, Files: manifest.Siblings, VerifiedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	if err := atomicJSON(filepath.Join(target, ".runonspark-complete.json"), marker, 0o640); err != nil {
+	if err := atomicJSON(filepath.Join(target, completionMarkerName), marker, 0o640); err != nil {
 		return nil, err
 	}
 	return map[string]any{"repository": artifact.Repository, "revision": artifact.Revision, "bytes_verified": total, "path": target}, nil
 }
 
+// completionMarkerName records a fully verified artifact download; new
+// downloads only ever write it. legacyCompletionMarkerName is the pre-
+// rename (spec 10) name — Complete falls back to reading it so an artifact
+// already verified before the rename is not forced through a full re-hash
+// of what can be tens of gigabytes of weights after an upgrade. This never
+// weakens verification: Complete still re-checks every file's hash against
+// whichever marker it reads.
+const completionMarkerName = ".basement-complete.json"
+const legacyCompletionMarkerName = ".runonspark-complete.json"
+
 func (h *HFClient) Complete(artifact recipe.Artifact, target string) bool {
-	data, err := os.ReadFile(filepath.Join(target, ".runonspark-complete.json"))
+	data, err := os.ReadFile(filepath.Join(target, completionMarkerName))
+	if err != nil {
+		data, err = os.ReadFile(filepath.Join(target, legacyCompletionMarkerName))
+	}
 	if err != nil {
 		return false
 	}
