@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { api, idempotency, terminal, formatBytes, type Job, type Preflight, type Recipe, type StorageInfo } from '../api'
+import { api, idempotency, terminal, formatBytes, startTimeoutMinutes, type Job, type Preflight, type Recipe, type StorageInfo } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { LOGOS, readableWeights } from '../catalog'
@@ -398,8 +398,8 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                   <div><dt>Typical speed</dt><dd>{REFERENCE_TPS[confirm.recipe.id] ? `~${REFERENCE_TPS[confirm.recipe.id]} tok/s` : 'n/a'}</dd></div>
                 </dl>
                 <p className="muted" style={{ fontSize: 12.5 }}>
-                  After the download, the first start loads the model into memory and typically takes
-                  5 to 15 minutes, with live progress the whole way, and later
+                  After the download, the first start loads the model into memory. This can take up to{' '}
+                  {startTimeoutMinutes(confirm.recipe)} minutes, with live progress the whole way, and later
                   starts are much faster. Cancelling is always safe: downloads resume where they left off.
                 </p>
                 {confirm.switchFrom && (

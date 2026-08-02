@@ -42,6 +42,11 @@ type Runtime struct {
 	ShmBytes       int64             `yaml:"shm_bytes" json:"shm_bytes"`
 	MemoryLock     bool              `yaml:"memory_lock" json:"memory_lock"`
 	IPCLock        bool              `yaml:"ipc_lock" json:"ipc_lock"`
+	// StartTimeoutMinutes bounds how long the health wait gives a first start
+	// before failing; the console's own copy derives from this value so it
+	// never promises a number the wait does not honour. 0 means the default
+	// of 20 minutes.
+	StartTimeoutMinutes int `yaml:"start_timeout_minutes" json:"start_timeout_minutes"`
 }
 
 func (r Runtime) Reference() string { return r.Image + "@" + r.Digest }

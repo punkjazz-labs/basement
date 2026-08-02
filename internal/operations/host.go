@@ -464,8 +464,19 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 	}
 }
 
+// startTimeout resolves the recipe's health-wait deadline. 0 or a negative
+// value falls back to the default of 20 minutes.
+func startTimeout(r recipe.Recipe) time.Duration {
+	minutes := r.Runtime.StartTimeoutMinutes
+	if minutes <= 0 {
+		minutes = 20
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
 func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress Progress) (map[string]any, error) {
-	deadline := time.Now().Add(20 * time.Minute)
+	timeout := startTimeout(r)
+	deadline := time.Now().Add(timeout)
 	attempt := 0
 	for time.Now().Before(deadline) {
 		attempt++
@@ -496,10 +507,11 @@ func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress P
 		}
 	}
 	logs := h.docker.Logs(ctx, containerName(r), 40)
+	minutes := int(timeout / time.Minute)
 	if logs != "" {
-		return nil, fmt.Errorf("vLLM did not become HTTP-ready within 20 minutes; last container output:\n%s", logs)
+		return nil, fmt.Errorf("vLLM did not become HTTP-ready within %d minutes; last container output:\n%s", minutes, logs)
 	}
-	return nil, errors.New("vLLM did not become HTTP-ready within 20 minutes")
+	return nil, fmt.Errorf("vLLM did not become HTTP-ready within %d minutes", minutes)
 }
 
 func (h *HostExecutor) health(ctx context.Context, r recipe.Recipe) error {
