@@ -170,6 +170,12 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
     for (const [name, present] of Object.entries(preflight.secrets)) if (!present) list.push(`${name} is missing`)
     return list
   }
+  // Two installs of different recipes are allowed to run at once; the
+  // per-recipe guard already covers the same recipe, so this only needs to
+  // know whether a different recipe has one in flight.
+  const anotherInstallRunning = confirm
+    ? jobs.some(job => job.kind === 'install' && job.recipe_id !== confirm.recipe.id && !terminal(job.state))
+    : false
   const reclaimCandidates = confirm?.preflight.checks
     .find(check => !check.ok && check.operation === 'verify_disk')
     ?.receipt?.reclaim_candidates
@@ -409,6 +415,9 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                   {startTimeoutMinutes(confirm.recipe)} minutes, with live progress the whole way, and later
                   starts are much faster. Cancelling is always safe: downloads resume where they left off.
                 </p>
+                {anotherInstallRunning && (
+                  <p className="muted" style={{ fontSize: 12.5 }}>Another download is running. Both continue, sharing bandwidth.</p>
+                )}
                 {confirm.switchFrom && (
                   <div className="install-choice" role="radiogroup" aria-label="After the download finishes">
                     <label className="confirm-check">
