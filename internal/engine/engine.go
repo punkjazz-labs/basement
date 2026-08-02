@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/punkjazz-labs/runonspark-manager/internal/operations"
@@ -17,11 +18,22 @@ import (
 )
 
 type Engine struct {
-	store       *store.Store
-	executor    operations.Executor
-	recipes     []recipe.Recipe
-	mu          sync.Mutex
-	running     map[string]context.CancelFunc
+	store    *store.Store
+	executor operations.Executor
+	// effective is the current merged catalog (recipe.Merge): one recipe per
+	// ID, the newest version known. It is what a NEW install or update
+	// targets. all is every distinct (id, version) this manager has ever
+	// verified — embedded, cached, or fetched — and only ever grows; it is
+	// what an ALREADY-INSTALLED model must be operated on with (see
+	// recipeFor), so a background recipe-index refresh can never change
+	// which container name, port, or config an existing install resolves
+	// to. Both are swapped atomically by SetRecipes as a unit; readers never
+	// take a lock.
+	effective atomic.Pointer[[]recipe.Recipe]
+	all       atomic.Pointer[[]recipe.Recipe]
+	mu        sync.Mutex
+	running   map[string]context.CancelFunc
+
 	recipeLocks map[string]*sync.Mutex
 	// runtime serializes container and activation mutations across recipes;
 	// downloads and preflight run outside it so a long install cannot block
@@ -56,8 +68,62 @@ type plannedOperation struct {
 	Receipt     map[string]any
 }
 
+// New starts the engine with recipes as both the effective catalog and the
+// full version history — correct at startup, when nothing has ever been
+// overlaid yet. SetRecipes takes over both from the first background
+// recipe-index refresh onward.
 func New(s *store.Store, executor operations.Executor, recipes []recipe.Recipe) *Engine {
-	return &Engine{store: s, executor: executor, recipes: recipes, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1), reserved: map[string]int64{}}
+	e := &Engine{store: s, executor: executor, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1), reserved: map[string]int64{}}
+	e.SetRecipes(recipes, recipes)
+	return e
+}
+
+// SetRecipes replaces the recipe catalog and history. all must be
+// monotonically growing (never drop a version some installed model may
+// still depend on); the caller (internal/recipefeed) owns that guarantee.
+// Safe to call from any goroutine at any time, including while jobs run.
+func (e *Engine) SetRecipes(all, effective []recipe.Recipe) {
+	e.all.Store(&all)
+	e.effective.Store(&effective)
+}
+
+func (e *Engine) effectiveRecipes() []recipe.Recipe {
+	if p := e.effective.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+func (e *Engine) allRecipes() []recipe.Recipe {
+	if p := e.all.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// recipeFor resolves the recipe to operate a job with. A fresh install
+// always targets the current effective (latest) catalog entry for the
+// recipe ID — that is what "install" and "update" mean. Every other job
+// kind operates on an EXISTING installed model, and must resolve to the
+// exact version recorded in store.InstalledModel.RecipeVersion: the
+// catalog's entry for that ID may have moved on to a newer version in the
+// background since the model was installed, and using that newer
+// definition would compute the wrong container name (host.go's
+// containerName embeds the version) or the wrong requirements for a
+// container that was never created. When the exact installed version is not
+// resolvable (should not normally happen: history only ever grows), this
+// falls back to the effective entry rather than failing outright.
+func (e *Engine) recipeFor(ctx context.Context, kind, recipeID string) (recipe.Recipe, bool) {
+	effective := e.effectiveRecipes()
+	if kind == "install" {
+		return recipe.Find(effective, recipeID)
+	}
+	if model, err := e.store.Model(ctx, recipeID); err == nil {
+		if pinned, ok := recipe.FindVersion(e.allRecipes(), recipeID, model.RecipeVersion); ok {
+			return pinned, true
+		}
+	}
+	return recipe.Find(effective, recipeID)
 }
 
 // reserveDisk records jobID's conservative disk footprint so concurrent
@@ -200,7 +266,7 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 	if err != nil {
 		return
 	}
-	r, ok := recipe.Find(e.recipes, job.RecipeID)
+	r, ok := e.recipeFor(ctx, job.Kind, job.RecipeID)
 	if !ok {
 		_ = e.store.UpdateJobState(ctx, jobID, "failed", "recipe is no longer available")
 		return
@@ -407,7 +473,7 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 		}
 		return plans, nil, nil
 	}
-	previous, err := e.activeRecipe(ctx, target.ID)
+	previous, err := e.activeRecipe(ctx, target)
 	if err != nil || previous == nil {
 		for _, op := range ops {
 			plans = append(plans, plannedOperation{Operation: op, Recipe: target})
@@ -463,7 +529,11 @@ func (e *Engine) sharedArtifacts(ctx context.Context, excludeRecipeID string) (m
 		if model.ArtifactPath != "" {
 			shared[model.ArtifactPath] = true
 		}
-		other, ok := recipe.Find(e.recipes, model.RecipeID)
+		// Use the exact version this other model was installed with, not
+		// whatever the catalog now has for its ID: an artifact revision can
+		// change between recipe versions, and understating what is still in
+		// use here is what protects it from remove_artifact_if_unshared.
+		other, ok := e.pinnedOrEffective(model.RecipeID, model.RecipeVersion)
 		if !ok {
 			continue
 		}
@@ -474,16 +544,37 @@ func (e *Engine) sharedArtifacts(ctx context.Context, excludeRecipeID string) (m
 	return shared, nil
 }
 
-func (e *Engine) activeRecipe(ctx context.Context, targetID string) (*recipe.Recipe, error) {
+// pinnedOrEffective resolves a recipe the same way recipeFor does for a
+// non-install job: prefer the exact installed version, falling back to
+// whatever the effective catalog currently has for that ID.
+func (e *Engine) pinnedOrEffective(id string, version int) (recipe.Recipe, bool) {
+	if pinned, ok := recipe.FindVersion(e.allRecipes(), id, version); ok {
+		return pinned, true
+	}
+	return recipe.Find(e.effectiveRecipes(), id)
+}
+
+// activeRecipe finds the model this job's target must be switched from, if
+// any: another actively-serving recipe, or the same recipe ID actively
+// serving an older version (an in-place update). Either way the result is
+// resolved to the EXACT version that model was installed with (never the
+// live catalog's current entry for that ID), because plan() uses it both to
+// stop the real running container and, on rollback, to restart it — and
+// only the exact installed version reliably names that container
+// (host.go's containerName embeds the version).
+func (e *Engine) activeRecipe(ctx context.Context, target recipe.Recipe) (*recipe.Recipe, error) {
 	models, err := e.store.Models(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, model := range models {
-		if !model.Active || model.RecipeID == targetID {
+		if !model.Active {
 			continue
 		}
-		active, ok := recipe.Find(e.recipes, model.RecipeID)
+		if model.RecipeID == target.ID && model.RecipeVersion == target.Version {
+			continue // already exactly this version; nothing to switch from
+		}
+		active, ok := e.pinnedOrEffective(model.RecipeID, model.RecipeVersion)
 		if !ok {
 			return nil, fmt.Errorf("active model recipe %s is no longer available", model.RecipeID)
 		}
@@ -701,7 +792,7 @@ func (e *Engine) cleanupAfterCancel(jobID string) {
 	if err != nil || (job.Kind != "install" && job.Kind != "start") {
 		return
 	}
-	r, ok := recipe.Find(e.recipes, job.RecipeID)
+	r, ok := e.recipeFor(background, job.Kind, job.RecipeID)
 	if !ok {
 		return
 	}
