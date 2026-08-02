@@ -16,10 +16,9 @@ import (
 
 // WizardUI drives one interactive setup run: discover-or-fixed-target,
 // choose a machine, connect, confirm hardware, choose how the console
-// listens, install, and report the result. cmd/runonspark-manager/setup.go
-// (terminal) and internal/setupweb (browser) each implement it; every
-// decision the flow makes lives once, here, so both surfaces stay in
-// lockstep.
+// listens, install, and report the result. cmd/basement/setup.go (terminal)
+// and internal/setupweb (browser) each implement it; every decision the
+// flow makes lives once, here, so both surfaces stay in lockstep.
 type WizardUI interface {
 	Prompter // Password, Confirm — unchanged, SSH needs them mid-flow
 
@@ -62,7 +61,7 @@ func DiscoverAndChoose(ctx context.Context, ui WizardUI) (target string, peers [
 	if len(candidates) == 0 {
 		// Capitalized and punctuated as a sentence on purpose: this text
 		// reaches the operator verbatim, not just a Go error log.
-		return "", nil, errors.New("No SSH-reachable machines found. Is the GB10 machine on this network?\n  You can also point setup directly:  runonspark-manager setup --host <ip>")
+		return "", nil, errors.New("No SSH-reachable machines found. Is the GB10 machine on this network?\n  You can also point setup directly:  basement setup --host <ip>")
 	}
 
 	index, err := ui.ChooseMachine(candidates)
@@ -131,7 +130,7 @@ func ConnectAndVerify(ctx context.Context, ui WizardUI, target, sshUser string) 
 		if gpu == "" {
 			gpu = "none detected"
 		}
-		return nil, fmt.Errorf("%s is not a GB10 machine (GPU: %s) — RunOnSpark recipes are built for the GB10 superchip, so setup will not install here", target, gpu)
+		return nil, fmt.Errorf("%s is not a GB10 machine (GPU: %s) — basement recipes are built for the GB10 superchip, so setup will not install here", target, gpu)
 	}
 	descriptor := identity.Hostname
 	if identity.OSName != "" {
@@ -197,13 +196,31 @@ func knownUsersPath() string {
 	if err != nil {
 		return ""
 	}
+	return filepath.Join(configDir, "basement", "known-users.json")
+}
+
+// legacyKnownUsersPath is the pre-rename (spec 10) location. RememberedUser
+// falls back to reading it when the new path has nothing yet, so upgrading
+// this machine's setup binary does not forget every remembered login;
+// RememberUser only ever writes the new path.
+func legacyKnownUsersPath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
 	return filepath.Join(configDir, "runonspark-manager", "known-users.json")
 }
 
 // RememberedUser returns the last username that connected successfully to
 // target, or "" if none is known.
 func RememberedUser(target string) string {
-	path := knownUsersPath()
+	if user := rememberedUserAt(knownUsersPath(), target); user != "" {
+		return user
+	}
+	return rememberedUserAt(legacyKnownUsersPath(), target)
+}
+
+func rememberedUserAt(path, target string) string {
 	if path == "" {
 		return ""
 	}

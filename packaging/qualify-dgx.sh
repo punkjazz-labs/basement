@@ -37,13 +37,13 @@ esac
 command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
 
-pairing_file=${RUNONSPARK_PAIRING_TOKEN_FILE:-/var/lib/runonspark-manager/pairing-token}
+pairing_file=${BASEMENT_PAIRING_TOKEN_FILE:-/var/lib/basement/pairing-token}
 [ -r "$pairing_file" ] || { echo "pairing token is not readable at $pairing_file" >&2; exit 1; }
 umask 077
 mkdir -p "$receipt_dir"
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 receipt_file="$receipt_dir/${timestamp}-${recipe_id}.jsonl"
-temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/runonspark-qualify.XXXXXX")
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/basement-qualify.XXXXXX")
 cookie_file="$temporary_dir/cookies.txt"
 
 cleanup() {
@@ -210,7 +210,7 @@ import json, re, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     bundle = json.load(handle)
 text = json.dumps(bundle)
-if bundle.get("redacted") is not True or bundle.get("format") != "runonspark-diagnostics-v1":
+if bundle.get("redacted") is not True or bundle.get("format") != "basement-diagnostics-v1":
     raise SystemExit("diagnostic bundle is not marked as the redacted v1 format")
 if re.search(r"hf_[A-Za-z0-9]{12,}", text):
     raise SystemExit("diagnostic bundle contains a likely Hugging Face token")

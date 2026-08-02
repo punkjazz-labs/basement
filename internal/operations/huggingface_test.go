@@ -76,6 +76,45 @@ func TestHuggingFaceDownloadResumesAndVerifies(t *testing.T) {
 	}
 }
 
+// An artifact verified before the basement rename (spec 10) only has the
+// pre-rename marker file on disk; Complete must still recognize it (falling
+// back to reading it, never writing it) so an upgraded manager does not
+// force a multi-gigabyte re-download of weights it already verified.
+func TestHuggingFaceCompleteFallsBackToPreRenameMarker(t *testing.T) {
+	content := []byte("already verified before the rename")
+	sum := sha256.Sum256(content)
+	revision := strings.Repeat("a", 40)
+	target := filepath.Join(t.TempDir(), "artifact")
+	if err := os.MkdirAll(filepath.Join(target, "weights"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "weights/model.bin"), content, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	marker := completionMarker{
+		Repository: "owner/model", Revision: revision, Bytes: int64(len(content)),
+		Files: []hfFile{{
+			Name: "weights/model.bin", Size: int64(len(content)),
+			LFS: &struct {
+				SHA256 string `json:"sha256"`
+				Size   int64  `json:"size"`
+			}{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(content))},
+		}},
+		VerifiedAt: "2026-01-01T00:00:00Z",
+	}
+	if err := atomicJSON(filepath.Join(target, legacyCompletionMarkerName), marker, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	artifact := recipe.Artifact{Role: "primary", Repository: "owner/model", Revision: revision, ExpectedBytes: int64(len(content))}
+	client := &HFClient{}
+	if !client.Complete(artifact, target) {
+		t.Fatal("pre-rename completion marker was not honored")
+	}
+	if _, err := os.Stat(filepath.Join(target, completionMarkerName)); err == nil {
+		t.Fatal("Complete must never write the current-name marker; it only reads and falls back")
+	}
+}
+
 func TestHuggingFaceManifestPathTraversalIsRejected(t *testing.T) {
 	revision := strings.Repeat("a", 40)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

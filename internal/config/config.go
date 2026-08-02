@@ -40,14 +40,14 @@ func Parse(version string) (Config, error) {
 
 func defaultDataDir() string {
 	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
-		return "/var/lib/runonspark-manager"
+		return "/var/lib/basement"
 	}
 	if state := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(state) {
-		return filepath.Join(state, "runonspark-manager")
+		return filepath.Join(state, "basement")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "./var"
 	}
-	return filepath.Join(home, ".local", "state", "runonspark-manager")
+	return filepath.Join(home, ".local", "state", "basement")
 }

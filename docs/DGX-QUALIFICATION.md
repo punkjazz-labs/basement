@@ -18,7 +18,7 @@ After installing and starting the manager, run the qualification helper locally 
 sudo packaging/qualify-dgx.sh \
   http://127.0.0.1:7070 \
   qwen36-35b-a3b-nvfp4-1s \
-  /var/lib/runonspark-manager/qualification
+  /var/lib/basement/qualification
 ```
 
 The helper exercises authenticated preflight, installation, persisted job polling, real inference verification, stop, start, a second smoke test, and redacted diagnostic export. Add `--remove` only when the downloaded weights should be deleted and removal/reclaim behavior is the test objective.
@@ -35,13 +35,13 @@ The script reports evidence but never changes a recipe from candidate to verifie
 
 Run these after the basic lifecycle passes, one machine at a time:
 
-1. During a model download, restart `runonspark-manager`; confirm the same job resumes and completed bytes are retained.
+1. During a model download, restart `basement`; confirm the same job resumes and completed bytes are retained.
 2. With a model ready, reboot the Spark; confirm the UI shows recovery until health and inference reconciliation complete.
 3. Fill a manager-owned test volume until preflight reports insufficient disk, then remove only that test data.
 4. Occupy port 8000 with an unrelated listener and confirm preflight blocks. Repeat with another manager-owned model active and confirm the UI offers a transactional switch.
 5. Block registry or Hugging Face access temporarily and confirm the job fails with a redacted actionable error, then resumes with the same idempotency identity after access returns.
 6. Run with `--remove` and verify the receipt's reclaimed bytes match the recipe's owned artifacts while unrelated data remains.
-7. Scan the JSONL receipt, diagnostic bundle, manager API, and `journalctl -u runonspark-manager` output for credentials before promoting any recipe.
+7. Scan the JSONL receipt, diagnostic bundle, manager API, and `journalctl -u basement` output for credentials before promoting any recipe.
 8. Consume unified memory with a controlled manager-owned test process until live preflight blocks the start. Confirm no model container start is attempted and the process can be removed without rebooting the Spark.
 9. During a switch, force the target's live-memory check to fail after the previous model stops. Confirm rollback restores and re-verifies the previous model.
 10. Begin a controlled download with sufficient space, then consume only the manager-owned test volume until the declared safety margin would be crossed. Confirm the job fails with a resumable partial download before the filesystem is exhausted.

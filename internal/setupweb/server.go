@@ -1,8 +1,8 @@
 // Package setupweb serves the browser wizard: a loopback-only HTTP server
-// that runs the same flow as `runonspark-manager setup` (internal/setup)
-// behind a single page instead of a terminal. It never talks to a manager
-// API — like the terminal wizard, it only ever speaks SSH outward to the
-// machine being installed.
+// that runs the same flow as `basement setup` (internal/setup) behind a
+// single page instead of a terminal. It never talks to a manager API — like
+// the terminal wizard, it only ever speaks SSH outward to the machine being
+// installed.
 package setupweb
 
 import (
@@ -130,7 +130,7 @@ func (s *Server) Wait(ctx context.Context) {
 }
 
 // run drives the shared setup flow (internal/setup) with this server as its
-// WizardUI, exactly like runonspark-manager setup does on the terminal.
+// WizardUI, exactly like basement setup does on the terminal.
 func (s *Server) run(ctx context.Context) {
 	s.flowCtx = ctx
 	defer s.markFinished()

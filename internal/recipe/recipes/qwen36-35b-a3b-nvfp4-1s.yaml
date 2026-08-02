@@ -6,7 +6,7 @@ publisher: MiaAI Lab + Unsloth
 model_by: Qwen team, Alibaba
 model_released: April 2026
 recipe_by: MiaAI Lab
-trust: runonspark-candidate
+trust: basement-candidate
 verification: candidate
 source:
   url: https://github.com/MiaAI-Lab/Unsloth-Qwen3.6-35b-NVFP4-DGX-Spark

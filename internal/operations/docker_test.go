@@ -167,6 +167,47 @@ func TestDockerNotFoundIsDistinguishableFromDaemonFailure(t *testing.T) {
 	}
 }
 
+// ManagedContainers must recognize containers labelled under the pre-rename
+// (spec 10) namespace, not just the current one: a machine set up before the
+// rename still has containers created under it, and they are never
+// relabeled in place (docs/plans/10-rename-basement.md).
+func TestManagedContainersReadsBothLabelNamespaces(t *testing.T) {
+	var requestedFilters string
+	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		if !strings.Contains(request.URL.Path, "/containers/json") {
+			t.Fatalf("unexpected Docker request: %s %s", request.Method, request.URL)
+		}
+		requestedFilters = request.URL.Query().Get("filters")
+		body := `[
+			{"Names":["/basement-qwen-v1"],"State":"running","Labels":{"ai.basement.managed":"true","ai.basement.recipe-id":"qwen","ai.basement.recipe-version":"1"}},
+			{"Names":["/runonspark-laguna-v3"],"State":"exited","Labels":{"ai.runonspark.managed":"true","ai.runonspark.recipe-id":"laguna","ai.runonspark.recipe-version":"3"}}
+		]`
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}}
+	containers, err := client.ManagedContainers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(requestedFilters, "ai.basement.managed=true") || !strings.Contains(requestedFilters, "ai.runonspark.managed=true") {
+		t.Fatalf("filter did not request both label namespaces: %s", requestedFilters)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("got %d containers, want 2: %#v", len(containers), containers)
+	}
+	byName := map[string]ManagedContainer{}
+	for _, c := range containers {
+		byName[c.Name] = c
+	}
+	current, ok := byName["basement-qwen-v1"]
+	if !ok || current.RecipeID != "qwen" || current.Version != "1" || !current.Running {
+		t.Errorf("current-namespace container = %#v", current)
+	}
+	legacy, ok := byName["runonspark-laguna-v3"]
+	if !ok || legacy.RecipeID != "laguna" || legacy.Version != "3" || legacy.Running {
+		t.Errorf("legacy-namespace container = %#v", legacy)
+	}
+}
+
 // The client must never pin a Docker API version: it negotiates the daemon's
 // own ApiVersion via the unversioned /version endpoint and uses that for
 // every call. A pinned version breaks either new daemons ("client version

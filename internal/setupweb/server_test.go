@@ -104,7 +104,7 @@ func TestValidTokenServesThePage(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "RunOnSpark setup") {
+	if !strings.Contains(string(body), "basement setup") {
 		t.Error("page body does not look like the wizard page")
 	}
 }

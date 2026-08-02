@@ -131,7 +131,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		return map[string]any{"product_name": system.ProductName, "dgx_spark": true}, nil
 	case "verify_memory_capacity", "verify_memory":
 		if operation.Type == "verify_memory" {
-			if state, err := h.docker.Container(ctx, containerName(r)); err == nil && state.Running {
+			if state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r)); err == nil && state.Running {
 				return map[string]any{"already_running": true, "container_id": state.ID}, nil
 			}
 		}
@@ -266,33 +266,37 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		}
 		return map[string]any{"container_id": id, "container_name": containerName(r)}, nil
 	case "start_container":
-		if err := h.docker.Start(ctx, containerName(r)); err != nil {
+		name := h.resolveContainerName(ctx, r)
+		if err := h.docker.Start(ctx, name); err != nil {
 			return nil, err
 		}
-		state, err := h.docker.Container(ctx, containerName(r))
+		state, err := h.docker.Container(ctx, name)
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"container_id": state.ID, "running": state.Running}, nil
 	case "stop_container":
-		if err := h.docker.Stop(ctx, containerName(r)); err != nil {
+		name := h.resolveContainerName(ctx, r)
+		if err := h.docker.Stop(ctx, name); err != nil {
 			return nil, err
 		}
 		// Containers from earlier recipe versions (cancelled installs,
-		// upgrades) hold the same host port; stop them too.
-		stopped := []string{containerName(r)}
+		// upgrades — including ones still under the pre-rename name) hold
+		// the same host port; stop them too.
+		stopped := []string{name}
 		if managed, err := h.docker.ManagedContainers(ctx); err == nil {
 			for _, container := range managed {
-				if container.RecipeID == r.ID && container.Running && container.Name != containerName(r) {
+				if container.RecipeID == r.ID && container.Running && container.Name != name {
 					if err := h.docker.Stop(ctx, container.Name); err == nil {
 						stopped = append(stopped, container.Name)
 					}
 				}
 			}
 		}
-		return map[string]any{"container_name": containerName(r), "stopped": true, "stopped_containers": stopped}, nil
+		return map[string]any{"container_name": name, "stopped": true, "stopped_containers": stopped}, nil
 	case "remove_container":
-		if err := h.docker.Remove(ctx, containerName(r)); err != nil {
+		name := h.resolveContainerName(ctx, r)
+		if err := h.docker.Remove(ctx, name); err != nil {
 			return nil, err
 		}
 		if err := h.removeOwnedConfig(r); err != nil {
@@ -301,7 +305,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := h.removeOwnedCache(r); err != nil {
 			return nil, err
 		}
-		return map[string]any{"container_name": containerName(r), "removed": true, "generated_config_removed": true, "compilation_cache_removed": true}, nil
+		return map[string]any{"container_name": name, "removed": true, "generated_config_removed": true, "compilation_cache_removed": true}, nil
 	case "wait_http":
 		return h.waitHTTP(ctx, r, progress)
 	case "verify_openai_inference":
@@ -442,10 +446,10 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 		}
 		return true
 	case "create_container":
-		state, err := h.docker.Container(ctx, containerName(r))
-		return err == nil && state.Labels["ai.runonspark.recipe-id"] == r.ID && state.Labels["ai.runonspark.recipe-version"] == fmt.Sprint(r.Version)
+		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
+		return err == nil && containerLabelsMatch(state.Labels, r)
 	case "start_container":
-		state, err := h.docker.Container(ctx, containerName(r))
+		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		return err == nil && state.Running
 	case "wait_http":
 		return h.health(ctx, r) == nil
@@ -453,10 +457,10 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 		_, err := h.verifyInference(ctx, r)
 		return err == nil
 	case "stop_container":
-		state, err := h.docker.Container(ctx, containerName(r))
+		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		return errors.Is(err, ErrContainerNotFound) || (err == nil && !state.Running)
 	case "remove_container":
-		_, err := h.docker.Container(ctx, containerName(r))
+		_, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		_, configErr := os.Stat(filepath.Dir(h.configPath(r)))
 		_, cacheErr := os.Stat(h.cachePath(r))
 		return errors.Is(err, ErrContainerNotFound) && errors.Is(configErr, os.ErrNotExist) && errors.Is(cacheErr, os.ErrNotExist)
@@ -501,8 +505,9 @@ func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress P
 		// A dead container never becomes healthy — fail immediately with its
 		// exit state and last output instead of burning the whole deadline.
 		if attempt%5 == 0 {
-			if state, err := h.docker.Container(ctx, containerName(r)); err == nil && !state.Running {
-				logs := h.docker.Logs(ctx, containerName(r), 40)
+			name := h.resolveContainerName(ctx, r)
+			if state, err := h.docker.Container(ctx, name); err == nil && !state.Running {
+				logs := h.docker.Logs(ctx, name, 40)
 				detail := ""
 				if logs != "" {
 					detail = "; last container output:\n" + logs
@@ -521,7 +526,7 @@ func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress P
 		case <-time.After(2 * time.Second):
 		}
 	}
-	logs := h.docker.Logs(ctx, containerName(r), 40)
+	logs := h.docker.Logs(ctx, h.resolveContainerName(ctx, r), 40)
 	minutes := int(timeout / time.Minute)
 	if logs != "" {
 		return nil, fmt.Errorf("vLLM did not become HTTP-ready within %d minutes; last container output:\n%s", minutes, logs)
@@ -718,7 +723,50 @@ func (h *HostExecutor) cachePath(r recipe.Recipe) string {
 func (h *HostExecutor) modelURL(r recipe.Recipe) string {
 	return fmt.Sprintf("http://127.0.0.1:%d", r.Service.DefaultHostPort)
 }
-func containerName(r recipe.Recipe) string { return fmt.Sprintf("runonspark-%s-v%d", r.ID, r.Version) }
+// containerName is the name new containers are created under. Callers about
+// to create a container must always use this directly; callers looking up
+// or operating on a container that may already exist should go through
+// resolveContainerName instead (see its doc comment).
+func containerName(r recipe.Recipe) string { return fmt.Sprintf("basement-%s-v%d", r.ID, r.Version) }
+
+// legacyContainerName is the pre-rename (spec 10) naming scheme. Containers
+// created before the rename still carry it — live containers are never
+// renamed — so lookups fall back to it via resolveContainerName.
+func legacyContainerName(r recipe.Recipe) string { return fmt.Sprintf("runonspark-%s-v%d", r.ID, r.Version) }
+
+// resolveContainerName returns the name r's container actually has on the
+// host right now: the current scheme if a container exists under it,
+// otherwise the pre-rename scheme if one exists there instead, otherwise the
+// current scheme (nothing exists yet, so that is what creating one will
+// use). This is for callers that look up or operate on a container that may
+// already exist; a step that is about to CREATE a container must call
+// containerName directly so new containers always get the current name.
+func (h *HostExecutor) resolveContainerName(ctx context.Context, r recipe.Recipe) string {
+	name := containerName(r)
+	if _, err := h.docker.Container(ctx, name); err == nil {
+		return name
+	}
+	legacy := legacyContainerName(r)
+	if _, err := h.docker.Container(ctx, legacy); err == nil {
+		return legacy
+	}
+	return name
+}
+
+// containerLabelsMatch reports whether labels identify r, reading the
+// current label namespace and falling back to the pre-rename (spec 10) one
+// so a container created before the rename is still recognized.
+func containerLabelsMatch(labels map[string]string, r recipe.Recipe) bool {
+	recipeID := labels[labelRecipeID]
+	if recipeID == "" {
+		recipeID = labels[legacyLabelRecipeID]
+	}
+	version := labels[labelRecipeVersion]
+	if version == "" {
+		version = labels[legacyLabelRecipeVersion]
+	}
+	return recipeID == r.ID && version == fmt.Sprint(r.Version)
+}
 
 // ArtifactKey identifies a pinned artifact independently of the recipe that
 // references it, so removal can recognize artifacts shared across recipes.

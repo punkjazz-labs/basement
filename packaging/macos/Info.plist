@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>RunOnSpark Setup</string>
+	<string>basement setup</string>
 	<key>CFBundleDisplayName</key>
-	<string>RunOnSpark Setup</string>
+	<string>basement setup</string>
 	<key>CFBundleIdentifier</key>
-	<string>ai.runonspark.setup</string>
+	<string>ai.punkjazz.basement.setup</string>
 	<key>CFBundleExecutable</key>
-	<string>runonspark-setup</string>
+	<string>basement-setup</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>

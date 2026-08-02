@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -109,6 +111,45 @@ func fakeVLLM(t *testing.T, response string) (*HostExecutor, recipe.Recipe) {
 	r := recipes[0]
 	r.Service.DefaultHostPort = port
 	return &HostExecutor{http: server.Client()}, r
+}
+
+// A model installed before the basement rename (spec 10) still runs under
+// its pre-rename container name; resolveContainerName must find it instead
+// of assuming it is missing, and Completed must recognize it as already
+// created from its pre-rename labels. Live containers are never renamed
+// (docs/plans/10-rename-basement.md).
+func TestResolveContainerNameFallsBackToPreRenameContainer(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := recipes[0]
+	newName := containerName(r)
+	legacyName := legacyContainerName(r)
+	docker := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(request.URL.Path, url.PathEscape(newName)):
+			return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+		case strings.Contains(request.URL.Path, url.PathEscape(legacyName)):
+			body := `{"ID":"legacy-id","State":{"Running":true,"Status":"running"},"Config":{"Labels":{"ai.runonspark.managed":"true","ai.runonspark.recipe-id":"` +
+				r.ID + `","ai.runonspark.recipe-version":"` + strconv.Itoa(r.Version) + `"}}}`
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		default:
+			t.Fatalf("unexpected container request: %s", request.URL)
+			return nil, nil
+		}
+	})}}
+	executor := &HostExecutor{docker: docker}
+
+	if got := executor.resolveContainerName(context.Background(), r); got != legacyName {
+		t.Fatalf("resolveContainerName = %q, want the pre-rename name %q", got, legacyName)
+	}
+	if !executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Error("create_container was not recognized as already completed for a pre-rename container")
+	}
+	if !executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil) {
+		t.Error("start_container was not recognized as already running for a pre-rename container")
+	}
 }
 
 func TestVerifyInferenceAcceptsReasoningOnlyResponse(t *testing.T) {

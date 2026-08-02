@@ -60,13 +60,13 @@ func Validate(r Recipe) error {
 	if strings.TrimSpace(r.DisplayName) == "" || strings.TrimSpace(r.Publisher) == "" {
 		problems = append(problems, "display_name and publisher are required")
 	}
-	if r.Trust != "runonspark-candidate" && r.Trust != "runonspark-verified" {
+	if r.Trust != "basement-candidate" && r.Trust != "basement-verified" {
 		problems = append(problems, "trust is invalid")
 	}
 	if r.Verification != "candidate" && r.Verification != "dgx-spark-verified" {
 		problems = append(problems, "verification is invalid")
 	}
-	if r.Trust == "runonspark-verified" && r.Verification != "dgx-spark-verified" {
+	if r.Trust == "basement-verified" && r.Verification != "dgx-spark-verified" {
 		problems = append(problems, "verified trust requires real DGX verification")
 	}
 	sourceURL, sourceErr := url.Parse(r.Source.URL)

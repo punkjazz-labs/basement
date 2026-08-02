@@ -13,22 +13,34 @@ import (
 )
 
 // The embedded unit is a byte-for-byte copy of
-// packaging/systemd/runonspark-manager.service; a test enforces that.
+// packaging/systemd/basement.service; a test enforces that.
 //
-//go:embed assets/runonspark-manager.service
+//go:embed assets/basement.service
 var systemdUnit string
 
 const (
-	installDir  = "/usr/lib/runonspark-manager"
-	binaryPath  = installDir + "/runonspark-manager"
-	dataDir     = "/var/lib/runonspark-manager"
-	unitPath    = "/etc/systemd/system/runonspark-manager.service"
-	dropInDir   = "/etc/systemd/system/runonspark-manager.service.d"
+	installDir  = "/usr/lib/basement"
+	binaryPath  = installDir + "/basement"
+	dataDir     = "/var/lib/basement"
+	unitPath    = "/etc/systemd/system/basement.service"
+	dropInDir   = "/etc/systemd/system/basement.service.d"
 	dropInPath  = dropInDir + "/listen.conf"
-	stagingPath = "/tmp/runonspark-manager.staged"
+	stagingPath = "/tmp/basement.staged"
+	serviceUser = "basement"
 	// releaseURL is where tagged releases publish the linux/arm64 binary
-	// (ADR 0010; asset naming is part of the release contract).
+	// (ADR 0010; asset naming is part of the release contract). It still
+	// points at the runonspark-manager repository: the repo itself renames
+	// separately from this branch (docs/plans/10-rename-basement.md).
 	releaseURL = "https://github.com/punkjazz-labs/runonspark-manager/releases/latest/download"
+
+	// Pre-rename (spec 10) names and paths. A machine set up before the
+	// rename still runs under these; Install adopts it in place (see
+	// adoptLegacyInstall) instead of orphaning it next to a second,
+	// parallel installation.
+	legacyDataDir     = "/var/lib/runonspark-manager"
+	legacyUnitName    = "runonspark-manager.service"
+	legacyUnitPath    = "/etc/systemd/system/" + legacyUnitName
+	legacyServiceUser = "runonspark"
 )
 
 // ListenMode selects which interface the console binds after install.
@@ -104,8 +116,8 @@ type ReleaseSource struct{}
 func (ReleaseSource) Stage(ctx context.Context, runner Runner, logf func(string, ...any)) (string, error) {
 	logf("downloading latest release on the target")
 	script := fmt.Sprintf(
-		"curl -fsSL %[1]s/runonspark-manager-linux-arm64 -o %[2]s && "+
-			"curl -fsSL %[1]s/runonspark-manager-linux-arm64.sha256 -o %[2]s.sha256 && "+
+		"curl -fsSL %[1]s/basement-linux-arm64 -o %[2]s && "+
+			"curl -fsSL %[1]s/basement-linux-arm64.sha256 -o %[2]s.sha256 && "+
 			"cd /tmp && awk '{print $1\"  %[2]s\"}' %[2]s.sha256 | sha256sum -c -",
 		releaseURL, stagingPath)
 	if _, err := runner.Run(ctx, script, nil); err != nil {
@@ -134,7 +146,7 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 		logf = func(string, ...any) {}
 	}
 	if _, err := runner.Run(ctx, "command -v systemctl", nil); err != nil {
-		return InstallResult{}, fmt.Errorf("%s has no systemd; RunOnSpark Manager needs a systemd-based OS", runner.Describe())
+		return InstallResult{}, fmt.Errorf("%s has no systemd; basement needs a systemd-based OS", runner.Describe())
 	}
 	if _, err := runner.Run(ctx, "getent group docker", nil); err != nil {
 		return InstallResult{}, fmt.Errorf("Docker is not installed on %s; install Docker first, then rerun setup", runner.Describe())
@@ -160,14 +172,18 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 		return InstallResult{}, err
 	}
 
+	if err := adoptLegacyInstall(ctx, runner, logf); err != nil {
+		return InstallResult{}, err
+	}
+
 	logf("installing binary and service user")
 	steps := []string{
 		"install -d -m 0755 " + installDir,
 		fmt.Sprintf("install -m 0755 %s %s", staged, binaryPath),
-		"getent group runonspark >/dev/null || groupadd --system runonspark",
-		"getent passwd runonspark >/dev/null || useradd --system --gid runonspark --home-dir " + dataDir + " --shell /usr/sbin/nologin runonspark",
-		"usermod -a -G docker runonspark",
-		"install -d -o runonspark -g runonspark -m 0750 " + dataDir,
+		"getent group " + serviceUser + " >/dev/null || groupadd --system " + serviceUser,
+		"getent passwd " + serviceUser + " >/dev/null || useradd --system --gid " + serviceUser + " --home-dir " + dataDir + " --shell /usr/sbin/nologin " + serviceUser,
+		"usermod -a -G docker " + serviceUser,
+		"install -d -o " + serviceUser + " -g " + serviceUser + " -m 0750 " + dataDir,
 	}
 	for _, step := range steps {
 		if _, err := runner.RunPrivileged(ctx, step, nil); err != nil {
@@ -195,8 +211,8 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 		}
 	}
 
-	logf("starting runonspark-manager.service")
-	if _, err := runner.RunPrivileged(ctx, "systemctl daemon-reload && systemctl enable --now runonspark-manager.service && systemctl restart runonspark-manager.service", nil); err != nil {
+	logf("starting basement.service")
+	if _, err := runner.RunPrivileged(ctx, "systemctl daemon-reload && systemctl enable --now basement.service && systemctl restart basement.service", nil); err != nil {
 		return InstallResult{}, fmt.Errorf("start service: %w", err)
 	}
 
@@ -208,7 +224,7 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 		}, "", "  ")
 		if err == nil {
 			payload := string(fleet) + "\n"
-			if _, err := runner.RunPrivileged(ctx, "tee "+dataDir+"/fleet.json >/dev/null && chown runonspark:runonspark "+dataDir+"/fleet.json", strings.NewReader(payload)); err != nil {
+			if _, err := runner.RunPrivileged(ctx, "tee "+dataDir+"/fleet.json >/dev/null && chown "+serviceUser+":"+serviceUser+" "+dataDir+"/fleet.json", strings.NewReader(payload)); err != nil {
 				logf("note: could not record discovered peers: %v", err)
 			}
 		}
@@ -229,6 +245,77 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 		}
 	}
 	return result, nil
+}
+
+// adoptLegacyInstall folds a pre-rename (spec 10) install into the current
+// one instead of leaving it running side by side with a fresh install under
+// the new names: it stops and disables the old unit, moves the old data
+// directory (the SQLite database, artifacts, receipts and pairing state) in
+// place with a single mv, and renames the old service account so uid/gid —
+// and therefore file ownership — carries over untouched. It runs before the
+// new unit and service user are installed, so those steps see whatever this
+// leaves behind and converge on it.
+//
+// It never touches anything once the new data directory already exists:
+// something already adopted or fresh-installed here, and moving old
+// remnants on top of live new data could destroy it. That case is only
+// reported through logf, never treated as an error — the new install is
+// already the one in charge.
+func adoptLegacyInstall(ctx context.Context, runner Runner, logf func(string, ...any)) error {
+	oldUnitPresent, err := targetExists(ctx, runner, "test -f "+legacyUnitPath)
+	if err != nil {
+		return fmt.Errorf("check for a pre-rename unit: %w", err)
+	}
+	if oldUnitPresent {
+		logf("found a pre-rename install (%s); adopting it", legacyUnitName)
+		if _, err := runner.RunPrivileged(ctx, "systemctl disable --now "+legacyUnitName, nil); err != nil {
+			return fmt.Errorf("stop pre-rename service: %w", err)
+		}
+	}
+
+	newDataDirPresent, err := targetExists(ctx, runner, "test -d "+dataDir)
+	if err != nil {
+		return fmt.Errorf("check for the data directory: %w", err)
+	}
+	oldDataDirPresent, err := targetExists(ctx, runner, "test -d "+legacyDataDir)
+	if err != nil {
+		return fmt.Errorf("check for a pre-rename data directory: %w", err)
+	}
+	switch {
+	case oldDataDirPresent && !newDataDirPresent:
+		logf("moving %s to %s", legacyDataDir, dataDir)
+		if _, err := runner.RunPrivileged(ctx, "mv "+legacyDataDir+" "+dataDir, nil); err != nil {
+			return fmt.Errorf("move pre-rename data directory: %w", err)
+		}
+	case oldDataDirPresent && newDataDirPresent:
+		logf("note: %s already exists; leaving %s in place untouched", dataDir, legacyDataDir)
+	}
+
+	oldUserPresent, err := targetExists(ctx, runner, "getent passwd "+legacyServiceUser+" >/dev/null 2>&1")
+	if err != nil {
+		return fmt.Errorf("check for a pre-rename service account: %w", err)
+	}
+	if oldUserPresent {
+		logf("renaming service account %s to %s", legacyServiceUser, serviceUser)
+		rename := "usermod -l " + serviceUser + " -d " + dataDir + " " + legacyServiceUser +
+			" && groupmod -n " + serviceUser + " " + legacyServiceUser
+		if _, err := runner.RunPrivileged(ctx, rename, nil); err != nil {
+			return fmt.Errorf("rename pre-rename service account: %w", err)
+		}
+	}
+	return nil
+}
+
+// targetExists runs check (expected to be a test(1) or getent invocation
+// with no output of its own) and reports whether it succeeded, without
+// treating "it does not exist" as a Runner error: check always exits 0, so
+// only a genuine transport/execution failure reaches the caller as err.
+func targetExists(ctx context.Context, runner Runner, check string) (bool, error) {
+	out, err := runner.Run(ctx, check+" && echo present || echo absent", nil)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "present", nil
 }
 
 // resolveListen turns a listen mode into a concrete address using the

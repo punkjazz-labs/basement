@@ -2,9 +2,9 @@
 // for a recipe index, using a private key that lives only in a file on the
 // signer's own machine — never in this repository, never in an environment
 // variable's value (only its value is a path), never logged. It is not part
-// of the runonspark-manager binary: the ability to sign an index ships in no
-// binary except this standalone tool, run by hand or from a release
-// process that has the real key.
+// of the basement binary: the ability to sign an index ships in no binary
+// except this standalone tool, run by hand or from a release process that
+// has the real key.
 //
 // Usage:
 //
@@ -16,8 +16,8 @@
 // public half to cross-check against recipe.IndexPublicKeyBase64, and store
 // the private half in the approved OS secret store, never in this repo.
 // `make sign-index` wraps this command and requires the key path in
-// RUNONSPARK_SIGN_KEY so it is never typed as a command-line argument
-// visible in shell history or a process list.
+// BASEMENT_SIGN_KEY so it is never typed as a command-line argument visible
+// in shell history or a process list.
 package main
 
 import (

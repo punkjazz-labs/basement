@@ -5,15 +5,20 @@ product promises. A change that violates them will be rejected in review even if
 
 ## What this project is
 
-runonspark-manager is a local-first Go manager for GB10 machines (NVIDIA DGX Spark, MSI
+basement is a local-first Go manager for GB10 machines (NVIDIA DGX Spark, MSI
 EdgeXpert). It installs curated vLLM model recipes and serves an embedded React console.
 The product promise is trust: pinned versions, verified installs, honest copy, receipts
 for everything. Users include non-experts; the console must read like a considered
 appliance, not a devops tool.
 
+The module path and repository are still `github.com/punkjazz-labs/runonspark-manager`
+— they rename together with the GitHub repository itself (the owner's action, not an
+executor's); only the product name, binaries, and everything users see are `basement`
+(see docs/plans/10-rename-basement.md).
+
 ## Layout
 
-- `cmd/runonspark-manager/` CLI entry
+- `cmd/basement/` CLI entry
 - `internal/engine/` job engine: planning, execution, rollback, per-recipe locks, a
   one-slot runtime semaphore for GPU-touching steps
 - `internal/operations/` step executors (verify_*, download, container lifecycle)

@@ -1,6 +1,6 @@
-// Package setup installs RunOnSpark Manager onto a GB10-class machine, either
-// the one it is running on or a remote one over SSH. Discovery finds the
-// machines; this package verifies identity and performs the install.
+// Package setup installs basement onto a GB10-class machine, either the one
+// it is running on or a remote one over SSH. Discovery finds the machines;
+// this package verifies identity and performs the install.
 package setup
 
 import (
