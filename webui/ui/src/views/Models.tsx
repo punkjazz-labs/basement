@@ -212,6 +212,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
     const statusText = busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
     const measured = model?.tokens_per_second
     const reference = REFERENCE_TPS[recipe.id]
+    const updateAvailable = Boolean(model && model.recipe_version < recipe.version)
     const open = expanded === recipe.id
     const toggle = () => setExpanded(open ? '' : recipe.id)
     // Buttons act without toggling the row; empty space anywhere else in the
@@ -262,13 +263,21 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             {model && isActive && (
               <>
                 <button className="ghost" disabled={busy} onClick={act(() => simpleAction(recipe.id, 'stop'))}>Stop</button>
+                {updateAvailable && (
+                  <button className="ghost" disabled={busy} onClick={act(() => startInstall(recipe))}>Update</button>
+                )}
                 <button className="primary" disabled={busy} onClick={act(openPlayground)}>Open</button>
               </>
             )}
             {model && !isActive && model.status !== 'recovering' && (
-              <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
-                {activeOther(recipe.id) ? 'Switch to' : 'Start'}
-              </button>
+              <>
+                {updateAvailable && (
+                  <button className="ghost" disabled={busy} onClick={act(() => startInstall(recipe))}>Update</button>
+                )}
+                <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
+                  {activeOther(recipe.id) ? 'Switch to' : 'Start'}
+                </button>
+              </>
             )}
             {model?.status === 'recovering' && <button className="ghost" disabled onClick={act(() => {})}>Recovering</button>}
           </div>
@@ -304,13 +313,10 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
               <dd>{recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
               <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
               <dt>Recipe version</dt><dd>v{recipe.version}</dd>
-              {model && model.recipe_version < recipe.version && (
+              {updateAvailable && (
                 <>
                   <dt>Recipe</dt>
-                  <dd className="update-line">
-                    Recipe updated
-                    <button className="ghost" disabled={busy} onClick={() => startInstall(recipe)}>Update</button>
-                  </dd>
+                  <dd className="update-line">Recipe updated</dd>
                 </>
               )}
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
