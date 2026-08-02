@@ -34,6 +34,10 @@ func main() {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(2)
 	}
+	if cfg.Command == "version" {
+		fmt.Println(cfg.Version)
+		return
+	}
 	if cfg.Command == "pairing-url" {
 		printPairingInfo(cfg)
 		return
