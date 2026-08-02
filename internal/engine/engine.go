@@ -27,6 +27,11 @@ type Engine struct {
 	// downloads and preflight run outside it so a long install cannot block
 	// stopping an unrelated model.
 	runtime chan struct{}
+	// reserved holds each running install job's conservative disk footprint
+	// (recipe.Recipe.RequiredBytes), keyed by job ID and guarded by mu. It
+	// lets two concurrent installs see each other's claim on free space
+	// instead of each checking disk in isolation.
+	reserved map[string]int64
 }
 
 type RemovePayload struct {
@@ -52,7 +57,36 @@ type plannedOperation struct {
 }
 
 func New(s *store.Store, executor operations.Executor, recipes []recipe.Recipe) *Engine {
-	return &Engine{store: s, executor: executor, recipes: recipes, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1)}
+	return &Engine{store: s, executor: executor, recipes: recipes, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1), reserved: map[string]int64{}}
+}
+
+// reserveDisk records jobID's conservative disk footprint so concurrent
+// installs see it. Only install jobs call this; every other kind leaves
+// shared disk budget alone.
+func (e *Engine) reserveDisk(jobID string, bytes int64) {
+	e.mu.Lock()
+	e.reserved[jobID] = bytes
+	e.mu.Unlock()
+}
+
+func (e *Engine) releaseDisk(jobID string) {
+	e.mu.Lock()
+	delete(e.reserved, jobID)
+	e.mu.Unlock()
+}
+
+// reservedByOthers sums every other job's disk reservation, excluding
+// jobID's own, so a job never counts its own bytes against itself.
+func (e *Engine) reservedByOthers(jobID string) int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var total int64
+	for id, bytes := range e.reserved {
+		if id != jobID {
+			total += bytes
+		}
+	}
+	return total
 }
 
 func (e *Engine) recipeLock(recipeID string) *sync.Mutex {
@@ -174,6 +208,12 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 	lock := e.recipeLock(r.ID)
 	lock.Lock()
 	defer lock.Unlock()
+	if job.Kind == "install" {
+		// A download-only install (activate: false) still writes the same
+		// bytes to disk as one that switches, so it reserves the same way.
+		e.reserveDisk(jobID, r.RequiredBytes())
+		defer e.releaseDisk(jobID)
+	}
 	runtimeHeld := false
 	defer func() {
 		if runtimeHeld {
@@ -280,6 +320,9 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 			continue
 		}
 		progress := func(value any) error { return e.store.UpdateStepReceipt(ctx, jobID, index, redact.JSON(value)) }
+		// Recomputed per step, not once for the whole job: a long download
+		// spans other installs starting and finishing around it.
+		execution.ReservedBytes = e.reservedByOthers(jobID)
 		receipt, err := e.executor.Execute(ctx, execution, op, target, progress)
 		if err != nil {
 			if switchStarted && previous != nil {

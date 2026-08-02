@@ -700,6 +700,10 @@ type gateExecutor struct {
 	release     chan struct{}
 	enteredOnce sync.Once
 	captured    map[string]bool
+	// reservedSeen records the ReservedBytes each step observed, keyed by
+	// "operation:recipeID", so a test can inspect what a specific step of a
+	// specific job's execution was told about other jobs' disk claims.
+	reservedSeen map[string]int64
 }
 
 func (g *gateExecutor) Execute(ctx context.Context, execution operations.Execution, op recipe.Operation, r recipe.Recipe, progress operations.Progress) (map[string]any, error) {
@@ -708,6 +712,12 @@ func (g *gateExecutor) Execute(ctx context.Context, execution operations.Executi
 		g.captured = execution.SharedArtifacts
 		g.mu.Unlock()
 	}
+	g.mu.Lock()
+	if g.reservedSeen == nil {
+		g.reservedSeen = map[string]int64{}
+	}
+	g.reservedSeen[op.Type+":"+r.ID] = execution.ReservedBytes
+	g.mu.Unlock()
 	if op.Type == g.gateOp && r.ID == g.gateRecipe {
 		g.enteredOnce.Do(func() { close(g.entered) })
 		<-g.release
@@ -928,4 +938,243 @@ func TestCancelledInstallStopsItsContainer(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// TestConcurrentInstallsOfDifferentRecipesProceedInParallel proves spec 02's
+// core claim: a slow install of one recipe never blocks an install of a
+// different recipe. Only steps that touch the shared runtime (start_container
+// and friends) serialize; downloads do not.
+func TestConcurrentInstallsOfDifferentRecipesProceedInParallel(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	blocked, other := recipes[0], recipes[1]
+	executor := &gateExecutor{
+		switchExecutor: switchExecutor{running: map[string]bool{}},
+		gateOp:         "download_artifact", gateRecipe: blocked.ID,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	runner := New(s, executor, recipes)
+	first, _, err := s.CreateJob(ctx, "install", blocked.ID, "first-install", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	select {
+	case <-executor.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first install never reached the download gate")
+	}
+	second, _, err := s.CreateJob(ctx, "install", other.ID, "second-install", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	waitJob(t, s, second.ID, "ready")
+	pending, err := s.GetJob(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal(pending.State) {
+		t.Fatalf("first install finished before its download gate released; test does not prove parallelism, state=%s", pending.State)
+	}
+	close(executor.release)
+	waitJob(t, s, first.ID, "ready")
+}
+
+// TestSecondInstallVerifyDiskSeesFirstJobsReservationExcludingItsOwn covers
+// both disk-reservation acceptance criteria at once: the sum a second job's
+// verify_disk step is handed equals exactly the first job's reservation (not
+// zero, and not inflated by the second job's own bytes).
+func TestSecondInstallVerifyDiskSeesFirstJobsReservationExcludingItsOwn(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	blocked, other := recipes[0], recipes[1]
+	executor := &gateExecutor{
+		switchExecutor: switchExecutor{running: map[string]bool{}},
+		gateOp:         "verify_disk", gateRecipe: blocked.ID,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	runner := New(s, executor, recipes)
+	first, _, err := s.CreateJob(ctx, "install", blocked.ID, "first-install", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	select {
+	case <-executor.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first install never reached its own verify_disk step")
+	}
+	// The first job's own verify_disk saw nothing reserved: at this point it
+	// is the only running job, so it must never count its own bytes.
+	executor.mu.Lock()
+	firstReserved := executor.reservedSeen["verify_disk:"+blocked.ID]
+	executor.mu.Unlock()
+	if firstReserved != 0 {
+		t.Fatalf("a job's own reservation must not count against itself: got %d", firstReserved)
+	}
+	second, _, err := s.CreateJob(ctx, "install", other.ID, "second-install", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	waitJob(t, s, second.ID, "ready")
+	executor.mu.Lock()
+	secondReserved, sawIt := executor.reservedSeen["verify_disk:"+other.ID]
+	executor.mu.Unlock()
+	if !sawIt {
+		t.Fatal("second job's verify_disk step was never observed")
+	}
+	if secondReserved != blocked.RequiredBytes() {
+		t.Fatalf("second job's verify_disk should see exactly the first job's reservation: got %d want %d", secondReserved, blocked.RequiredBytes())
+	}
+	close(executor.release)
+	waitJob(t, s, first.ID, "ready")
+}
+
+// TestReservationReleasedOnCompletionFailureAndCancellation proves the
+// reservation registry never leaks: a leaked entry would understate free
+// disk for every install after it, forever.
+func TestReservationReleasedOnCompletionFailureAndCancellation(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+
+	completed := New(s, &fakeExecutor{}, recipes)
+	completeJob, _, err := s.CreateJob(ctx, "install", recipes[0].ID, "reserve-complete", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed.Start(completeJob.ID)
+	waitJob(t, s, completeJob.ID, "ready")
+	waitReservationReleased(t, completed, completeJob.ID)
+
+	failing := New(s, &fakeExecutor{failPull: true}, recipes)
+	failJob, _, err := s.CreateJob(ctx, "install", recipes[1].ID, "reserve-fail", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing.Start(failJob.ID)
+	waitJob(t, s, failJob.ID, "failed")
+	waitReservationReleased(t, failing, failJob.ID)
+
+	executor := &gateExecutor{
+		switchExecutor: switchExecutor{running: map[string]bool{}},
+		gateOp:         "wait_http", gateRecipe: recipes[0].ID,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	cancelling := New(s, executor, recipes)
+	cancelJob, _, err := s.CreateJob(ctx, "install", recipes[0].ID, "reserve-cancel", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelling.Start(cancelJob.ID)
+	select {
+	case <-executor.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("install never reached the cancellation gate")
+	}
+	cancelling.mu.Lock()
+	_, heldWhileRunning := cancelling.reserved[cancelJob.ID]
+	cancelling.mu.Unlock()
+	if !heldWhileRunning {
+		t.Fatal("reservation should be held while the install is paused mid-run")
+	}
+	if err := cancelling.Cancel(ctx, cancelJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(executor.release)
+	waitJob(t, s, cancelJob.ID, "cancelled")
+	waitReservationReleased(t, cancelling, cancelJob.ID)
+}
+
+// retryProbeExecutor stands in for a HostExecutor whose download_artifact
+// step internally retries several times on transient network errors
+// (host.go's retryNetwork), without ever returning to the engine between
+// attempts. It records what the engine's reservation registry holds for its
+// own job on every simulated attempt.
+type retryProbeExecutor struct {
+	fakeExecutor
+	jobID    string
+	runner   *Engine
+	mu       sync.Mutex
+	observed []int64
+}
+
+func (e *retryProbeExecutor) Execute(ctx context.Context, execution operations.Execution, op recipe.Operation, r recipe.Recipe, progress operations.Progress) (map[string]any, error) {
+	if op.Type == "download_artifact" {
+		for attempt := 0; attempt < 4; attempt++ {
+			e.runner.mu.Lock()
+			reserved := e.runner.reserved[e.jobID]
+			e.runner.mu.Unlock()
+			e.mu.Lock()
+			e.observed = append(e.observed, reserved)
+			e.mu.Unlock()
+		}
+	}
+	return e.fakeExecutor.Execute(ctx, execution, op, r, progress)
+}
+
+// TestRetriesWithinAStepNeverDoubleTheReservation proves the reservation an
+// install holds is set once at job start and never re-added, so a network
+// blip that makes retryNetwork retry pull_image or download_artifact several
+// times cannot inflate the job's claim on disk.
+func TestRetriesWithinAStepNeverDoubleTheReservation(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, _ := recipe.Builtin()
+	r := recipes[0]
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "retry-sim", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &retryProbeExecutor{jobID: job.ID}
+	runner := New(s, executor, recipes)
+	executor.runner = runner
+	runner.Start(job.ID)
+	waitJob(t, s, job.ID, "ready")
+	executor.mu.Lock()
+	observed := append([]int64(nil), executor.observed...)
+	executor.mu.Unlock()
+	if len(observed) == 0 {
+		t.Fatal("download_artifact retry probe never ran")
+	}
+	for i, value := range observed {
+		if value != r.RequiredBytes() {
+			t.Fatalf("reservation observed on simulated retry attempt %d was %d, want the single fixed value %d: retries must not double-reserve", i, value, r.RequiredBytes())
+		}
+	}
+}
+
+func waitReservationReleased(t *testing.T, runner *Engine, jobID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		runner.mu.Lock()
+		_, held := runner.reserved[jobID]
+		runner.mu.Unlock()
+		if !held {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("reservation for job %s was never released", jobID)
 }

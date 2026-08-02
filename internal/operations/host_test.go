@@ -62,8 +62,30 @@ func TestHostDiskGuardRejectsBeforeRequiredHeadroom(t *testing.T) {
 	}
 	r := recipes[0]
 	executor := &HostExecutor{inventory: resourceInventory{system: inventory.System{Hostname: "spark-full", StorageAvailable: r.RequiredBytes() - 1, DockerStorageAvailable: r.RequiredBytes() - 1, DockerSharesDataDisk: true}}}
-	if _, err := executor.verifyDisk(context.Background(), r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes); err == nil || !strings.Contains(err.Error(), "spark-full") {
+	if _, err := executor.verifyDisk(context.Background(), r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes, 0); err == nil || !strings.Contains(err.Error(), "spark-full") {
 		t.Fatalf("insufficient disk passed: %v", err)
+	}
+}
+
+func TestHostDiskGuardSubtractsOtherJobsReservation(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := recipes[0]
+	// Exactly enough for this job alone; a same-size reservation held by
+	// another job must push it over the edge.
+	system := inventory.System{Hostname: "spark-shared", StorageAvailable: r.RequiredBytes(), DockerStorageAvailable: r.RequiredBytes(), DockerSharesDataDisk: true}
+	executor := &HostExecutor{inventory: resourceInventory{system: system}}
+	if _, err := executor.verifyDisk(context.Background(), r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes, 0); err != nil {
+		t.Fatalf("job alone should fit: %v", err)
+	}
+	_, err = executor.verifyDisk(context.Background(), r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes, r.RequiredBytes())
+	if err == nil {
+		t.Fatal("another job's reservation was not subtracted from free space")
+	}
+	if err.Error() != "not enough free space while another install is running, so wait for it to finish or free up space" {
+		t.Fatalf("error does not match the UI-facing sentence: %v", err)
 	}
 }
 

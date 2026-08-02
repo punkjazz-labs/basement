@@ -15,6 +15,11 @@ type Execution struct {
 	// paths still referenced by other installed models; removal must retain
 	// them instead of deleting shared data.
 	SharedArtifacts map[string]bool
+	// ReservedBytes is the sum of every other running install job's
+	// conservative disk footprint (recipe.Recipe.RequiredBytes). verify_disk
+	// subtracts it from free space so two concurrent installs cannot both
+	// pass preflight and jointly overflow the disk.
+	ReservedBytes int64
 }
 
 type Progress func(receipt any) error
