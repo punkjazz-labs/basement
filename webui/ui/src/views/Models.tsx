@@ -283,9 +283,11 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             </div>
             <dl className="facts">
               <dt>Model by</dt><dd>{recipe.model_by || recipe.publisher}</dd>
+              <dt>Released</dt><dd>{recipe.model_released || 'n/a'}</dd>
               <dt>Quantization</dt>
               <dd>{recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
               <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
+              <dt>Recipe version</dt><dd>v{recipe.version}</dd>
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
               <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
               <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
