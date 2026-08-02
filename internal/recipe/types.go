@@ -25,6 +25,23 @@ type Recipe struct {
 	Service       Service      `yaml:"service" json:"service"`
 	Operations    []Operation  `yaml:"operations" json:"operations"`
 	Uninstall     []Operation  `yaml:"uninstall" json:"uninstall"`
+	// MemoryModel is measured or derived by maintainers during recipe
+	// qualification; the console shows memory estimates only when this block
+	// is present. Absent means the recipe has no memory estimate yet, not
+	// zero footprint.
+	MemoryModel *MemoryModel `yaml:"memory_model,omitempty" json:"memory_model,omitempty"`
+}
+
+// MemoryModel documents a recipe's memory footprint for the fleet fit
+// calculator. weights_bytes equals the primary artifact's expected_bytes
+// unless overridden. kv_bytes_per_token is derived from the model's public
+// config: layers x kv_heads x head_dim x 2 (K and V) x dtype bytes, honoring
+// the recipe's kv_cache_dtype. runtime_overhead_bytes (engine, CUDA graphs,
+// activations) is measured on hardware at qualification time.
+type MemoryModel struct {
+	WeightsBytes         int64 `yaml:"weights_bytes" json:"weights_bytes"`
+	KVBytesPerToken      int64 `yaml:"kv_bytes_per_token" json:"kv_bytes_per_token"`
+	RuntimeOverheadBytes int64 `yaml:"runtime_overhead_bytes" json:"runtime_overhead_bytes"`
 }
 
 type Source struct {
