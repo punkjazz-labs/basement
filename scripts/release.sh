@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds the release binaries for every supported platform into dist/, stages
-# the macOS double-click zip, and writes a dist/SHA256SUMS manifest covering
-# every artifact this script produces. Run on macOS; cross-compilation needs
-# no target toolchain since CGO_ENABLED=0.
+# the macOS and Windows double-click zips, and writes a dist/SHA256SUMS
+# manifest covering every artifact this script produces. Run on macOS;
+# cross-compilation needs no target toolchain since CGO_ENABLED=0.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -81,6 +81,29 @@ CMD
 echo "Staging macOS double-click artifacts"
 stage_macos_zip arm64
 stage_macos_zip amd64
+
+# Windows double-click artifact: just the .exe. There is no launcher script
+# because double-clicking a console .exe already opens its own window; the
+# console-ownership pause (cmd/runonspark-manager/console_windows.go) is what
+# keeps that window from vanishing before it can be read. No certificate
+# exists to sign it, so it is unsigned and SmartScreen will warn on first run
+# (see the spec report for the distribution decision this implies).
+stage_windows_zip() {
+  local arch="$1"
+  local src="$DIST_DIR/windows-$arch/runonspark-manager.exe"
+  local stage
+  stage="$(mktemp -d)"
+
+  cp "$src" "$stage/runonspark-manager.exe"
+  (cd "$stage" && zip -q -X -r "$DIST_DIR/RunOnSpark-Setup-windows-$arch.zip" .)
+  rm -rf "$stage"
+
+  echo "  windows-$arch unsigned (no certificate) - SmartScreen will warn on first run"
+}
+
+echo "Staging Windows artifacts"
+stage_windows_zip amd64
+stage_windows_zip arm64
 
 echo "Writing SHA256SUMS"
 (
