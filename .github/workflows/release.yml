@@ -24,10 +24,10 @@ jobs:
             for arch in arm64 amd64; do
               ext=""
               [ "$os" = windows ] && ext=".exe"
-              out="dist/runonspark-manager-${os}-${arch}${ext}"
+              out="dist/basement-${os}-${arch}${ext}"
               GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
                 -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
-                -o "$out" ./cmd/runonspark-manager
+                -o "$out" ./cmd/basement
               (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
             done
           done
@@ -40,5 +40,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "RunOnSpark Manager ${GITHUB_REF_NAME}" \
+            --title "basement ${GITHUB_REF_NAME}" \
             --generate-notes

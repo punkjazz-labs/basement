@@ -42,11 +42,11 @@ jobs:
           mkdir -p dist
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
-            -o dist/runonspark-manager ./cmd/runonspark-manager
-          sha256sum dist/runonspark-manager > dist/runonspark-manager.sha256
+            -o dist/basement ./cmd/basement
+          sha256sum dist/basement > dist/basement.sha256
           cp -r packaging dist/packaging
       - uses: actions/upload-artifact@v4
         with:
-          name: runonspark-manager-arm64
+          name: basement-arm64
           path: dist/
           if-no-files-found: error
