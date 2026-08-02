@@ -71,7 +71,7 @@ type preflightResponse struct {
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, recipes: recipes, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second}, closing: make(chan struct{})}
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, recipes: recipes, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.health)
 	mux.HandleFunc("/api/v1/auth/pair", server.pair)
@@ -878,6 +878,14 @@ func (s *Server) peerSummary(w http.ResponseWriter, r *http.Request, id string) 
 // time-boxed independently of the caller's own request context, the body is
 // size-capped before it is ever parsed, and it is only ever interpreted as
 // JSON, never as HTML.
+// refusePeerRedirect makes the peer client treat any redirect as a final
+// response. A real Spark manager never redirects its API; following one
+// would let a malicious "peer" bounce this manager's authenticated GET to a
+// host the user never approved.
+func refusePeerRedirect(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
 func (s *Server) fetchPeerJSON(ctx context.Context, baseURL, apiKey, endpoint string) (any, error) {
 	if !peerAllowedPaths[endpoint] {
 		return nil, fmt.Errorf("peer endpoint %s is not allowlisted", endpoint)

@@ -613,3 +613,28 @@ func waitAPIJob(t *testing.T, base, id string, cookies []*http.Cookie, want stri
 	}
 	t.Fatalf("job did not reach %s", want)
 }
+
+func TestFetchPeerJSONRefusesRedirects(t *testing.T) {
+	// A malicious "peer" must not be able to bounce this manager's
+	// authenticated GET to a host the user never approved: a redirect is
+	// treated as the peer's final (failing) answer, never followed.
+	elsewhere := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhere++
+		writeJSON(w, http.StatusOK, map[string]any{"secret": true})
+	}))
+	defer target.Close()
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/api/v1/system", http.StatusFound)
+	}))
+	defer peer.Close()
+
+	s := &Server{peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}}
+	_, err := s.fetchPeerJSON(context.Background(), peer.URL, "irrelevant", "/api/v1/system")
+	if err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("redirecting peer accepted: %v", err)
+	}
+	if elsewhere != 0 {
+		t.Fatal("the redirect target was contacted")
+	}
+}
