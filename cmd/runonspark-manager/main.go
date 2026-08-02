@@ -100,7 +100,10 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
-	exit(0)
+	// Not exit(0): the deferred db.Close() above must run on this path (the
+	// systemctl stop / SIGTERM path on every GB10 machine), so pause first,
+	// then let main return and its defers fire normally.
+	pauseBeforeExit()
 }
 
 // printPairingInfo re-prints the pairing card so nobody ever has to hunt for

@@ -82,12 +82,13 @@ echo "Staging macOS double-click artifacts"
 stage_macos_zip arm64
 stage_macos_zip amd64
 
-# Windows double-click artifact: just the .exe. There is no launcher script
-# because double-clicking a console .exe already opens its own window; the
-# console-ownership pause (cmd/runonspark-manager/console_windows.go) is what
-# keeps that window from vanishing before it can be read. No certificate
-# exists to sign it, so it is unsigned and SmartScreen will warn on first run
-# (see the spec report for the distribution decision this implies).
+# Windows double-click artifact: the .exe plus a .bat launcher that runs
+# `setup` in place, mirroring the macOS .command so double-clicking reaches
+# the same wizard. The bare .exe ships too — the .bat runs it, and a direct
+# double-click of the .exe still gets the console-ownership pause
+# (cmd/runonspark-manager/console_windows.go). No certificate exists to sign
+# either, so both are unsigned and SmartScreen will warn on first run (see
+# the spec report for the distribution decision this implies).
 stage_windows_zip() {
   local arch="$1"
   local src="$DIST_DIR/windows-$arch/runonspark-manager.exe"
@@ -95,6 +96,18 @@ stage_windows_zip() {
   stage="$(mktemp -d)"
 
   cp "$src" "$stage/runonspark-manager.exe"
+  cat >"$stage/RunOnSpark Setup.bat" <<'BAT'
+@echo off
+"%~dp0runonspark-manager.exe" setup
+rem Launched this way, cmd.exe shares the console with the wizard, so
+rem console_windows.go's sole-owner detection correctly does not pause on
+rem exit. This pause is what keeps the window open once the wizard exits.
+pause
+BAT
+  # Batch files are conventionally CRLF; the heredoc above wrote LF.
+  awk '{ printf "%s\r\n", $0 }' "$stage/RunOnSpark Setup.bat" >"$stage/RunOnSpark Setup.bat.crlf"
+  mv "$stage/RunOnSpark Setup.bat.crlf" "$stage/RunOnSpark Setup.bat"
+
   (cd "$stage" && zip -q -X -r "$DIST_DIR/RunOnSpark-Setup-windows-$arch.zip" .)
   rm -rf "$stage"
 
