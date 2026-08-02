@@ -53,9 +53,13 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
   const downloadedBytes = (recipe: Recipe) =>
     storage?.artifacts.filter(a => a.recipe_ids.includes(recipe.id)).reduce((sum, a) => sum + a.bytes, 0) ?? 0
   // Label honesty for a not-installed model with files already on disk:
-  // partial data resumes, a kept complete download reinstalls quickly.
+  // partial data resumes, a kept complete download reinstalls quickly. An
+  // already-installed model whose recipe has since moved to a newer
+  // version reads as an update, not a fresh install, whether or not it is
+  // currently serving.
   const installVerb = (recipe: Recipe) => {
-    if (installed.has(recipe.id)) return 'Install'
+    const own = installed.get(recipe.id)
+    if (own) return own.recipe_version < recipe.version ? 'Update' : 'Install'
     const bytes = downloadedBytes(recipe)
     if (bytes <= 0) return 'Install'
     return bytes >= recipe.artifact_bytes * 0.99 ? 'Reinstall' : 'Resume install'
@@ -94,7 +98,13 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
   const startInstall = (recipe: Recipe) =>
     run(recipe.id, async () => {
       const preflight = await api<Preflight>(`/api/v1/preflight?recipe_id=${encodeURIComponent(recipe.id)}`)
-      setConfirm({ recipe, preflight, switchFrom: activeOther(recipe.id)?.recipe_id })
+      // switchFrom drives the "switch now vs later" choice below. It is
+      // either a different model actively serving, or this same model
+      // updating itself while it is the one actively serving — both stop
+      // something before the new download can take over.
+      const own = installed.get(recipe.id)
+      const switchFrom = activeOther(recipe.id)?.recipe_id ?? (own?.active ? recipe.id : undefined)
+      setConfirm({ recipe, preflight, switchFrom })
       setLicence(licenceAccepted(recipe))
       setActivate(true)
       requestAnimationFrame(() => dialogRef.current?.showModal())
@@ -294,6 +304,15 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
               <dd>{recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
               <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
               <dt>Recipe version</dt><dd>v{recipe.version}</dd>
+              {model && model.recipe_version < recipe.version && (
+                <>
+                  <dt>Recipe</dt>
+                  <dd className="update-line">
+                    Recipe updated
+                    <button className="ghost" disabled={busy} onClick={() => startInstall(recipe)}>Update</button>
+                  </dd>
+                </>
+              )}
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
               <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
               <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
@@ -428,9 +447,11 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                         onChange={() => setActivate(true)}
                       />
                       <span>
-                        Download and switch now
+                        {confirm.switchFrom === confirm.recipe.id ? 'Update and switch now' : 'Download and switch now'}
                         <small>
-                          This stops {recipes.find(item => item.id === confirm.switchFrom)?.display_name} while {confirm.recipe.display_name} starts.
+                          {confirm.switchFrom === confirm.recipe.id
+                            ? `This restarts ${confirm.recipe.display_name} on the new version. If it fails, RunOnSpark restores the version that was running.`
+                            : `This stops ${recipes.find(item => item.id === confirm.switchFrom)?.display_name} while ${confirm.recipe.display_name} starts.`}
                         </small>
                       </span>
                     </label>
@@ -442,9 +463,11 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                         onChange={() => setActivate(false)}
                       />
                       <span>
-                        Download only
+                        {confirm.switchFrom === confirm.recipe.id ? 'Update only' : 'Download only'}
                         <small>
-                          {recipes.find(item => item.id === confirm.switchFrom)?.display_name} keeps serving. Start {confirm.recipe.display_name} later from the Models tab.
+                          {confirm.switchFrom === confirm.recipe.id
+                            ? `${confirm.recipe.display_name} keeps serving the current version. Switch to the update later from the Models tab.`
+                            : `${recipes.find(item => item.id === confirm.switchFrom)?.display_name} keeps serving. Start ${confirm.recipe.display_name} later from the Models tab.`}
                         </small>
                       </span>
                     </label>

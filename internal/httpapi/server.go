@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/punkjazz-labs/runonspark-manager/internal/auth"
@@ -37,7 +38,17 @@ type Server struct {
 	inventory inventory.Provider
 	executor  operations.Executor
 	engine    *engine.Engine
-	recipes   []recipe.Recipe
+	// effective is the current merged catalog (one recipe per ID, the
+	// newest version known) — what listing the catalog and starting a new
+	// install or update target. all is every distinct (id, version) ever
+	// verified and only ever grows; anything acting on an ALREADY-INSTALLED
+	// model (proxying inference, checking what an artifact deletion would
+	// affect, reclaim byte counts) must resolve through it via
+	// pinnedOrEffective, or a background recipe-index update could silently
+	// change which port, config, or files an existing install means. Both
+	// are swapped together by SetRecipes; readers never take a lock.
+	effective atomic.Pointer[[]recipe.Recipe]
+	all       atomic.Pointer[[]recipe.Recipe]
 	handler   http.Handler
 	metrics   *http.Client
 	// peerClient is a short-timeout client dedicated to server-to-server
@@ -71,7 +82,8 @@ type preflightResponse struct {
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, recipes: recipes, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{})}
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{})}
+	server.SetRecipes(recipes, recipes)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.health)
 	mux.HandleFunc("/api/v1/auth/pair", server.pair)
@@ -127,6 +139,40 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
+
+// SetRecipes replaces the catalog and its version history in one call — see
+// the field comments on Server. Safe to call from any goroutine at any
+// time, including while requests are in flight.
+func (s *Server) SetRecipes(all, effective []recipe.Recipe) {
+	s.all.Store(&all)
+	s.effective.Store(&effective)
+}
+
+func (s *Server) effectiveRecipes() []recipe.Recipe {
+	if p := s.effective.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+func (s *Server) allRecipes() []recipe.Recipe {
+	if p := s.all.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// pinnedOrEffective resolves the recipe an already-installed model was
+// actually built from — the exact (id, version) it was recorded with —
+// falling back to whatever the effective catalog currently has for that ID
+// on the rare chance history does not contain it (it should always grow,
+// never shrink; see recipefeed.Fetcher).
+func (s *Server) pinnedOrEffective(id string, version int) (recipe.Recipe, bool) {
+	if pinned, ok := recipe.FindVersion(s.allRecipes(), id, version); ok {
+		return pinned, true
+	}
+	return recipe.Find(s.effectiveRecipes(), id)
+}
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -223,7 +269,10 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recipeID := r.URL.Query().Get("recipe_id")
-	selected, ok := recipe.Find(s.recipes, recipeID)
+	// Preflight always evaluates against the current catalog entry: it
+	// exists to decide whether a fresh install or an update can proceed,
+	// and that always targets the newest known version.
+	selected, ok := recipe.Find(s.effectiveRecipes(), recipeID)
 	if !ok {
 		writeError(w, http.StatusNotFound, errors.New("recipe not found"))
 		return
@@ -304,7 +353,10 @@ func (s *Server) withReclaimCandidates(ctx context.Context, selected recipe.Reci
 		if model.RecipeID == selected.ID {
 			continue
 		}
-		item, ok := recipe.Find(s.recipes, model.RecipeID)
+		// The exact installed version: what removing this model would
+		// actually reclaim, which can differ from the catalog's current
+		// (possibly newer) entry for the same ID.
+		item, ok := s.pinnedOrEffective(model.RecipeID, model.RecipeVersion)
 		if !ok {
 			continue
 		}
@@ -332,7 +384,9 @@ func (s *Server) managedPortOwner(ctx context.Context, selected recipe.Recipe) s
 		if !model.Active || model.RecipeID == selected.ID {
 			continue
 		}
-		if active, ok := recipe.Find(s.recipes, model.RecipeID); ok && active.Service.DefaultHostPort == selected.Service.DefaultHostPort {
+		// The port an active model actually has bound is whatever its
+		// installed version declared, not the catalog's current entry.
+		if active, ok := s.pinnedOrEffective(model.RecipeID, model.RecipeVersion); ok && active.Service.DefaultHostPort == selected.Service.DefaultHostPort {
 			return active.ID
 		}
 	}
@@ -349,8 +403,9 @@ func (s *Server) listRecipes(w http.ResponseWriter, r *http.Request) {
 		ArtifactBytes int64 `json:"artifact_bytes"`
 		RequiredBytes int64 `json:"required_bytes"`
 	}
-	result := make([]view, 0, len(s.recipes))
-	for _, item := range s.recipes {
+	effective := s.effectiveRecipes()
+	result := make([]view, 0, len(effective))
+	for _, item := range effective {
 		result = append(result, view{Recipe: item, ArtifactBytes: item.TotalArtifactBytes(), RequiredBytes: item.RequiredBytes()})
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -388,7 +443,19 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	selected, ok := recipe.Find(s.recipes, parts[0])
+	// Every action here either targets a fresh install/update (the effective,
+	// newest catalog entry) or an already-installed model, whose handler
+	// (remove, and createJob's callers) re-resolves the exact installed
+	// version itself where a byte count or other version-sensitive field
+	// matters. This lookup only needs to know the ID is real; it falls back
+	// to the full version history so a model whose recipe has since been
+	// delisted upstream (no tombstone propagation exists yet — see the spec
+	// 04 report) stays reachable for its own start/stop/remove, even though
+	// it can no longer be freshly installed.
+	selected, ok := recipe.Find(s.effectiveRecipes(), parts[0])
+	if !ok {
+		selected, ok = recipe.Find(s.allRecipes(), parts[0])
+	}
 	if !ok {
 		writeError(w, 404, errors.New("recipe not found"))
 		return
@@ -469,7 +536,16 @@ func (s *Server) remove(w http.ResponseWriter, r *http.Request, selected recipe.
 	}
 	expected := int64(0)
 	if request.RemoveArtifacts {
-		expected = selected.TotalArtifactBytes()
+		// What removal actually reclaims is governed by the exact installed
+		// version's artifacts, not the catalog's current (possibly newer)
+		// entry for this ID.
+		target := selected
+		if model, err := s.store.Model(r.Context(), selected.ID); err == nil {
+			if pinned, ok := s.pinnedOrEffective(selected.ID, model.RecipeVersion); ok {
+				target = pinned
+			}
+		}
+		expected = target.TotalArtifactBytes()
 	}
 	if request.ExpectedReclaimBytes != expected {
 		writeError(w, 400, fmt.Errorf("reclaim confirmation mismatch: expected %d bytes", expected))
@@ -600,7 +676,7 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 	bundle := map[string]any{
 		"format": "runonspark-diagnostics-v1", "generated_at": time.Now().UTC().Format(time.RFC3339Nano),
-		"manager_version": s.version, "system": system, "recipes": s.recipes, "models": models,
+		"manager_version": s.version, "system": system, "recipes": s.effectiveRecipes(), "models": models,
 		"jobs": jobs, "recent_logs": recentLogs, "redacted": true,
 	}
 	body, err := json.MarshalIndent(bundle, "", "  ")
@@ -665,6 +741,12 @@ func (s *Server) authorizeInference(r *http.Request) bool {
 	return ok
 }
 
+// activeReadyRecipe resolves the exact recipe version the active model was
+// installed and started with — never the catalog's current entry for that
+// ID. This is what proxyModel dials and what telemetry reports on; using a
+// newer, not-yet-installed recipe's port or served_model_id here would
+// misroute live inference traffic the moment a background recipe update
+// lands, without anything about the actually-running container changing.
 func (s *Server) activeReadyRecipe(ctx context.Context) (recipe.Recipe, bool) {
 	models, err := s.store.Models(ctx)
 	if err != nil {
@@ -674,7 +756,7 @@ func (s *Server) activeReadyRecipe(ctx context.Context) (recipe.Recipe, bool) {
 		if !model.Active || model.Status != "ready" {
 			continue
 		}
-		if active, ok := recipe.Find(s.recipes, model.RecipeID); ok {
+		if active, ok := s.pinnedOrEffective(model.RecipeID, model.RecipeVersion); ok {
 			return active, true
 		}
 	}
@@ -1045,6 +1127,11 @@ func (s *Server) storageBreakdown(w http.ResponseWriter, r *http.Request) {
 	for _, model := range models {
 		installed[model.RecipeID] = model
 	}
+	// The full version history, not just the current catalog: an artifact
+	// or image still on disk for an older-but-still-installed recipe
+	// version must not read as orphaned just because the catalog has since
+	// moved that ID on to a newer version.
+	knownRecipes := s.allRecipes()
 	type artifactUse struct {
 		Repository string   `json:"repository"`
 		Revision   string   `json:"revision"`
@@ -1068,10 +1155,16 @@ func (s *Server) storageBreakdown(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				use := artifactUse{Repository: repository, Revision: revision.Name(), Bytes: dirBytes(filepath.Join(artifactRoot, repoDir.Name(), revision.Name())), RecipeIDs: []string{}}
-				for _, item := range s.recipes {
+				seenIDs := map[string]bool{}
+				for _, item := range knownRecipes {
+					if seenIDs[item.ID] {
+						continue // the same ID can appear at several versions
+					}
 					for _, artifact := range item.Artifacts {
 						if artifact.Repository == repository && artifact.Revision == revision.Name() {
 							use.RecipeIDs = append(use.RecipeIDs, item.ID)
+							seenIDs[item.ID] = true
+							break
 						}
 					}
 				}
@@ -1103,10 +1196,20 @@ func (s *Server) storageBreakdown(w http.ResponseWriter, r *http.Request) {
 	}
 	images := []imageUse{}
 	seenImages := map[string]int{}
-	for _, item := range s.recipes {
+	for _, item := range knownRecipes {
 		reference := item.Runtime.Reference()
 		if index, ok := seenImages[reference]; ok {
-			images[index].RecipeIDs = append(images[index].RecipeIDs, item.ID)
+			ids := images[index].RecipeIDs
+			alreadyListed := false
+			for _, id := range ids {
+				if id == item.ID {
+					alreadyListed = true
+					break
+				}
+			}
+			if !alreadyListed {
+				images[index].RecipeIDs = append(ids, item.ID)
+			}
 			continue
 		}
 		size, present := s.executor.RuntimeImageBytes(r.Context(), item)
@@ -1189,14 +1292,23 @@ func (s *Server) deleteArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, errors.New("no downloaded files match that model"))
 		return
 	}
+	// A safe (conservative) check by design: it asks whether ANY version of
+	// a recipe ID this manager has ever known — not just the catalog's
+	// current entry — references the artifact, because the catalog can
+	// have moved a recipe ID on to a newer version (with a different
+	// pinned revision) while an older version is what's actually installed
+	// and still using these exact files on disk. Understating "in use"
+	// here is how a still-needed model's files get deleted out from under
+	// it; overstating it just blocks a deletion that turns out to be safe.
 	referencesArtifact := func(recipeID string) bool {
-		selected, ok := recipe.Find(s.recipes, recipeID)
-		if !ok {
-			return false
-		}
-		for _, artifact := range selected.Artifacts {
-			if artifact.Repository == request.Repository && artifact.Revision == request.Revision {
-				return true
+		for _, candidate := range s.allRecipes() {
+			if candidate.ID != recipeID {
+				continue
+			}
+			for _, artifact := range candidate.Artifacts {
+				if artifact.Repository == request.Repository && artifact.Revision == request.Revision {
+					return true
+				}
 			}
 		}
 		return false
@@ -1208,8 +1320,12 @@ func (s *Server) deleteArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, model := range models {
 		if referencesArtifact(model.RecipeID) {
-			selected, _ := recipe.Find(s.recipes, model.RecipeID)
-			writeError(w, http.StatusConflict, fmt.Errorf("%s is installed and uses these files, so uninstall it instead", selected.DisplayName))
+			selected, ok := s.pinnedOrEffective(model.RecipeID, model.RecipeVersion)
+			name := model.RecipeID
+			if ok {
+				name = selected.DisplayName
+			}
+			writeError(w, http.StatusConflict, fmt.Errorf("%s is installed and uses these files, so uninstall it instead", name))
 			return
 		}
 	}

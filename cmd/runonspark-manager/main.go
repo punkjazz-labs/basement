@@ -22,6 +22,7 @@ import (
 	"github.com/punkjazz-labs/runonspark-manager/internal/inventory"
 	"github.com/punkjazz-labs/runonspark-manager/internal/operations"
 	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
+	"github.com/punkjazz-labs/runonspark-manager/internal/recipefeed"
 	"github.com/punkjazz-labs/runonspark-manager/internal/store"
 )
 
@@ -72,6 +73,15 @@ func main() {
 	provider := inventory.Host{DataDir: cfg.DataDir, DockerSocket: "/var/run/docker.sock"}
 	executor := operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider)
 	jobEngine := engine.New(db, executor, recipes)
+
+	// The recipe feed seeds from the embedded set plus whatever verified
+	// cache exists on disk (no network involved, so this never blocks or
+	// fails startup) and only then starts fetching in the background: the
+	// embedded recipes remain the permanent offline floor either way.
+	feed := recipefeed.NewFetcher(recipes, cfg.DataDir, logger)
+	cachedAll, cachedEffective := feed.Snapshot()
+	jobEngine.SetRecipes(cachedAll, cachedEffective)
+
 	if err := jobEngine.ResumeInterrupted(context.Background()); err != nil {
 		logger.Error("resume interrupted jobs", "error", err)
 		exit(1)
@@ -80,11 +90,20 @@ func main() {
 		logger.Error("reconcile active model", "error", err)
 		exit(1)
 	}
-	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, recipes)
+	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, cachedEffective)
+	api.SetRecipes(cachedAll, cachedEffective)
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
 	// Progress streams stay open indefinitely by design; without this hook a
 	// restart waits out the whole drain timeout whenever a console is open.
 	server.RegisterOnShutdown(api.Close)
+
+	feedCtx, stopFeed := context.WithCancel(context.Background())
+	defer stopFeed()
+	go feed.Run(feedCtx, recipefeed.RefreshInterval, func(all, effective []recipe.Recipe) {
+		jobEngine.SetRecipes(all, effective)
+		api.SetRecipes(all, effective)
+	})
+
 	go func() {
 		logger.Info("manager listening", "address", cfg.Listen, "pairing_token_path", authManager.PairingTokenPath(), "version", cfg.Version)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -95,6 +114,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
+	stopFeed()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {

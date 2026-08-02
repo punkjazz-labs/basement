@@ -107,6 +107,27 @@ export default function App() {
     api<UpdateInfo>('/api/v1/update').then(setUpdate).catch(() => {})
   }, [authed, refresh])
 
+  // The manager refreshes its recipe catalog from the signed remote index in
+  // the background every few hours (spec 04); this light poll is what lets
+  // an already-open console notice a "Recipe updated" row without the user
+  // reloading the page. Silent on failure, like every other poll here — the
+  // next successful tick just catches up.
+  useEffect(() => {
+    if (!authed) return
+    let cancelled = false
+    const poll = () => {
+      if (document.hidden) return
+      api<Recipe[]>('/api/v1/recipes').then(next => {
+        if (!cancelled) setRecipes(next)
+      }).catch(() => {})
+    }
+    const timer = setInterval(poll, 5 * 60 * 1000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [authed])
+
   // Keep an SSE stream open per non-terminal job so progress is live.
   useEffect(() => {
     if (!authed) return
