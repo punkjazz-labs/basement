@@ -63,6 +63,18 @@ type APIKey struct {
 	LastUsedAt string `json:"last_used_at,omitempty"`
 }
 
+// Peer identifies another Spark this manager reads fleet status from. The
+// stored api_key authenticates outbound calls this manager makes to the peer
+// and is deliberately absent from this struct's JSON so a handler cannot
+// serialize it into a response by accident; PeerCredentials is the only path
+// to the plaintext key, and it never leaves the server process.
+type Peer struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	BaseURL   string `json:"base_url"`
+	CreatedAt string `json:"created_at"`
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
@@ -151,6 +163,13 @@ CREATE TABLE IF NOT EXISTS model_metrics (
   tokens_per_second REAL NOT NULL,
   time_to_first_token_ms INTEGER NOT NULL DEFAULT 0,
   measured_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS peers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  api_key TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -524,6 +543,75 @@ func (s *Store) VerifyAPIKey(ctx context.Context, secret string) bool {
 func hashSecret(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(sum[:])
+}
+
+// CreatePeer records another Spark to poll for fleet status. The caller is
+// responsible for having already proven base_url and api_key work together
+// before this is called; this method only persists.
+func (s *Store) CreatePeer(ctx context.Context, name, baseURL, apiKey string) (Peer, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 64 {
+		return Peer{}, errors.New("a Spark name between 1 and 64 characters is required")
+	}
+	if baseURL == "" {
+		return Peer{}, errors.New("a base URL is required")
+	}
+	if apiKey == "" {
+		return Peer{}, errors.New("an API key is required")
+	}
+	id, err := randomID("peer_")
+	if err != nil {
+		return Peer{}, err
+	}
+	peer := Peer{ID: id, Name: name, BaseURL: baseURL, CreatedAt: now()}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO peers(id,name,base_url,api_key,created_at) VALUES(?,?,?,?,?)`, peer.ID, peer.Name, peer.BaseURL, apiKey, peer.CreatedAt); err != nil {
+		return Peer{}, err
+	}
+	return peer, nil
+}
+
+// Peers never includes the api_key column, so a handler cannot leak a
+// credential just by forwarding this result.
+func (s *Store) Peers(ctx context.Context) ([]Peer, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,base_url,created_at FROM peers ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Peer{}
+	for rows.Next() {
+		var peer Peer
+		if err := rows.Scan(&peer.ID, &peer.Name, &peer.BaseURL, &peer.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, peer)
+	}
+	return result, rows.Err()
+}
+
+// PeerCredentials is the sole path to a peer's plaintext api_key; it exists
+// only for the server to authenticate its own outbound calls to that peer,
+// and its result must never be written to an HTTP response or a log line.
+func (s *Store) PeerCredentials(ctx context.Context, id string) (Peer, string, error) {
+	var peer Peer
+	var apiKey string
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,base_url,created_at,api_key FROM peers WHERE id=?`, id).
+		Scan(&peer.ID, &peer.Name, &peer.BaseURL, &peer.CreatedAt, &apiKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Peer{}, "", os.ErrNotExist
+	}
+	return peer, apiKey, err
+}
+
+func (s *Store) DeletePeer(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM peers WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
 }
 
 func (s *Store) DeleteModel(ctx context.Context, recipeID string) error {

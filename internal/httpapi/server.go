@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -39,6 +40,11 @@ type Server struct {
 	recipes   []recipe.Recipe
 	handler   http.Handler
 	metrics   *http.Client
+	// peerClient is a short-timeout client dedicated to server-to-server
+	// fleet calls; kept separate from metrics so its purpose (reaching
+	// another Spark, not this one's own vLLM runtime) is unambiguous at
+	// call sites.
+	peerClient *http.Client
 	// closing releases long-lived SSE streams the moment shutdown starts, so
 	// a service restart never waits out the graceful-drain timeout on
 	// progress streams that would otherwise stay open forever.
@@ -65,25 +71,30 @@ type preflightResponse struct {
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, recipes: recipes, metrics: &http.Client{Timeout: 3 * time.Second}, closing: make(chan struct{})}
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, recipes: recipes, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second}, closing: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.health)
 	mux.HandleFunc("/api/v1/auth/pair", server.pair)
 	mux.HandleFunc("/api/v1/auth/status", server.authStatus)
-	mux.HandleFunc("/api/v1/system", server.withReadAuth(server.system))
+	// system, models and telemetry are also the three endpoints a peer
+	// manager reads through /summary, so they accept API-key auth in
+	// addition to a console session (ADR-scale change: see withPeerReadAuth).
+	mux.HandleFunc("/api/v1/system", server.withPeerReadAuth(server.system))
 	mux.HandleFunc("/api/v1/preflight", server.withReadAuth(server.preflight))
 	mux.HandleFunc("/api/v1/recipes", server.withReadAuth(server.listRecipes))
-	mux.HandleFunc("/api/v1/models", server.withReadAuth(server.listModels))
+	mux.HandleFunc("/api/v1/models", server.withPeerReadAuth(server.listModels))
 	mux.HandleFunc("/api/v1/models/", server.withReadAuth(server.modelAction))
 	mux.HandleFunc("/api/v1/jobs", server.withReadAuth(server.listJobs))
 	mux.HandleFunc("/api/v1/jobs/", server.withReadAuth(server.jobAction))
 	mux.HandleFunc("/api/v1/diagnostics", server.withReadAuth(server.diagnostics))
 	mux.HandleFunc("/api/v1/keys", server.keys)
 	mux.HandleFunc("/api/v1/keys/", server.keyAction)
-	mux.HandleFunc("/api/v1/telemetry", server.withReadAuth(server.telemetry))
+	mux.HandleFunc("/api/v1/telemetry", server.withPeerReadAuth(server.telemetry))
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
 	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
 	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateCheck))
+	mux.HandleFunc("/api/v1/peers", server.peersCollection)
+	mux.HandleFunc("/api/v1/peers/", server.withReadAuth(server.peerAction))
 	mux.HandleFunc("/v1/", server.proxyModel)
 	assets, _ := fs.Sub(webui.Assets, "assets")
 	fileServer := http.FileServer(http.FS(assets))
@@ -723,6 +734,203 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": true})
 }
 
+// peerAllowedPaths is the entire surface a fleet peer will ever expose to
+// this manager. fetchPeerJSON refuses anything outside it, so this stays an
+// enforced allowlist rather than an assumption baked into call sites.
+var peerAllowedPaths = map[string]bool{
+	"/api/v1/system":    true,
+	"/api/v1/models":    true,
+	"/api/v1/telemetry": true,
+}
+
+type peerView struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	BaseURL string `json:"base_url"`
+}
+
+func (s *Server) peersCollection(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if _, ok := s.auth.Authenticate(r); !ok {
+			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
+			return
+		}
+		s.listPeers(w, r)
+	case http.MethodPost:
+		if err := s.auth.AuthorizeMutation(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+		s.createPeer(w, r)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) listPeers(w http.ResponseWriter, r *http.Request) {
+	list, err := s.store.Peers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	result := make([]peerView, 0, len(list))
+	for _, peer := range list {
+		result = append(result, peerView{ID: peer.ID, Name: peer.Name, BaseURL: peer.BaseURL})
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Name    string `json:"name"`
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	baseURL, err := normalizedPeerBaseURL(request.BaseURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(request.APIKey) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("an API key is required"))
+		return
+	}
+	// Prove the URL and key actually reach a Spark before this is saved;
+	// a peer entry that has never been confirmed reachable is worse than
+	// no entry at all.
+	if _, err := s.fetchPeerJSON(r.Context(), baseURL, request.APIKey, "/api/v1/system"); err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("could not reach that Spark with this key, so check the URL and key"))
+		return
+	}
+	peer, err := s.store.CreatePeer(r.Context(), request.Name, baseURL, request.APIKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, peerView{ID: peer.ID, Name: peer.Name, BaseURL: peer.BaseURL})
+}
+
+func (s *Server) peerAction(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(path.Clean(r.URL.Path), "/api/v1/peers/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 1 || parts[0] == "" || parts[0] == "." {
+		http.NotFound(w, r)
+		return
+	}
+	id := parts[0]
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		if err := s.auth.AuthorizeMutation(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+		if err := s.store.DeletePeer(r.Context(), id); err != nil {
+			writeError(w, http.StatusNotFound, errors.New("that Spark is not in the fleet"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"removed": true})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "summary" && r.Method == http.MethodGet {
+		s.peerSummary(w, r, id)
+		return
+	}
+	methodNotAllowed(w)
+}
+
+// peerSummary proxies exactly three read-only endpoints on the peer
+// (system, models, telemetry) and merges their bodies into one response.
+// A peer that cannot be reached, times out, or fails auth is reported as
+// reachable: false rather than turning into an error for the whole call, so
+// one down machine never breaks the rest of the fleet view.
+func (s *Server) peerSummary(w http.ResponseWriter, r *http.Request, id string) {
+	peer, apiKey, err := s.store.PeerCredentials(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("that Spark is not in the fleet"))
+		return
+	}
+	system, systemErr := s.fetchPeerJSON(r.Context(), peer.BaseURL, apiKey, "/api/v1/system")
+	models, modelsErr := s.fetchPeerJSON(r.Context(), peer.BaseURL, apiKey, "/api/v1/models")
+	telemetry, telemetryErr := s.fetchPeerJSON(r.Context(), peer.BaseURL, apiKey, "/api/v1/telemetry")
+	response := map[string]any{"reachable": systemErr == nil && modelsErr == nil && telemetryErr == nil}
+	if systemErr == nil {
+		response["system"] = system
+	}
+	if modelsErr == nil {
+		response["models"] = models
+	}
+	if telemetryErr == nil {
+		response["telemetry"] = telemetry
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// fetchPeerJSON calls exactly one allowlisted read-only path on a peer and
+// decodes its JSON body. The peer's response is untrusted input: the call is
+// time-boxed independently of the caller's own request context, the body is
+// size-capped before it is ever parsed, and it is only ever interpreted as
+// JSON, never as HTML.
+func (s *Server) fetchPeerJSON(ctx context.Context, baseURL, apiKey, endpoint string) (any, error) {
+	if !peerAllowedPaths[endpoint] {
+		return nil, fmt.Errorf("peer endpoint %s is not allowlisted", endpoint)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, baseURL+endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := s.peerClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("peer returned status %d", resp.StatusCode)
+	}
+	var payload any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("peer returned an unreadable response: %w", err)
+	}
+	return payload, nil
+}
+
+// normalizedPeerBaseURL accepts only a bare http(s) origin: LAN HTTP is
+// acceptable at this phase (mTLS is a later spec), but a path, query or
+// embedded credentials would let a malicious "peer" redirect this manager's
+// authenticated calls somewhere the user never approved.
+func normalizedPeerBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", errors.New("enter a valid URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", errors.New("the URL must start with http:// or https://")
+	}
+	if u.Host == "" {
+		return "", errors.New("the URL must include a host")
+	}
+	if u.User != nil {
+		return "", errors.New("the URL must not include a username or password")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", errors.New("the URL must not include a path")
+	}
+	if u.RawQuery != "" {
+		return "", errors.New("the URL must not include a query string")
+	}
+	if u.Fragment != "" {
+		return "", errors.New("the URL must not include a fragment")
+	}
+	return u.Scheme + "://" + u.Host, nil
+}
+
 func (s *Server) telemetry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -1080,6 +1288,27 @@ func (s *Server) withReadAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+// withPeerReadAuth additionally accepts an API-key bearer token, so another
+// Spark's manager can read this handler on our behalf when assembling a
+// fleet summary. It must only ever wrap read-only, non-sensitive handlers:
+// system, models and telemetry. Every other /api/v1 route keeps requiring a
+// console session via withReadAuth.
+func (s *Server) withPeerReadAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if header := r.Header.Get("Authorization"); strings.HasPrefix(header, "Bearer ") {
+			if s.store.VerifyAPIKey(r.Context(), strings.TrimPrefix(header, "Bearer ")) {
+				next(w, r)
+				return
+			}
+		}
+		if _, ok := s.auth.Authenticate(r); ok {
+			next(w, r)
+			return
+		}
+		writeError(w, 401, errors.New("authentication required"))
 	}
 }
 

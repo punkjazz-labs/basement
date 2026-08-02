@@ -277,6 +277,301 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	}
 }
 
+// newPairedTestServer boots a fresh manager and completes pairing, returning
+// a session cookie jar and CSRF token every subsequent mutating call needs.
+func newPairedTestServer(t *testing.T) (server *httptest.Server, cookies []*http.Cookie, csrf string) {
+	t.Helper()
+	dataDir := t.TempDir()
+	database, err := store.Open(filepath.Join(dataDir, "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	authManager, err := auth.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &apiExecutor{done: map[string]bool{}}
+	runner := engine.New(database, executor, recipes)
+	server = httptest.NewServer(New("test-version", dataDir, authManager, database, readyInventory{}, executor, runner, recipes).Handler())
+	t.Cleanup(server.Close)
+	tokenBytes, err := os.ReadFile(authManager.PairingTokenPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimSpace(string(tokenBytes))
+	paired := doRequest(t, http.MethodPost, server.URL+"/api/v1/auth/pair", `{"token":"`+token+`"}`, nil, map[string]string{"Origin": server.URL})
+	if paired.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(paired.Body)
+		t.Fatalf("pair status=%d body=%s", paired.StatusCode, data)
+	}
+	var pairResult struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(paired.Body).Decode(&pairResult); err != nil {
+		t.Fatal(err)
+	}
+	cookies = paired.Cookies()
+	paired.Body.Close()
+	return server, cookies, pairResult.CSRF
+}
+
+// fakePeer stands in for another Spark's manager: it serves exactly the
+// three read-only endpoints a real peer would, gated behind the same Bearer
+// API key scheme this manager itself uses.
+func fakePeer(t *testing.T, wantKey string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	authed := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+wantKey {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			next(w, r)
+		}
+	}
+	mux.HandleFunc("/api/v1/system", authed(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"hostname": "peer-host", "manager_version": "9.9.9", "memory_available_bytes": 42_000_000_000,
+			"installed_models": []map[string]any{{"recipe_id": "demo", "active": true, "status": "ready"}},
+		})
+	}))
+	mux.HandleFunc("/api/v1/models", authed(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, []map[string]any{{"recipe_id": "demo", "active": true, "status": "ready"}})
+	}))
+	mux.HandleFunc("/api/v1/telemetry", authed(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"memory_available": 42_000_000_000})
+	}))
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestPeerLifecycleOverAPI(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf}
+
+	peer := fakePeer(t, "rosk_realkey")
+
+	// A wrong key must be caught before anything is persisted: the whole
+	// point of the pre-save check is that a broken entry is never saved.
+	badKey := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers",
+		`{"name":"edgexpert-beta","base_url":"`+peer.URL+`","api_key":"rosk_wrongkey"}`, cookies, headers)
+	if badKey.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad key status=%d", badKey.StatusCode)
+	}
+	var badKeyBody struct {
+		Error string `json:"error"`
+	}
+	json.NewDecoder(badKey.Body).Decode(&badKeyBody)
+	badKey.Body.Close()
+	if badKeyBody.Error != "could not reach that Spark with this key, so check the URL and key" {
+		t.Fatalf("unexpected error message: %q", badKeyBody.Error)
+	}
+
+	// Missing CSRF must be rejected the same way every other mutation is.
+	noCSRF := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers",
+		`{"name":"edgexpert-beta","base_url":"`+peer.URL+`","api_key":"rosk_realkey"}`, cookies, map[string]string{"Origin": server.URL})
+	if noCSRF.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing CSRF status=%d", noCSRF.StatusCode)
+	}
+	noCSRF.Body.Close()
+
+	// A URL with a path is rejected before any network call is made.
+	badURL := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers",
+		`{"name":"edgexpert-beta","base_url":"`+peer.URL+`/some/path","api_key":"rosk_realkey"}`, cookies, headers)
+	if badURL.StatusCode != http.StatusBadRequest {
+		t.Fatalf("path-bearing URL status=%d", badURL.StatusCode)
+	}
+	badURL.Body.Close()
+
+	created := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers",
+		`{"name":"edgexpert-beta","base_url":"`+peer.URL+`","api_key":"rosk_realkey"}`, cookies, headers)
+	createdBody, _ := io.ReadAll(created.Body)
+	created.Body.Close()
+	if created.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.StatusCode, createdBody)
+	}
+	if bytes.Contains(createdBody, []byte("rosk_realkey")) {
+		t.Fatalf("create response leaked the API key: %s", createdBody)
+	}
+	var createdPeer struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(createdBody, &createdPeer); err != nil {
+		t.Fatal(err)
+	}
+	if createdPeer.ID == "" || createdPeer.Name != "edgexpert-beta" {
+		t.Fatalf("unexpected created peer: %#v", createdPeer)
+	}
+
+	list := doRequest(t, http.MethodGet, server.URL+"/api/v1/peers", "", cookies, nil)
+	listBody, _ := io.ReadAll(list.Body)
+	list.Body.Close()
+	if bytes.Contains(listBody, []byte("rosk_realkey")) {
+		t.Fatalf("peer list leaked the API key: %s", listBody)
+	}
+	var peerList []struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(listBody, &peerList); err != nil {
+		t.Fatal(err)
+	}
+	if len(peerList) != 1 || peerList[0].ID != createdPeer.ID {
+		t.Fatalf("unexpected peer list: %s", listBody)
+	}
+
+	summary := doRequest(t, http.MethodGet, server.URL+"/api/v1/peers/"+createdPeer.ID+"/summary", "", cookies, nil)
+	var summaryBody struct {
+		Reachable bool           `json:"reachable"`
+		System    map[string]any `json:"system"`
+		Models    []any          `json:"models"`
+		Telemetry map[string]any `json:"telemetry"`
+	}
+	if err := json.NewDecoder(summary.Body).Decode(&summaryBody); err != nil {
+		t.Fatal(err)
+	}
+	summary.Body.Close()
+	if !summaryBody.Reachable || summaryBody.System["hostname"] != "peer-host" || len(summaryBody.Models) != 1 || summaryBody.Telemetry == nil {
+		t.Fatalf("unexpected reachable summary: %#v", summaryBody)
+	}
+
+	// The summary must mark the peer unreachable, not error the whole
+	// response, once it stops answering.
+	peer.Close()
+	downSummary := doRequest(t, http.MethodGet, server.URL+"/api/v1/peers/"+createdPeer.ID+"/summary", "", cookies, nil)
+	var downBody struct {
+		Reachable bool `json:"reachable"`
+	}
+	if downSummary.StatusCode != http.StatusOK {
+		t.Fatalf("down peer summary status=%d, want 200", downSummary.StatusCode)
+	}
+	if err := json.NewDecoder(downSummary.Body).Decode(&downBody); err != nil {
+		t.Fatal(err)
+	}
+	downSummary.Body.Close()
+	if downBody.Reachable {
+		t.Fatal("summary reported a closed peer as reachable")
+	}
+
+	noCSRFDelete := doRequest(t, http.MethodDelete, server.URL+"/api/v1/peers/"+createdPeer.ID, "", cookies, map[string]string{"Origin": server.URL})
+	if noCSRFDelete.StatusCode != http.StatusForbidden {
+		t.Fatalf("delete without CSRF status=%d", noCSRFDelete.StatusCode)
+	}
+	noCSRFDelete.Body.Close()
+
+	deleted := doRequest(t, http.MethodDelete, server.URL+"/api/v1/peers/"+createdPeer.ID, "", cookies, headers)
+	if deleted.StatusCode != http.StatusOK {
+		t.Fatalf("delete status=%d", deleted.StatusCode)
+	}
+	deleted.Body.Close()
+
+	deletedAgain := doRequest(t, http.MethodDelete, server.URL+"/api/v1/peers/"+createdPeer.ID, "", cookies, headers)
+	if deletedAgain.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete of already-removed peer status=%d", deletedAgain.StatusCode)
+	}
+	deletedAgain.Body.Close()
+
+	afterDelete := doRequest(t, http.MethodGet, server.URL+"/api/v1/peers", "", cookies, nil)
+	afterDeleteBody, _ := io.ReadAll(afterDelete.Body)
+	afterDelete.Body.Close()
+	if !bytes.Equal(bytes.TrimSpace(afterDeleteBody), []byte("[]")) {
+		t.Fatalf("peer list after delete = %s, want []", afterDeleteBody)
+	}
+}
+
+// TestPeerSideKeyAuthIsScopedToReadOnlyFleetEndpoints proves the extension
+// described in the spec: an API key now authenticates GET requests to
+// system, models and telemetry (so a peer manager can read them), but every
+// other /api/v1 route still requires a console session, exactly as before.
+func TestPeerSideKeyAuthIsScopedToReadOnlyFleetEndpoints(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf, "Idempotency-Key": "make-a-key"}
+	created := doRequest(t, http.MethodPost, server.URL+"/api/v1/keys", `{"name":"fleet-peer"}`, cookies, headers)
+	var createdKey struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.NewDecoder(created.Body).Decode(&createdKey); err != nil {
+		t.Fatal(err)
+	}
+	created.Body.Close()
+	if createdKey.Secret == "" {
+		t.Fatal("key creation did not return a secret")
+	}
+	bearer := map[string]string{"Authorization": "Bearer " + createdKey.Secret}
+
+	for _, path := range []string{"/api/v1/system", "/api/v1/models", "/api/v1/telemetry"} {
+		response := doRequest(t, http.MethodGet, server.URL+path, "", nil, bearer)
+		if response.StatusCode != http.StatusOK {
+			data, _ := io.ReadAll(response.Body)
+			t.Errorf("%s with API key status=%d body=%s", path, response.StatusCode, data)
+		}
+		response.Body.Close()
+	}
+
+	for _, path := range []string{"/api/v1/recipes", "/api/v1/jobs", "/api/v1/storage", "/api/v1/diagnostics", "/api/v1/preflight", "/api/v1/update"} {
+		response := doRequest(t, http.MethodGet, server.URL+path, "", nil, bearer)
+		if response.StatusCode != http.StatusUnauthorized {
+			data, _ := io.ReadAll(response.Body)
+			t.Errorf("%s with API key status=%d, want 401 (key auth must not extend past system/models/telemetry): body=%s", path, response.StatusCode, data)
+		}
+		response.Body.Close()
+	}
+
+	// The same key must never authorize a mutation anywhere.
+	mutation := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers", `{"name":"x","base_url":"http://x","api_key":"y"}`, nil, bearer)
+	if mutation.StatusCode == http.StatusCreated {
+		t.Fatal("an inference API key must not be able to create a peer")
+	}
+	mutation.Body.Close()
+}
+
+// TestFetchPeerJSONRejectsNonAllowlistedPath is the acceptance test for the
+// proxy's allowlist: fetchPeerJSON is the only place that ever calls out to
+// a peer, and it must refuse anything outside the three named endpoints
+// before a request is even sent.
+func TestFetchPeerJSONRejectsNonAllowlistedPath(t *testing.T) {
+	called := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		writeJSON(w, http.StatusOK, map[string]any{})
+	})
+	peer := httptest.NewServer(mux)
+	defer peer.Close()
+
+	s := &Server{peerClient: &http.Client{Timeout: 3 * time.Second}}
+	for _, path := range []string{"/api/v1/keys", "/api/v1/keys/abc", "/v1/chat/completions", "/api/v1/models/qwen/install", "../etc/passwd", ""} {
+		_, err := s.fetchPeerJSON(context.Background(), peer.URL, "irrelevant", path)
+		if err == nil {
+			t.Fatalf("path %q was not rejected by the allowlist", path)
+		}
+		if !strings.Contains(err.Error(), "not allowlisted") {
+			t.Fatalf("path %q rejected for the wrong reason: %v", path, err)
+		}
+	}
+	if called {
+		t.Fatal("a disallowed path reached the peer over the network")
+	}
+
+	// Sanity: an allowlisted path on the same client does reach the peer.
+	if _, err := s.fetchPeerJSON(context.Background(), peer.URL, "irrelevant", "/api/v1/system"); err != nil {
+		t.Fatalf("allowlisted path was rejected: %v", err)
+	}
+	if !called {
+		t.Fatal("allowlisted path never reached the peer")
+	}
+}
+
 func doRequest(t *testing.T, method, url, body string, cookies []*http.Cookie, headers map[string]string) *http.Response {
 	t.Helper()
 	request, err := http.NewRequest(method, url, strings.NewReader(body))
