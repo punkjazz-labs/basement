@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, formatBytes, terminal, stateCopy, operationCopy, type Job, type Recipe, type Step } from '../api'
+import { api, formatBytes, terminal, startTimeoutMinutes, stateCopy, operationCopy, type Job, type Recipe, type Step } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
 
 const CHECKS = [
@@ -17,17 +17,20 @@ interface Phase {
   operations: string[]
 }
 
-const FIRST_START_NOTE = 'Loading the model into memory. The first start typically takes 5 to 15 minutes, never more than 20. Later starts are much faster.'
+function firstStartNote(recipe?: Recipe): string {
+  return `Loading the model into memory. The first start can take up to ${startTimeoutMinutes(recipe)} minutes, with live progress the whole way. Later starts are much faster.`
+}
 
-function phasePlan(job: Job): Phase[] {
+function phasePlan(job: Job, recipe?: Recipe): Phase[] {
   if (job.kind === 'install') {
+    const firstStart = firstStartNote(recipe)
     return [
       { title: 'Check system', note: 'Hardware, memory, disk and access', states: ['queued', 'preflighting'], operations: CHECKS },
       { title: 'Prepare runtime', note: 'Pinned vLLM image', states: ['downloading_runtime'], operations: ['pull_image'] },
       { title: 'Download model', note: 'Resumable model files', states: ['downloading_models'], operations: ['download_artifact'] },
       { title: 'Configure service', note: 'Owned configuration and container', states: ['configuring'], operations: ['write_generated_config', 'create_container'] },
-      { title: 'Start model', note: 'Safe memory reservation', activeNote: FIRST_START_NOTE, states: ['checking_memory', 'starting', 'stopping'], operations: ['stop_container', 'verify_memory', 'start_container'] },
-      { title: 'Verify endpoint', note: 'Health and real inference', activeNote: FIRST_START_NOTE, states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
+      { title: 'Start model', note: 'Safe memory reservation', activeNote: firstStart, states: ['checking_memory', 'starting', 'stopping'], operations: ['stop_container', 'verify_memory', 'start_container'] },
+      { title: 'Verify endpoint', note: 'Health and real inference', activeNote: firstStart, states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
     ]
   }
   if (job.kind === 'start') {
@@ -237,10 +240,10 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
 
   if (!job) return <dialog ref={ref} onClose={onClose} />
 
-  const phases = phasePlan(job)
+  const recipe = recipes.find(item => item.id === job.recipe_id)
+  const phases = phasePlan(job, recipe)
   const activeIndex = activePhaseIndex(job, phases)
   const succeeded = terminal(job.state) && job.state !== 'failed' && job.state !== 'cancelled'
-  const recipe = recipes.find(item => item.id === job.recipe_id)
   const verb = { install: 'Deploy', start: 'Start', stop: 'Stop', remove: 'Remove', 'smoke-test': 'Test', benchmark: 'Measure' }[job.kind] ?? 'Manage'
   // A benchmark or smoke test is not a deployment; every piece of copy in
   // this dialog follows the job's own noun.

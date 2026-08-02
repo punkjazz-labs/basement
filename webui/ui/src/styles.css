@@ -330,6 +330,8 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .confirm-check span { display: block; font-weight: 500; }
 .confirm-check small { display: block; color: var(--faint); font-weight: 400; margin-top: 1px; }
 
+.install-choice { display: grid; gap: 8px; }
+
 .dialog-result { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .dialog-result .cell { background: var(--green-tint); border: 1px solid var(--green-line); border-radius: 8px; padding: 12px 14px; }
 .dialog-result .l { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }

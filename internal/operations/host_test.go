@@ -38,6 +38,23 @@ func TestHostMemoryGuardChecksCapacityAndLiveHeadroom(t *testing.T) {
 	}
 }
 
+func TestStartTimeoutFallsBackToTwentyMinutes(t *testing.T) {
+	cases := []struct {
+		minutes int
+		want    time.Duration
+	}{
+		{0, 20 * time.Minute},
+		{45, 45 * time.Minute},
+		{-5, 20 * time.Minute},
+	}
+	for _, c := range cases {
+		r := recipe.Recipe{Runtime: recipe.Runtime{StartTimeoutMinutes: c.minutes}}
+		if got := startTimeout(r); got != c.want {
+			t.Errorf("startTimeout(%d) = %s, want %s", c.minutes, got, c.want)
+		}
+	}
+}
+
 func TestHostDiskGuardRejectsBeforeRequiredHeadroom(t *testing.T) {
 	recipes, err := recipe.Builtin()
 	if err != nil {

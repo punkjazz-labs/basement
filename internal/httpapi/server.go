@@ -414,8 +414,9 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) install(w http.ResponseWriter, r *http.Request, selected recipe.Recipe) {
 	var request struct {
-		Confirmed     bool `json:"confirmed"`
-		AcceptLicence bool `json:"accept_licence"`
+		Confirmed     bool  `json:"confirmed"`
+		AcceptLicence bool  `json:"accept_licence"`
+		Activate      *bool `json:"activate"`
 	}
 	if err := decodeBody(r, &request); err != nil {
 		writeError(w, 400, err)
@@ -440,7 +441,10 @@ func (s *Server) install(w http.ResponseWriter, r *http.Request, selected recipe
 			return
 		}
 	}
-	s.createJob(w, r, "install", selected, map[string]any{"confirmed": true})
+	// Activate defaults to true, preserving the historical install-and-serve
+	// behaviour for callers that omit it.
+	activate := request.Activate == nil || *request.Activate
+	s.createJob(w, r, "install", selected, map[string]any{"confirmed": true, "activate": activate})
 }
 
 func (s *Server) remove(w http.ResponseWriter, r *http.Request, selected recipe.Recipe) {

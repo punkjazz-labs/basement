@@ -1,16 +1,20 @@
 package recipe
 
 type Recipe struct {
-	SchemaVersion int          `yaml:"schema_version" json:"schema_version"`
-	ID            string       `yaml:"id" json:"id"`
-	Version       int          `yaml:"version" json:"version"`
-	DisplayName   string       `yaml:"display_name" json:"display_name"`
-	Publisher     string       `yaml:"publisher" json:"publisher"`
+	SchemaVersion int    `yaml:"schema_version" json:"schema_version"`
+	ID            string `yaml:"id" json:"id"`
+	Version       int    `yaml:"version" json:"version"`
+	DisplayName   string `yaml:"display_name" json:"display_name"`
+	Publisher     string `yaml:"publisher" json:"publisher"`
 	// Attribution is three separate facts: the lab that made the model, and
 	// the author of this serving recipe. The weights builder is derived from
 	// the artifact repository owner. Publisher remains the display byline.
 	ModelBy  string `yaml:"model_by" json:"model_by"`
 	RecipeBy string `yaml:"recipe_by" json:"recipe_by"`
+	// ModelReleased is a maintainer-researched display string (e.g. "May
+	// 2026"), not a computed value. Absent means unknown; the console must
+	// show n/a rather than guess.
+	ModelReleased string       `yaml:"model_released,omitempty" json:"model_released,omitempty"`
 	Trust         string       `yaml:"trust" json:"trust"`
 	Verification  string       `yaml:"verification" json:"verification"`
 	Source        Source       `yaml:"source" json:"source"`
@@ -42,6 +46,11 @@ type Runtime struct {
 	ShmBytes       int64             `yaml:"shm_bytes" json:"shm_bytes"`
 	MemoryLock     bool              `yaml:"memory_lock" json:"memory_lock"`
 	IPCLock        bool              `yaml:"ipc_lock" json:"ipc_lock"`
+	// StartTimeoutMinutes bounds how long the health wait gives a first start
+	// before failing; the console's own copy derives from this value so it
+	// never promises a number the wait does not honour. 0 means the default
+	// of 20 minutes.
+	StartTimeoutMinutes int `yaml:"start_timeout_minutes" json:"start_timeout_minutes"`
 }
 
 func (r Runtime) Reference() string { return r.Image + "@" + r.Digest }

@@ -17,6 +17,7 @@ export interface Recipe {
   publisher: string
   model_by?: string
   recipe_by?: string
+  model_released?: string
   trust: string
   verification: string
   source: { url: string; revision: string }
@@ -30,6 +31,7 @@ export interface Recipe {
     required_licence_acceptance: boolean
   }
   service: { internal_port: number; default_host_port: number; served_model_id: string }
+  runtime: { start_timeout_minutes: number }
   artifact_bytes: number
   required_bytes: number
 }
@@ -224,6 +226,15 @@ export async function copyText(value: string): Promise<void> {
 }
 
 export const terminal = (state: string) => ['ready', 'failed', 'cancelled', 'stopped', 'removed'].includes(state)
+
+// startTimeoutMinutes mirrors the backend fallback in
+// internal/operations/host.go startTimeout: 0 or unset means the default of
+// 20 minutes. The console derives every first-start time claim from this so
+// it never promises a number the health wait does not honour.
+export function startTimeoutMinutes(recipe?: Recipe): number {
+  const minutes = recipe?.runtime.start_timeout_minutes
+  return minutes && minutes > 0 ? minutes : 20
+}
 
 export const stateCopy: Record<string, string> = {
   queued: 'Queued',

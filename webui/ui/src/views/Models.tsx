@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { api, idempotency, terminal, formatBytes, type Job, type Preflight, type Recipe, type StorageInfo } from '../api'
+import { api, idempotency, terminal, formatBytes, startTimeoutMinutes, type Job, type Preflight, type Recipe, type StorageInfo } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { LOGOS, readableWeights } from '../catalog'
@@ -27,6 +27,10 @@ interface ConfirmState {
 export default function Models({ system, recipes, models, jobs, refreshModelsAndJobs, openDeployment, openPlayground }: AppState) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [licence, setLicence] = useState(false)
+  // Whether the install switches to the new model as soon as it is ready.
+  // Only meaningful when another model is serving; defaults to the
+  // historical behaviour so a single click still installs and serves.
+  const [activate, setActivate] = useState(true)
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState('')
   const [storage, setStorage] = useState<StorageInfo | null>(null)
@@ -92,6 +96,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
       const preflight = await api<Preflight>(`/api/v1/preflight?recipe_id=${encodeURIComponent(recipe.id)}`)
       setConfirm({ recipe, preflight, switchFrom: activeOther(recipe.id)?.recipe_id })
       setLicence(licenceAccepted(recipe))
+      setActivate(true)
       requestAnimationFrame(() => dialogRef.current?.showModal())
     })
 
@@ -101,7 +106,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
       const result = await api<{ job: Job }>(`/api/v1/models/${confirm.recipe.id}/install`, {
         method: 'POST',
         headers: idempotency(),
-        body: JSON.stringify({ confirmed: true, accept_licence: true }),
+        body: JSON.stringify({ confirmed: true, accept_licence: true, activate: confirm.switchFrom ? activate : true }),
       })
       dialogRef.current?.close()
       setConfirm(null)
@@ -278,9 +283,11 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             </div>
             <dl className="facts">
               <dt>Model by</dt><dd>{recipe.model_by || recipe.publisher}</dd>
+              <dt>Released</dt><dd>{recipe.model_released || 'n/a'}</dd>
               <dt>Quantization</dt>
               <dd>{recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
               <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
+              <dt>Recipe version</dt><dd>v{recipe.version}</dd>
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
               <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
               <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
@@ -398,15 +405,41 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                   <div><dt>Typical speed</dt><dd>{REFERENCE_TPS[confirm.recipe.id] ? `~${REFERENCE_TPS[confirm.recipe.id]} tok/s` : 'n/a'}</dd></div>
                 </dl>
                 <p className="muted" style={{ fontSize: 12.5 }}>
-                  After the download, the first start loads the model into memory and typically takes
-                  5 to 15 minutes, with live progress the whole way, and later
+                  After the download, the first start loads the model into memory. This can take up to{' '}
+                  {startTimeoutMinutes(confirm.recipe)} minutes, with live progress the whole way, and later
                   starts are much faster. Cancelling is always safe: downloads resume where they left off.
                 </p>
                 {confirm.switchFrom && (
-                  <p className="muted">
-                    <strong>{recipes.find(item => item.id === confirm.switchFrom)?.display_name} stops after the download.</strong>{' '}
-                    If this model fails verification, RunOnSpark restores it.
-                  </p>
+                  <div className="install-choice" role="radiogroup" aria-label="After the download finishes">
+                    <label className="confirm-check">
+                      <input
+                        type="radio"
+                        name="install-activate"
+                        checked={activate}
+                        onChange={() => setActivate(true)}
+                      />
+                      <span>
+                        Download and switch now
+                        <small>
+                          This stops {recipes.find(item => item.id === confirm.switchFrom)?.display_name} while {confirm.recipe.display_name} starts.
+                        </small>
+                      </span>
+                    </label>
+                    <label className="confirm-check">
+                      <input
+                        type="radio"
+                        name="install-activate"
+                        checked={!activate}
+                        onChange={() => setActivate(false)}
+                      />
+                      <span>
+                        Download only
+                        <small>
+                          {recipes.find(item => item.id === confirm.switchFrom)?.display_name} keeps serving. Start {confirm.recipe.display_name} later from the Models tab.
+                        </small>
+                      </span>
+                    </label>
+                  </div>
                 )}
                 <a href={confirm.recipe.artifacts[0].licence_url} target="_blank" rel="noreferrer">
                   Read the {confirm.recipe.artifacts[0].licence} licence ↗

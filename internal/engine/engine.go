@@ -33,6 +33,17 @@ type RemovePayload struct {
 	RemoveArtifacts bool `json:"remove_artifacts"`
 }
 
+// InstallPayload carries the console's activation choice. A nil Activate
+// means true, so jobs created before this field existed keep installing and
+// serving immediately.
+type InstallPayload struct {
+	Activate *bool `json:"activate,omitempty"`
+}
+
+func (p InstallPayload) activate() bool {
+	return p.Activate == nil || *p.Activate
+}
+
 type plannedOperation struct {
 	Operation   recipe.Operation
 	Recipe      recipe.Recipe
@@ -319,8 +330,20 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 	switch job.Kind {
 	case "install":
 		ops = target.Operations
+		var payload InstallPayload
+		_ = json.Unmarshal(job.Payload, &payload)
+		if !payload.activate() {
+			ops = downloadOnlyOperations(ops)
+		}
 	case "start":
 		ops = []recipe.Operation{{Type: "verify_memory"}, {Type: "start_container"}, {Type: "wait_http"}, {Type: "verify_openai_inference"}}
+		// A download-only install never wrote the runtime config or created
+		// the container (see downloadOnlyOperations); the first start after
+		// one has to do both before the usual start sequence, and only then
+		// does the host port actually get bound.
+		if model, modelErr := e.store.Model(ctx, target.ID); modelErr == nil && model.ContainerID == "" {
+			ops = []recipe.Operation{{Type: "verify_port"}, {Type: "write_generated_config"}, {Type: "create_container"}, {Type: "verify_memory"}, {Type: "start_container"}, {Type: "wait_http"}, {Type: "verify_openai_inference"}}
+		}
 	case "stop":
 		ops = []recipe.Operation{{Type: "stop_container"}}
 	case "smoke-test":
@@ -350,7 +373,7 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 	}
 	switchStopPlanned := false
 	for _, op := range ops {
-		if job.Kind == "install" && op.Type == "verify_port" && previous.Service.DefaultHostPort == target.Service.DefaultHostPort {
+		if (job.Kind == "install" || job.Kind == "start") && op.Type == "verify_port" && previous.Service.DefaultHostPort == target.Service.DefaultHostPort {
 			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Receipt: map[string]any{"host_port": target.Service.DefaultHostPort, "occupied_by_managed_recipe": previous.ID, "available_after_switch": true}})
 			continue
 		}
@@ -361,6 +384,27 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 		plans = append(plans, plannedOperation{Operation: op, Recipe: target})
 	}
 	return plans, previous, nil
+}
+
+// downloadOnlyOperations trims an install plan to what a download-only
+// install needs: the runtime image and model artifacts, verified. It stops
+// before the first operation that touches the container, and drops
+// verify_port because a job that never binds the port cannot conflict on it
+// - required so a download-only install stays possible while another model
+// serves on the (currently shared) host port.
+func downloadOnlyOperations(ops []recipe.Operation) []recipe.Operation {
+	trimmed := make([]recipe.Operation, 0, len(ops))
+	for _, op := range ops {
+		switch op.Type {
+		case "write_generated_config", "create_container", "verify_memory", "start_container", "wait_http", "verify_openai_inference":
+			return trimmed
+		case "verify_port":
+			continue
+		default:
+			trimmed = append(trimmed, op)
+		}
+	}
+	return trimmed
 }
 
 func (e *Engine) sharedArtifacts(ctx context.Context, excludeRecipeID string) (map[string]bool, error) {
@@ -482,6 +526,17 @@ func (e *Engine) failSwitch(job store.Job, target, previous recipe.Recipe, plans
 func (e *Engine) finish(ctx context.Context, job store.Job, r recipe.Recipe) error {
 	switch job.Kind {
 	case "install", "start":
+		if job.Kind == "install" {
+			var payload InstallPayload
+			_ = json.Unmarshal(job.Payload, &payload)
+			if !payload.activate() {
+				model := store.InstalledModel{RecipeID: r.ID, RecipeVersion: r.Version, Status: "stopped", ArtifactPath: e.executor.ArtifactPath(r), Active: false}
+				if err := e.store.SetInstalled(ctx, model); err != nil {
+					return err
+				}
+				return e.store.UpdateJobState(ctx, job.ID, "ready", "")
+			}
+		}
 		containerID := e.containerID(ctx, job.ID)
 		if existing, err := e.store.Model(ctx, r.ID); err == nil && containerID == "" {
 			containerID = existing.ContainerID
