@@ -227,9 +227,8 @@ export default function App() {
     <div className="shell">
       <a className="skip-link" href="#main">Skip to content</a>
       <aside className="side">
-        <a className="side-mark" href="/" aria-label="RunOnSpark Manager">
-          <img src="/favicon.svg" alt="" width="20" height="20" />
-          <strong>RunOnSpark</strong>
+        <a className="side-mark" href="/" aria-label="basement">
+          <strong>basement</strong>
         </a>
         <nav aria-label="Console sections">
           {TABS.map(name => (

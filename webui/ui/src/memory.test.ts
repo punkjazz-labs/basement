@@ -15,7 +15,7 @@ function makeRecipe(overrides: {
     version: 1,
     display_name: overrides.id,
     publisher: 'test',
-    trust: 'runonspark-candidate',
+    trust: 'basement-candidate',
     verification: 'candidate',
     source: { url: 'https://huggingface.co/test/test', revision: '0'.repeat(40) },
     topology: { spark_count: 1 },

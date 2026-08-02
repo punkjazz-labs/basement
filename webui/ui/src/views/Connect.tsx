@@ -9,7 +9,7 @@ function snippetFor(kind: Snippet, base: string, model: string): string {
   switch (kind) {
     case 'curl':
       return `curl ${base}/chat/completions \\
-  -H "Authorization: Bearer $RUNONSPARK_API_KEY" \\
+  -H "Authorization: Bearer $BASEMENT_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "${model}",
@@ -21,7 +21,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="${base}",
-    api_key=os.environ["RUNONSPARK_API_KEY"],
+    api_key=os.environ["BASEMENT_API_KEY"],
 )
 
 response = client.chat.completions.create(
@@ -34,7 +34,7 @@ print(response.choices[0].message.content)`
 
 const client = new OpenAI({
   baseURL: "${base}",
-  apiKey: process.env.RUNONSPARK_API_KEY,
+  apiKey: process.env.BASEMENT_API_KEY,
 });
 
 const response = await client.chat.completions.create({
@@ -48,7 +48,7 @@ console.log(response.choices[0].message.content);`
     litellm_params:
       model: openai/${model}
       api_base: ${base}
-      api_key: os.environ/RUNONSPARK_API_KEY`
+      api_key: os.environ/BASEMENT_API_KEY`
   }
 }
 
@@ -194,7 +194,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
           <pre><code>{snippetFor(snippet, base, model)}</code></pre>
         </div>
         <p className="faint" style={{ fontSize: 12.5, marginBottom: 0 }}>
-          Set <code>RUNONSPARK_API_KEY</code> to a key from above. Works with the OpenAI SDKs, Cursor, Continue, LiteLLM, Open WebUI, and anything else OpenAI-compatible.
+          Set <code>BASEMENT_API_KEY</code> to a key from above. Works with the OpenAI SDKs, Cursor, Continue, LiteLLM, Open WebUI, and anything else OpenAI-compatible.
         </p>
       </section>
     </div>

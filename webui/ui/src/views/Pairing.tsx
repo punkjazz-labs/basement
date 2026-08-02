@@ -27,7 +27,7 @@ export default function Pairing({ onPaired }: { onPaired: () => void }) {
   return (
     <main className="pairing">
       <div>
-        <p className="kicker">RunOnSpark manager</p>
+        <p className="kicker">basement</p>
         <h1>Pair this Spark</h1>
       </div>
       <p className="muted">
@@ -47,7 +47,7 @@ export default function Pairing({ onPaired }: { onPaired: () => void }) {
       </form>
       {error && <p className="error-text" role="alert">{error}</p>}
       <p className="hint">
-        Lost it? On the Spark, run <code>runonspark-manager pairing-url</code> to print it again.
+        Lost it? On the Spark, run <code>basement pairing-url</code> to print it again.
       </p>
     </main>
   )

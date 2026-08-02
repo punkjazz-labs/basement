@@ -139,7 +139,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
       const from = recipes.find(item => item.id === active.recipe_id)?.display_name ?? active.recipe_id
       const { ok } = await confirmBox({
         title: `Switch to ${recipe.display_name}?`,
-        body: `${from} will stop. If the new model fails verification, RunOnSpark restores the previous one.`,
+        body: `${from} will stop. If the new model fails verification, basement restores the previous one.`,
         confirmLabel: 'Switch model',
       })
       if (!ok) return
@@ -390,7 +390,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
           </div>
           <p className="hero-line">
             {USE[featured.id]}{' '}
-            <span>Verified and pinned for a single Spark. RunOnSpark measures its real speed after install.</span>
+            <span>Verified and pinned for a single Spark. Basement measures its real speed after install.</span>
           </p>
           <div className="hero-score">
             <div className="cell"><div className="l">Speed</div><div className="v">~{REFERENCE_TPS[featured.id]}</div><div className="u">tok/s · typical</div></div>
@@ -417,7 +417,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
         )}
       </div>
       <p className="table-note">
-        Speeds marked “typical” are community-reported for a DGX Spark; RunOnSpark measures the real number after install.
+        Speeds marked “typical” are community-reported for a DGX Spark; basement measures the real number after install.
         Click a row for weights, revisions and licences.
       </p>
 
@@ -466,7 +466,7 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                         {confirm.switchFrom === confirm.recipe.id ? 'Update and switch now' : 'Download and switch now'}
                         <small>
                           {confirm.switchFrom === confirm.recipe.id
-                            ? `This restarts ${confirm.recipe.display_name} on the new version. If it fails, RunOnSpark restores the version that was running.`
+                            ? `This restarts ${confirm.recipe.display_name} on the new version. If it fails, basement restores the version that was running.`
                             : `This stops ${recipes.find(item => item.id === confirm.switchFrom)?.display_name} while ${confirm.recipe.display_name} starts.`}
                         </small>
                       </span>

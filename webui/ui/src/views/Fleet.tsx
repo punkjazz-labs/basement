@@ -92,7 +92,7 @@ export default function Fleet({ system, recipes, models, liveTPS }: FleetProps) 
   const remove = async (peer: Peer) => {
     const { ok } = await confirmBox({
       title: `Remove “${peer.name}” from the fleet?`,
-      body: 'RunOnSpark stops polling it. Nothing changes on that Spark itself.',
+      body: 'Basement stops polling it. Nothing changes on that Spark itself.',
       confirmLabel: 'Remove',
       danger: true,
     })
