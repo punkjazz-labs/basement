@@ -13,6 +13,8 @@ Execution order and why:
 4. **04 remote recipe index** — security-critical; assign only after 01–03 diffs proved
    trustworthy, and review this one line by line.
 5. **05 memory calculator** — data layer only; UI waits for an approved mockup.
+6. **07 installers** — packaging only (release script, macOS/Windows double-click
+   artifacts); independent of 02–05 and safe to run in parallel with them.
 
 `00-conventions.md` is mandatory reading for the executor before any spec. Prompt
 skeleton for each assignment:
