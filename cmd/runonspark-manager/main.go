@@ -32,49 +32,53 @@ func main() {
 	cfg, err := config.Parse(version)
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
-		os.Exit(2)
+		exit(2)
+	}
+	if cfg.Command == "version" {
+		fmt.Println(cfg.Version)
+		exit(0)
 	}
 	if cfg.Command == "pairing-url" {
 		printPairingInfo(cfg)
-		return
+		exit(0)
 	}
 	if cfg.Command == "setup" {
-		os.Exit(runSetup(flag.Args()[1:]))
+		exit(runSetup(flag.Args()[1:]))
 	}
 	if cfg.Command != "" {
 		logger.Error("unknown command", "command", cfg.Command)
-		os.Exit(2)
+		exit(2)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		logger.Error("create data directory", "error", err)
-		os.Exit(1)
+		exit(1)
 	}
 	db, err := store.Open(filepath.Join(cfg.DataDir, "manager.db"))
 	if err != nil {
 		logger.Error("open state database", "error", err)
-		os.Exit(1)
+		exit(1)
 	}
 	defer db.Close()
 	authManager, err := auth.Open(cfg.DataDir)
 	if err != nil {
 		logger.Error("initialize local identity", "error", err)
-		os.Exit(1)
+		exit(1)
 	}
 	recipes, err := recipe.Builtin()
 	if err != nil {
 		logger.Error("load recipes", "error", err)
-		os.Exit(1)
+		exit(1)
 	}
 	provider := inventory.Host{DataDir: cfg.DataDir, DockerSocket: "/var/run/docker.sock"}
 	executor := operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider)
 	jobEngine := engine.New(db, executor, recipes)
 	if err := jobEngine.ResumeInterrupted(context.Background()); err != nil {
 		logger.Error("resume interrupted jobs", "error", err)
-		os.Exit(1)
+		exit(1)
 	}
 	if err := jobEngine.ReconcileActiveModel(context.Background()); err != nil {
 		logger.Error("reconcile active model", "error", err)
-		os.Exit(1)
+		exit(1)
 	}
 	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, recipes)
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
@@ -85,7 +89,7 @@ func main() {
 		logger.Info("manager listening", "address", cfg.Listen, "pairing_token_path", authManager.PairingTokenPath(), "version", cfg.Version)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server failed", "error", err)
-			os.Exit(1)
+			exit(1)
 		}
 	}()
 	stop := make(chan os.Signal, 1)
@@ -96,6 +100,10 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
+	// Not exit(0): the deferred db.Close() above must run on this path (the
+	// systemctl stop / SIGTERM path on every GB10 machine), so pause first,
+	// then let main return and its defers fire normally.
+	pauseBeforeExit()
 }
 
 // printPairingInfo re-prints the pairing card so nobody ever has to hunt for
