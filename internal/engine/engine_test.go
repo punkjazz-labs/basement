@@ -278,6 +278,124 @@ func TestDownloadOnlyInstallLeavesModelStoppedAndSkipsTheContainer(t *testing.T)
 	}
 }
 
+// TestDownloadOnlyInstallThenStartCreatesTheContainer covers the gap a
+// download-only install leaves behind: it never wrote the runtime config or
+// created the container, so the first start afterwards must do both before
+// the normal start sequence, not just verify_memory/start_container against
+// a container that was never created.
+func TestDownloadOnlyInstallThenStartCreatesTheContainer(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeExecutor{}
+	runner := New(s, fake, recipes)
+	id := recipes[0].ID
+	install, _, err := s.CreateJob(ctx, "install", id, "download-only", map[string]any{"confirmed": true, "activate": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(install.ID)
+	waitJob(t, s, install.ID, "ready")
+
+	start, _, err := s.CreateJob(ctx, "start", id, "start-after-download-only", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(start.ID)
+	job := waitJob(t, s, start.ID, "ready")
+	var sawConfig, sawContainer bool
+	for _, step := range job.Steps {
+		sawConfig = sawConfig || step.Operation == "write_generated_config"
+		sawContainer = sawContainer || step.Operation == "create_container"
+	}
+	if !sawConfig || !sawContainer {
+		t.Fatalf("start after a download-only install should write config and create the container, steps=%+v", job.Steps)
+	}
+	model, err := s.Model(ctx, id)
+	if err != nil {
+		t.Fatalf("model missing: %v", err)
+	}
+	if !model.Active || model.ContainerID == "" {
+		t.Fatalf("started model should be active with a container id, got %#v", model)
+	}
+}
+
+// TestPlanForStartingADownloadOnlyModelWhileAnotherServesComposesWithSwitch
+// exercises the case the review flagged: X was installed download-only while
+// Y served, so starting X now must both build X's container and switch Y
+// out, and the two mechanisms (container creation, switch insertion) must
+// compose in the right order.
+func TestPlanForStartingADownloadOnlyModelWhileAnotherServesComposesWithSwitch(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, serving := recipes[0], recipes[1]
+	if target.Service.DefaultHostPort != serving.Service.DefaultHostPort {
+		t.Fatalf("test fixture assumes recipes share a host port: %d vs %d", target.Service.DefaultHostPort, serving.Service.DefaultHostPort)
+	}
+	if err := s.ActivateExclusively(ctx, store.InstalledModel{RecipeID: serving.ID, RecipeVersion: serving.Version, Status: "ready", ContainerID: "serving-container"}); err != nil {
+		t.Fatal(err)
+	}
+	// A completed download-only install: installed, inactive, no container.
+	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", Active: false}); err != nil {
+		t.Fatal(err)
+	}
+	runner := New(s, &fakeExecutor{}, recipes)
+	job, _, err := s.CreateJob(ctx, "start", target.ID, "start-while-serving", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, previous, err := runner.plan(ctx, job, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous == nil || previous.ID != serving.ID {
+		t.Fatalf("expected %s to be reported as the previously active model, got %+v", serving.ID, previous)
+	}
+	indexOf := func(match func(plannedOperation) bool) int {
+		for i, plan := range plans {
+			if match(plan) {
+				return i
+			}
+		}
+		return -1
+	}
+	portIndex := indexOf(func(p plannedOperation) bool { return p.Operation.Type == "verify_port" })
+	configIndex := indexOf(func(p plannedOperation) bool { return p.Operation.Type == "write_generated_config" })
+	containerIndex := indexOf(func(p plannedOperation) bool { return p.Operation.Type == "create_container" })
+	switchIndex := indexOf(func(p plannedOperation) bool { return p.BeginSwitch })
+	memoryIndex := indexOf(func(p plannedOperation) bool { return p.Operation.Type == "verify_memory" })
+	startIndex := indexOf(func(p plannedOperation) bool { return p.Operation.Type == "start_container" })
+	if portIndex < 0 || configIndex < 0 || containerIndex < 0 || switchIndex < 0 || memoryIndex < 0 || startIndex < 0 {
+		t.Fatalf("plan is missing an expected step: %+v", plans)
+	}
+	if !(portIndex < configIndex && configIndex < containerIndex && containerIndex < switchIndex && switchIndex < memoryIndex && memoryIndex < startIndex) {
+		t.Fatalf("plan steps are out of order: port=%d config=%d container=%d switch=%d memory=%d start=%d, plans=%+v",
+			portIndex, configIndex, containerIndex, switchIndex, memoryIndex, startIndex, plans)
+	}
+	if plans[switchIndex].Operation.Type != "stop_container" || plans[switchIndex].Recipe.ID != serving.ID {
+		t.Fatalf("switch step should stop the serving recipe %s, got %+v", serving.ID, plans[switchIndex])
+	}
+	portReceipt := plans[portIndex].Receipt
+	if portReceipt == nil || portReceipt["available_after_switch"] != true {
+		t.Fatalf("verify_port should carry the available_after_switch receipt when a switch is planned, got %+v", portReceipt)
+	}
+}
+
 func TestExecutorErrorsAreRedacted(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
@@ -348,7 +466,7 @@ func TestSwitchMakesOnlyVerifiedTargetActive(t *testing.T) {
 	previous, target := recipes[0], recipes[1]
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
-		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
 	} {
 		if err := s.SetInstalled(ctx, model); err != nil {
 			t.Fatal(err)
@@ -382,7 +500,7 @@ func TestSwitchFailureRestoresPreviousModel(t *testing.T) {
 	previous, target := recipes[0], recipes[1]
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
-		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
 	} {
 		if err := s.SetInstalled(ctx, model); err != nil {
 			t.Fatal(err)
@@ -461,7 +579,7 @@ func TestSwitchReportsWhenRollbackAlsoFails(t *testing.T) {
 	previous, target := recipes[0], recipes[1]
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
-		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
 	} {
 		if err := s.SetInstalled(ctx, model); err != nil {
 			t.Fatal(err)
@@ -501,7 +619,7 @@ func TestSwitchMemoryGuardFailsBeforeTargetStartAndRollsBack(t *testing.T) {
 	previous, target := recipes[0], recipes[1]
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
-		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
 	} {
 		if err := s.SetInstalled(ctx, model); err != nil {
 			t.Fatal(err)
@@ -538,7 +656,7 @@ func TestRestartFinalizesAlreadyVerifiedRollback(t *testing.T) {
 	previous, target := recipes[0], recipes[1]
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "switching", ArtifactPath: "/managed/" + previous.ID, Active: true},
-		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "starting", ArtifactPath: "/managed/" + target.ID},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "starting", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
 	} {
 		if err := s.SetInstalled(ctx, model); err != nil {
 			t.Fatal(err)
@@ -646,7 +764,7 @@ func TestCancelDuringSwitchStaysNonTerminalUntilRollbackFinishes(t *testing.T) {
 	previous, target := recipes[0], recipes[1]
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
-		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID},
+		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
 	} {
 		if err := s.SetInstalled(ctx, model); err != nil {
 			t.Fatal(err)
