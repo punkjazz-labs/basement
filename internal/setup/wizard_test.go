@@ -25,7 +25,7 @@ type stubUI struct {
 }
 
 func (s *stubUI) Password(string) (string, error) { return "", nil }
-func (s *stubUI) Confirm(string) (bool, error)     { return true, nil }
+func (s *stubUI) Confirm(string) (bool, error)    { return true, nil }
 func (s *stubUI) ChooseMachine([]discovery.Candidate) (int, error) {
 	return s.chooseMachineIndex, s.chooseMachineErr
 }
