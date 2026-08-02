@@ -127,6 +127,28 @@ func TestLagunaUsesSeparateReadOnlyDrafterMount(t *testing.T) {
 	}
 }
 
+func TestChatTemplateKwargsAlwaysReachVLLM(t *testing.T) {
+	// Laguna's own template defaults enable_thinking to true; the recipe's
+	// explicit false must override it. Omitting the flag when both values
+	// were false is how raw reasoning leaked into the playground.
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := recipe.Find(recipes, "laguna-s-2-1-nvfp4-dflash-1s")
+	if !ok {
+		t.Fatal("Laguna recipe missing")
+	}
+	if r.Service.VLLM.ChatTemplate.EnableThinking || r.Service.VLLM.ChatTemplate.PreserveThinking {
+		t.Fatalf("this test assumes Laguna disables thinking; recipe says %+v", r.Service.VLLM.ChatTemplate)
+	}
+	joined := strings.Join(vllmArgs(r), " ")
+	want := `--default-chat-template-kwargs {"enable_thinking":false,"preserve_thinking":false}`
+	if !strings.Contains(joined, want) {
+		t.Fatalf("explicit false kwargs missing from vLLM args: %s", joined)
+	}
+}
+
 func toStrings(values []any) []string {
 	result := make([]string, len(values))
 	for index, value := range values {

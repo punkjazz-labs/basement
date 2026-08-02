@@ -444,10 +444,12 @@ func vllmArgs(r recipe.Recipe) []string {
 	if v.ChatTemplateFile != "" {
 		args = append(args, "--chat-template", artifactMountPath("primary")+"/"+v.ChatTemplateFile)
 	}
-	if v.ChatTemplate.EnableThinking || v.ChatTemplate.PreserveThinking {
-		options, _ := json.Marshal(v.ChatTemplate)
-		args = append(args, "--default-chat-template-kwargs", string(options))
-	}
+	// Always sent, explicit values included when both are false: a recipe's
+	// "false" is a decision, and the model's own template default must not
+	// win over it. Laguna ships enable_thinking defaulting to true, so
+	// omitting the flag turned thinking on against the recipe's intent.
+	options, _ := json.Marshal(v.ChatTemplate)
+	args = append(args, "--default-chat-template-kwargs", string(options))
 	generation, _ := json.Marshal(v.Generation)
 	args = append(args, "--override-generation-config", string(generation))
 	if v.TrustRemoteCode {

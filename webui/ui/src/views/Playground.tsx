@@ -8,13 +8,17 @@ interface Message {
   content: string
 }
 
-// Thinking models sometimes leak reasoning markup into the text stream, for
-// example a stray "</think>" before the answer. Only the answer is shown, and
-// only the answer is sent back as conversation history.
+// Thinking models sometimes leak reasoning into the text stream in two
+// shapes: tagged "<think>...</think>" blocks, and bare reasoning ending in
+// "</think>" when the chat template already opened the block inside the
+// prompt. Both are stripped; only the answer is shown, and only the answer
+// is sent back as conversation history. An answer that legitimately contains
+// a literal "</think>" would lose its lead-in — vanishingly rare next to
+// reasoning leaking on every reply.
 const visibleText = (text: string) =>
   text
     .replace(/<think>[\s\S]*?(?:<\/think>|$)/g, '')
-    .replace(/^\s*<\/think>/, '')
+    .replace(/^[\s\S]*?<\/think>\s*/, '')
     .replace(/^\s+/, '')
 
 // Models speak markdown; render it, sanitized, so replies read like answers

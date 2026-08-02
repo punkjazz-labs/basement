@@ -3,11 +3,13 @@ package operations
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/punkjazz-labs/runonspark-manager/internal/inventory"
 	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
@@ -189,5 +191,88 @@ func TestBenchmarkEmptyStreamErrorCarriesSamples(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `{"choices":[]}`) {
 		t.Fatalf("error lacks stream sample: %v", err)
+	}
+}
+
+func TestRetryNetworkRetriesTransientFailuresAutomatically(t *testing.T) {
+	// A resolver blip mid-install (the exact ghcr.io SERVFAIL seen on a
+	// Spark) must be retried without asking the user anything.
+	executor := &HostExecutor{retryDelays: []time.Duration{0, 0}}
+	calls := 0
+	receipt, err := executor.retryNetwork(context.Background(), "pulling the runtime image", nil, func() (map[string]any, error) {
+		calls++
+		if calls < 3 {
+			return nil, errors.New("dial tcp: lookup ghcr.io on 127.0.0.53:53: server misbehaving")
+		}
+		return map[string]any{"image": "ok"}, nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+	if receipt["image"] != "ok" {
+		t.Fatalf("receipt=%v", receipt)
+	}
+}
+
+func TestRetryNetworkGivesUpWithMachineSideGuidance(t *testing.T) {
+	executor := &HostExecutor{retryDelays: []time.Duration{0}}
+	calls := 0
+	_, err := executor.retryNetwork(context.Background(), "downloading model weights", nil, func() (map[string]any, error) {
+		calls++
+		return nil, errors.New("read tcp: connection reset by peer")
+	})
+	if calls != 2 {
+		t.Fatalf("calls=%d", calls)
+	}
+	if err == nil || !strings.Contains(err.Error(), "check this machine's connection and DNS") {
+		t.Fatalf("error lacks guidance: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("error hides the underlying cause: %v", err)
+	}
+}
+
+func TestRetryNetworkSurfacesRealErrorsImmediately(t *testing.T) {
+	// Auth failures, missing images and the disk guard are decisions, not
+	// blips; retrying them would only hide the real problem.
+	executor := &HostExecutor{retryDelays: []time.Duration{0, 0}}
+	for _, message := range []string{
+		"docker returned 401 Unauthorized: authentication required",
+		"the image pull paused to protect free disk space: free space would drop below the safety margin",
+	} {
+		calls := 0
+		_, err := executor.retryNetwork(context.Background(), "pulling the runtime image", nil, func() (map[string]any, error) {
+			calls++
+			return nil, errors.New(message)
+		})
+		if calls != 1 {
+			t.Fatalf("%q retried %d times", message, calls)
+		}
+		if err == nil || err.Error() != message {
+			t.Fatalf("error rewritten: %v", err)
+		}
+	}
+}
+
+func TestRetryNetworkStopsWhenCancelled(t *testing.T) {
+	executor := &HostExecutor{retryDelays: []time.Duration{time.Hour}}
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	done := make(chan error, 1)
+	go func() {
+		_, err := executor.retryNetwork(ctx, "pulling the runtime image", nil, func() (map[string]any, error) {
+			calls++
+			return nil, errors.New("dial tcp: i/o timeout")
+		})
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancellation swallowed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry ignored cancellation")
 	}
 }

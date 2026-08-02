@@ -22,15 +22,80 @@ import (
 )
 
 type HostExecutor struct {
-	dataDir   string
-	inventory inventory.Provider
-	docker    *DockerClient
-	hf        *HFClient
-	http      *http.Client
+	dataDir     string
+	inventory   inventory.Provider
+	docker      *DockerClient
+	hf          *HFClient
+	http        *http.Client
+	retryDelays []time.Duration
 }
 
 func NewHostExecutor(dataDir, dockerSocket string, provider inventory.Provider) *HostExecutor {
-	return &HostExecutor{dataDir: dataDir, inventory: provider, docker: NewDockerClient(dockerSocket), hf: NewHFClient(), http: &http.Client{Timeout: 30 * time.Second}}
+	return &HostExecutor{dataDir: dataDir, inventory: provider, docker: NewDockerClient(dockerSocket), hf: NewHFClient(), http: &http.Client{Timeout: 30 * time.Second}, retryDelays: networkRetryDelays}
+}
+
+// networkRetryDelays paces automatic retries of registry pulls and weight
+// downloads: roughly two minutes of patience before a network problem is
+// allowed to fail an install. Docker keeps completed layers and weight
+// downloads resume from disk, so a retry only repeats the lost tail.
+var networkRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second}
+
+// transientNetworkError recognizes failures that a working machine recovers
+// from on its own: resolver hiccups, dropped connections, registry blips.
+// Docker flattens typed errors into event strings, so the match is textual
+// by design. Anything else (auth, missing image, disk guard) surfaces
+// immediately.
+func transientNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"server misbehaving", // systemd-resolved SERVFAIL, e.g. "lookup ghcr.io on 127.0.0.53:53"
+		"no such host",
+		"temporary failure in name resolution",
+		"connection refused",
+		"connection reset",
+		"broken pipe",
+		"unexpected eof",
+		"timeout",
+		"network is unreachable",
+		"service unavailable",
+		"bad gateway",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryNetwork reruns op while it fails on what looks like a temporary
+// network problem. The user is never asked to redo a blip by hand; only a
+// persistent outage surfaces, carrying the machine-side checks to run.
+func (h *HostExecutor) retryNetwork(ctx context.Context, what string, progress Progress, op func() (map[string]any, error)) (map[string]any, error) {
+	for attempt := 0; ; attempt++ {
+		value, err := op()
+		if err == nil || ctx.Err() != nil || !transientNetworkError(err) {
+			return value, err
+		}
+		if attempt >= len(h.retryDelays) {
+			if attempt > 0 {
+				return nil, fmt.Errorf("%s failed %d times on network errors; check this machine's connection and DNS, then retry: %w", what, attempt+1, err)
+			}
+			return nil, err
+		}
+		if progress != nil {
+			if problem := progress(map[string]any{"status": "retrying after a network error", "attempt": attempt + 1, "error": err.Error()}); problem != nil {
+				return nil, problem
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(h.retryDelays[attempt]):
+		}
+	}
 }
 
 // RuntimeImageBytes asks Docker for the pinned runtime image's on-disk size.
@@ -137,7 +202,9 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 			}
 			return nil
 		}
-		return h.docker.Pull(ctx, r.Runtime.Reference(), guarded)
+		return h.retryNetwork(ctx, "pulling the runtime image", guarded, func() (map[string]any, error) {
+			return h.docker.Pull(ctx, r.Runtime.Reference(), guarded)
+		})
 	case "download_artifact":
 		var receipts []map[string]any
 		for i, artifact := range r.Artifacts {
@@ -161,7 +228,9 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 				}
 				return nil
 			}
-			receipt, err := h.hf.Download(ctx, artifact, target, guarded)
+			receipt, err := h.retryNetwork(ctx, "downloading model weights", guarded, func() (map[string]any, error) {
+				return h.hf.Download(ctx, artifact, target, guarded)
+			})
 			if err != nil {
 				return nil, err
 			}
