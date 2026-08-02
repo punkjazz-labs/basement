@@ -362,13 +362,23 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
               <p className="pub">{featured.model_by || featured.publisher}</p>
             </div>
             <div className="hero-get">
-              <button
-                className="brand"
-                disabled={pending.has(featured.id) || detected < featured.topology.spark_count}
-                onClick={() => startInstall(featured)}
-              >
-                {detected >= featured.topology.spark_count ? installVerb(featured) : 'Needs a Spark'}
-              </button>
+              {(() => {
+                // Same lock the table rows use: a running install/start/stop/
+                // remove for this recipe means the hero must say so too, not
+                // offer a second Install.
+                const heroBusy = pending.has(featured.id) ||
+                  jobs.some(job => job.recipe_id === featured.id && !terminal(job.state) &&
+                    ['install', 'start', 'stop', 'remove'].includes(job.kind))
+                return (
+                  <button
+                    className="brand"
+                    disabled={heroBusy || detected < featured.topology.spark_count}
+                    onClick={() => startInstall(featured)}
+                  >
+                    {detected < featured.topology.spark_count ? 'Needs a Spark' : heroBusy ? 'Working' : installVerb(featured)}
+                  </button>
+                )
+              })()}
               <small>{formatBytes(featured.artifact_bytes)} download</small>
             </div>
           </div>

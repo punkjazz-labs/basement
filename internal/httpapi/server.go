@@ -282,12 +282,16 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) preflightResponse {
 	response := preflightResponse{RecipeID: selected.ID, Ready: true, Secrets: map[string]bool{}}
+	// The advisory checks see other running installs' disk reservations,
+	// exactly like the real verify_disk step will, so the dialog and the
+	// job it starts cannot disagree while another download runs.
+	execution := operations.Execution{Kind: "preflight", ReservedBytes: s.engine.ReservedDiskBytes()}
 	checkedLiveMemory := false
 	for _, op := range selected.Operations {
 		if !strings.HasPrefix(op.Type, "verify_") {
 			break
 		}
-		receipt, err := s.executor.Execute(ctx, operations.Execution{Kind: "preflight"}, op, selected, nil)
+		receipt, err := s.executor.Execute(ctx, execution, op, selected, nil)
 		if err != nil && op.Type == "verify_port" {
 			if owner := s.managedPortOwner(ctx, selected); owner != "" {
 				receipt = map[string]any{"host_port": selected.Service.DefaultHostPort, "occupied_by_managed_recipe": owner, "available_after_switch": true}
@@ -308,7 +312,7 @@ func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) prefl
 		response.Checks = append(response.Checks, check)
 	}
 	if !checkedLiveMemory {
-		receipt, err := s.executor.Execute(ctx, operations.Execution{Kind: "preflight"}, recipe.Operation{Type: "verify_memory"}, selected, nil)
+		receipt, err := s.executor.Execute(ctx, execution, recipe.Operation{Type: "verify_memory"}, selected, nil)
 		if err != nil {
 			if owner := s.managedPortOwner(ctx, selected); owner != "" {
 				receipt = map[string]any{"occupied_by_managed_recipe": owner, "rechecked_after_switch_stop": true}

@@ -141,6 +141,14 @@ func (e *Engine) releaseDisk(jobID string) {
 	e.mu.Unlock()
 }
 
+// ReservedDiskBytes reports the total disk currently reserved by running
+// install jobs, for callers outside any job — the advisory preflight uses
+// it so the dialog's disk check agrees with what the real verify_disk step
+// will conclude while another install runs.
+func (e *Engine) ReservedDiskBytes() int64 {
+	return e.reservedByOthers("")
+}
+
 // reservedByOthers sums every other job's disk reservation, excluding
 // jobID's own, so a job never counts its own bytes against itself.
 func (e *Engine) reservedByOthers(jobID string) int64 {
