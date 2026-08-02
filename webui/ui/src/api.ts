@@ -149,6 +149,21 @@ export interface APIKey {
   last_used_at?: string
 }
 
+export interface Peer {
+  id: string
+  name: string
+  base_url: string
+}
+
+// A merged read of a peer's own system/models/telemetry endpoints. Any of
+// the three is absent when the peer could not be reached in time.
+export interface PeerSummary {
+  reachable: boolean
+  system?: SystemInfo
+  models?: InstalledModel[]
+  telemetry?: Telemetry
+}
+
 export interface UpdateInfo {
   current_version: string
   latest_version?: string

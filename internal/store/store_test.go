@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -176,5 +178,51 @@ func TestRestartDoesNotExposeStaleReadyModel(t *testing.T) {
 	}
 	if model.Status != "recovering" || !model.Active {
 		t.Fatalf("stale state was exposed after restart: %#v", model)
+	}
+}
+
+func TestPeerCRUDNeverExposesTheAPIKey(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	created, err := s.CreatePeer(ctx, "edgexpert-beta", "http://edgexpert-beta.local:7070", "rosk_secretvalue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.Name != "edgexpert-beta" || created.BaseURL != "http://edgexpert-beta.local:7070" {
+		t.Fatalf("unexpected created peer: %#v", created)
+	}
+
+	list, err := s.Peers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != created.ID {
+		t.Fatalf("unexpected peer list: %#v", list)
+	}
+
+	// Peers() and its Peer struct carry no api_key field at all, so this is
+	// a compile-time guarantee, not just a runtime check; still, prove the
+	// credential only comes back through the dedicated accessor.
+	peer, apiKey, err := s.PeerCredentials(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiKey != "rosk_secretvalue" || peer.ID != created.ID {
+		t.Fatalf("PeerCredentials returned unexpected data: peer=%#v key=%q", peer, apiKey)
+	}
+
+	if err := s.DeletePeer(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PeerCredentials(ctx, created.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected os.ErrNotExist after delete, got %v", err)
+	}
+	if err := s.DeletePeer(ctx, created.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected os.ErrNotExist deleting an already-removed peer, got %v", err)
 	}
 }

@@ -8,12 +8,13 @@ import Models from './views/Models'
 import Playground from './views/Playground'
 import Connect from './views/Connect'
 import Monitor from './views/Monitor'
+import Fleet from './views/Fleet'
 import Storage from './views/Storage'
 import Activity from './views/Activity'
 import DeploymentDialog from './views/Deployment'
 import { ConfirmHost } from './confirm'
 
-const TABS = ['Models', 'Playground', 'Connect', 'Monitor', 'Storage', 'Activity'] as const
+const TABS = ['Models', 'Playground', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
 type Tab = (typeof TABS)[number]
 
 const DESC: Record<Tab, string> = {
@@ -21,6 +22,7 @@ const DESC: Record<Tab, string> = {
   Playground: 'Talk to the model that is serving right now.',
   Connect: 'Endpoint, API keys and client snippets for this Spark.',
   Monitor: 'Live GPU health and serving metrics.',
+  Fleet: 'Every Spark you have added, and what each one is serving right now.',
   Storage: 'What is on disk and how to reclaim it.',
   Activity: 'Every job, persisted. Open one for phases and receipts.',
 }
@@ -257,6 +259,7 @@ export default function App() {
           </div>
           {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
           {tab === 'Monitor' && <Monitor telemetry={telemetry} activeName={activeRecipe?.display_name} />}
+          {tab === 'Fleet' && <Fleet {...state} liveTPS={liveTPS} />}
           {tab === 'Storage' && <Storage {...state} />}
           {tab === 'Activity' && <Activity {...state} />}
         </main>
