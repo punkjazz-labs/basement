@@ -39,8 +39,9 @@ PNGs with `sips -s format jpeg` before visually inspecting if your tooling needs
 
 ## Git
 
-- One branch per spec: `spec/NN-short-name`. Commit messages: `NN: what changed` in
-  plain lowercase, e.g. `01: per-recipe start timeout replaces hardcoded 20 minutes`.
+- One branch per spec: `spec/NN-short-name`. Commit messages: `manual: NN: what
+  changed` in plain lowercase, e.g. `manual: 01: per-recipe start timeout replaces
+  hardcoded 20 minutes`. The `manual:` prefix satisfies the repo's commit-msg hook.
 - Never push to main. Never touch `.github/`, `LICENSE`, or repo settings.
 - Do not commit generated screenshots or scratch scripts.
 
