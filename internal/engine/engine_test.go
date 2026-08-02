@@ -203,6 +203,81 @@ func TestQwenLifecycleVerticalSlice(t *testing.T) {
 	}
 }
 
+func TestPlanForDownloadOnlyInstallExcludesContainerAndSwitchOperations(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := New(s, &fakeExecutor{}, recipes)
+	job, _, err := s.CreateJob(ctx, "install", recipes[0].ID, "download-only", map[string]any{"confirmed": true, "activate": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, _, err := runner.plan(ctx, job, recipes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	forbidden := map[string]bool{
+		"write_generated_config": true, "create_container": true, "verify_memory": true,
+		"start_container": true, "wait_http": true, "verify_openai_inference": true,
+		"stop_container": true, "verify_port": true,
+	}
+	for _, plan := range plans {
+		if forbidden[plan.Operation.Type] {
+			t.Fatalf("download-only plan contains %s", plan.Operation.Type)
+		}
+		if plan.BeginSwitch {
+			t.Fatalf("download-only plan contains a switch step: %+v", plan)
+		}
+	}
+	if len(plans) == 0 || plans[len(plans)-1].Operation.Type != "download_artifact" {
+		t.Fatalf("download-only plan should end at download_artifact, got %+v", plans)
+	}
+}
+
+func TestDownloadOnlyInstallLeavesModelStoppedAndSkipsTheContainer(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeExecutor{}
+	runner := New(s, fake, recipes)
+	id := recipes[0].ID
+	install, _, err := s.CreateJob(ctx, "install", id, "download-only", map[string]any{"confirmed": true, "activate": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(install.ID)
+	job := waitJob(t, s, install.ID, "ready")
+	for _, step := range job.Steps {
+		if step.Operation == "create_container" || step.Operation == "start_container" {
+			t.Fatalf("download-only install ran %s", step.Operation)
+		}
+	}
+	model, err := s.Model(ctx, id)
+	if err != nil {
+		t.Fatalf("model missing after download-only install: %v", err)
+	}
+	if model.Active || model.Status != "stopped" {
+		t.Fatalf("download-only model should end inactive/stopped, got %#v", model)
+	}
+	if fake.container || fake.running {
+		t.Fatalf("download-only install touched the container: %#v", fake)
+	}
+}
+
 func TestExecutorErrorsAreRedacted(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
