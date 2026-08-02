@@ -92,7 +92,7 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	if !bytes.Contains(body, []byte("RunOnSpark Manager")) {
+	if !bytes.Contains(body, []byte("basement")) {
 		t.Fatal("embedded UI did not load")
 	}
 	if response.Header.Get("Content-Security-Policy") == "" {
@@ -234,7 +234,7 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	if diagnostics.StatusCode != http.StatusOK || !strings.HasPrefix(diagnostics.Header.Get("Content-Disposition"), "attachment;") {
 		t.Fatalf("diagnostics status=%d disposition=%q", diagnostics.StatusCode, diagnostics.Header.Get("Content-Disposition"))
 	}
-	if !bytes.Contains(diagnosticBody, []byte(`"format": "runonspark-diagnostics-v1"`)) || !bytes.Contains(diagnosticBody, []byte("[REDACTED]")) || bytes.Contains(diagnosticBody, []byte(secret)) {
+	if !bytes.Contains(diagnosticBody, []byte(`"format": "basement-diagnostics-v1"`)) || !bytes.Contains(diagnosticBody, []byte("[REDACTED]")) || bytes.Contains(diagnosticBody, []byte(secret)) {
 		t.Fatalf("diagnostic export was incomplete or leaked a secret: %s", diagnosticBody)
 	}
 

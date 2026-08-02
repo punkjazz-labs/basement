@@ -679,7 +679,7 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	bundle := map[string]any{
-		"format": "runonspark-diagnostics-v1", "generated_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"format": "basement-diagnostics-v1", "generated_at": time.Now().UTC().Format(time.RFC3339Nano),
 		"manager_version": s.version, "system": system, "recipes": s.effectiveRecipes(), "models": models,
 		"jobs": jobs, "recent_logs": recentLogs, "redacted": true,
 	}
@@ -694,7 +694,7 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="runonspark-diagnostics-%s.json"`, time.Now().UTC().Format("20060102T150405Z")))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="basement-diagnostics-%s.json"`, time.Now().UTC().Format("20060102T150405Z")))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(append(body, '\n'))
 }
@@ -706,12 +706,12 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 // is never exposed to the network (ADR 0007).
 func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeInference(r) {
-		writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", "provide a valid RunOnSpark API key as 'Authorization: Bearer rosk_...'")
+		writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", "provide a valid basement API key as 'Authorization: Bearer rosk_...'")
 		return
 	}
 	active, ok := s.activeReadyRecipe(r.Context())
 	if !ok {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "model_not_ready", "no model is active and ready; start one from the RunOnSpark console")
+		writeOpenAIError(w, http.StatusServiceUnavailable, "model_not_ready", "no model is active and ready; start one from the basement console")
 		return
 	}
 	target := fmt.Sprintf("127.0.0.1:%d", active.Service.DefaultHostPort)
