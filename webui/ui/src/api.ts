@@ -10,6 +10,15 @@ export interface Artifact {
   licence_url: string
 }
 
+// MemoryModel is present only for recipes maintainers have qualified for the
+// memory-fit calculator (see webui/ui/src/memory.ts). Absent means unknown,
+// not zero footprint.
+export interface MemoryModel {
+  weights_bytes: number
+  kv_bytes_per_token: number
+  runtime_overhead_bytes: number
+}
+
 export interface Recipe {
   id: string
   version: number
@@ -32,6 +41,7 @@ export interface Recipe {
   }
   service: { internal_port: number; default_host_port: number; served_model_id: string }
   runtime: { start_timeout_minutes: number }
+  memory_model?: MemoryModel
   artifact_bytes: number
   required_bytes: number
 }
