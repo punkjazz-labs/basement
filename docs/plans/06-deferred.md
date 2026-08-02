@@ -51,7 +51,22 @@ engine and operations do not yet execute multi-node topologies. Requires fleet p
 qualified 2-Spark recipe. Spec after fleet phase 1 ships and the hardware runbook has
 been executed on the owner's DGX pair.
 
+## Native GUI installers (macOS .app / Windows GUI .exe)
+
+Spec 07 ships the terminal wizard in double-clickable form; a real GUI wizard is the
+eventual polish. The install engine (`setup.Install`, `DialSSH`, `Probe`, discovery)
+is already terminal-free behind the `Prompter` interface, but the wizard orchestration
+in `cmd/runonspark-manager/setup.go` (machine picker, username, listen choice, summary
+card) is not — it must first be lifted into `internal/setup` behind a wider interface
+(ask, choice, progress, summary) so terminal and GUI stay single-source. Promote to
+spec 08 only when all three exist: that extraction; an Apple Developer ID (an unsigned
+GUI app triggers far worse Gatekeeper/SmartScreen friction than an unsigned CLI, so
+signing becomes near-mandatory) plus eventually a Windows cert; and an explicit
+dependency decision by the owner on the GUI shell (e.g. Wails). The curl one-liner keeps
+the terminal flow regardless; native apps serve the download buttons.
+
 ## Naming and licence
 
-The public brand is undecided (RunOnSpark is the working name). A LICENSE file must
-land before the repo ever goes public. Neither is executor work.
+The public brand decision so far: basement (basement.punkjazz.ai) is the public-facing
+identity; RunOnSpark Manager remains the working name of the software. A LICENSE file
+must land before the repo ever goes public. Neither is executor work.
