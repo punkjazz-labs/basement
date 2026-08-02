@@ -1,6 +1,6 @@
-# RunOnSpark Manager
+# basement
 
-RunOnSpark Manager is a local-first service for GB10 machines (NVIDIA DGX Spark and OEM equivalents such as the ASUS Ascent GX10 and MSI EdgeXpert) that installs and manages curated vLLM recipes. One Go binary serves the API and embedded console, persists jobs in SQLite, validates immutable recipes, and executes an allowlisted lifecycle through Docker's structured API.
+basement is a local-first service for GB10 machines (NVIDIA DGX Spark and OEM equivalents such as the ASUS Ascent GX10 and MSI EdgeXpert) that installs and manages curated vLLM recipes. One Go binary serves the API and embedded console, persists jobs in SQLite, validates immutable recipes, and executes an allowlisted lifecycle through Docker's structured API.
 
 ## Install
 
@@ -39,17 +39,17 @@ The manager defaults to loopback until an operator deliberately chooses a LAN or
 The console (React + TypeScript, embedded in the binary) includes a streaming playground, integration snippets, API key management, live vLLM telemetry, a storage view, and per-model speed measured on the actual device by an automatic benchmark job.
 
 ```bash
-go run ./cmd/runonspark-manager --data-dir ./var --listen 127.0.0.1:7070
+go run ./cmd/basement --data-dir ./var --listen 127.0.0.1:7070
 ```
 
-On first launch, `install.sh` prints a pairing card (URL, token, QR); re-print it anytime with `runonspark-manager pairing-url`. Production installation places the data directory under `/var/lib/runonspark-manager`.
+On first launch, `install.sh` prints a pairing card (URL, token, QR); re-print it anytime with `basement pairing-url`. Production installation places the data directory under `/var/lib/basement`.
 
 Run the local verification suite with:
 
 ```bash
 go test ./...
 go vet ./...
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/runonspark-manager
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/basement
 ```
 
 After changing the console, rebuild the embedded assets (CI fails if they drift from source):

@@ -22,7 +22,7 @@ server-side only. Two-day job when actually needed; zero value before.
 ## Unmanaged workload detection
 
 Detect foreign vLLM/Ollama containers, occupied ports, and GPU memory held by processes
-we did not start; show them honestly ("Running outside RunOnSpark"), count their memory
+we did not start; show them honestly ("Running outside basement"), count their memory
 in preflights, never touch them. The preflight verifications already fail politely; the
 missing piece is naming the occupant. Needs design for the Docker/process introspection
 boundary before speccing.
@@ -61,6 +61,6 @@ one machine.
 
 ## Naming and licence
 
-The public brand decision so far: basement (basement.punkjazz.ai) is the public-facing
-identity; RunOnSpark Manager remains the working name of the software. A LICENSE file
-must land before the repo ever goes public. Neither is executor work.
+The naming decision: basement (basement.punkjazz.ai) is the product name outright, not
+a public-facing alias over a separate working name — see spec 10 for the rename itself.
+A LICENSE file must land before the repo ever goes public. That is not executor work.
