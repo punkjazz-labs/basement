@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>RunOnSpark setup</title>
+<title>basement setup</title>
 <style>
 /* Design tokens copied from webui/ui/src/styles.css (dark palette + pill
    button family). This page ships inside the setup binary, not the
@@ -124,7 +124,7 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--gr
 </head>
 <body>
 <div class="wrap">
-  <div class="mark"><span class="dot"></span><strong>RunOnSpark setup</strong></div>
+  <div class="mark"><span class="dot"></span><strong>basement setup</strong></div>
   <div id="app"></div>
 </div>
 <script>
@@ -310,7 +310,7 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--gr
       ? el("div", { class: "note", text: "Loopback only — from another device use an SSH tunnel, or rerun setup and pick the Tailscale or local network option." })
       : null;
     app.replaceChildren(el("div", { class: "card" }, [
-      el("h2", { text: "RunOnSpark Manager is running" }),
+      el("h2", { text: "basement is running" }),
       el("div", { class: "sub" }, []),
       el("div", {}, rowEls),
       note

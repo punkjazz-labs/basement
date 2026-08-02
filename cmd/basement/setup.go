@@ -19,9 +19,9 @@ import (
 	"github.com/punkjazz-labs/runonspark-manager/internal/setup"
 )
 
-// runSetup implements `runonspark-manager setup`: install on this machine if
-// it is a GB10, otherwise discover GB10-class machines on the network, let
-// the operator pick the master, and install over SSH. The flow itself
+// runSetup implements `basement setup`: install on this machine if it is a
+// GB10, otherwise discover GB10-class machines on the network, let the
+// operator pick the master, and install over SSH. The flow itself
 // (discovery, choice, confirmation, listen selection, install, summary)
 // lives in internal/setup/wizard.go; this file is the terminal rendering of
 // that flow plus flag parsing.
@@ -44,7 +44,7 @@ func runSetup(args []string) int {
 	}
 
 	fmt.Println()
-	fmt.Println(paint.bold("RunOnSpark setup"))
+	fmt.Println(paint.bold("basement setup"))
 
 	// On a GB10 machine, setup means: install right here.
 	if runtime.GOOS == "linux" && *host == "" {
@@ -135,7 +135,7 @@ func (u *terminalUI) ChooseMachine(candidates []discovery.Candidate) (int, error
 	}
 	fmt.Println()
 
-	choice, err := u.ask(u.paint.bold(fmt.Sprintf("Which machine should run RunOnSpark Manager? [1-%d]: ", len(candidates))))
+	choice, err := u.ask(u.paint.bold(fmt.Sprintf("Which machine should run basement? [1-%d]: ", len(candidates))))
 	if err != nil {
 		return 0, err
 	}
@@ -228,7 +228,7 @@ func (u *terminalUI) Summary(result setup.InstallResult) {
 	rule := u.paint.dim(strings.Repeat("─", 62))
 	fmt.Println()
 	fmt.Println(rule)
-	fmt.Printf("  %s %s\n", u.paint.green("✓"), u.paint.bold("RunOnSpark Manager is running"))
+	fmt.Printf("  %s %s\n", u.paint.green("✓"), u.paint.bold("basement is running"))
 	fmt.Println()
 	fmt.Printf("    %-14s %s\n", "Console", u.paint.bold(result.ConsoleURL))
 	if result.AltURL != "" {
@@ -243,7 +243,7 @@ func (u *terminalUI) Summary(result setup.InstallResult) {
 		fmt.Println(u.paint.dim("    setup and pick the tailscale or lan interface."))
 	}
 	fmt.Println()
-	fmt.Println(u.paint.dim("    Re-print this card on the machine anytime:  runonspark-manager pairing-url"))
+	fmt.Println(u.paint.dim("    Re-print this card on the machine anytime:  basement pairing-url"))
 	fmt.Println(rule)
 }
 

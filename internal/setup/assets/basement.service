@@ -1,5 +1,5 @@
 [Unit]
-Description=RunOnSpark Manager
+Description=basement
 Documentation=https://github.com/punkjazz-labs/runonspark-manager
 After=network-online.target docker.service
 Wants=network-online.target
@@ -7,10 +7,10 @@ Requires=docker.service
 
 [Service]
 Type=simple
-User=runonspark
-Group=runonspark
+User=basement
+Group=basement
 SupplementaryGroups=docker
-ExecStart=/usr/lib/runonspark-manager/runonspark-manager --data-dir /var/lib/runonspark-manager --listen 127.0.0.1:7070
+ExecStart=/usr/lib/basement/basement --data-dir /var/lib/basement --listen 127.0.0.1:7070
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=45s
@@ -35,7 +35,7 @@ RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=no
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/runonspark-manager
+ReadWritePaths=/var/lib/basement
 
 [Install]
 WantedBy=multi-user.target

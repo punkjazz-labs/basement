@@ -133,7 +133,7 @@ func printPairingInfo(cfg config.Config) {
 	if _, listenPort, err := net.SplitHostPort(cfg.Listen); err == nil && listenPort != "" {
 		port = listenPort
 	}
-	fmt.Println("RunOnSpark Manager — pairing")
+	fmt.Println("basement — pairing")
 	fmt.Println()
 	if hostname, err := os.Hostname(); err == nil {
 		short, _, _ := strings.Cut(hostname, ".")

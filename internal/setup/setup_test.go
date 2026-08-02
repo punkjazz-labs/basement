@@ -3,6 +3,7 @@ package setup
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -125,12 +126,12 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 	joined := strings.Join(runner.privileged, "\n")
 	for _, required := range []string{
 		"install -m 0755 /tmp/binary " + binaryPath,
-		"groupadd --system runonspark",
-		"usermod -a -G docker runonspark",
-		"install -d -o runonspark -g runonspark -m 0750 " + dataDir,
+		"groupadd --system basement",
+		"usermod -a -G docker basement",
+		"install -d -o basement -g basement -m 0750 " + dataDir,
 		"tee " + unitPath,
 		"tee " + dropInPath,
-		"systemctl daemon-reload && systemctl enable --now runonspark-manager.service && systemctl restart runonspark-manager.service",
+		"systemctl daemon-reload && systemctl enable --now basement.service && systemctl restart basement.service",
 		"tee " + dataDir + "/fleet.json",
 	} {
 		if !strings.Contains(joined, required) {
@@ -218,14 +219,113 @@ func TestInstallTailscaleModeNeedsTailscaleAddress(t *testing.T) {
 	}
 }
 
+// TestInstallFreshHasNoLegacyAdoption is the baseline for the adopt tests
+// below: a machine that never ran a pre-rename install must not trigger any
+// of the legacy-adoption commands, only the ordinary fresh-install ones.
+func TestInstallFreshHasNoLegacyAdoption(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	runner.outputs["pairing-token"] = "tok\n"
+	if _, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"}, Options{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(append(append([]string{}, runner.commands...), runner.privileged...), "\n")
+	for _, unexpected := range []string{
+		"systemctl disable --now " + legacyUnitName,
+		"mv " + legacyDataDir,
+		"usermod -l " + serviceUser,
+	} {
+		if strings.Contains(joined, unexpected) {
+			t.Errorf("fresh install ran a legacy-adoption command: %q\nplan:\n%s", unexpected, joined)
+		}
+	}
+	joined = strings.Join(runner.privileged, "\n")
+	for _, required := range []string{
+		"getent group " + serviceUser + " >/dev/null || groupadd --system " + serviceUser,
+		"getent passwd " + serviceUser + " >/dev/null || useradd",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("fresh install plan is missing %q", required)
+		}
+	}
+}
+
+// TestInstallAdoptsPreRenameInstall is the dangerous path: a machine running
+// the pre-rename unit, data directory and service account must be folded
+// into the new names in place — service stopped and disabled, data moved
+// with a single mv (never copy-then-delete), account renamed so uid/gid
+// (and therefore file ownership) carries over.
+func TestInstallAdoptsPreRenameInstall(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	runner.outputs["pairing-token"] = "tok\n"
+	runner.outputs["test -f "+legacyUnitPath] = "present\n"
+	runner.outputs["test -d "+legacyDataDir] = "present\n"
+	runner.outputs["getent passwd "+legacyServiceUser] = "present\n"
+
+	if _, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"}, Options{}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	joined := strings.Join(runner.privileged, "\n")
+	for _, required := range []string{
+		"systemctl disable --now " + legacyUnitName,
+		"mv " + legacyDataDir + " " + dataDir,
+		"usermod -l " + serviceUser + " -d " + dataDir + " " + legacyServiceUser + " && groupmod -n " + serviceUser + " " + legacyServiceUser,
+	} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("adopt plan is missing %q\nplan:\n%s", required, joined)
+		}
+	}
+	// Never copy-then-delete: the data directory move must be a single mv,
+	// never a separate copy step (cp, rsync, tar) anywhere in the plan.
+	for _, forbidden := range []string{"cp -r " + legacyDataDir, "rsync"} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("adopt plan copied instead of moving the data directory: %q", forbidden)
+		}
+	}
+}
+
+// TestInstallLeavesNewInstallAloneWhenLegacyRemnantsExist is the mixed case:
+// the new data directory already exists (a prior adopt or fresh install
+// already happened here), so pre-rename remnants must be left untouched —
+// never overwritten, never merged — and the situation only reported.
+func TestInstallLeavesNewInstallAloneWhenLegacyRemnantsExist(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	runner.outputs["pairing-token"] = "tok\n"
+	runner.outputs["test -d "+dataDir] = "present\n"
+	runner.outputs["test -d "+legacyDataDir] = "present\n"
+
+	var notes []string
+	logf := func(format string, args ...any) { notes = append(notes, fmt.Sprintf(format, args...)) }
+	if _, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"}, Options{}, logf); err != nil {
+		t.Fatal(err)
+	}
+
+	joined := strings.Join(runner.privileged, "\n")
+	if strings.Contains(joined, "mv "+legacyDataDir) {
+		t.Errorf("install moved %s even though %s already exists\nplan:\n%s", legacyDataDir, dataDir, joined)
+	}
+	reported := false
+	for _, note := range notes {
+		if strings.Contains(note, legacyDataDir) && strings.Contains(note, dataDir) {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("leftover legacy data directory was not reported; log lines: %#v", notes)
+	}
+}
+
 // The embedded unit must stay identical to the packaged one so the script
 // install path and the setup command produce the same service.
 func TestEmbeddedUnitMatchesPackaging(t *testing.T) {
-	packaged, err := os.ReadFile("../../packaging/systemd/runonspark-manager.service")
+	packaged, err := os.ReadFile("../../packaging/systemd/basement.service")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(packaged) != systemdUnit {
-		t.Fatal("internal/setup/assets/runonspark-manager.service differs from packaging/systemd/runonspark-manager.service — keep them identical")
+		t.Fatal("internal/setup/assets/basement.service differs from packaging/systemd/basement.service — keep them identical")
 	}
 }

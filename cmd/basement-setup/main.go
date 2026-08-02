@@ -1,10 +1,9 @@
-// Command runonspark-setup is the double-clickable installer: no terminal,
+// Command basement-setup is the double-clickable installer: no terminal,
 // ever. It binds a loopback-only HTTP server (internal/setupweb), opens the
 // operator's default browser at the wizard page, and runs the same install
-// flow as `runonspark-manager setup` behind it. Built with -H=windowsgui on
-// Windows so no console window appears; on macOS it ships inside a minimal
-// .app bundle (packaging, not this binary) so Finder never opens Terminal
-// either.
+// flow as `basement setup` behind it. Built with -H=windowsgui on Windows so
+// no console window appears; on macOS it ships inside a minimal .app bundle
+// (packaging, not this binary) so Finder never opens Terminal either.
 package main
 
 import (
@@ -27,7 +26,7 @@ func main() {
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 	srv, err := setupweb.New(logger)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "runonspark-setup:", err)
+		fmt.Fprintln(os.Stderr, "basement-setup:", err)
 		os.Exit(1)
 	}
 
