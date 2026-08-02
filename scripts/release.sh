@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Builds the release binaries for every supported platform into dist/, plus a
-# dist/SHA256SUMS manifest covering every artifact this script produces.
-# Run on macOS; cross-compilation needs no target toolchain since
-# CGO_ENABLED=0.
+# Builds the release binaries for every supported platform into dist/, stages
+# the macOS double-click zip, and writes a dist/SHA256SUMS manifest covering
+# every artifact this script produces. Run on macOS; cross-compilation needs
+# no target toolchain since CGO_ENABLED=0.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,6 +39,48 @@ for target in "${TARGETS[@]}"; do
     -ldflags "-s -w -X main.version=$VERSION" \
     -o "$outdir/$binname" "$PACKAGE"
 done
+
+# macOS double-click artifact: the darwin binary plus a .command launcher
+# that execs `setup` in place, so double-clicking opens Terminal straight
+# into the same wizard the curl one-liner reaches. Signing and notarization
+# only run when the environment provides the credentials; otherwise the zip
+# ships unsigned and the skip is printed so it is never silent.
+stage_macos_zip() {
+  local arch="$1"
+  local src="$DIST_DIR/darwin-$arch/runonspark-manager"
+  local stage
+  stage="$(mktemp -d)"
+
+  cp "$src" "$stage/runonspark-manager"
+  cat >"$stage/RunOnSpark Setup.command" <<'CMD'
+#!/bin/sh
+cd "$(dirname "$0")"
+exec ./runonspark-manager setup
+CMD
+  chmod +x "$stage/runonspark-manager" "$stage/RunOnSpark Setup.command"
+
+  if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+    echo "  codesigning darwin-$arch with $CODESIGN_IDENTITY"
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$stage/runonspark-manager"
+  else
+    echo "  CODESIGN_IDENTITY not set; shipping darwin-$arch unsigned (Gatekeeper: right-click, Open)"
+  fi
+
+  (cd "$stage" && zip -q -X -r "$DIST_DIR/RunOnSpark-Setup-macos-$arch.zip" .)
+  rm -rf "$stage"
+
+  if [ -n "${CODESIGN_IDENTITY:-}" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
+    echo "  notarizing darwin-$arch with profile $NOTARY_PROFILE"
+    xcrun notarytool submit "$DIST_DIR/RunOnSpark-Setup-macos-$arch.zip" \
+      --keychain-profile "$NOTARY_PROFILE" --wait
+  elif [ -n "${CODESIGN_IDENTITY:-}" ]; then
+    echo "  NOTARY_PROFILE not set; skipping notarization for darwin-$arch"
+  fi
+}
+
+echo "Staging macOS double-click artifacts"
+stage_macos_zip arm64
+stage_macos_zip amd64
 
 echo "Writing SHA256SUMS"
 (
