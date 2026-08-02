@@ -4,6 +4,7 @@ version: 4
 display_name: Qwen 3.6 27B
 publisher: MiaAI Lab + NVIDIA
 model_by: Qwen team, Alibaba
+model_released: April 2026
 recipe_by: MiaAI Lab
 trust: runonspark-candidate
 verification: candidate
