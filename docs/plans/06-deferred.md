@@ -53,17 +53,11 @@ been executed on the owner's DGX pair.
 
 ## Native GUI installers (macOS .app / Windows GUI .exe)
 
-Spec 07 ships the terminal wizard in double-clickable form; a real GUI wizard is the
-eventual polish. The install engine (`setup.Install`, `DialSSH`, `Probe`, discovery)
-is already terminal-free behind the `Prompter` interface, but the wizard orchestration
-in `cmd/runonspark-manager/setup.go` (machine picker, username, listen choice, summary
-card) is not — it must first be lifted into `internal/setup` behind a wider interface
-(ask, choice, progress, summary) so terminal and GUI stay single-source. Promote to
-spec 08 only when all three exist: that extraction; an Apple Developer ID (an unsigned
-GUI app triggers far worse Gatekeeper/SmartScreen friction than an unsigned CLI, so
-signing becomes near-mandatory) plus eventually a Windows cert; and an explicit
-dependency decision by the owner on the GUI shell (e.g. Wails). The curl one-liner keeps
-the terminal flow regardless; native apps serve the download buttons.
+Promoted: this is now spec 08 (browser-served wizard inside a double-clickable
+.app / windowsgui .exe, no GUI framework). This entry stays only as history of
+the earlier Wails deliberation; the framework route was dropped in favor of the
+loopback browser wizard, which needs no new dependency and cross-compiles from
+one machine.
 
 ## Naming and licence
 
