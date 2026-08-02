@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>RunOnSpark setup</title>
+<style>
+/* Design tokens copied from webui/ui/src/styles.css (dark palette + pill
+   button family). This page ships inside the setup binary, not the
+   console build, so the values are copied rather than shared — keep them
+   in sync by hand if the console palette changes. */
+:root {
+  --bg: #101210;
+  --surface: #141614;
+  --surface-2: #1c1f1b;
+  --panel: #171a16;
+  --hover: #181b17;
+  --line: #242822;
+  --line-strong: #333731;
+  --ink: #edf0ea;
+  --muted: #a3aba0;
+  --faint: #6f776c;
+  --green: #76b900;
+  --green-ink: #101300;
+  --green-deep: #a4d94e;
+  --green-tint: #1a2410;
+  --green-line: #324420;
+  --warn: #d9a12f;
+  --fail: #e0644e;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg); color: var(--ink); font: 13.5px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+button { font: inherit; cursor: pointer; }
+h1, h2 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+a { color: var(--green-deep); }
+:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; border-radius: 4px; }
+
+.wrap { max-width: 560px; margin: 0 auto; padding: 48px 20px 80px; }
+.mark { display: flex; align-items: center; gap: 8px; margin-bottom: 28px; }
+.mark strong { font-size: 15px; font-weight: 650; }
+.mark .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  padding: 22px; margin-bottom: 16px;
+}
+.card h2 { font-size: 15px; margin-bottom: 4px; }
+.card .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 16px; }
+
+button.primary {
+  background: var(--green); color: var(--green-ink); border: 1px solid var(--green); border-radius: 999px;
+  padding: 6px 18px; font-weight: 650; font-size: 12.5px;
+}
+button.primary:hover { filter: brightness(1.05); }
+button.primary:disabled { background: var(--surface-2); color: var(--faint); border-color: var(--line-strong); cursor: default; filter: none; }
+button.ghost {
+  background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink);
+  border-radius: 999px; padding: 6px 18px; font-weight: 500; font-size: 12.5px;
+}
+button.ghost:hover { border-color: var(--faint); }
+button.danger {
+  background: none; border: 1px solid color-mix(in srgb, var(--fail) 45%, var(--line));
+  color: var(--fail); border-radius: 999px; padding: 6px 18px; font-size: 12.5px;
+}
+button.danger:hover { background: color-mix(in srgb, var(--fail) 7%, transparent); }
+button.quiet { background: none; border: 0; color: var(--muted); padding: 6px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 500; }
+button.quiet:hover { color: var(--ink); background: var(--surface-2); }
+.row { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+
+.machine-list { display: grid; gap: 6px; }
+.machine {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+}
+.machine.unlikely { opacity: 0.55; }
+.machine .name { font-weight: 550; min-width: 160px; }
+.machine .ip { color: var(--muted); font-family: var(--mono); font-size: 12px; flex: 1; }
+.badge {
+  font-size: 11px; font-weight: 550; color: var(--green-deep); background: var(--green-tint);
+  border: 1px solid var(--green-line); border-radius: 999px; padding: 2px 9px;
+}
+
+label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+input[type=text], input[type=password] {
+  width: 100%; background: var(--panel); border: 1px solid var(--line-strong); color: var(--ink);
+  border-radius: 8px; padding: 9px 12px; font: inherit; font-family: var(--mono); font-size: 13px;
+}
+input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--green); outline-offset: 1px; }
+
+.options { display: grid; gap: 8px; }
+.option {
+  display: flex; align-items: flex-start; gap: 10px; padding: 12px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel);
+}
+.option input[type=radio] { margin-top: 3px; accent-color: var(--green); }
+.option .opt-title { font-weight: 550; }
+.option .opt-title .rec { color: var(--green-deep); font-weight: 550; font-size: 11.5px; margin-left: 6px; }
+.option .opt-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+.progress-log { font-family: var(--mono); font-size: 12px; color: var(--muted); display: grid; gap: 4px; max-height: 220px; overflow-y: auto; }
+.spinner {
+  width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-strong);
+  border-top-color: var(--green); display: inline-block; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: -2px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.summary-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.summary-row:last-child { border-bottom: 0; }
+.summary-row .label { color: var(--muted); font-size: 12px; }
+.summary-row .value { font-family: var(--mono); font-size: 12.5px; word-break: break-all; text-align: right; }
+.copy-btn { margin-left: 8px; }
+.note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+.error-text { color: var(--fail); font-size: 13px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="mark"><span class="dot"></span><strong>RunOnSpark setup</strong></div>
+  <div id="app"></div>
+</div>
+<script>
+(function () {
+  "use strict";
+  var apiBase = location.pathname.replace(/\/$/, "");
+  var app = document.getElementById("app");
+  var lastSeq = -1;
+  var polling = true;
+
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    attrs = attrs || {};
+    for (var key in attrs) {
+      var value = attrs[key];
+      if (value === null || value === undefined) continue;
+      if (key === "text") node.textContent = value;
+      else if (key === "html") node.innerHTML = value;
+      else if (key.indexOf("on") === 0) node.addEventListener(key.slice(2), value);
+      else node.setAttribute(key, value);
+    }
+    (children || []).forEach(function (c) { if (c) node.appendChild(c); });
+    return node;
+  }
+
+  function answer(kind, payload) {
+    payload = payload || {};
+    payload.kind = kind;
+    return fetch(apiBase + "/api/answer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  }
+
+  function progressCard(state, headline) {
+    var log = el("div", { class: "progress-log" },
+      state.progress.map(function (line) { return el("div", { text: line }); }));
+    return el("div", { class: "card" }, [
+      el("h2", {}, [el("span", { class: "spinner" }), document.createTextNode(headline)]),
+      log
+    ]);
+  }
+
+  function renderMachines(state) {
+    var chosen = null;
+    var rows = state.candidates.map(function (c, index) {
+      var badge = c.likely ? el("span", { class: "badge", text: "GB10-class" }) : null;
+      var row = el("label", { class: "machine" + (c.likely ? "" : " unlikely") }, [
+        el("input", { type: "radio", name: "machine", value: String(index), onchange: function () { chosen = index; } }),
+        el("span", { class: "name", text: c.name }),
+        el("span", { class: "ip", text: c.ip }),
+        badge
+      ]);
+      return row;
+    });
+    var continueBtn = el("button", {
+      class: "primary", text: "Continue", onclick: function () {
+        if (chosen === null) return;
+        continueBtn.disabled = true;
+        answer("machines", { index: chosen });
+      }
+    });
+    app.replaceChildren(el("div", { class: "card" }, [
+      el("h2", { text: "Choose a machine" }),
+      el("div", { class: "sub", text: "GB10-class machines are badged; other machines are dimmed." }),
+      el("div", { class: "machine-list" }, rows),
+      el("div", { class: "row" }, [continueBtn])
+    ]));
+  }
+
+  function renderNonGB10(state) {
+    app.replaceChildren(el("div", { class: "card" }, [
+      el("h2", { text: state.name + " does not look like a GB10 machine" }),
+      el("div", { class: "sub", text: "The GB10-class entries do. Connect anyway to check its hardware?" }),
+      el("div", { class: "row" }, [
+        el("button", { class: "ghost", text: "Connect anyway", onclick: function () { answer("nongb10", { proceed: true }); } }),
+        el("button", { class: "quiet", text: "Cancel", onclick: function () { answer("nongb10", { proceed: false }); } })
+      ])
+    ]));
+  }
+
+  function renderUsername(state) {
+    var input = el("input", { type: "text", value: state.suggested || "" });
+    app.replaceChildren(el("div", { class: "card" }, [
+      el("h2", { text: "Username on " + state.target }),
+      el("label", { text: "SSH username" }),
+      input,
+      el("div", { class: "row" }, [
+        el("button", {
+          class: "primary", text: "Continue", onclick: function () {
+            answer("username", { username: input.value });
+          }
+        })
+      ])
+    ]));
+    input.focus();
+  }
+
+  function renderPassword(state) {
+    var input = el("input", { type: "password" });
+    app.replaceChildren(el("div", { class: "card" }, [
+      el("h2", { text: "Password required" }),
+      el("label", { text: state.prompt || "Password" }),
+      input,
+      el("div", { class: "row" }, [
+        el("button", {
+          class: "primary", text: "Continue", onclick: function () {
+            var value = input.value;
+            input.value = "";
+            answer("password", { value: value });
+          }
+        })
+      ])
+    ]));
+    input.focus();
+  }
+
+  function renderConfirm(state) {
+    app.replaceChildren(el("div", { class: "card" }, [
+      el("h2", { text: "Confirm" }),
+      el("div", { class: "sub", text: state.prompt || "" }),
+      el("div", { class: "row" }, [
+        el("button", { class: "primary", text: "Yes", onclick: function () { answer("confirm", { proceed: true }); } }),
+        el("button", { class: "quiet", text: "No", onclick: function () { answer("confirm", { proceed: false }); } })
+      ])
+    ]));
+  }
+
+  function renderListen(state) {
+    var options = [
+      { value: "loopback", title: "Only this machine itself", sub: "Other devices would need an SSH tunnel." },
+      { value: "tailscale", title: "Your Tailscale devices", sub: "Reachable from anywhere via your tailnet." },
+      { value: "lan", title: "Any device on your local network", sub: "Phones, laptops — and it opens in your browser when done." }
+    ];
+    var recommended = state.remote ? "lan" : "loopback";
+    var chosen = recommended;
+    var optionEls = options.map(function (option) {
+      var rec = option.value === recommended ? el("span", { class: "rec", text: "(recommended)" }) : null;
+      return el("label", { class: "option" }, [
+        el("input", {
+          type: "radio", name: "listen", value: option.value,
+          checked: option.value === recommended ? "checked" : null,
+          onchange: function () { chosen = option.value; }
+        }),
+        el("div", {}, [
+          el("div", { class: "opt-title" }, [document.createTextNode(option.title), rec]),
+          el("div", { class: "opt-sub", text: option.sub })
+        ])
+      ]);
+    });
+    app.replaceChildren(el("div", { class: "card" }, [
+      el("h2", { text: "Who should be able to open the console?" }),
+      el("div", { class: "options" }, optionEls),
+      el("div", { class: "row" }, [
+        el("button", { class: "primary", text: "Continue", onclick: function () { answer("listen", { mode: chosen }); } })
+      ])
+    ]));
+  }
+
+  function renderSummary(state) {
+    var summary = state.summary || {};
+    var rows = [
+      ["Console", summary.consoleUrl, true]
+    ];
+    if (summary.altUrl) rows.push(["Also try", summary.altUrl, false]);
+    if (summary.token) rows.push(["Pairing token", summary.token, false]);
+    var rowEls = rows.map(function (r) {
+      var valueNode = r[2]
+        ? el("a", { class: "value", href: r[1], target: "_blank", rel: "noreferrer", text: r[1] })
+        : el("span", { class: "value", text: r[1] });
+      var copy = el("button", {
+        class: "quiet copy-btn", text: "Copy", onclick: function () {
+          navigator.clipboard && navigator.clipboard.writeText(r[1]);
+        }
+      });
+      return el("div", { class: "summary-row" }, [
+        el("span", { class: "label", text: r[0] }),
+        el("span", {}, [valueNode, copy])
+      ]);
+    });
+    var note = summary.loopback
+      ? el("div", { class: "note", text: "Loopback only — from another device use an SSH tunnel, or rerun setup and pick the Tailscale or local network option." })
+      : null;
+    app.replaceChildren(el("div", { class: "card" }, [
+      el("h2", { text: "RunOnSpark Manager is running" }),
+      el("div", { class: "sub" }, []),
+      el("div", {}, rowEls),
+      note
+    ]));
+    polling = false;
+  }
+
+  function renderError(state) {
+    app.replaceChildren(el("div", { class: "card" }, [
+      el("h2", { text: "Setup could not continue" }),
+      el("div", { class: "error-text", text: state.error || "An unknown error occurred." })
+    ]));
+    polling = false;
+  }
+
+  function render(state) {
+    switch (state.phase) {
+      case "scanning":
+        app.replaceChildren(progressCard(state, "Scanning your network…"));
+        break;
+      case "progress":
+        app.replaceChildren(progressCard(state, "Working…"));
+        break;
+      case "machines":
+        renderMachines(state);
+        break;
+      case "nongb10":
+        renderNonGB10(state);
+        break;
+      case "username":
+        renderUsername(state);
+        break;
+      case "password":
+        renderPassword(state);
+        break;
+      case "confirm":
+        renderConfirm(state);
+        break;
+      case "listen":
+        renderListen(state);
+        break;
+      case "summary":
+        renderSummary(state);
+        break;
+      case "error":
+        renderError(state);
+        break;
+      default:
+        app.replaceChildren(progressCard(state, "Starting…"));
+    }
+  }
+
+  function poll() {
+    fetch(apiBase + "/api/state", { cache: "no-store" })
+      .then(function (response) { return response.json(); })
+      .then(function (state) {
+        if (state.seq !== lastSeq) {
+          lastSeq = state.seq;
+          render(state);
+        }
+        if (polling) setTimeout(poll, 1000);
+      })
+      .catch(function () {
+        if (polling) setTimeout(poll, 1000);
+      });
+  }
+
+  poll();
+})();
+</script>
+</body>
+</html>

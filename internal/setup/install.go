@@ -48,8 +48,8 @@ type Options struct {
 	DiscoveredPeers []string
 }
 
-// Result is what the operator needs after a successful install.
-type Result struct {
+// InstallResult is what the operator needs after a successful install.
+type InstallResult struct {
 	ConsoleURL string
 	AltURL     string
 	Token      string
@@ -129,35 +129,35 @@ func validateARM64ELF(payload []byte) error {
 // Install performs the full installation through runner: system checks,
 // binary, service user, systemd unit, listen drop-in, service start, pairing
 // token. It mirrors packaging/install.sh so both paths stay equivalent.
-func Install(ctx context.Context, runner Runner, source BinarySource, opts Options, logf func(string, ...any)) (Result, error) {
+func Install(ctx context.Context, runner Runner, source BinarySource, opts Options, logf func(string, ...any)) (InstallResult, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	if _, err := runner.Run(ctx, "command -v systemctl", nil); err != nil {
-		return Result{}, fmt.Errorf("%s has no systemd; RunOnSpark Manager needs a systemd-based OS", runner.Describe())
+		return InstallResult{}, fmt.Errorf("%s has no systemd; RunOnSpark Manager needs a systemd-based OS", runner.Describe())
 	}
 	if _, err := runner.Run(ctx, "getent group docker", nil); err != nil {
-		return Result{}, fmt.Errorf("Docker is not installed on %s; install Docker first, then rerun setup", runner.Describe())
+		return InstallResult{}, fmt.Errorf("Docker is not installed on %s; install Docker first, then rerun setup", runner.Describe())
 	}
 	// Fresh OEM GB10 machines often ship Docker without the NVIDIA runtime
 	// registered; models cannot start without it, so register it here.
 	runtimes, err := runner.RunPrivileged(ctx, "docker info --format '{{range $name, $ignored := .Runtimes}}{{$name}} {{end}}'", nil)
 	if err != nil {
-		return Result{}, fmt.Errorf("Docker daemon is not reachable on %s: %w", runner.Describe(), err)
+		return InstallResult{}, fmt.Errorf("Docker daemon is not reachable on %s: %w", runner.Describe(), err)
 	}
 	if !strings.Contains(runtimes, "nvidia") {
 		if _, err := runner.Run(ctx, "command -v nvidia-ctk", nil); err != nil {
-			return Result{}, fmt.Errorf("the NVIDIA Container Toolkit is missing on %s; install nvidia-container-toolkit, then rerun setup", runner.Describe())
+			return InstallResult{}, fmt.Errorf("the NVIDIA Container Toolkit is missing on %s; install nvidia-container-toolkit, then rerun setup", runner.Describe())
 		}
 		logf("registering the NVIDIA container runtime with Docker")
 		if _, err := runner.RunPrivileged(ctx, "nvidia-ctk runtime configure --runtime=docker && systemctl restart docker", nil); err != nil {
-			return Result{}, fmt.Errorf("register NVIDIA container runtime: %w", err)
+			return InstallResult{}, fmt.Errorf("register NVIDIA container runtime: %w", err)
 		}
 	}
 
 	staged, err := source.Stage(ctx, runner, logf)
 	if err != nil {
-		return Result{}, err
+		return InstallResult{}, err
 	}
 
 	logf("installing binary and service user")
@@ -171,33 +171,33 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	}
 	for _, step := range steps {
 		if _, err := runner.RunPrivileged(ctx, step, nil); err != nil {
-			return Result{}, fmt.Errorf("%s: %w", step, err)
+			return InstallResult{}, fmt.Errorf("%s: %w", step, err)
 		}
 	}
 	if _, err := runner.RunPrivileged(ctx, "tee "+unitPath+" >/dev/null", strings.NewReader(systemdUnit)); err != nil {
-		return Result{}, fmt.Errorf("write systemd unit: %w", err)
+		return InstallResult{}, fmt.Errorf("write systemd unit: %w", err)
 	}
 
 	listen, err := resolveListen(ctx, runner, opts.Listen)
 	if err != nil {
-		return Result{}, err
+		return InstallResult{}, err
 	}
 	if listen == "" {
 		// Loopback default: drop any previous override so reruns converge.
 		if _, err := runner.RunPrivileged(ctx, "rm -f "+dropInPath, nil); err != nil {
-			return Result{}, err
+			return InstallResult{}, err
 		}
 	} else {
 		logf("console will listen on %s", listen)
 		dropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=%s --data-dir %s --listen %s\n", binaryPath, dataDir, listen)
 		if _, err := runner.RunPrivileged(ctx, "install -d -m 0755 "+dropInDir+" && tee "+dropInPath+" >/dev/null", strings.NewReader(dropIn)); err != nil {
-			return Result{}, fmt.Errorf("write listen configuration: %w", err)
+			return InstallResult{}, fmt.Errorf("write listen configuration: %w", err)
 		}
 	}
 
 	logf("starting runonspark-manager.service")
 	if _, err := runner.RunPrivileged(ctx, "systemctl daemon-reload && systemctl enable --now runonspark-manager.service && systemctl restart runonspark-manager.service", nil); err != nil {
-		return Result{}, fmt.Errorf("start service: %w", err)
+		return InstallResult{}, fmt.Errorf("start service: %w", err)
 	}
 
 	if len(opts.DiscoveredPeers) > 0 {
@@ -215,7 +215,7 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	}
 
 	token := waitForToken(ctx, runner)
-	result := Result{Token: token, Loopback: listen == ""}
+	result := InstallResult{Token: token, Loopback: listen == ""}
 	port := "7070"
 	if index := strings.LastIndex(listen, ":"); index >= 0 {
 		port = listen[index+1:]

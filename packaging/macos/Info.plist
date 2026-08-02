@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>RunOnSpark Setup</string>
+	<key>CFBundleDisplayName</key>
+	<string>RunOnSpark Setup</string>
+	<key>CFBundleIdentifier</key>
+	<string>ai.runonspark.setup</string>
+	<key>CFBundleExecutable</key>
+	<string>runonspark-setup</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- Hides the app from the Dock and Cmd-Tab: it never shows a window of
+	     its own (the wizard is the browser tab it opens), so a normal Dock
+	     icon would just bounce and then sit there looking unresponsive. This
+	     is an Info.plist visibility key, not a code signing entitlement. -->
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>
