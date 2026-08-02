@@ -1,4 +1,14 @@
-# Public site: direction exploration
+# basement: site direction
+
+Decisions so far (2026-08-02): the project's public identity is **basement**, first
+hosted at **basement.punkjazz.ai**. Direction **B (one ink)** is chosen: red #d92500
+on paper #f2ede3, Didot/Bodoni display cropping off-canvas, typewriter caps furniture,
+typography leads everything. Directions A and C are dropped as site skins; the flyer
+survives only as a possible printable campaign asset inside B's world. Current
+explorations within B: B1 refined original, B2 Lichtenstein Ben-Day (comic burst
+"2 Sparks. Free local intelligence!", never prices), B3 Eigen-Labs-flavored minimal
+manifesto (numbered conviction lines, huge whitespace). Tagline in use:
+"Stop renting intelligence."
 
 Status: exploration, not a spec. Nothing here is buildable until the owner picks a
 direction from static mockups. The site will likely live in its own repo; this doc
@@ -91,8 +101,6 @@ it does; screenshots of real terminal output beat adjectives.
 
 ## Open questions
 
-- Name and domain (RunOnSpark is the working title; local.ai is taken; decision needed
-  before any wordmark work).
 - Whether Spark product photography can be used and under what terms; halftone
   treatment likely transforms it enough, verify before launch.
 - Pareto chart data sourcing: must be our own benchmarks + published prices, dated.
