@@ -137,7 +137,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		}
 		return h.verifyMemory(ctx, r, operation.Type == "verify_memory")
 	case "verify_disk":
-		return h.verifyDisk(ctx, r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes)
+		return h.verifyDisk(ctx, r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes, execution.ReservedBytes)
 	case "verify_port":
 		if err := inventory.CheckPort(r.Service.DefaultHostPort); err != nil {
 			// Our own leftover container (a cancelled install, an old recipe
@@ -190,11 +190,11 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if h.docker.ImageExists(ctx, r.Runtime.Reference()) {
 			return map[string]any{"image": r.Runtime.Reference(), "reused": true}, nil
 		}
-		if _, err := h.verifyDisk(ctx, r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes); err != nil {
+		if _, err := h.verifyDisk(ctx, r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes, execution.ReservedBytes); err != nil {
 			return nil, fmt.Errorf("refusing image pull: %w", err)
 		}
 		guarded := func(value any) error {
-			if _, err := h.verifyDisk(ctx, r, r.TotalArtifactBytes(), 0); err != nil {
+			if _, err := h.verifyDisk(ctx, r, r.TotalArtifactBytes(), 0, execution.ReservedBytes); err != nil {
 				return fmt.Errorf("the image pull paused to protect free disk space: %w", err)
 			}
 			if progress != nil {
@@ -220,7 +220,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 					remaining = 0
 				}
 				remainingArtifacts := remaining + laterBytes
-				if _, err := h.verifyDisk(ctx, r, remainingArtifacts, 0); err != nil {
+				if _, err := h.verifyDisk(ctx, r, remainingArtifacts, 0, execution.ReservedBytes); err != nil {
 					return fmt.Errorf("the download paused to protect free disk space: %w", err)
 				}
 				if progress != nil {
@@ -359,7 +359,11 @@ func (h *HostExecutor) verifyMemory(ctx context.Context, r recipe.Recipe, requir
 	return receipt, nil
 }
 
-func (h *HostExecutor) verifyDisk(ctx context.Context, r recipe.Recipe, artifactBytes, runtimeBytes int64) (map[string]any, error) {
+// verifyDisk checks free disk against this job's own requirement, minus
+// whatever reservedBytes other running installs have already claimed. That
+// claim can land on either disk pool depending on where downloads happen to
+// write, so it is charged against both rather than split or guessed at.
+func (h *HostExecutor) verifyDisk(ctx context.Context, r recipe.Recipe, artifactBytes, runtimeBytes, reservedBytes int64) (map[string]any, error) {
 	system, err := h.inventory.Inspect(ctx)
 	if err != nil {
 		return nil, err
@@ -377,11 +381,22 @@ func (h *HostExecutor) verifyDisk(ctx context.Context, r recipe.Recipe, artifact
 		node.RuntimeDiskAvailable = system.StorageAvailable
 		node.SharedDataRuntimeDisk = true
 	}
+	if reservedBytes > 0 {
+		node.DataDiskAvailable -= reservedBytes
+		node.RuntimeDiskAvailable -= reservedBytes
+	}
 	results, err := resourceguard.CheckDisk([]resourceguard.Node{node}, r.Topology.SparkCount, resourceguard.DiskPolicy{
 		ArtifactBytes: artifactBytes, RuntimeBytes: runtimeBytes, SafetyMarginBytes: r.Requirements.SafetyMarginBytes,
 	})
-	receipt := map[string]any{"per_node": results, "artifact_bytes": artifactBytes, "runtime_disk_bytes": runtimeBytes, "safety_margin_bytes": r.Requirements.SafetyMarginBytes, "docker_disk_unknown": dockerDiskUnknown}
+	receipt := map[string]any{
+		"per_node": results, "artifact_bytes": artifactBytes, "runtime_disk_bytes": runtimeBytes,
+		"safety_margin_bytes": r.Requirements.SafetyMarginBytes, "docker_disk_unknown": dockerDiskUnknown,
+		"reserved_by_other_installs_bytes": reservedBytes,
+	}
 	if err != nil {
+		if reservedBytes > 0 {
+			return receipt, errors.New("not enough free space while another install is running, so wait for it to finish or free up space")
+		}
 		return receipt, err
 	}
 	return receipt, nil
