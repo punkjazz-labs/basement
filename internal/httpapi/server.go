@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +58,12 @@ type Server struct {
 	// another Spark, not this one's own vLLM runtime) is unambiguous at
 	// call sites.
 	peerClient *http.Client
+	// delegateClient is the same server-to-server client with a longer
+	// bound, used only for delegated placement (ADR 0013). A peer answers
+	// these with a job id rather than a finished install, but it runs its
+	// own preflight first, which reads disk and GPU state, so the three
+	// seconds a fleet summary gets would be a false deadline here.
+	delegateClient *http.Client
 	// closing releases long-lived SSE streams the moment shutdown starts, so
 	// a service restart never waits out the graceful-drain timeout on
 	// progress streams that would otherwise stay open forever.
@@ -69,6 +77,12 @@ type Server struct {
 	updateResult  map[string]any
 	updateFetched time.Time
 }
+
+// peerDelegationTimeout bounds a delegated placement call. The peer answers
+// with a job id once it has run its own preflight and written its own job
+// row; the download itself happens afterwards, in the peer's job, and is not
+// waited on here.
+const peerDelegationTimeout = 20 * time.Second
 
 type preflightCheck struct {
 	Operation string `json:"operation"`
@@ -85,20 +99,23 @@ type preflightResponse struct {
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{})}
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{})}
 	server.SetRecipes(recipes, recipes)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.health)
 	mux.HandleFunc("/api/v1/auth/pair", server.pair)
 	mux.HandleFunc("/api/v1/auth/status", server.authStatus)
-	// system, models and telemetry are also the three endpoints a peer
-	// manager reads through /summary, so they accept API-key auth in
+	// system, models and telemetry are the three endpoints a peer manager
+	// reads through /summary, and preflight is the one it reads before
+	// offering to place a model here, so all four accept API-key auth in
 	// addition to a console session (ADR-scale change: see withPeerReadAuth).
 	mux.HandleFunc("/api/v1/system", server.withPeerReadAuth(server.system))
-	mux.HandleFunc("/api/v1/preflight", server.withReadAuth(server.preflight))
+	mux.HandleFunc("/api/v1/preflight", server.withPeerReadAuth(server.preflight))
 	mux.HandleFunc("/api/v1/recipes", server.withReadAuth(server.listRecipes))
 	mux.HandleFunc("/api/v1/models", server.withPeerReadAuth(server.listModels))
-	mux.HandleFunc("/api/v1/models/", server.withReadAuth(server.modelAction))
+	// The model routes are the one place an API key may cause a mutation,
+	// and only the install subaction; see withModelAuth.
+	mux.HandleFunc("/api/v1/models/", server.withModelAuth(server.modelAction))
 	mux.HandleFunc("/api/v1/jobs", server.withReadAuth(server.listJobs))
 	mux.HandleFunc("/api/v1/jobs/", server.withReadAuth(server.jobAction))
 	mux.HandleFunc("/api/v1/diagnostics", server.withReadAuth(server.diagnostics))
@@ -481,7 +498,14 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, errors.New("recipe not found"))
 		return
 	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
+	if delegatedInstall(r) {
+		// withModelAuth sets the marker only for an install, so this is a
+		// second lock on the same door rather than the first one.
+		if !isModelInstallRequest(r) {
+			writeError(w, http.StatusForbidden, errors.New("an API key may only trigger an install on this Spark"))
+			return
+		}
+	} else if err := s.auth.AuthorizeMutation(r); err != nil {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
@@ -753,10 +777,8 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorizeInference(r *http.Request) bool {
-	if header := r.Header.Get("Authorization"); strings.HasPrefix(header, "Bearer ") {
-		if s.store.VerifyAPIKey(r.Context(), strings.TrimPrefix(header, "Bearer ")) {
-			return true
-		}
+	if s.bearerAPIKey(r) {
+		return true
 	}
 	_, ok := s.auth.Authenticate(r)
 	return ok
@@ -841,13 +863,41 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": true})
 }
 
-// peerAllowedPaths is the entire surface a fleet peer will ever expose to
-// this manager. fetchPeerJSON refuses anything outside it, so this stays an
-// enforced allowlist rather than an assumption baked into call sites.
+// peerAllowedPaths is the entire GET surface a fleet peer will ever expose
+// to this manager: the three read-only endpoints peerSummary merges, plus
+// preflight, which the console asks about before offering to install a model
+// on the peer instead of here (ADR 0013). Every call out to a peer goes
+// through peerPathAllowed, so this stays an enforced allowlist rather than
+// an assumption baked into call sites.
 var peerAllowedPaths = map[string]bool{
 	"/api/v1/system":    true,
 	"/api/v1/models":    true,
 	"/api/v1/telemetry": true,
+	"/api/v1/preflight": true,
+}
+
+// peerInstallPath matches the one write this manager ever makes on a peer:
+// installing a recipe the peer then resolves from its OWN catalogue. It is a
+// pattern rather than a table entry because the path carries a recipe id,
+// and the id segment is held to a conservative character set so nothing a
+// caller supplies can steer the request elsewhere on the peer.
+var peerInstallPath = regexp.MustCompile(`^/api/v1/models/[A-Za-z0-9][A-Za-z0-9._-]*/install$`)
+
+// peerPathAllowed is the single gate every outbound peer call passes. The
+// query string is not part of the decision: only the path is allowlisted.
+func peerPathAllowed(method, endpoint string) bool {
+	target := endpoint
+	if mark := strings.IndexByte(target, '?'); mark >= 0 {
+		target = target[:mark]
+	}
+	switch method {
+	case http.MethodGet:
+		return peerAllowedPaths[target]
+	case http.MethodPost:
+		return peerInstallPath.MatchString(target)
+	default:
+		return false
+	}
 }
 
 type peerView struct {
@@ -946,7 +996,155 @@ func (s *Server) peerAction(w http.ResponseWriter, r *http.Request) {
 		s.peerSummary(w, r, id)
 		return
 	}
+	// Delegated placement (ADR 0013): the head is a remote control here. Both
+	// of these forward to the peer's own public API and relay its answer.
+	if len(parts) == 2 && parts[1] == "preflight" && r.Method == http.MethodGet {
+		s.peerPreflight(w, r, id)
+		return
+	}
+	if len(parts) == 4 && parts[1] == "models" && parts[3] == "install" && r.Method == http.MethodPost {
+		s.peerInstall(w, r, id, parts[2])
+		return
+	}
 	methodNotAllowed(w)
+}
+
+// delegatableRecipe resolves the recipe a placement names and refuses
+// anything that is not a single-Spark deployment. A two-Spark recipe already
+// has a path of its own, in which THIS manager is the head and drives the
+// peer's worker rank step by step (internal/httpapi/node.go); handing the
+// whole recipe to the peer as well would run it twice, once per machine.
+// The head must therefore know the recipe to answer at all: it reads its own
+// catalogue for the topology, while the peer stays authoritative about
+// everything else, including which version of that recipe it will install.
+func (s *Server) delegatableRecipe(recipeID string) (recipe.Recipe, error) {
+	selected, ok := recipe.Find(s.effectiveRecipes(), recipeID)
+	if !ok {
+		selected, ok = recipe.Find(s.allRecipes(), recipeID)
+	}
+	if !ok {
+		return recipe.Recipe{}, errors.New("this Spark does not have that model in its catalogue, so it cannot place it on another Spark")
+	}
+	if selected.Topology.SparkCount != 1 {
+		return recipe.Recipe{}, fmt.Errorf("%s runs across %d Sparks, so it is deployed from here rather than handed to one machine", selected.DisplayName, selected.Topology.SparkCount)
+	}
+	return selected, nil
+}
+
+// peerPreflight asks the peer whether it could install a model, and relays
+// its answer untouched. Every fact in that answer is the peer's: its disk,
+// its memory, its ports, its licence record, resolved against its own
+// catalogue. This manager only decides that the question is a fair one to
+// ask (see delegatableRecipe).
+func (s *Server) peerPreflight(w http.ResponseWriter, r *http.Request, id string) {
+	recipeID := strings.TrimSpace(r.URL.Query().Get("recipe_id"))
+	if _, err := s.delegatableRecipe(recipeID); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	peer, apiKey, err := s.store.PeerCredentials(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("that Spark is not in the fleet"))
+		return
+	}
+	endpoint := "/api/v1/preflight?" + url.Values{"recipe_id": []string{recipeID}}.Encode()
+	s.relayPeer(w, r, http.MethodGet, peer.BaseURL, apiKey, endpoint, nil, nil)
+}
+
+// peerInstall asks the peer to install a model on itself. The peer resolves
+// the recipe from its own catalogue by id, runs its own preflight, applies
+// its own licence gate and creates its own job; what comes back is that
+// peer's job, reported here exactly as the peer reported it. The caller's
+// Idempotency-Key travels with the request, so a retried click lands on the
+// peer's existing job rather than starting a second download.
+func (s *Server) peerInstall(w http.ResponseWriter, r *http.Request, id, recipeID string) {
+	if err := s.auth.AuthorizeMutation(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if _, err := s.delegatableRecipe(recipeID); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var request struct {
+		Confirmed     bool  `json:"confirmed"`
+		AcceptLicence bool  `json:"accept_licence"`
+		Activate      *bool `json:"activate"`
+	}
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// Re-encoded from the decoded shape rather than piped through, so the
+	// only bytes that reach the peer are the three fields its install
+	// endpoint documents. Whether they are sufficient is the peer's call.
+	body, err := json.Marshal(request)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	peer, apiKey, err := s.store.PeerCredentials(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("that Spark is not in the fleet"))
+		return
+	}
+	headers := map[string]string{"Idempotency-Key": strings.TrimSpace(r.Header.Get("Idempotency-Key"))}
+	s.relayPeer(w, r, http.MethodPost, peer.BaseURL, apiKey, "/api/v1/models/"+recipeID+"/install", body, headers)
+}
+
+// relayPeer makes one allowlisted call to a peer and writes the peer's own
+// status code and body back to the console unchanged. The peer is
+// authoritative about its own machine, so a status this manager invented
+// (ready when the peer said out of disk, accepted when the peer refused a
+// licence) would be a lie about hardware we do not own. The one thing this
+// manager speaks for is the network between them: unreachable, unreadable
+// and non-JSON answers become a 502 in plain language.
+//
+// The peer's body stays untrusted input: it is time-boxed, size-capped, and
+// parsed as JSON before being re-encoded, so it can never be relayed as
+// anything a browser would render.
+func (s *Server) relayPeer(w http.ResponseWriter, r *http.Request, method, baseURL, apiKey, endpoint string, body []byte, headers map[string]string) {
+	if !peerPathAllowed(method, endpoint) {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("peer endpoint %s is not allowlisted", endpoint))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), peerDelegationTimeout)
+	defer cancel()
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, baseURL+endpoint, reader)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	for name, value := range headers {
+		if value != "" {
+			request.Header.Set(name, value)
+		}
+	}
+	response, err := s.delegateClient.Do(request)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, errors.New("could not reach that Spark, so check that it is powered on and reachable on the network"))
+		return
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, errors.New("that Spark started answering and then stopped, so try again"))
+		return
+	}
+	var decoded any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		writeError(w, http.StatusBadGateway, errors.New("that Spark sent a reply this manager could not read, so check that the URL points at a basement manager"))
+		return
+	}
+	writeJSON(w, response.StatusCode, decoded)
 }
 
 // peerSummary proxies exactly three read-only endpoints on the peer
@@ -990,7 +1188,7 @@ func refusePeerRedirect(*http.Request, []*http.Request) error {
 }
 
 func (s *Server) fetchPeerJSON(ctx context.Context, baseURL, apiKey, endpoint string) (any, error) {
-	if !peerAllowedPaths[endpoint] {
+	if !peerPathAllowed(http.MethodGet, endpoint) {
 		return nil, fmt.Errorf("peer endpoint %s is not allowlisted", endpoint)
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -1467,17 +1665,19 @@ func (s *Server) withReadAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // withPeerReadAuth additionally accepts an API-key bearer token, so another
-// Spark's manager can read this handler on our behalf when assembling a
-// fleet summary. It must only ever wrap read-only, non-sensitive handlers:
-// system, models and telemetry. Every other /api/v1 route keeps requiring a
-// console session via withReadAuth.
+// Spark's manager can read this handler on our behalf: when assembling a
+// fleet summary (system, models, telemetry) or when asking whether this
+// machine could take an install (preflight, ADR 0013). It must only ever
+// wrap read-only, non-sensitive handlers — those four and nothing else.
+// Preflight qualifies: it runs the recipe's verify_ steps, which inspect
+// disk, memory and ports without touching runtime state, and reports this
+// machine's own answer. Every other read-only /api/v1 route keeps requiring
+// a console session via withReadAuth.
 func (s *Server) withPeerReadAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if header := r.Header.Get("Authorization"); strings.HasPrefix(header, "Bearer ") {
-			if s.store.VerifyAPIKey(r.Context(), strings.TrimPrefix(header, "Bearer ")) {
-				next(w, r)
-				return
-			}
+		if s.bearerAPIKey(r) {
+			next(w, r)
+			return
 		}
 		if _, ok := s.auth.Authenticate(r); ok {
 			next(w, r)
@@ -1485,6 +1685,62 @@ func (s *Server) withPeerReadAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		writeError(w, 401, errors.New("authentication required"))
 	}
+}
+
+// withModelAuth gates every /api/v1/models/{id}/... action. A console
+// session drives all of them, exactly as before. An API-key bearer token
+// drives exactly one: install, which is what a head Spark asks this machine
+// to do when its owner places a model here (ADR 0013). Start, stop,
+// smoke-test, benchmark and remove stay console-only, so holding a key never
+// becomes control over what this Spark is serving right now, and neither
+// does it become a way to delete anything.
+func (s *Server) withModelAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := s.auth.Authenticate(r); ok {
+			next(w, r)
+			return
+		}
+		if isModelInstallRequest(r) && s.bearerAPIKey(r) {
+			// No CSRF token is involved on this path, and none is wanted.
+			// CSRF exists to stop a browser's ambient cookie authority from
+			// being spent by another site; an Authorization header is never
+			// attached by a browser on its own, so there is nothing to
+			// forge. The marker tells modelAction the same thing.
+			next(w, r.WithContext(context.WithValue(r.Context(), delegatedInstallKey{}, true)))
+			return
+		}
+		writeError(w, 401, errors.New("authentication required"))
+	}
+}
+
+// delegatedInstallKey marks a request that authenticated with a bearer API
+// key rather than a console session. Only withModelAuth ever sets it, and
+// only for an install.
+type delegatedInstallKey struct{}
+
+func delegatedInstall(r *http.Request) bool {
+	marked, _ := r.Context().Value(delegatedInstallKey{}).(bool)
+	return marked
+}
+
+// isModelInstallRequest reports whether this request is exactly
+// POST /api/v1/models/{recipe_id}/install. It matches the whole path rather
+// than testing a suffix, because this is the single subaction an API key is
+// permitted to reach.
+func isModelInstallRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path.Clean(r.URL.Path), "/api/v1/models/"), "/")
+	return len(parts) == 2 && parts[0] != "" && parts[0] != "." && parts[1] == "install"
+}
+
+func (s *Server) bearerAPIKey(r *http.Request) bool {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return false
+	}
+	return s.store.VerifyAPIKey(r.Context(), strings.TrimPrefix(header, "Bearer "))
 }
 
 func securityHeaders(next http.Handler) http.Handler {
