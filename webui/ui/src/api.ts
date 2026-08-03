@@ -168,6 +168,57 @@ export interface Peer {
   base_url: string
 }
 
+// ---- Finding and adopting a second Spark ------------------------------------
+// One machine the network sweep answered for. gb10_hint and basement are the
+// sweep's own findings, never a guess made here: they rank the list the
+// console shows and never remove anything from it.
+export interface FleetCandidate {
+  name: string
+  address: string
+  gb10_hint: boolean
+  basement: { base_url: string } | null
+}
+
+// One line of the adoption run, as the manager stored it. state is
+// pending | running | done | failed; detail is the sentence to show when
+// there is one.
+export interface AdoptStep {
+  name: string
+  state: string
+  detail?: string
+}
+
+export interface AdoptResult {
+  // The adopted Spark, as either the stored peer or just its name.
+  peer?: Peer | string
+  console_url?: string
+  // The link that pairs this browser with the new Spark's console. This is
+  // the one a person should follow; console_url alone lands unpaired.
+  owner_pairing_url?: string
+}
+
+export interface AdoptStatus {
+  running: boolean
+  step?: string
+  steps?: AdoptStep[]
+  error?: string
+  result?: AdoptResult
+}
+
+// Sparks already running basement first, then likely GB10s, then everything
+// else. Sort is stable, so the sweep's own order survives inside each group.
+export const candidateRank = (candidate: FleetCandidate): number =>
+  candidate.basement ? 0 : candidate.gb10_hint ? 1 : 2
+
+export const rankCandidates = (candidates: FleetCandidate[]): FleetCandidate[] =>
+  [...candidates].sort((left, right) => candidateRank(left) - candidateRank(right))
+
+// The name to greet the new Spark by, whichever shape the result carries.
+export const adoptedName = (result?: AdoptResult): string => {
+  if (typeof result?.peer === 'string') return result.peer
+  return result?.peer?.name ?? ''
+}
+
 // A merged read of a peer's own system/models/telemetry endpoints. Any of
 // the three is absent when the peer could not be reached in time.
 export interface PeerSummary {
