@@ -552,6 +552,100 @@ func TestStartContainerRebuildsAContainerLeftAtAMovedPath(t *testing.T) {
 	}
 }
 
+// A container removed outside this manager — docker rm by hand, say while a
+// machine was being repaired — leaves the stored install still naming it, so
+// the start job takes the short plan and never creates anything. Before this
+// the job died on a raw Docker 404 from the start call. The manager holds the
+// recipe and every input, so it builds the container again exactly as a create
+// would and starts that one.
+func TestStartContainerRebuildsAContainerRemovedOutsideTheManager(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	newName, legacyName := containerName(r), legacyContainerName(r)
+	created, started := false, false
+	var createBody map[string]any
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		path := request.URL.Path
+		name := containerFromPath(path)
+		switch {
+		case request.Method == http.MethodPost && strings.HasPrefix(path, "/containers/create"):
+			if got := request.URL.Query().Get("name"); got != newName {
+				t.Fatalf("rebuilt container name = %q, want %q", got, newName)
+			}
+			if err := json.NewDecoder(request.Body).Decode(&createBody); err != nil {
+				t.Fatal(err)
+			}
+			created = true
+			return dockerFixtureResponse(http.StatusCreated, `{"ID":"rebuilt-id"}`), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+			if !created {
+				t.Fatal("the missing container was started instead of being built again")
+			}
+			if name != newName {
+				t.Fatalf("started %q, want the rebuilt container %q", name, newName)
+			}
+			started = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodGet && name == legacyName:
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		case request.Method == http.MethodGet && name == newName:
+			if !created {
+				return dockerFixtureResponse(http.StatusNotFound, ""), nil
+			}
+			labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("rebuilt-id", started, labels, executor.expectedMounts(r))), nil
+		default:
+			t.Fatalf("unexpected Docker request: %s %s", request.Method, request.URL)
+			return nil, nil
+		}
+	})}}
+
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if !created || !started {
+		t.Fatalf("created=%v started=%v, want the container built again and started", created, started)
+	}
+	if receipt["container_id"] != "rebuilt-id" || receipt["running"] != true {
+		t.Fatalf("receipt=%#v", receipt)
+	}
+	// The log has to say which repair happened: this container was gone, not
+	// pointed at the wrong place.
+	if receipt["recreated_missing"] != newName {
+		t.Fatalf("receipt does not name the container it rebuilt: %#v", receipt["recreated_missing"])
+	}
+	if _, moved := receipt["recreated_after_move"]; moved {
+		t.Errorf("a missing container was reported as a moved one: %#v", receipt["recreated_after_move"])
+	}
+
+	// The rebuilt container is a normal create: same mounts, same labels.
+	host, _ := createBody["HostConfig"].(map[string]any)
+	if host == nil {
+		t.Fatalf("create request carried no host configuration: %#v", createBody)
+	}
+	binds := toStrings(host["Binds"].([]any))
+	want := []string{executor.artifactPath(r, 0) + ":/model:ro", executor.cachePath(r) + ":" + cacheMountPath + ":rw"}
+	if len(binds) != len(want) {
+		t.Fatalf("binds=%#v, want %#v", binds, want)
+	}
+	for index, bind := range binds {
+		if bind != want[index] {
+			t.Fatalf("binds=%#v, want %#v", binds, want)
+		}
+	}
+	labels, _ := createBody["Labels"].(map[string]any)
+	if labels[labelManaged] != "true" || labels[labelRecipeID] != r.ID || labels[labelRecipeVersion] != strconv.Itoa(r.Version) {
+		t.Fatalf("rebuilt container labels = %#v", labels)
+	}
+	// A container never exists without the record of how it was launched, even
+	// when the start job is the step that built it.
+	if _, err := os.Stat(executor.configPath(r)); err != nil {
+		t.Fatalf("the launch record was not written for the rebuilt container: %v", err)
+	}
+}
+
 // A container whose mounts still match is left exactly as it is: no stop, no
 // remove, no rebuild.
 func TestStartContainerLeavesAMatchingContainerAlone(t *testing.T) {
@@ -583,6 +677,9 @@ func TestStartContainerLeavesAMatchingContainerAlone(t *testing.T) {
 	}
 	if _, rebuilt := receipt["recreated_after_move"]; rebuilt {
 		t.Error("a matching container was reported as rebuilt")
+	}
+	if _, missing := receipt["recreated_missing"]; missing {
+		t.Error("a container that was right there was reported as missing")
 	}
 }
 

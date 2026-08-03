@@ -238,27 +238,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		}
 		return map[string]any{"artifacts": receipts}, nil
 	case "write_generated_config":
-		path := h.configPath(r)
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			return nil, err
-		}
-		modelRevisions := make(map[string]string, len(r.Artifacts))
-		for _, artifact := range r.Artifacts {
-			modelRevisions[artifact.Role] = artifact.Revision
-		}
-		entrypoint, arguments, err := runtimeCommand(r, execution.Placement)
-		if err != nil {
-			return nil, err
-		}
-		config := map[string]any{"recipe_id": r.ID, "recipe_version": r.Version, "image": r.Runtime.Reference(), "model_revisions": modelRevisions, "container_name": containerName(r), "runtime_kind": r.Runtime.Kind, "entrypoint": entrypoint, "arguments": arguments}
-		if execution.Placement.Distributed() {
-			config["node_role"] = execution.Placement.Role
-			config["node_count"] = execution.Placement.NodeCount
-		}
-		if err := atomicJSON(path, config, 0o640); err != nil {
-			return nil, err
-		}
-		return map[string]any{"path": path, "contains_secrets": false}, nil
+		return h.writeGeneratedConfig(execution, r)
 	case "create_container":
 		if err := h.verifyRuntimeInputs(r); err != nil {
 			return nil, err
@@ -285,13 +265,25 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := h.verifyRuntimeInputs(r); err != nil {
 			return nil, err
 		}
-		// A start job carries no create step, so a container left pointing at
-		// a directory that has since moved is repaired here or not at all.
+		// A start job carries no create step, so a container that is gone —
+		// removed by hand outside this manager, while the stored install still
+		// names it — or one left pointing at a directory that has since moved
+		// is rebuilt here or not at all. Both are asked before anything is
+		// touched: replaceStaleContainer removes what it repairs, which would
+		// otherwise read as a container that was never there.
+		_, inspectErr := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
+		missing := errors.Is(inspectErr, ErrContainerNotFound)
 		stale, err := h.replaceStaleContainer(ctx, r)
 		if err != nil {
 			return nil, err
 		}
-		if len(stale) > 0 {
+		if missing || len(stale) > 0 {
+			// A container is never created without the record of how it was
+			// launched; on a machine where remove_container deleted that record
+			// this writes it again first.
+			if err := h.ensureGeneratedConfig(execution, r); err != nil {
+				return nil, err
+			}
 			if _, err := h.createContainer(ctx, execution, r); err != nil {
 				return nil, err
 			}
@@ -305,6 +297,11 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 			return nil, err
 		}
 		receipt := map[string]any{"container_id": state.ID, "running": state.Running}
+		// The two repairs are different stories and the log tells them apart:
+		// one container was gone, the other was reading from the wrong place.
+		if missing {
+			receipt["recreated_missing"] = containerName(r)
+		}
 		if len(stale) > 0 {
 			receipt["recreated_after_move"] = mountMismatchReceipt(stale)
 		}
@@ -804,6 +801,48 @@ func (h *HostExecutor) expectedMounts(r recipe.Recipe) map[string]string {
 		paths[index] = h.artifactPath(r, index)
 	}
 	return containerMounts(r, paths, h.cachePath(r))
+}
+
+// writeGeneratedConfig records how this machine launches r: the pinned image
+// and revisions, the container name, and the exact command. It is the body of
+// the write_generated_config step, and the one place that record is produced.
+func (h *HostExecutor) writeGeneratedConfig(execution Execution, r recipe.Recipe) (map[string]any, error) {
+	path := h.configPath(r)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, err
+	}
+	modelRevisions := make(map[string]string, len(r.Artifacts))
+	for _, artifact := range r.Artifacts {
+		modelRevisions[artifact.Role] = artifact.Revision
+	}
+	entrypoint, arguments, err := runtimeCommand(r, execution.Placement)
+	if err != nil {
+		return nil, err
+	}
+	config := map[string]any{"recipe_id": r.ID, "recipe_version": r.Version, "image": r.Runtime.Reference(), "model_revisions": modelRevisions, "container_name": containerName(r), "runtime_kind": r.Runtime.Kind, "entrypoint": entrypoint, "arguments": arguments}
+	if execution.Placement.Distributed() {
+		config["node_role"] = execution.Placement.Role
+		config["node_count"] = execution.Placement.NodeCount
+	}
+	if err := atomicJSON(path, config, 0o640); err != nil {
+		return nil, err
+	}
+	return map[string]any{"path": path, "contains_secrets": false}, nil
+}
+
+// ensureGeneratedConfig writes that record when it is not on disk. Docker
+// takes the container's command from the recipe, not from this file, so a
+// missing record cannot stop a container from being built; it would leave a
+// running container whose launch is written down nowhere, which is what a
+// remove_container followed by a start would produce.
+func (h *HostExecutor) ensureGeneratedConfig(execution Execution, r recipe.Recipe) error {
+	if _, err := os.Stat(h.configPath(r)); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	_, err := h.writeGeneratedConfig(execution, r)
+	return err
 }
 
 // createContainer builds the container for r against this machine's current
