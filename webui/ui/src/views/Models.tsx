@@ -1,5 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { api, idempotency, terminal, formatBytes, startTimeoutMinutes, type Job, type Preflight, type Recipe, type StorageInfo } from '../api'
+import {
+  api, idempotency, terminal, formatBytes, startTimeoutMinutes, modelStateWord, peerModelList,
+  type InstalledModel, type Job, type Peer, type Preflight, type Recipe, type StorageInfo, type PeerSummary,
+} from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { LOGOS, readableWeights } from '../catalog'
@@ -24,7 +27,13 @@ interface ConfirmState {
   switchFrom?: string
 }
 
-export default function Models({ system, recipes, models, jobs, refreshModelsAndJobs, openDeployment, openPlayground }: AppState) {
+// Where an install is about to run. A recipe that needs two Sparks always
+// runs across both, so this choice only exists for one-Spark recipes.
+type Placement = 'local' | 'peer'
+
+export default function Models({
+  system, recipes, models, jobs, peers, refreshModelsAndJobs, openDeployment, openPlayground, openFleet,
+}: AppState) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [licence, setLicence] = useState(false)
   // Whether the install switches to the new model as soon as it is ready.
@@ -34,6 +43,16 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState('')
   const [storage, setStorage] = useState<StorageInfo | null>(null)
+  const [placement, setPlacement] = useState<Placement>('local')
+  const [peerPreflight, setPeerPreflight] = useState<Preflight | null>(null)
+  const [peerChecking, setPeerChecking] = useState(false)
+  const [peerError, setPeerError] = useState('')
+  const [peerSummary, setPeerSummary] = useState<PeerSummary | null>(null)
+  // Recipes this console has asked the paired Spark to install during this
+  // session. That Spark only lists a model once its install finishes, and
+  // the fleet API has no remote job stream, so this is all the row can
+  // honestly say in between. It clears as soon as the model shows up.
+  const [delegated, setDelegated] = useState<Set<string>>(new Set())
   const dialogRef = useRef<HTMLDialogElement>(null)
 
   // Storage tells us which recipes already have model files on disk, so a
@@ -42,14 +61,70 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
     api<StorageInfo>('/api/v1/storage').then(setStorage).catch(() => {})
   }, [jobs.length])
 
+  // The fleet holds one other Spark at most today. Everything this view says
+  // about a peer names that one machine, so with any other number it says
+  // nothing rather than picking a Spark to speak for.
+  const peer: Peer | undefined = peers.length === 1 ? peers[0] : undefined
+  const peerID = peer?.id
+
+  // The same merged read the Fleet tab polls, for the same reason: it is the
+  // only source for what the other Spark has installed and is serving.
+  useEffect(() => {
+    if (!peerID) {
+      setPeerSummary(null)
+      return
+    }
+    let cancelled = false
+    const sample = async () => {
+      if (document.hidden) return
+      try {
+        const next = await api<PeerSummary>(`/api/v1/peers/${encodeURIComponent(peerID)}/summary`)
+        if (!cancelled) setPeerSummary(next)
+      } catch {
+        if (!cancelled) setPeerSummary({ reachable: false })
+      }
+    }
+    sample()
+    const timer = setInterval(sample, 10000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [peerID])
+
+  const peerModels = peerModelList(peerSummary)
+  const peerInstalled = new Map(peerModels.map(model => [model.recipe_id, model]))
+
+  // A delegated install has landed once the peer lists that model itself;
+  // from then on its own status is the truthful thing to show. The map read
+  // here is derived from this very summary, so it is always the fresh one.
+  useEffect(() => {
+    setDelegated(previous => {
+      if (previous.size === 0) return previous
+      const next = new Set([...previous].filter(id => !peerInstalled.has(id)))
+      return next.size === previous.size ? previous : next
+    })
+  }, [peerSummary]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const installed = useMemo(() => new Map(models.map(model => [model.recipe_id, model])), [models])
   const sorted = useMemo(
     () => [...recipes].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id)),
     [recipes],
   )
   const detected = system?.hardware_scope.detected_spark_count ?? 0
+  // Every Spark this console can install on: the one it runs on, plus the
+  // ones paired on the Fleet tab. Pairing a second Spark is what makes a
+  // two-Spark recipe installable; the distributed preflight still runs when
+  // the install starts and can still refuse.
+  const available = detected + peers.length
+  const fitsOn = (recipe: Recipe) => available >= recipe.topology.spark_count
+  // Short of exactly one machine, with none paired yet: something the user
+  // can fix right now rather than a dead end.
+  const pairable = (recipe: Recipe) =>
+    !fitsOn(recipe) && peers.length === 0 && detected >= 1 && detected + 1 >= recipe.topology.spark_count
   const blockers = system?.blocking_conditions ?? []
   const activeOther = (id: string) => models.find(model => model.active && model.recipe_id !== id)
+  const nameOf = (id?: string) => recipes.find(recipe => recipe.id === id)?.display_name ?? id ?? ''
   const downloadedBytes = (recipe: Recipe) =>
     storage?.artifacts.filter(a => a.recipe_ids.includes(recipe.id)).reduce((sum, a) => sum + a.bytes, 0) ?? 0
   // Label honesty for a not-installed model with files already on disk:
@@ -64,6 +139,15 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
     if (bytes <= 0) return 'Install'
     return bytes >= recipe.artifact_bytes * 0.99 ? 'Reinstall' : 'Resume install'
   }
+  // On the other Spark this console only knows what that Spark reports:
+  // whether it has the model, and at which recipe version. Partial downloads
+  // over there are its own business, so a resume is never claimed.
+  const peerInstallVerb = (recipe: Recipe) => {
+    const there = peerInstalled.get(recipe.id)
+    return there && there.recipe_version < recipe.version ? 'Update' : 'Install'
+  }
+  const verbFor = (recipe: Recipe, where: Placement) =>
+    where === 'peer' ? peerInstallVerb(recipe) : installVerb(recipe)
   // The licence was accepted when the first install of this recipe was
   // confirmed; a resume or reinstall never asks again.
   const licenceAccepted = (recipe: Recipe) =>
@@ -105,18 +189,71 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
       const own = installed.get(recipe.id)
       const switchFrom = activeOther(recipe.id)?.recipe_id ?? (own?.active ? recipe.id : undefined)
       setConfirm({ recipe, preflight, switchFrom })
-      setLicence(licenceAccepted(recipe))
+      setLicence(false)
       setActivate(true)
+      setPlacement('local')
+      setPeerPreflight(null)
+      setPeerError('')
+      setPeerChecking(false)
       requestAnimationFrame(() => dialogRef.current?.showModal())
     })
+
+  // Every machine answers its own preflight, so choosing the other Spark
+  // means asking that Spark before any number in the dialog can be trusted.
+  const choosePlacement = (where: Placement) => {
+    setPlacement(where)
+    if (where === 'local' || !confirm || !peer || peerPreflight || peerChecking) return
+    setPeerChecking(true)
+    setPeerError('')
+    const path = `/api/v1/peers/${encodeURIComponent(peer.id)}/preflight?recipe_id=${encodeURIComponent(confirm.recipe.id)}`
+    api<Preflight>(path)
+      .then(setPeerPreflight)
+      .catch(problem => setPeerError(problem instanceof Error ? problem.message : `Could not reach ${peer.name}`))
+      .finally(() => setPeerChecking(false))
+  }
+
+  // Which model has to give way, on the machine the install targets. Here it
+  // was worked out when the dialog opened; on the other Spark it comes from
+  // that Spark's own model list.
+  const switchFromFor = (where: Placement): string | undefined => {
+    if (!confirm) return undefined
+    if (where === 'local') return confirm.switchFrom
+    const other = peerModels.find(model => model.active && model.recipe_id !== confirm.recipe.id)
+    if (other) return other.recipe_id
+    return peerInstalled.get(confirm.recipe.id)?.active ? confirm.recipe.id : undefined
+  }
 
   const confirmInstall = () =>
     confirm &&
     run(confirm.recipe.id, async () => {
-      const result = await api<{ job: Job }>(`/api/v1/models/${confirm.recipe.id}/install`, {
+      const recipe = confirm.recipe
+      // The picker is only ever shown with a peer in hand; without one there
+      // is nothing to delegate to, and quietly installing here instead would
+      // not be what was asked for.
+      if (placement === 'peer' && !peer) return
+      const body = JSON.stringify({
+        confirmed: true,
+        accept_licence: true,
+        activate: switchFromFor(placement) ? activate : true,
+      })
+      if (placement === 'peer' && peer) {
+        await api<{ job?: Job }>(
+          `/api/v1/peers/${encodeURIComponent(peer.id)}/models/${encodeURIComponent(recipe.id)}/install`,
+          { method: 'POST', headers: idempotency(), body },
+        )
+        dialogRef.current?.close()
+        setConfirm(null)
+        setDelegated(previous => new Set(previous).add(recipe.id))
+        noticeBox(
+          `${peer.name} is installing ${recipe.display_name}`,
+          `The job runs on that Spark, so its progress and logs live on its own console. This row shows the model as soon as ${peer.name} reports it.`,
+        )
+        return
+      }
+      const result = await api<{ job: Job }>(`/api/v1/models/${recipe.id}/install`, {
         method: 'POST',
         headers: idempotency(),
-        body: JSON.stringify({ confirmed: true, accept_licence: true, activate: confirm.switchFrom ? activate : true }),
+        body,
       })
       dialogRef.current?.close()
       setConfirm(null)
@@ -186,9 +323,8 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
   const anotherInstallRunning = confirm
     ? jobs.some(job => job.kind === 'install' && job.recipe_id !== confirm.recipe.id && !terminal(job.state))
     : false
-  const reclaimCandidates = confirm?.preflight.checks
-    .find(check => !check.ok && check.operation === 'verify_disk')
-    ?.receipt?.reclaim_candidates
+  const reclaimFrom = (preflight: Preflight) =>
+    preflight.checks.find(check => !check.ok && check.operation === 'verify_disk')?.receipt?.reclaim_candidates
 
   const firstRun = models.length === 0
   const featured = firstRun ? sorted.find(recipe => recipe.id === ORDER[0]) : undefined
@@ -208,8 +344,23 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
     const busy = pending.has(recipe.id) || running(kind => disruptive.has(kind))
     const measuring = running(kind => kind === 'benchmark' || kind === 'smoke-test')
     const isActive = Boolean(model?.active && model.status === 'ready')
-    const fits = detected >= recipe.topology.spark_count
-    const statusText = busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
+    const fits = fitsOn(recipe)
+    const canPair = pairable(recipe)
+    // What the paired Spark says about this same model. Its own word for its
+    // own state, plus the one thing this console knows that it cannot see
+    // yet: an install this session asked it to run.
+    const peerModel: InstalledModel | undefined = peerInstalled.get(recipe.id)
+    const peerServing = Boolean(peerModel?.active && peerModel.status === 'ready')
+    const peerWord = peerModel ? modelStateWord(peerModel) : delegated.has(recipe.id) ? 'Installing' : ''
+    const peerBusy = peerWord === 'Installing' || peerWord === 'Starting' || peerWord === 'Switching'
+    const localStatus = busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
+    // A model that lives only on the other Spark reads as that Spark's
+    // status; one that lives on both keeps this Spark's status in front.
+    const statusText = !model && peerWord ? peerWord : localStatus
+    const peerNote = peer && peerWord ? (!model ? `on ${peer.name}` : `${peerWord} on ${peer.name}`) : ''
+    // Serving is serving, whichever Spark is doing it; the annotation says
+    // which one.
+    const dotClass = isActive || peerServing ? 'on' : busy || peerBusy ? 'busy' : ''
     const measured = model?.tokens_per_second
     const reference = REFERENCE_TPS[recipe.id]
     const updateAvailable = Boolean(model && model.recipe_version < recipe.version)
@@ -251,14 +402,28 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
             <span className="n">{formatBytes(recipe.artifact_bytes)}</span>
           </div>
           <div className="m-status">
-            <span className={`sdot ${isActive ? 'on' : busy ? 'busy' : ''}`} aria-hidden="true" />
-            {statusText}
+            <span className={`sdot ${dotClass}`} aria-hidden="true" />
+            <span>
+              {statusText}
+              {peerNote && <small className="peer-note">{peerNote}</small>}
+            </span>
           </div>
           <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
-            {!model && (
+            {peer && peerWord && (
+              <button
+                className="ghost"
+                onClick={act(() => window.open(peer.base_url, '_blank', 'noopener,noreferrer'))}
+              >
+                Open on {peer.name}
+              </button>
+            )}
+            {!model && (fits || !canPair) && (
               <button className="primary" disabled={busy || !fits} onClick={act(() => startInstall(recipe))}>
                 {busy ? 'Working' : fits ? installVerb(recipe) : 'Needs a Spark'}
               </button>
+            )}
+            {!model && !fits && canPair && (
+              <button className="primary" onClick={act(openFleet)}>Pair a second Spark</button>
             )}
             {model && isActive && (
               <>
@@ -375,13 +540,17 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
                 const heroBusy = pending.has(featured.id) ||
                   jobs.some(job => job.recipe_id === featured.id && !terminal(job.state) &&
                     ['install', 'start', 'stop', 'remove'].includes(job.kind))
+                const heroFits = fitsOn(featured)
+                if (!heroFits && pairable(featured)) {
+                  return <button className="brand" onClick={openFleet}>Pair a second Spark</button>
+                }
                 return (
                   <button
                     className="brand"
-                    disabled={heroBusy || detected < featured.topology.spark_count}
+                    disabled={heroBusy || !heroFits}
                     onClick={() => startInstall(featured)}
                   >
-                    {detected < featured.topology.spark_count ? 'Needs a Spark' : heroBusy ? 'Working' : installVerb(featured)}
+                    {!heroFits ? 'Needs a Spark' : heroBusy ? 'Working' : installVerb(featured)}
                   </button>
                 )
               })()}
@@ -422,117 +591,202 @@ export default function Models({ system, recipes, models, jobs, refreshModelsAnd
       </p>
 
       <dialog ref={dialogRef} onClose={() => setConfirm(null)} aria-label="Confirm installation">
-        {confirm && (
-          <form method="dialog" className="dialog-pad" onSubmit={event => event.preventDefault()}>
-            <div className="dialog-head">
-              <div>
-                <p className="kicker">{installVerb(confirm.recipe) === 'Install' ? 'Install model' : installVerb(confirm.recipe)}</p>
-                <h2>{confirm.recipe.display_name}</h2>
-              </div>
-              <button type="button" className="dialog-close" onClick={() => dialogRef.current?.close()} aria-label="Close">×</button>
+        {confirm && (() => {
+          const recipe = confirm.recipe
+          const onPeer = placement === 'peer'
+          // Every number in here belongs to the machine that will actually
+          // run the install, which is why the other Spark answers its own
+          // preflight before anything below is shown for it.
+          const shown = onPeer ? peerPreflight : confirm.preflight
+          const target = onPeer ? peerSummary?.system : system
+          const machine = onPeer && peer ? peer.name : 'This Spark'
+          const verb = verbFor(recipe, placement)
+          const switchFrom = switchFromFor(placement)
+          const licenceAlready = onPeer ? Boolean(peerPreflight?.licence_accepted) : licenceAccepted(recipe)
+          const reclaim = shown ? reclaimFrom(shown) : undefined
+          const close = () => dialogRef.current?.close()
+          const foot = (confirmable: boolean) => (
+            <div className="dialog-foot">
+              <button type="button" className="ghost" onClick={close}>Cancel</button>
+              <button type="button" className="primary" disabled={!confirmable} onClick={confirmInstall}>{verb}</button>
             </div>
-            {confirm.preflight.ready ? (
-              <>
-                <dl className="model-facts">
-                  <div>
-                    <dt>Download</dt>
-                    <dd>
-                      {installVerb(confirm.recipe) === 'Resume install'
-                        ? `${formatBytes(Math.max(confirm.recipe.artifact_bytes - downloadedBytes(confirm.recipe), 0))} to go`
-                        : formatBytes(confirm.recipe.artifact_bytes)}
-                    </dd>
-                  </div>
-                  <div><dt>Space needed</dt><dd>{formatBytes(confirm.recipe.required_bytes)}</dd></div>
-                  <div><dt>Typical speed</dt><dd>{REFERENCE_TPS[confirm.recipe.id] ? `~${REFERENCE_TPS[confirm.recipe.id]} tok/s` : 'n/a'}</dd></div>
-                </dl>
-                <p className="muted" style={{ fontSize: 12.5 }}>
-                  After the download, the first start loads the model into memory. This can take up to{' '}
-                  {startTimeoutMinutes(confirm.recipe)} minutes, with live progress the whole way, and later
-                  starts are much faster. Cancelling is always safe: downloads resume where they left off.
-                </p>
-                {anotherInstallRunning && (
-                  <p className="muted" style={{ fontSize: 12.5 }}>Another download is running. Both continue, sharing bandwidth.</p>
-                )}
-                {confirm.switchFrom && (
-                  <div className="install-choice" role="radiogroup" aria-label="After the download finishes">
-                    <label className="confirm-check">
-                      <input
-                        type="radio"
-                        name="install-activate"
-                        checked={activate}
-                        onChange={() => setActivate(true)}
-                      />
-                      <span>
-                        {confirm.switchFrom === confirm.recipe.id ? 'Update and switch now' : 'Download and switch now'}
-                        <small>
-                          {confirm.switchFrom === confirm.recipe.id
-                            ? `This restarts ${confirm.recipe.display_name} on the new version. If it fails, basement restores the version that was running.`
-                            : `This stops ${recipes.find(item => item.id === confirm.switchFrom)?.display_name} while ${confirm.recipe.display_name} starts.`}
-                        </small>
-                      </span>
-                    </label>
-                    <label className="confirm-check">
-                      <input
-                        type="radio"
-                        name="install-activate"
-                        checked={!activate}
-                        onChange={() => setActivate(false)}
-                      />
-                      <span>
-                        {confirm.switchFrom === confirm.recipe.id ? 'Update only' : 'Download only'}
-                        <small>
-                          {confirm.switchFrom === confirm.recipe.id
-                            ? `${confirm.recipe.display_name} keeps serving the current version. Switch to the update later from the Models tab.`
-                            : `${recipes.find(item => item.id === confirm.switchFrom)?.display_name} keeps serving. Start ${confirm.recipe.display_name} later from the Models tab.`}
-                        </small>
-                      </span>
-                    </label>
-                  </div>
-                )}
-                <a href={confirm.recipe.artifacts[0].licence_url} target="_blank" rel="noreferrer">
-                  Read the {confirm.recipe.artifacts[0].licence} licence ↗
-                </a>
-                {licenceAccepted(confirm.recipe) ? (
-                  <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
-                    Licence already accepted with the first install of this model.
-                  </p>
-                ) : (
-                  <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <input type="checkbox" checked={licence} onChange={event => setLicence(event.target.checked)} />
-                    I accept the model licence
+          )
+          return (
+            <form method="dialog" className="dialog-pad" onSubmit={event => event.preventDefault()}>
+              <div className="dialog-head">
+                <div>
+                  <p className="kicker">{verb === 'Install' ? 'Install model' : verb}</p>
+                  <h2>{recipe.display_name}</h2>
+                </div>
+                <button type="button" className="dialog-close" onClick={close} aria-label="Close">×</button>
+              </div>
+              {/* A model that needs two Sparks always runs across both, so
+                  there is nothing to choose; a one-Spark model can run on
+                  either machine in the fleet. */}
+              {peer && recipe.topology.spark_count === 1 && (
+                <div className="install-choice" role="radiogroup" aria-label="Run on">
+                  <p className="kicker">Run on</p>
+                  <label className="confirm-check">
+                    <input
+                      type="radio"
+                      name="install-placement"
+                      checked={!onPeer}
+                      onChange={() => choosePlacement('local')}
+                    />
+                    <span>
+                      This Spark
+                      <small>{system?.hostname ?? 'the machine this console runs on'}</small>
+                    </span>
                   </label>
-                )}
-                <div className="dialog-foot">
-                  <button type="button" className="ghost" onClick={() => dialogRef.current?.close()}>Cancel</button>
-                  <button type="button" className="primary" disabled={!licence} onClick={confirmInstall}>
-                    {installVerb(confirm.recipe)}
-                  </button>
+                  <label className="confirm-check">
+                    <input
+                      type="radio"
+                      name="install-placement"
+                      checked={onPeer}
+                      onChange={() => choosePlacement('peer')}
+                    />
+                    <span>
+                      {peer.name}
+                      <small>{peerSummary?.system?.hostname ?? peer.base_url}</small>
+                    </span>
+                  </label>
                 </div>
-              </>
-            ) : (
-              <>
-                <p className="error-text" role="alert">This Spark is not ready for {confirm.recipe.display_name} yet:</p>
-                <ul>{preflightBlockers(confirm.preflight).map(item => <li key={item}>{item}</li>)}</ul>
-                {Array.isArray(reclaimCandidates) && reclaimCandidates.length > 0 && (
-                  <div className="alert">
-                    <strong>Free up space</strong>
-                    <ul>
-                      {reclaimCandidates.map(candidate => (
-                        <li key={candidate.recipe_id}>
-                          Removing {candidate.display_name} reclaims {formatBytes(candidate.bytes)}
-                          {candidate.active ? ' (currently active)' : ''}
-                        </li>
-                      ))}
-                    </ul>
+              )}
+              {onPeer && peerChecking ? (
+                <>
+                  <p className="muted" style={{ fontSize: 12.5 }}>Checking {machine} for space, memory and licence…</p>
+                  {foot(false)}
+                </>
+              ) : onPeer && (peerError || !shown) ? (
+                <>
+                  <p className="error-text" role="alert">{peerError || `${machine} did not answer with a preflight.`}</p>
+                  <p className="muted" style={{ fontSize: 12.5 }}>Pick this Spark to install here instead.</p>
+                  {foot(false)}
+                </>
+              ) : shown && shown.ready ? (
+                <>
+                  <dl className="model-facts">
+                    <div>
+                      <dt>Download</dt>
+                      <dd>
+                        {verb === 'Resume install'
+                          ? `${formatBytes(Math.max(recipe.artifact_bytes - downloadedBytes(recipe), 0))} to go`
+                          : formatBytes(recipe.artifact_bytes)}
+                      </dd>
+                    </div>
+                    <div><dt>Space needed</dt><dd>{formatBytes(recipe.required_bytes)}</dd></div>
+                    <div><dt>Typical speed</dt><dd>{REFERENCE_TPS[recipe.id] ? `~${REFERENCE_TPS[recipe.id]} tok/s` : 'n/a'}</dd></div>
+                  </dl>
+                  {/* Read from whichever machine will run this, and only when
+                      that machine actually reported both numbers. */}
+                  {target && target.storage_available_bytes > 0 && target.memory_available_bytes > 0 && (
+                    <p className="muted" style={{ fontSize: 12.5 }}>
+                      {machine} has {formatBytes(target.storage_available_bytes)} free on disk and{' '}
+                      {formatBytes(target.memory_available_bytes)} memory free right now.
+                    </p>
+                  )}
+                  {onPeer ? (
+                    <p className="muted" style={{ fontSize: 12.5 }}>
+                      {machine} runs this install itself, so the live progress is on that Spark's own console.
+                      The first start loads the model into memory and can take up to {startTimeoutMinutes(recipe)} minutes.
+                    </p>
+                  ) : (
+                    <p className="muted" style={{ fontSize: 12.5 }}>
+                      After the download, the first start loads the model into memory. This can take up to{' '}
+                      {startTimeoutMinutes(recipe)} minutes, with live progress the whole way, and later
+                      starts are much faster. Cancelling is always safe: downloads resume where they left off.
+                    </p>
+                  )}
+                  {!onPeer && anotherInstallRunning && (
+                    <p className="muted" style={{ fontSize: 12.5 }}>Another download is running. Both continue, sharing bandwidth.</p>
+                  )}
+                  {switchFrom && (
+                    <div className="install-choice" role="radiogroup" aria-label="After the download finishes">
+                      {peer && recipe.topology.spark_count === 1 && <p className="kicker">After the download finishes</p>}
+                      <label className="confirm-check">
+                        <input
+                          type="radio"
+                          name="install-activate"
+                          checked={activate}
+                          onChange={() => setActivate(true)}
+                        />
+                        <span>
+                          {switchFrom === recipe.id ? 'Update and switch now' : 'Download and switch now'}
+                          <small>
+                            {switchFrom === recipe.id
+                              ? `This restarts ${recipe.display_name} on the new version. If it fails, basement restores the version that was running.`
+                              : `This stops ${nameOf(switchFrom)} while ${recipe.display_name} starts.`}
+                          </small>
+                        </span>
+                      </label>
+                      <label className="confirm-check">
+                        <input
+                          type="radio"
+                          name="install-activate"
+                          checked={!activate}
+                          onChange={() => setActivate(false)}
+                        />
+                        <span>
+                          {switchFrom === recipe.id ? 'Update only' : 'Download only'}
+                          <small>
+                            {switchFrom === recipe.id
+                              ? `${recipe.display_name} keeps serving the current version. Switch to the update later from the Models tab.`
+                              : `${nameOf(switchFrom)} keeps serving. Start ${recipe.display_name} later from the Models tab.`}
+                          </small>
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                  {onPeer && (
+                    <p className="muted" style={{ fontSize: 12.5 }}>
+                      {switchFrom
+                        ? `Switching happens on ${machine}: it changes the model that Spark serves, not the one serving here.`
+                        : `${machine} downloads and serves this model. What this Spark is serving does not change.`}
+                    </p>
+                  )}
+                  <a href={recipe.artifacts[0].licence_url} target="_blank" rel="noreferrer">
+                    Read the {recipe.artifacts[0].licence} licence ↗
+                  </a>
+                  {licenceAlready ? (
+                    <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+                      {onPeer
+                        ? `Licence already accepted on ${machine}.`
+                        : 'Licence already accepted with the first install of this model.'}
+                    </p>
+                  ) : (
+                    <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <input type="checkbox" checked={licence} onChange={event => setLicence(event.target.checked)} />
+                      I accept the model licence
+                    </label>
+                  )}
+                  {foot(licenceAlready || licence)}
+                </>
+              ) : shown ? (
+                <>
+                  <p className="error-text" role="alert">{machine} is not ready for {recipe.display_name} yet:</p>
+                  <ul>{preflightBlockers(shown).map(item => <li key={item}>{item}</li>)}</ul>
+                  {Array.isArray(reclaim) && reclaim.length > 0 && (
+                    <div className="alert">
+                      <strong>Free up space</strong>
+                      <ul>
+                        {reclaim.map(candidate => (
+                          <li key={candidate.recipe_id}>
+                            Removing {candidate.display_name} reclaims {formatBytes(candidate.bytes)}
+                            {candidate.active ? ' (currently active)' : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <div className="dialog-foot">
+                    {onPeer && <span className="note">Pick this Spark to install here instead.</span>}
+                    <button type="button" className="ghost" onClick={close}>Close</button>
                   </div>
-                )}
-                <div className="dialog-foot">
-                  <button type="button" className="ghost" onClick={() => dialogRef.current?.close()}>Close</button>
-                </div>
-              </>
-            )}
-          </form>
-        )}
+                </>
+              ) : null}
+            </form>
+          )
+        })()}
       </dialog>
     </div>
   )

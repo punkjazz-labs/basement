@@ -262,6 +262,9 @@ input[type='text'], input[type='password'], textarea {
 .sdot.busy { background: var(--warn); animation: breathe 1.2s ease-in-out infinite; }
 .sdot.fail { background: var(--fail); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fail) 15%, transparent); }
 .m-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+/* A model that lives on another Spark in the fleet says so under its status,
+   in the same quiet voice the rest of the row uses. */
+.m-status .peer-note { display: block; color: var(--faint); font-size: 11px; margin-top: 1px; }
 
 /* expanded detail — the "A depth" inside a row */
 .mdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }
@@ -294,6 +297,21 @@ input[type='text'], input[type='password'], textarea {
 .field { display: grid; gap: 4px; }
 .field span { font-size: 12px; color: var(--muted); }
 .field input { width: 100%; }
+
+/* Adding a Spark is three short steps, two of which happen on the other
+   machine. Numbered, quiet, and inside the dialog that was already there. */
+.steps { list-style: none; counter-reset: step; margin: 0; padding: 0; display: grid; gap: 16px; }
+.steps li { counter-increment: step; display: grid; gap: 8px; padding-left: 30px; position: relative; }
+.steps li::before {
+  content: counter(step);
+  position: absolute; left: 0; top: 0; width: 20px; height: 20px; border-radius: 50%;
+  border: 1px solid var(--line-strong); background: var(--panel); color: var(--muted);
+  font-size: 11px; font-weight: 650; display: flex; align-items: center; justify-content: center;
+}
+.steps strong { font-size: 13px; font-weight: 600; }
+.steps p { margin: 0; color: var(--muted); font-size: 12.5px; }
+.steps .snippet { padding: 12px 14px; }
+.steps .snippet pre { padding-right: 62px; }
 
 /* ---- Dialogs -------------------------------------------------------------- */
 

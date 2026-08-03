@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
-import { api, formatBytes, type Peer, type PeerSummary } from '../api'
+import { api, copyText, formatBytes, type Peer, type PeerSummary } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { logoFor } from '../catalog'
@@ -15,27 +15,18 @@ interface AddForm {
 }
 
 const EMPTY_FORM: AddForm = { name: '', base_url: '', api_key: '' }
+// The same one-line install the website hands out. Nothing here is generated
+// per machine, so it can be copied straight into the other Spark's terminal.
+const INSTALL_COMMAND = 'curl -fsSL basement.punkjazz.ai/install.sh | sh'
 
-export default function Fleet({ system, recipes, models, liveTPS }: FleetProps) {
-  const [peers, setPeers] = useState<Peer[]>([])
+export default function Fleet({ system, recipes, models, peers, refreshPeers, liveTPS }: FleetProps) {
   const [summaries, setSummaries] = useState<Record<string, PeerSummary>>({})
-  const [error, setError] = useState('')
   const [expanded, setExpanded] = useState('')
   const [form, setForm] = useState<AddForm>(EMPTY_FORM)
   const [formError, setFormError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [copied, setCopied] = useState(false)
   const dialogRef = useRef<HTMLDialogElement>(null)
-
-  const load = () =>
-    api<Peer[]>('/api/v1/peers')
-      .then(list => {
-        setPeers(list)
-        setError('')
-      })
-      .catch(problem => setError(problem instanceof Error ? problem.message : 'Could not read the fleet'))
-  useEffect(() => {
-    load()
-  }, [])
 
   // Poll every peer's merged summary while this tab is mounted (it unmounts
   // with every other tab switch, which stops the polling for free) and
@@ -68,7 +59,18 @@ export default function Fleet({ system, recipes, models, liveTPS }: FleetProps) 
   const openAdd = () => {
     setForm(EMPTY_FORM)
     setFormError('')
+    setCopied(false)
     dialogRef.current?.showModal()
+  }
+
+  const copyCommand = async () => {
+    try {
+      await copyText(INSTALL_COMMAND)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      /* the command is on screen and can still be selected by hand */
+    }
   }
 
   const submit = async (event: React.FormEvent) => {
@@ -81,7 +83,7 @@ export default function Fleet({ system, recipes, models, liveTPS }: FleetProps) 
         body: JSON.stringify({ name: form.name, base_url: form.base_url, api_key: form.api_key }),
       })
       dialogRef.current?.close()
-      load()
+      await refreshPeers()
     } catch (problem) {
       setFormError(problem instanceof Error ? problem.message : 'Could not add that Spark')
     } finally {
@@ -100,7 +102,7 @@ export default function Fleet({ system, recipes, models, liveTPS }: FleetProps) 
     try {
       await api(`/api/v1/peers/${encodeURIComponent(peer.id)}`, { method: 'DELETE', body: '{}' })
       setExpanded('')
-      load()
+      await refreshPeers()
     } catch (problem) {
       noticeBox('Could not remove that Spark', problem instanceof Error ? problem.message : undefined)
     }
@@ -108,8 +110,6 @@ export default function Fleet({ system, recipes, models, liveTPS }: FleetProps) 
 
   const thisModel = models.find(model => model.active && model.status === 'ready')
   const thisRecipe = recipes.find(recipe => recipe.id === thisModel?.recipe_id)
-
-  if (error) return <div className="empty">{error}</div>
 
   return (
     <div className="stack">
@@ -223,6 +223,8 @@ export default function Fleet({ system, recipes, models, liveTPS }: FleetProps) 
       )}
 
       <dialog ref={dialogRef} onClose={() => setFormError('')} aria-label="Add a Spark">
+        {/* Three steps in one dialog, because the first two happen on the
+            other machine and the third is the form that was always here. */}
         <form className="dialog-pad" onSubmit={submit}>
           <div className="dialog-head">
             <div>
@@ -231,27 +233,44 @@ export default function Fleet({ system, recipes, models, liveTPS }: FleetProps) 
             </div>
             <button type="button" className="dialog-close" onClick={() => dialogRef.current?.close()} aria-label="Close">×</button>
           </div>
-          <label className="field">
-            <span>Name</span>
-            <input type="text" required maxLength={64} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} />
-          </label>
-          <label className="field">
-            <span>URL</span>
-            <input
-              type="text"
-              required
-              placeholder="http://edgexpert-beta.local:7070"
-              value={form.base_url}
-              onChange={event => setForm({ ...form, base_url: event.target.value })}
-            />
-          </label>
-          <label className="field">
-            <span>API key</span>
-            <input type="password" required value={form.api_key} onChange={event => setForm({ ...form, api_key: event.target.value })} />
-          </label>
-          <p className="faint" style={{ fontSize: 12.5, margin: 0 }}>
-            Generate an API key on that Spark's Connect tab, then paste it here.
-          </p>
+          <ol className="steps">
+            <li>
+              <strong>Install basement on the other Spark</strong>
+              <p>Run this in a terminal on that machine.</p>
+              <div className="snippet">
+                <button type="button" className="ghost copy" onClick={copyCommand}>{copied ? 'Copied' : 'Copy'}</button>
+                <pre><code>{INSTALL_COMMAND}</code></pre>
+              </div>
+            </li>
+            <li>
+              <strong>Generate an API key on that Spark's Connect tab</strong>
+              <p>Open that console, create a key, and copy it. It is only shown once.</p>
+            </li>
+            <li>
+              <strong>Add it here</strong>
+              <label className="field">
+                <span>Name</span>
+                <input type="text" required maxLength={64} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>URL</span>
+                <input
+                  type="text"
+                  required
+                  placeholder="http://edgexpert-beta.local:7070"
+                  value={form.base_url}
+                  onChange={event => setForm({ ...form, base_url: event.target.value })}
+                />
+              </label>
+              <label className="field">
+                <span>API key</span>
+                <input type="password" required value={form.api_key} onChange={event => setForm({ ...form, api_key: event.target.value })} />
+              </label>
+              <p className="faint" style={{ fontSize: 12.5, margin: 0 }}>
+                Basement calls that Spark with this URL and key before it saves anything.
+              </p>
+            </li>
+          </ol>
           {formError && <p className="error-text" role="alert" style={{ margin: 0 }}>{formError}</p>}
           <div className="dialog-foot">
             <button type="button" className="ghost" onClick={() => dialogRef.current?.close()}>Cancel</button>
