@@ -136,6 +136,8 @@ main { flex: 1; width: 100%; max-width: 1032px; padding: 18px 36px 80px; }
   color: var(--faint); border: 1px dashed var(--line-strong); border-radius: 10px;
   padding: 30px; text-align: center;
 }
+.empty p { margin: 0; }
+.empty-actions { display: flex; gap: 10px; justify-content: center; align-items: center; margin-top: 14px; flex-wrap: wrap; }
 
 /* One button family: pills. Orange marks the single primary action; everything
    else stays quiet so the orange always means "the thing to do next". */
@@ -340,6 +342,32 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .confirm-check small { display: block; color: var(--faint); font-weight: 400; margin-top: 1px; }
 
 .install-choice { display: grid; gap: 8px; }
+.dialog-form { display: grid; gap: 14px; }
+.field small { font-size: 11.5px; }
+/* The pairing token is typed into the other console, so it wraps in full
+   rather than scrolling out of sight. */
+.snippet.token { padding: 12px 14px; }
+.snippet.token pre { padding-right: 62px; }
+.snippet.token code {
+  font-family: var(--mono); font-size: 13px; letter-spacing: 0.02em;
+  user-select: all; overflow-wrap: anywhere; white-space: pre-wrap;
+}
+.dialog-note { margin: 0; font-size: 12.5px; }
+.dialog-foot .lead { margin-right: auto; }
+.done-line { margin: 0; font-size: 14.5px; }
+.field input[readonly] { color: var(--muted); background: var(--panel); }
+
+/* Finding a second Spark: the sweep's hints rank the rows and dim the ones it
+   knows nothing about. Nothing is ever hidden. */
+.cand-list { display: grid; max-height: 44dvh; overflow-y: auto; }
+.cand-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.cand-row:last-child { border-bottom: 0; }
+.cand-row .grow { flex: 1; min-width: 0; }
+.cand-row .nm { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.cand-row .use { color: var(--muted); font-size: 12px; margin-top: 1px; overflow-wrap: anywhere; }
+.cand-row.plain { opacity: 0.55; }
+.cand-row.plain:hover, .cand-row.plain:focus-within { opacity: 1; }
+.tag.quiet { color: var(--muted); background: var(--surface-2); border-color: var(--line-strong); }
 
 .dialog-result { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .dialog-result .cell { background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px; padding: 12px 14px; }

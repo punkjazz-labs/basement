@@ -168,6 +168,90 @@ export interface Peer {
   base_url: string
 }
 
+// ---- Finding and adopting a second Spark ------------------------------------
+// One machine the network sweep answered for. gb10_hint and basement are the
+// sweep's own findings, never a guess made here: they rank the list the
+// console shows and never remove anything from it.
+export interface FleetCandidate {
+  name: string
+  address: string
+  gb10_hint: boolean
+  basement: { base_url: string } | null
+}
+
+// One line of the adoption run, as the manager stored it. The six keys are
+// connect, verify, install, start, pair and peer, always all six and always
+// in that order; key is what logic reads and label is what a person reads,
+// so the wording stays the backend's to change.
+export interface AdoptStep {
+  key: string
+  label: string
+  state: string
+  detail?: string
+}
+
+export interface AdoptResult {
+  // The adopted Spark, as either the stored peer or just its name.
+  peer?: Peer | string
+  console_url?: string
+  alt_url?: string
+  // Where the new Spark's console asks for the pairing token. It has no
+  // token-in-URL form, so the owner types the token into the page.
+  owner_pairing_url?: string
+  // A durable shared secret, not a one-shot code. It is shown so it can be
+  // copied and typed, and it never travels in a link from here.
+  owner_pairing_token?: string
+}
+
+export interface AdoptStatus {
+  state: 'idle' | 'running' | 'succeeded' | 'failed' | string
+  address?: string
+  started_at?: string
+  finished_at?: string
+  steps?: AdoptStep[]
+  // Extra lines the run wrote as it went. The most recent one is the only
+  // one the console shows.
+  progress?: string[]
+  error?: string
+  result?: AdoptResult
+}
+
+// Sparks already running basement first, then likely GB10s, then everything
+// else. Sort is stable, so the sweep's own order survives inside each group.
+export const candidateRank = (candidate: FleetCandidate): number =>
+  candidate.basement ? 0 : candidate.gb10_hint ? 1 : 2
+
+export const rankCandidates = (candidates: FleetCandidate[]): FleetCandidate[] =>
+  [...candidates].sort((left, right) => candidateRank(left) - candidateRank(right))
+
+// The name to greet the new Spark by, whichever shape the result carries.
+export const adoptedName = (result?: AdoptResult): string => {
+  if (typeof result?.peer === 'string') return result.peer
+  return result?.peer?.name ?? ''
+}
+
+// Adoption takes a bare host: no scheme, no port, no path. The sweep already
+// answers with one, so this only guards what a person or a prefill could
+// hand over. An IPv6 literal in brackets keeps its colons; a bare one is
+// left alone rather than cut at its first colon.
+export function bareHost(value: string): string {
+  let host = value.trim()
+  const scheme = host.indexOf('://')
+  if (scheme !== -1) host = host.slice(scheme + 3)
+  const credentials = host.lastIndexOf('@')
+  if (credentials !== -1) host = host.slice(credentials + 1)
+  host = host.split('/')[0].split('?')[0].split('#')[0]
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']')
+    return end === -1 ? host : host.slice(0, end + 1)
+  }
+  const port = host.indexOf(':')
+  if (port === -1) return host
+  // Two or more colons and no brackets: an unbracketed IPv6 literal, which
+  // has no port to strip.
+  return host.indexOf(':', port + 1) === -1 ? host.slice(0, port) : host
+}
+
 // A merged read of a peer's own system/models/telemetry endpoints. Any of
 // the three is absent when the peer could not be reached in time.
 export interface PeerSummary {

@@ -1,5 +1,8 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
-import { api, copyText, formatBytes, type Peer, type PeerSummary } from '../api'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import {
+  adoptedName, api, bareHost, copyText, formatBytes, rankCandidates,
+  type AdoptStatus, type FleetCandidate, type Peer, type PeerSummary,
+} from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { logoFor } from '../catalog'
@@ -14,10 +17,20 @@ interface AddForm {
   api_key: string
 }
 
+// One dialog, six states. The first two belong to the network sweep, the
+// rest to the single machine being set up over SSH.
+type FindStage = 'scanning' | 'results' | 'credentials' | 'progress' | 'failed' | 'done'
+
 const EMPTY_FORM: AddForm = { name: '', base_url: '', api_key: '' }
 // The same one-line install the website hands out. Nothing here is generated
 // per machine, so it can be copied straight into the other Spark's terminal.
 const INSTALL_COMMAND = 'curl -fsSL basement.punkjazz.ai/install.sh | sh'
+
+// The adoption steps arrive with their own state; these only translate it
+// into the phase list the Activity view already uses. An unknown state stays
+// pending on screen and keeps its own word.
+const STEP_CLASS: Record<string, string> = { done: 'complete', running: 'active', failed: 'failed', pending: 'pending' }
+const STEP_WORD: Record<string, string> = { done: 'Done', running: 'Working', failed: 'Failed', pending: 'Waiting' }
 
 export default function Fleet({ system, recipes, models, peers, refreshPeers, liveTPS }: FleetProps) {
   const [summaries, setSummaries] = useState<Record<string, PeerSummary>>({})
@@ -27,6 +40,25 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const [submitting, setSubmitting] = useState(false)
   const [copied, setCopied] = useState(false)
   const dialogRef = useRef<HTMLDialogElement>(null)
+
+  const [stage, setStage] = useState<FindStage>('scanning')
+  const [candidates, setCandidates] = useState<FleetCandidate[]>([])
+  const [scanError, setScanError] = useState('')
+  const [target, setTarget] = useState<FleetCandidate | null>(null)
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [adoptError, setAdoptError] = useState('')
+  const [starting, setStarting] = useState(false)
+  const [status, setStatus] = useState<AdoptStatus | null>(null)
+  const [tokenCopied, setTokenCopied] = useState(false)
+  const findRef = useRef<HTMLDialogElement>(null)
+  // A sweep cannot be cancelled once it is out, so its answer is dropped if
+  // the dialog moved on while it was in flight.
+  const scanToken = useRef(0)
+
+  // The password is only ever in this component's state and in the one
+  // request that carries it. Leaving the view drops it.
+  useEffect(() => () => setPassword(''), [])
 
   // Poll every peer's merged summary while this tab is mounted (it unmounts
   // with every other tab switch, which stops the polling for free) and
@@ -56,11 +88,135 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     }
   }, [peers])
 
-  const openAdd = () => {
-    setForm(EMPTY_FORM)
+  const openAdd = (prefill?: Partial<AddForm>) => {
+    setForm({ ...EMPTY_FORM, ...prefill })
     setFormError('')
     setCopied(false)
     dialogRef.current?.showModal()
+  }
+
+  // The sweep blocks for as long as it takes; there is nothing to show in the
+  // meantime except that it is running.
+  const scan = useCallback(async () => {
+    const token = ++scanToken.current
+    setStage('scanning')
+    setScanError('')
+    setCandidates([])
+    try {
+      const found = await api<{ candidates: FleetCandidate[] }>('/api/v1/fleet/discover', {
+        method: 'POST',
+        body: '{}',
+      })
+      if (scanToken.current !== token) return
+      setCandidates(rankCandidates(found.candidates ?? []))
+    } catch (problem) {
+      if (scanToken.current !== token) return
+      setScanError(problem instanceof Error ? problem.message : 'The scan did not finish')
+    }
+    setStage('results')
+  }, [])
+
+  const openFind = async () => {
+    scanToken.current += 1
+    setStage('scanning')
+    setTarget(null)
+    setUsername('')
+    setPassword('')
+    setAdoptError('')
+    setStatus(null)
+    setTokenCopied(false)
+    findRef.current?.showModal()
+    // A setup started earlier and still running owns this dialog: show it
+    // instead of a scan whose results could not be acted on anyway.
+    try {
+      const current = await api<AdoptStatus>('/api/v1/fleet/adopt/status')
+      if (current.state === 'running') {
+        setStatus(current)
+        setStage('progress')
+        return
+      }
+    } catch {
+      /* no run to resume is the ordinary case */
+    }
+    scan()
+  }
+
+  const pair = (candidate: FleetCandidate) => {
+    findRef.current?.close()
+    openAdd({ name: candidate.name, base_url: candidate.basement?.base_url ?? '' })
+  }
+
+  const setUp = (candidate: FleetCandidate) => {
+    setTarget(candidate)
+    setPassword('')
+    setAdoptError('')
+    setStage('credentials')
+  }
+
+  const startAdopt = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!target) return
+    setStarting(true)
+    setAdoptError('')
+    try {
+      // The 202 carries the first status snapshot, so the step list is on
+      // screen before the first poll comes back.
+      const snapshot = await api<AdoptStatus>('/api/v1/fleet/adopt', {
+        method: 'POST',
+        body: JSON.stringify({ address: bareHost(target.address), username, password }),
+      })
+      setStatus(snapshot)
+      setStage('progress')
+    } catch (problem) {
+      setAdoptError(problem instanceof Error ? problem.message : 'Could not start the setup')
+    } finally {
+      // Whatever happened, the password has left this component. A retry
+      // asks for it again.
+      setPassword('')
+      setStarting(false)
+    }
+  }
+
+  // Poll only while a run is in flight. Reaching a result or an error moves
+  // the dialog on, which is also what stops this.
+  useEffect(() => {
+    if (stage !== 'progress') return
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const next = await api<AdoptStatus>('/api/v1/fleet/adopt/status')
+        if (cancelled) return
+        setStatus(next)
+        if (next.state === 'succeeded') {
+          await refreshPeers()
+          if (!cancelled) setStage('done')
+          return
+        }
+        // Only succeeded and failed are terminal. An idle answer means the
+        // manager has not recorded the run yet, so ask again.
+        if (next.state === 'failed') setStage('failed')
+      } catch {
+        /* the next tick asks again */
+      }
+    }
+    poll()
+    const timer = setInterval(poll, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [stage, refreshPeers])
+
+  const copyToken = async () => {
+    const token = status?.result?.owner_pairing_token
+    if (!token) return
+    try {
+      await copyText(token)
+      setTokenCopied(true)
+      setTimeout(() => setTokenCopied(false), 1600)
+    } catch {
+      /* the token is on screen and can still be selected by hand */
+    }
   }
 
   const copyCommand = async () => {
@@ -108,18 +264,44 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     }
   }
 
+  // Closing puts the dialog back to its first state, unless a setup is under
+  // way: that one keeps polling with the dialog shut, so the fleet table
+  // still gains the Spark the moment the run lands.
+  const closeFind = () => {
+    scanToken.current += 1
+    setPassword('')
+    setCandidates([])
+    setScanError('')
+    if (stage === 'scanning' || stage === 'results' || stage === 'credentials') {
+      setAdoptError('')
+      setStage('scanning')
+    }
+  }
+
   const thisModel = models.find(model => model.active && model.status === 'ready')
   const thisRecipe = recipes.find(recipe => recipe.id === thisModel?.recipe_id)
+  const adoptSteps = status?.steps ?? []
+  const failedStep = adoptSteps.find(step => step.state === 'failed')
+  const progress = status?.progress ?? []
+  const latestProgress = progress.length > 0 ? progress[progress.length - 1] : ''
+  const setupHost = status?.address || (target ? bareHost(target.address) : '')
+  const result = status?.result
+  const newName = adoptedName(result) || target?.name || 'Your second Spark'
+  // Only claimed when the catalog actually carries a two-Spark recipe.
+  const hasTwoSparkRecipe = recipes.some(recipe => recipe.topology.spark_count === 2)
 
   return (
     <div className="stack">
-      <div className="section-head">
-        <span className="spacer" />
-        <button className="primary" onClick={openAdd}>Add a Spark</button>
-      </div>
-
       {peers.length === 0 ? (
-        <div className="empty">One Spark here. Add another to see your whole fleet on one screen.</div>
+        // One peer is what basement supports today, so both ways in live
+        // here and both disappear once a second Spark exists.
+        <div className="empty">
+          <p>One Spark here. Add another to see your whole fleet on one screen.</p>
+          <div className="empty-actions">
+            <button className="primary" onClick={openFind}>Find a second Spark</button>
+            <button className="quiet" onClick={() => openAdd()}>Add by address</button>
+          </div>
+        </div>
       ) : (
         <div className="mtable fleet">
           <div className="mthead" aria-hidden="true">
@@ -277,6 +459,219 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
             <button type="submit" className="primary" disabled={submitting}>{submitting ? 'Adding' : 'Add a Spark'}</button>
           </div>
         </form>
+      </dialog>
+
+      <dialog ref={findRef} onClose={closeFind} aria-label="Find a second Spark">
+        <div className="dialog-pad">
+          <div className="dialog-head">
+            <div>
+              <p className="kicker">Fleet</p>
+              <h2>
+                {stage === 'credentials' ? 'Set up this Spark'
+                  : stage === 'progress' || stage === 'failed' ? 'Setting up this Spark'
+                    : stage === 'done' ? 'Second Spark added'
+                      : 'Find a second Spark'}
+              </h2>
+            </div>
+            <button type="button" className="dialog-close" onClick={() => findRef.current?.close()} aria-label="Close">×</button>
+          </div>
+
+          {stage === 'scanning' && (
+            <>
+              <p className="thinking">Looking for Sparks on your network</p>
+              <p className="faint dialog-note">This takes up to ten seconds.</p>
+              <div className="dialog-foot">
+                <button type="button" className="ghost" onClick={() => findRef.current?.close()}>Cancel</button>
+              </div>
+            </>
+          )}
+
+          {stage === 'results' && (
+            <>
+              {scanError ? (
+                <>
+                  <div className="error-note">
+                    <strong>The scan did not finish</strong>
+                    <p>{scanError}</p>
+                  </div>
+                  <p className="faint dialog-note">You can scan again, or add a Spark by address.</p>
+                </>
+              ) : candidates.length === 0 ? (
+                <>
+                  <div className="empty">Nothing answered on this network.</div>
+                  <p className="faint dialog-note">
+                    A Spark that is off, on another network, or blocking this scan will not show up here. You can still add one by address.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="muted dialog-note">
+                    These machines answered. Each label is what the scan could tell from outside, not a promise.
+                  </p>
+                  <div className="cand-list">
+                    {candidates.map(candidate => (
+                      <div key={candidate.address} className={`cand-row ${!candidate.basement && !candidate.gb10_hint ? 'plain' : ''}`}>
+                        <div className="grow">
+                          <div className="nm">
+                            {candidate.name || candidate.address}
+                            {candidate.basement ? (
+                              <span className="tag">Running basement</span>
+                            ) : candidate.gb10_hint ? (
+                              <span className="tag quiet">Likely a GB10</span>
+                            ) : (
+                              <span className="tag quiet">Host on your network</span>
+                            )}
+                          </div>
+                          <div className="use">{candidate.address}</div>
+                        </div>
+                        {candidate.basement ? (
+                          <button type="button" className="primary" onClick={() => pair(candidate)}>Pair</button>
+                        ) : (
+                          <button
+                            type="button"
+                            className={candidate.gb10_hint ? 'primary' : 'ghost'}
+                            onClick={() => setUp(candidate)}
+                          >
+                            Set up
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+              <div className="dialog-foot">
+                <button
+                  type="button"
+                  className="quiet lead"
+                  onClick={() => {
+                    findRef.current?.close()
+                    openAdd()
+                  }}
+                >
+                  Add by address
+                </button>
+                <button type="button" className="ghost" onClick={scan}>Scan again</button>
+                <button type="button" className="ghost" onClick={() => findRef.current?.close()}>Cancel</button>
+              </div>
+            </>
+          )}
+
+          {stage === 'credentials' && (
+            <form className="dialog-form" onSubmit={startAdopt}>
+              <p className="muted dialog-note">
+                Basement installs itself on that Spark over SSH from this one. Your password goes to that machine only. It is not stored here.
+              </p>
+              <label className="field">
+                <span>Address</span>
+                <input type="text" readOnly value={target ? bareHost(target.address) : ''} />
+                <small className="faint">Just the host. Basement brings its own port.</small>
+              </label>
+              <label className="field">
+                <span>Username on that Spark</span>
+                <input
+                  type="text"
+                  required
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={username}
+                  onChange={event => setUsername(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>Password</span>
+                <input
+                  type="password"
+                  required
+                  autoComplete="new-password"
+                  value={password}
+                  onChange={event => setPassword(event.target.value)}
+                />
+              </label>
+              {adoptError && <p className="error-text dialog-note" role="alert">{adoptError}</p>}
+              <div className="dialog-foot">
+                <button type="button" className="ghost" onClick={() => setStage('results')}>Back</button>
+                <button type="submit" className="primary" disabled={starting}>{starting ? 'Starting' : 'Start'}</button>
+              </div>
+            </form>
+          )}
+
+          {(stage === 'progress' || stage === 'failed') && (
+            <>
+              {setupHost && <p className="faint dialog-note">{setupHost}</p>}
+              {adoptSteps.length === 0 ? (
+                <p className="thinking">Starting</p>
+              ) : (
+                <ol className="phase-list">
+                  {adoptSteps.map(step => {
+                    // A step's own detail wins; the running one borrows the
+                    // latest progress line when it has nothing of its own.
+                    const line = step.detail || (step.state === 'running' ? latestProgress : '')
+                    return (
+                      <li key={step.key} className={STEP_CLASS[step.state] ?? 'pending'}>
+                        <i aria-hidden="true" />
+                        <div>
+                          <strong>{step.label}</strong>
+                          {line && <span>{line}</span>}
+                        </div>
+                        <b>{STEP_WORD[step.state] ?? step.state}</b>
+                      </li>
+                    )
+                  })}
+                </ol>
+              )}
+              {/* The failed step already carries its sentence; only say it
+                  once. */}
+              {stage === 'failed' && status?.error && !failedStep?.detail && (
+                <div className="error-note">
+                  <strong>Setup stopped</strong>
+                  <p>{status.error}</p>
+                </div>
+              )}
+              <div className="dialog-foot">
+                {stage === 'progress' && <span className="note">This keeps running if you close the dialog.</span>}
+                <button type="button" className="ghost" onClick={() => findRef.current?.close()}>Close</button>
+                {stage === 'failed' && target && (
+                  <button type="button" className="primary" onClick={() => setStage('credentials')}>Retry</button>
+                )}
+              </div>
+            </>
+          )}
+
+          {stage === 'done' && (
+            <>
+              <p className="done-line">{newName} is part of your basement now.</p>
+              {result?.owner_pairing_token && (
+                <>
+                  <p className="muted dialog-note">
+                    Its console will ask for this pairing token the first time you open it. Type it in there.
+                  </p>
+                  <div className="snippet token">
+                    <button type="button" className="ghost copy" onClick={copyToken}>{tokenCopied ? 'Copied' : 'Copy'}</button>
+                    <pre><code>{result.owner_pairing_token}</code></pre>
+                  </div>
+                  <p className="faint dialog-note">It stays valid after that, so keep it like a password.</p>
+                </>
+              )}
+              <p className="muted dialog-note">The fleet table shows what it is serving.</p>
+              {hasTwoSparkRecipe && (
+                <p className="faint dialog-note">Models that need two Sparks can be installed now. They are on the Models tab.</p>
+              )}
+              <div className="dialog-foot">
+                <button type="button" className="ghost" onClick={() => findRef.current?.close()}>Done</button>
+                {result?.owner_pairing_url && (
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => window.open(result.owner_pairing_url, '_blank', 'noopener,noreferrer')}
+                  >
+                    Open its console
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
       </dialog>
     </div>
   )
