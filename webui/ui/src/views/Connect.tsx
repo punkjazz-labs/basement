@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, idempotency, copyText, type APIKey } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
+import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
 
 const SNIPPETS = ['curl', 'Python', 'JavaScript', 'LiteLLM'] as const
 type Snippet = (typeof SNIPPETS)[number]
@@ -162,14 +163,20 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
         {keys.length === 0 && !freshSecret && (
           <p className="muted">No keys yet. Create one to connect Cursor, scripts, or anything OpenAI-compatible.</p>
         )}
-        <form onSubmit={create} style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        {/* A lone text field sitting next to a freshly revealed secret is
+            close enough to a login form for a manager to guess at. It names
+            a key, it is not a credential, so it says so. */}
+        <form onSubmit={create} style={{ display: 'flex', gap: 8, marginTop: 12 }} {...FORM_IGNORED_BY_MANAGERS}>
           <input
+            name="new-key-label"
+            id="new-key-label"
             value={newName}
             onChange={event => setNewName(event.target.value)}
             placeholder="Key name, e.g. laptop"
             aria-label="New key name"
             required
             maxLength={64}
+            {...IGNORED_BY_MANAGERS}
             style={{ flex: 1, background: 'var(--surface-2)', color: 'var(--ink)', border: '1px solid var(--line-strong)', borderRadius: 8, padding: '8px 12px' }}
           />
           <button className="primary">Create key</button>

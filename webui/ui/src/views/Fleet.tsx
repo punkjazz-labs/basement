@@ -6,6 +6,7 @@ import {
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { logoFor } from '../catalog'
+import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
 
 interface FleetProps extends AppState {
   liveTPS: number | null
@@ -40,6 +41,14 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const [submitting, setSubmitting] = useState(false)
   const [copied, setCopied] = useState(false)
   const dialogRef = useRef<HTMLDialogElement>(null)
+  // A <dialog>'s children stay in the document while it is shut, so without
+  // these flags the secret-shaped fields below would be mounted for as long
+  // as this tab is, and would be torn out of the page on every tab switch.
+  // Password managers read that as a login form appearing and vanishing.
+  // Rendering only while the dialog is open keeps them out of the document
+  // except when the user is actually filling them in.
+  const [addOpen, setAddOpen] = useState(false)
+  const [findOpen, setFindOpen] = useState(false)
 
   const [stage, setStage] = useState<FindStage>('scanning')
   const [candidates, setCandidates] = useState<FleetCandidate[]>([])
@@ -92,6 +101,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     setForm({ ...EMPTY_FORM, ...prefill })
     setFormError('')
     setCopied(false)
+    setAddOpen(true)
     dialogRef.current?.showModal()
   }
 
@@ -125,6 +135,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     setAdoptError('')
     setStatus(null)
     setTokenCopied(false)
+    setFindOpen(true)
     findRef.current?.showModal()
     // A setup started earlier and still running owns this dialog: show it
     // instead of a scan whose results could not be acted on anyway.
@@ -269,6 +280,8 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   // still gains the Spark the moment the run lands.
   const closeFind = () => {
     scanToken.current += 1
+    setFindOpen(false)
+    setUsername('')
     setPassword('')
     setCandidates([])
     setScanError('')
@@ -404,10 +417,19 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
         </div>
       )}
 
-      <dialog ref={dialogRef} onClose={() => setFormError('')} aria-label="Add a Spark">
+      <dialog
+        ref={dialogRef}
+        onClose={() => {
+          setFormError('')
+          setAddOpen(false)
+          setForm(EMPTY_FORM)
+        }}
+        aria-label="Add a Spark"
+      >
         {/* Three steps in one dialog, because the first two happen on the
             other machine and the third is the form that was always here. */}
-        <form className="dialog-pad" onSubmit={submit}>
+        {addOpen && (
+        <form className="dialog-pad" onSubmit={submit} {...FORM_IGNORED_BY_MANAGERS}>
           <div className="dialog-head">
             <div>
               <p className="kicker">Fleet</p>
@@ -432,21 +454,46 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
               <strong>Add it here</strong>
               <label className="field">
                 <span>Name</span>
-                <input type="text" required maxLength={64} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} />
+                <input
+                  type="text"
+                  name="spark-label"
+                  id="spark-label"
+                  required
+                  maxLength={64}
+                  value={form.name}
+                  onChange={event => setForm({ ...form, name: event.target.value })}
+                  {...IGNORED_BY_MANAGERS}
+                />
               </label>
               <label className="field">
                 <span>URL</span>
                 <input
                   type="text"
+                  name="spark-address"
+                  id="spark-address"
                   required
                   placeholder="http://edgexpert-beta.local:7070"
                   value={form.base_url}
                   onChange={event => setForm({ ...form, base_url: event.target.value })}
+                  {...IGNORED_BY_MANAGERS}
                 />
               </label>
+              {/* Not masked: this key was shown in the clear on the other
+                  Spark's Connect tab a moment ago, it is pasted once and
+                  never read back here, and masking it only hid a bad paste
+                  until the request failed. */}
               <label className="field">
                 <span>API key</span>
-                <input type="password" required value={form.api_key} onChange={event => setForm({ ...form, api_key: event.target.value })} />
+                <input
+                  type="text"
+                  name="spark-access-token"
+                  id="spark-access-token"
+                  required
+                  spellCheck={false}
+                  value={form.api_key}
+                  onChange={event => setForm({ ...form, api_key: event.target.value })}
+                  {...IGNORED_BY_MANAGERS}
+                />
               </label>
               <p className="faint" style={{ fontSize: 12.5, margin: 0 }}>
                 Basement calls that Spark with this URL and key before it saves anything.
@@ -459,9 +506,11 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
             <button type="submit" className="primary" disabled={submitting}>{submitting ? 'Adding' : 'Add a Spark'}</button>
           </div>
         </form>
+        )}
       </dialog>
 
       <dialog ref={findRef} onClose={closeFind} aria-label="Find a second Spark">
+        {findOpen && (
         <div className="dialog-pad">
           <div className="dialog-head">
             <div>
@@ -557,35 +606,53 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
             </>
           )}
 
+          {/* This really is a login pair, so a manager offering to save it
+              is not a misfire in principle. It is still wrong here: the
+              credential belongs to the SSH account on the other Spark, and a
+              manager would file it against this console's own web address,
+              where it would be offered as the console's login and never fit.
+              Basement keeps no copy either, so both fields opt out and a
+              retry asks again. */}
           {stage === 'credentials' && (
-            <form className="dialog-form" onSubmit={startAdopt}>
+            <form className="dialog-form" onSubmit={startAdopt} {...FORM_IGNORED_BY_MANAGERS}>
               <p className="muted dialog-note">
-                Basement installs itself on that Spark over SSH from this one. Your password goes to that machine only. It is not stored here.
+                Basement installs itself on that Spark over SSH from this one. Your password goes to that machine only. It is not stored here, and no password manager is asked to keep it.
               </p>
               <label className="field">
                 <span>Address</span>
-                <input type="text" readOnly value={target ? bareHost(target.address) : ''} />
+                <input
+                  type="text"
+                  name="ssh-host"
+                  id="ssh-host"
+                  readOnly
+                  value={target ? bareHost(target.address) : ''}
+                  {...IGNORED_BY_MANAGERS}
+                />
                 <small className="faint">Just the host. Basement brings its own port.</small>
               </label>
               <label className="field">
                 <span>Username on that Spark</span>
                 <input
                   type="text"
+                  name="ssh-account"
+                  id="ssh-account"
                   required
-                  autoComplete="off"
                   spellCheck={false}
                   value={username}
                   onChange={event => setUsername(event.target.value)}
+                  {...IGNORED_BY_MANAGERS}
                 />
               </label>
               <label className="field">
                 <span>Password</span>
                 <input
                   type="password"
+                  name="ssh-secret"
+                  id="ssh-secret"
                   required
-                  autoComplete="new-password"
                   value={password}
                   onChange={event => setPassword(event.target.value)}
+                  {...IGNORED_BY_MANAGERS}
                 />
               </label>
               {adoptError && <p className="error-text dialog-note" role="alert">{adoptError}</p>}
@@ -672,6 +739,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
             </>
           )}
         </div>
+        )}
       </dialog>
     </div>
   )

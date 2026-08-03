@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api, setCSRF } from '../api'
+import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
 
 export default function Pairing({ onPaired }: { onPaired: () => void }) {
   const [token, setToken] = useState('')
@@ -33,15 +34,22 @@ export default function Pairing({ onPaired }: { onPaired: () => void }) {
       <p className="muted">
         Enter the pairing token shown when the manager was installed.
       </p>
-      <form onSubmit={pair}>
+      {/* The token is masked because it is on screen next to nothing else,
+          but it is a one-time bootstrap credential: after pairing, the
+          browser holds a session cookie and this screen never comes back on
+          this machine. A manager that saved it would keep an entry it can
+          never fill again, so the field opts out. */}
+      <form onSubmit={pair} {...FORM_IGNORED_BY_MANAGERS}>
         <input
           type="password"
+          name="basement-pairing-token"
+          id="basement-pairing-token"
           value={token}
           onChange={event => setToken(event.target.value)}
           placeholder="Pairing token"
           aria-label="Pairing token"
-          autoComplete="off"
           required
+          {...IGNORED_BY_MANAGERS}
         />
         <button className="primary" disabled={busy}>Pair</button>
       </form>
