@@ -11,13 +11,20 @@ const USE: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
   'qwen36-27b-nvfp4-1s': 'Flagship-level coding in a smaller footprint.',
   'laguna-s-2-1-nvfp4-dflash-1s': 'Built for long, independent agent runs.',
+  'nemotron-omni-30b-a3b-nvfp4-1s': "NVIDIA's own reasoning model, tuned for this hardware.",
+  'qwen35-122b-a10b-nvfp4-1s': 'The biggest model a single Spark can hold.',
+  'deepseek-v4-flash-0731-2s': 'The flagship run. Needs two Sparks linked together.',
 }
 // Community-reported typical speeds on a DGX Spark, shown until this device
-// measures its own number.
+// measures its own number. Each figure traces to a corroborated measurement
+// recorded in docs/MODEL-CANDIDATES-2026-08.md.
 const REFERENCE_TPS: Record<string, number> = {
   'qwen36-35b-a3b-nvfp4-1s': 80,
   'qwen36-27b-nvfp4-1s': 33,
   'laguna-s-2-1-nvfp4-dflash-1s': 19.4,
+  'nemotron-omni-30b-a3b-nvfp4-1s': 57, // 56.94 median, dev.classmethod.jp, Omni NVFP4
+  'qwen35-122b-a10b-nvfp4-1s': 28, // 28.3 corroborated baseline, ice-ice-bear bench + NVIDIA forum 365639
+  'deepseek-v4-flash-0731-2s': 68, // 67.58 measured on 2x Spark vLLM NVFP4; inside the forum's 42-76 range
 }
 // How each runtime kind is written in a sentence. An unknown kind keeps the
 // recipe's own word rather than being renamed to something friendlier.
