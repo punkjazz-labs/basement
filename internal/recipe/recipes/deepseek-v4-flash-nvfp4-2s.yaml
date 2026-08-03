@@ -1,0 +1,142 @@
+schema_version: 1
+id: deepseek-v4-flash-nvfp4-2s
+# The first two-Spark recipe: NVIDIA's official NVFP4 build of DeepSeek V4
+# Flash 0731 (168.3 GB, does not fit one 128 GB Spark), served with vLLM
+# TP=2 across two DGX Sparks cabled back to back with ConnectX-7.
+#
+# Launch topology follows the community recipe that runs this exact
+# workload (tonyd2wild/Deepseek-v4-Flash-TP2-DGX-Spark-500k-CTX): plain
+# vllm serve with --nnodes 2, worker rank first, weights pre-downloaded on
+# both nodes, NCCL pinned to the RoCE fabric. The interconnect environment
+# below carries that recipe's interface names (rocep1s0f0 / enp1s0f0np0);
+# if a unit reports different names, this recipe needs a revision, not an
+# override.
+#
+# Qualification flags, in honesty order:
+# - runtime image is the same pinned vllm/vllm-openai the pack already
+#   uses; DeepSeek V4 MoE support in this pinned digest is unverified
+#   until the two-node install runs.
+# - reasoning_parser/tool_call_parser: DeepSeek V4 Flash emits the same
+#   literal think-tag convention the qwen3 parser splits on, so qwen3 is
+#   the closest allowlisted functional match; both are unverified against
+#   real output and qualification decides whether they hold.
+# - max_model_len starts at 131072, far below the 500k the community
+#   recipe reaches, so first qualification measures a conservative
+#   configuration before context is raised.
+# - memory_model omitted: TP=2 shards weights across nodes and the flat
+#   single-node formula would be wrong by construction.
+version: 1
+display_name: DeepSeek V4 Flash
+publisher: DeepSeek + NVIDIA
+model_by: DeepSeek
+recipe_by: tonyd2wild (community launch topology)
+model_released: July 2026
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://huggingface.co/nvidia/DeepSeek-V4-Flash-NVFP4
+  revision: e3cd60e7de98e9867116860d522499a728de1cf9
+topology:
+  spark_count: 2
+  interconnect:
+    kind: connectx7
+    master_port: 29501
+    shared_environment:
+      NCCL_IB_DISABLE: "0"
+      NCCL_IB_HCA: rocep1s0f0
+      NCCL_IB_GID_INDEX: "3"
+      NCCL_SOCKET_IFNAME: enp1s0f0np0
+      GLOO_SOCKET_IFNAME: enp1s0f0np0
+      TP_SOCKET_IFNAME: enp1s0f0np0
+      NCCL_IGNORE_CPU_AFFINITY: "1"
+      NCCL_DEBUG: WARN
+    head_environment: {}
+    worker_environment: {}
+runtime:
+  kind: vllm
+  image: vllm/vllm-openai
+  digest: sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089
+  image_bytes: 10238912364
+  image_disk_bytes: 30716737092
+  environment:
+    CUTE_DSL_ARCH: sm_121a
+    MAX_JOBS: "4"
+  shm_bytes: 34359738368
+  memory_lock: true
+  ipc_lock: true
+artifacts:
+  - role: primary
+    repository: nvidia/DeepSeek-V4-Flash-NVFP4
+    revision: e3cd60e7de98e9867116860d522499a728de1cf9
+    expected_bytes: 168305308121
+    licence: MIT
+    licence_url: https://huggingface.co/nvidia/DeepSeek-V4-Flash-NVFP4/blob/e3cd60e7de98e9867116860d522499a728de1cf9/LICENSE
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 12000000000
+  safety_margin_bytes: 20000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: nvidia/DeepSeek-V4-Flash-NVFP4
+  vllm:
+    tensor_parallel_size: 2
+    kv_cache_dtype: fp8
+    attention_backend: ""
+    moe_backend: auto
+    linear_backend: ""
+    gpu_memory_utilization: "0.85"
+    max_model_len: 131072
+    max_num_seqs: 8
+    max_num_batched_tokens: 0
+    multimodal_image_limit: 0
+    speculative_method: ""
+    speculative_tokens: 0
+    speculative_moe_backend: ""
+    speculative_model_role: ""
+    reasoning_parser: qwen3
+    tool_call_parser: qwen3_xml
+    load_format: ""
+    chat_template_file: ""
+    chat_template:
+      enable_thinking: true
+      preserve_thinking: true
+    generation:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 0
+      min_p: 0
+      presence_penalty: 0
+      repetition_penalty: 1
+    trust_remote_code: true
+    chunked_prefill: true
+    async_scheduling: false
+    prefix_caching: false
+    auto_tool_choice: true
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_memory_capacity
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: verify_memory
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared

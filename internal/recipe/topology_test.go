@@ -81,8 +81,8 @@ func TestSingleSparkRecipesAreUnaffected(t *testing.T) {
 		if err := Validate(r); err != nil {
 			t.Fatalf("shipped recipe %s became invalid: %v", r.ID, err)
 		}
-		if r.Distributed() || r.Topology.Interconnect != nil {
-			t.Fatalf("shipped recipe %s is not single-Spark: %#v", r.ID, r.Topology)
+		if r.Distributed() != (r.Topology.Interconnect != nil) {
+			t.Fatalf("shipped recipe %s half-declares a fabric: %#v", r.ID, r.Topology)
 		}
 	}
 	half := recipes[0]
