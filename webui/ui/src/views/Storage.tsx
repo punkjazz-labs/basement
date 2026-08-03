@@ -97,12 +97,12 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
       </div>
       <section className="card">
         <div className="disk-bar" role="img" aria-label={`Models use ${formatBytes(managed)}, other data ${formatBytes(otherUsed)}, free ${formatBytes(free)}`}>
-          <span style={{ width: pct(managed), background: 'var(--green)', marginRight: 2 }} />
+          <span style={{ width: pct(managed), background: 'var(--ink)', marginRight: 2 }} />
           <span style={{ width: pct(otherUsed), background: 'var(--line-strong)', marginRight: 2 }} />
           <span style={{ width: pct(free), background: 'var(--surface-2)' }} />
         </div>
         <div className="disk-legend">
-          <span><i style={{ background: 'var(--green)' }} />Models, caches &amp; runtimes · {formatBytes(managed)}</span>
+          <span><i style={{ background: 'var(--ink)' }} />Models, caches &amp; runtimes · {formatBytes(managed)}</span>
           <span><i style={{ background: 'var(--line-strong)' }} />Everything else · {formatBytes(otherUsed)}</span>
           <span><i style={{ background: 'var(--surface-2)', border: '1px solid var(--line-strong)' }} />Free · {formatBytes(free)}</span>
         </div>

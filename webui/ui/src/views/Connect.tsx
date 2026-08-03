@@ -170,7 +170,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
             aria-label="New key name"
             required
             maxLength={64}
-            style={{ flex: 1, background: 'var(--surface-2)', color: 'var(--text)', border: '1px solid var(--line-strong)', borderRadius: 8, padding: '8px 12px' }}
+            style={{ flex: 1, background: 'var(--surface-2)', color: 'var(--ink)', border: '1px solid var(--line-strong)', borderRadius: 8, padding: '8px 12px' }}
           />
           <button className="primary">Create key</button>
         </form>
