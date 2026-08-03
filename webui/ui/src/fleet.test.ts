@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { adoptedName, rankCandidates, type FleetCandidate } from './api'
+import { adoptedName, bareHost, rankCandidates, type FleetCandidate } from './api'
 
 const candidate = (name: string, extra: Partial<FleetCandidate> = {}): FleetCandidate => ({
   name,
@@ -28,6 +28,26 @@ describe('rankCandidates', () => {
     const found = [candidate('b', { gb10_hint: true }), candidate('a', { gb10_hint: true })]
     expect(rankCandidates(found).map(entry => entry.name)).toEqual(['b', 'a'])
     expect(found.map(entry => entry.name)).toEqual(['b', 'a'])
+  })
+})
+
+describe('bareHost', () => {
+  it('leaves a host the sweep already answered with alone', () => {
+    expect(bareHost('spark-worker.local')).toBe('spark-worker.local')
+    expect(bareHost('192.168.99.137')).toBe('192.168.99.137')
+    expect(bareHost('  spark-worker.local  ')).toBe('spark-worker.local')
+  })
+
+  it('drops a scheme, a port, a path and any credentials', () => {
+    expect(bareHost('http://spark-worker.local:7070')).toBe('spark-worker.local')
+    expect(bareHost('https://user:secret@spark-worker.local:7070/console')).toBe('spark-worker.local')
+    expect(bareHost('spark-worker.local:7070')).toBe('spark-worker.local')
+    expect(bareHost('spark-worker.local/console?x=1')).toBe('spark-worker.local')
+  })
+
+  it('keeps an IPv6 literal whole', () => {
+    expect(bareHost('http://[fe80::1]:7070')).toBe('[fe80::1]')
+    expect(bareHost('fe80::1')).toBe('fe80::1')
   })
 })
 

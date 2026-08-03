@@ -343,6 +343,15 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 
 .install-choice { display: grid; gap: 8px; }
 .dialog-form { display: grid; gap: 14px; }
+.field small { font-size: 11.5px; }
+/* The pairing token is typed into the other console, so it wraps in full
+   rather than scrolling out of sight. */
+.snippet.token { padding: 12px 14px; }
+.snippet.token pre { padding-right: 62px; }
+.snippet.token code {
+  font-family: var(--mono); font-size: 13px; letter-spacing: 0.02em;
+  user-select: all; overflow-wrap: anywhere; white-space: pre-wrap;
+}
 .dialog-note { margin: 0; font-size: 12.5px; }
 .dialog-foot .lead { margin-right: auto; }
 .done-line { margin: 0; font-size: 14.5px; }

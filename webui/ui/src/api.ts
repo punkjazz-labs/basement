@@ -179,11 +179,13 @@ export interface FleetCandidate {
   basement: { base_url: string } | null
 }
 
-// One line of the adoption run, as the manager stored it. state is
-// pending | running | done | failed; detail is the sentence to show when
-// there is one.
+// One line of the adoption run, as the manager stored it. The six keys are
+// connect, verify, install, start, pair and peer, always all six and always
+// in that order; key is what logic reads and label is what a person reads,
+// so the wording stays the backend's to change.
 export interface AdoptStep {
-  name: string
+  key: string
+  label: string
   state: string
   detail?: string
 }
@@ -192,15 +194,24 @@ export interface AdoptResult {
   // The adopted Spark, as either the stored peer or just its name.
   peer?: Peer | string
   console_url?: string
-  // The link that pairs this browser with the new Spark's console. This is
-  // the one a person should follow; console_url alone lands unpaired.
+  alt_url?: string
+  // Where the new Spark's console asks for the pairing token. It has no
+  // token-in-URL form, so the owner types the token into the page.
   owner_pairing_url?: string
+  // A durable shared secret, not a one-shot code. It is shown so it can be
+  // copied and typed, and it never travels in a link from here.
+  owner_pairing_token?: string
 }
 
 export interface AdoptStatus {
-  running: boolean
-  step?: string
+  state: 'idle' | 'running' | 'succeeded' | 'failed' | string
+  address?: string
+  started_at?: string
+  finished_at?: string
   steps?: AdoptStep[]
+  // Extra lines the run wrote as it went. The most recent one is the only
+  // one the console shows.
+  progress?: string[]
   error?: string
   result?: AdoptResult
 }
@@ -217,6 +228,28 @@ export const rankCandidates = (candidates: FleetCandidate[]): FleetCandidate[] =
 export const adoptedName = (result?: AdoptResult): string => {
   if (typeof result?.peer === 'string') return result.peer
   return result?.peer?.name ?? ''
+}
+
+// Adoption takes a bare host: no scheme, no port, no path. The sweep already
+// answers with one, so this only guards what a person or a prefill could
+// hand over. An IPv6 literal in brackets keeps its colons; a bare one is
+// left alone rather than cut at its first colon.
+export function bareHost(value: string): string {
+  let host = value.trim()
+  const scheme = host.indexOf('://')
+  if (scheme !== -1) host = host.slice(scheme + 3)
+  const credentials = host.lastIndexOf('@')
+  if (credentials !== -1) host = host.slice(credentials + 1)
+  host = host.split('/')[0].split('?')[0].split('#')[0]
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']')
+    return end === -1 ? host : host.slice(0, end + 1)
+  }
+  const port = host.indexOf(':')
+  if (port === -1) return host
+  // Two or more colons and no brackets: an unbracketed IPv6 literal, which
+  // has no port to strip.
+  return host.indexOf(':', port + 1) === -1 ? host.slice(0, port) : host
 }
 
 // A merged read of a peer's own system/models/telemetry endpoints. Any of

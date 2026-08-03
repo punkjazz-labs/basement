@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
-  adoptedName, api, copyText, formatBytes, rankCandidates,
+  adoptedName, api, bareHost, copyText, formatBytes, rankCandidates,
   type AdoptStatus, type FleetCandidate, type Peer, type PeerSummary,
 } from '../api'
 import type { AppState } from '../App'
@@ -50,6 +50,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const [adoptError, setAdoptError] = useState('')
   const [starting, setStarting] = useState(false)
   const [status, setStatus] = useState<AdoptStatus | null>(null)
+  const [tokenCopied, setTokenCopied] = useState(false)
   const findRef = useRef<HTMLDialogElement>(null)
   // A sweep cannot be cancelled once it is out, so its answer is dropped if
   // the dialog moved on while it was in flight.
@@ -123,12 +124,13 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     setPassword('')
     setAdoptError('')
     setStatus(null)
+    setTokenCopied(false)
     findRef.current?.showModal()
     // A setup started earlier and still running owns this dialog: show it
     // instead of a scan whose results could not be acted on anyway.
     try {
       const current = await api<AdoptStatus>('/api/v1/fleet/adopt/status')
-      if (current.running) {
+      if (current.state === 'running') {
         setStatus(current)
         setStage('progress')
         return
@@ -157,11 +159,13 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     setStarting(true)
     setAdoptError('')
     try {
-      await api('/api/v1/fleet/adopt', {
+      // The 202 carries the first status snapshot, so the step list is on
+      // screen before the first poll comes back.
+      const snapshot = await api<AdoptStatus>('/api/v1/fleet/adopt', {
         method: 'POST',
-        body: JSON.stringify({ address: target.address, username, password }),
+        body: JSON.stringify({ address: bareHost(target.address), username, password }),
       })
-      setStatus(null)
+      setStatus(snapshot)
       setStage('progress')
     } catch (problem) {
       setAdoptError(problem instanceof Error ? problem.message : 'Could not start the setup')
@@ -183,13 +187,14 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
         const next = await api<AdoptStatus>('/api/v1/fleet/adopt/status')
         if (cancelled) return
         setStatus(next)
-        if (next.running) return
-        if (next.result) {
+        if (next.state === 'succeeded') {
           await refreshPeers()
           if (!cancelled) setStage('done')
           return
         }
-        if (next.error || (next.steps ?? []).some(step => step.state === 'failed')) setStage('failed')
+        // Only succeeded and failed are terminal. An idle answer means the
+        // manager has not recorded the run yet, so ask again.
+        if (next.state === 'failed') setStage('failed')
       } catch {
         /* the next tick asks again */
       }
@@ -201,6 +206,18 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
       clearInterval(timer)
     }
   }, [stage, refreshPeers])
+
+  const copyToken = async () => {
+    const token = status?.result?.owner_pairing_token
+    if (!token) return
+    try {
+      await copyText(token)
+      setTokenCopied(true)
+      setTimeout(() => setTokenCopied(false), 1600)
+    } catch {
+      /* the token is on screen and can still be selected by hand */
+    }
+  }
 
   const copyCommand = async () => {
     try {
@@ -265,6 +282,9 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const thisRecipe = recipes.find(recipe => recipe.id === thisModel?.recipe_id)
   const adoptSteps = status?.steps ?? []
   const failedStep = adoptSteps.find(step => step.state === 'failed')
+  const progress = status?.progress ?? []
+  const latestProgress = progress.length > 0 ? progress[progress.length - 1] : ''
+  const setupHost = status?.address || (target ? bareHost(target.address) : '')
   const result = status?.result
   const newName = adoptedName(result) || target?.name || 'Your second Spark'
   // Only claimed when the catalog actually carries a two-Spark recipe.
@@ -544,7 +564,8 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
               </p>
               <label className="field">
                 <span>Address</span>
-                <input type="text" readOnly value={target?.address ?? ''} />
+                <input type="text" readOnly value={target ? bareHost(target.address) : ''} />
+                <small className="faint">Just the host. Basement brings its own port.</small>
               </label>
               <label className="field">
                 <span>Username on that Spark</span>
@@ -577,21 +598,26 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
 
           {(stage === 'progress' || stage === 'failed') && (
             <>
-              {target && <p className="faint dialog-note">{target.address}</p>}
+              {setupHost && <p className="faint dialog-note">{setupHost}</p>}
               {adoptSteps.length === 0 ? (
-                <p className="thinking">{status?.step || 'Starting'}</p>
+                <p className="thinking">Starting</p>
               ) : (
                 <ol className="phase-list">
-                  {adoptSteps.map((step, index) => (
-                    <li key={`${index}:${step.name}`} className={STEP_CLASS[step.state] ?? 'pending'}>
-                      <i aria-hidden="true" />
-                      <div>
-                        <strong>{step.name}</strong>
-                        {step.detail && <span>{step.detail}</span>}
-                      </div>
-                      <b>{STEP_WORD[step.state] ?? step.state}</b>
-                    </li>
-                  ))}
+                  {adoptSteps.map(step => {
+                    // A step's own detail wins; the running one borrows the
+                    // latest progress line when it has nothing of its own.
+                    const line = step.detail || (step.state === 'running' ? latestProgress : '')
+                    return (
+                      <li key={step.key} className={STEP_CLASS[step.state] ?? 'pending'}>
+                        <i aria-hidden="true" />
+                        <div>
+                          <strong>{step.label}</strong>
+                          {line && <span>{line}</span>}
+                        </div>
+                        <b>{STEP_WORD[step.state] ?? step.state}</b>
+                      </li>
+                    )
+                  })}
                 </ol>
               )}
               {/* The failed step already carries its sentence; only say it
@@ -615,6 +641,18 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
           {stage === 'done' && (
             <>
               <p className="done-line">{newName} is part of your basement now.</p>
+              {result?.owner_pairing_token && (
+                <>
+                  <p className="muted dialog-note">
+                    Its console will ask for this pairing token the first time you open it. Type it in there.
+                  </p>
+                  <div className="snippet token">
+                    <button type="button" className="ghost copy" onClick={copyToken}>{tokenCopied ? 'Copied' : 'Copy'}</button>
+                    <pre><code>{result.owner_pairing_token}</code></pre>
+                  </div>
+                  <p className="faint dialog-note">It stays valid after that, so keep it like a password.</p>
+                </>
+              )}
               <p className="muted dialog-note">The fleet table shows what it is serving.</p>
               {hasTwoSparkRecipe && (
                 <p className="faint dialog-note">Models that need two Sparks can be installed now. They are on the Models tab.</p>
