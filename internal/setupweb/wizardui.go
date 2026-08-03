@@ -64,6 +64,13 @@ func (s *Server) Confirm(prompt string) (bool, error) {
 	return body.Proceed, nil
 }
 
+// ConfirmAlways is the same yes/no card as Confirm. The distinction the
+// interface draws — a question a --yes flag may not answer — has no meaning
+// in the browser wizard, which has no flags and always asks.
+func (s *Server) ConfirmAlways(prompt string) (bool, error) {
+	return s.Confirm(prompt)
+}
+
 func (s *Server) ChooseMachine(candidates []discovery.Candidate) (int, error) {
 	views := make([]candidateView, len(candidates))
 	for index, candidate := range candidates {
@@ -154,15 +161,25 @@ func (s *Server) Progress(line string) {
 	s.mu.Unlock()
 }
 
+// Summary appends one finished machine's card. A run that sets up two
+// Sparks calls it twice and the page shows both.
 func (s *Server) Summary(result setup.InstallResult) {
 	s.mu.Lock()
 	s.state.Phase = "summary"
-	s.state.Summary = &summaryView{
+	s.state.Summaries = append(s.state.Summaries, summaryView{
 		ConsoleURL: result.ConsoleURL,
 		AltURL:     result.AltURL,
 		Token:      result.Token,
 		Loopback:   result.Loopback,
-	}
+	})
+	s.state.Seq++
+	s.mu.Unlock()
+}
+
+func (s *Server) NextSteps(lines []string) {
+	s.mu.Lock()
+	s.state.Phase = "summary"
+	s.state.NextSteps = lines
 	s.state.Seq++
 	s.mu.Unlock()
 }

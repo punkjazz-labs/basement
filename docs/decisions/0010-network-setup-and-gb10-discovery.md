@@ -73,6 +73,26 @@ signing them is ADR 0008's follow-up.
   **changed** key is a hard failure, never re-promptable.
 - sudo: passwordless probed first; otherwise prompted once per session.
 
+### More than one machine per run
+
+Owners of two Sparks should not have to run the installer twice and then
+work out what to do next. After the chosen machine is installed, setup
+offers the other **GB10-class** candidates from the same sweep, one at a
+time, and each accepted machine goes through the identical path: username,
+SSH connection, GB10 identity confirmation, listen choice, install, card.
+The offer is a question that `--yes` may not answer (`WizardUI.ConfirmAlways`):
+on a shared network the machine next door can be somebody else's. A machine
+that fails is reported and skipped; the machines already installed keep
+their result. Candidates whose hostname carries no vendor hint are never
+offered, only ever chosen deliberately from the picker.
+
+Pairing stays manual. The run ends by printing each console's address and
+the three console steps that join them (API key on the worker's Connect
+tab, Add a Spark on the head's Fleet tab, then two-Spark models become
+installable). Automatic key exchange is ADR 0005 and is deliberately not
+improvised here. A single-machine run that saw another GB10-class machine
+says where the same path starts.
+
 ### Fleet groundwork
 
 Non-selected discovered machines are recorded on the master as

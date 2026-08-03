@@ -28,6 +28,18 @@ installs over SSH with your existing credentials (nothing is stored), and
 opens the paired console in your browser. Run it on the machine itself and
 it installs locally instead.
 
+Two Sparks are one run, not two. If the sweep found another GB10-class
+machine, the installer offers to set that one up as well, asking once per
+machine and connecting to nothing you did not say yes to. When it has set
+up two machines it prints both console addresses and the three steps that
+pair them, which you follow in the console (see Multi-Spark below). If a
+second machine cannot be installed, the first one keeps its result: it is
+already running.
+
+Running the installer again on a machine that already has basement is also
+how you update it. It replaces the binary and the service file and restarts
+the service; your models, API keys, jobs and settings stay where they are.
+
 ## What you get
 
 - A console. Pick a model, click Install, watch every step complete with
@@ -162,14 +174,24 @@ family is vLLM. No single runtime covers the frontier anymore.
 
 ## Multi-Spark
 
-The resource evaluator already requires every node of a multi-Spark
-recipe to pass independently, and recipes declare their topology
-(`spark_count`). Distributed execution itself is not in the current
-release: secure paired-node discovery and placement are specified in
+Two Sparks are paired by hand, in the console. The installer can set both
+machines up in one run, but it never exchanges credentials for you: you
+create an API key on the second Spark's Connect tab, then add that Spark on
+the first one under Fleet, with its console URL and that key. Pairing codes
+and mutual authentication are specified in
 [`docs/decisions/0005`](docs/decisions/0005-automatic-discovery-and-placement.md)
-and are the gate for two-Spark flagships such as DeepSeek V4 Flash NVFP4
-and Inkling-Small. The console derives hardware context from manager
-inventory; the current release detects the local managed node.
+and are not built, so the manual step is the whole story today.
+
+Once paired, the Fleet tab shows every Spark you have added and what each
+one is serving. A recipe that declares two Sparks (`spark_count`) plans
+across exactly two nodes: this manager as the head and the single added
+peer as the worker. Each node runs its own preflight and has to pass on its
+own; the head refuses to start a distributed model when no peer is
+configured, when more than one is, or when the recipe does not describe the
+interconnect. That is the whole supported topology: a head and one worker.
+No two-Spark recipe has completed the qualification protocol on real
+hardware yet, so the path is built but unproven, like every other candidate
+in the pack.
 
 ## Development
 

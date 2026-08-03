@@ -135,17 +135,17 @@ func (s *Server) run(ctx context.Context) {
 	s.flowCtx = ctx
 	defer s.markFinished()
 
-	target, peers, err := setup.DiscoverAndChoose(ctx, s)
+	found, err := setup.DiscoverAndChoose(ctx, s)
 	if err != nil {
 		s.fail(err)
 		return
 	}
-	username, err := setup.ResolveUsername(s, target, setup.DefaultSSHUser())
+	username, err := setup.ResolveUsername(s, found.Target, setup.DefaultSSHUser())
 	if err != nil {
 		s.fail(err)
 		return
 	}
-	runner, err := setup.ConnectAndVerify(ctx, s, target, username)
+	runner, err := setup.ConnectAndVerify(ctx, s, found.Target, username)
 	if err != nil {
 		s.fail(err)
 		return
@@ -157,15 +157,26 @@ func (s *Server) run(ctx context.Context) {
 	// windows) — so remote is always true, and PickSource("") resolves to a
 	// release download on the target since this process is never
 	// linux/arm64.
-	if _, err := setup.FinishInstall(ctx, s, runner, setup.PickSource(""), peers, true); err != nil {
+	source := setup.PickSource("")
+	result, err := setup.FinishInstall(ctx, s, runner, source, found.Peers, true)
+	if err != nil {
 		s.fail(err)
 		return
 	}
+	// Same guided second machine as the terminal wizard, through the same
+	// questions: the page needs no new phase for it.
+	setup.InstallMore(ctx, s, setup.Machine{Target: found.Target, Result: result}, found.Offer, source, username)
 }
 
+// markFinished records that the flow is over. The page keys its polling off
+// Done rather than off the first summary: a run can install a second machine
+// after the first machine's card, so a summary is not the end of anything
+// until this says so.
 func (s *Server) markFinished() {
 	s.mu.Lock()
 	s.finished = true
+	s.state.Done = true
+	s.state.Seq++
 	s.mu.Unlock()
 	go func() {
 		<-time.After(idleAfterFinish)

@@ -57,15 +57,17 @@ func runSetup(args []string) int {
 				fmt.Fprintf(os.Stderr, "%s cannot locate this binary: %v\n", paint.red("✗"), err)
 				return 1
 			}
-			return ui.finishInstall(ctx, local, setup.LocalFileSource{Path: executable}, nil, false)
+			if _, err := ui.finishInstall(ctx, local, setup.LocalFileSource{Path: executable}, nil, false); err != nil {
+				return 1
+			}
+			return 0
 		}
 	}
 
 	// Otherwise: find the machines and install over SSH.
-	target := *host
-	var peers []string
-	if target == "" {
-		chosen, discoveredPeers, err := setup.DiscoverAndChoose(ctx, ui)
+	found := setup.Discovered{Target: *host}
+	if found.Target == "" {
+		discovered, err := setup.DiscoverAndChoose(ctx, ui)
 		if err != nil {
 			if errors.Is(err, setup.ErrDeclined) {
 				return 1
@@ -73,8 +75,9 @@ func runSetup(args []string) int {
 			fmt.Fprintf(os.Stderr, "%s %v\n", paint.red("✗"), err)
 			return 1
 		}
-		target, peers = chosen, discoveredPeers
+		found = discovered
 	}
+	target := found.Target
 
 	// The account on the GB10 machine is whatever its owner created during
 	// first boot (often not the operator's local username), so always ask —
@@ -100,7 +103,16 @@ func runSetup(args []string) int {
 	}
 	defer runner.Close()
 
-	return ui.finishInstall(ctx, runner, setup.PickSource(*binary), peers, true)
+	source := setup.PickSource(*binary)
+	result, err := ui.finishInstall(ctx, runner, source, found.Peers, true)
+	if err != nil {
+		return 1
+	}
+	// Owners of two Sparks should not have to run the installer twice: the
+	// other GB10-class machines the sweep found are offered here, one at a
+	// time, in the same run.
+	setup.InstallMore(ctx, ui, setup.Machine{Target: target, Result: result}, found.Offer, source, *sshUser)
+	return 0
 }
 
 // terminalUI is the terminal implementation of setup.WizardUI: every prompt
@@ -110,6 +122,23 @@ type terminalUI struct {
 	*terminalPrompter
 	paint      style
 	listenFlag string
+}
+
+var _ setup.WizardUI = (*terminalUI)(nil)
+
+// ConfirmAlways always puts the question to the operator, even under --yes.
+// The only thing it is asked for is whether to install on another machine
+// discovery turned up, and that must never be answered by a flag: on a
+// shared network the machine next door is somebody else's. With no terminal
+// to ask on, the read fails and the flow takes that as "no".
+func (u *terminalUI) ConfirmAlways(prompt string) (bool, error) {
+	fmt.Println()
+	answer, err := u.ask(u.paint.bold(prompt) + " [y/N]: ")
+	if err != nil {
+		return false, err
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	return answer == "y" || answer == "yes", nil
 }
 
 func (u *terminalUI) ChooseMachine(candidates []discovery.Candidate) (int, error) {
@@ -220,7 +249,14 @@ func (u *terminalUI) ChooseListen(remote bool) (setup.ListenMode, error) {
 	}
 }
 
+// Progress prints status dim, except a failure the flow chose to carry on
+// from (a machine that could not be set up): that one is not a detail to
+// skim past.
 func (u *terminalUI) Progress(line string) {
+	if strings.HasPrefix(line, "✗") {
+		fmt.Println(u.paint.red(line))
+		return
+	}
 	fmt.Println(u.paint.dim(line))
 }
 
@@ -247,19 +283,43 @@ func (u *terminalUI) Summary(result setup.InstallResult) {
 	fmt.Println(rule)
 }
 
+// NextSteps prints the closing guidance under the last machine's card, in
+// the same plain voice: the headline, then the steps, indented to line up
+// with the summary's values.
+func (u *terminalUI) NextSteps(lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Printf("  %s\n", u.paint.bold(lines[0]))
+	if len(lines) > 1 {
+		fmt.Println()
+	}
+	for _, line := range lines[1:] {
+		if line == "" {
+			fmt.Println()
+			continue
+		}
+		fmt.Println("    " + line)
+	}
+	fmt.Println()
+}
+
 // finishInstall runs the shared install tail (setup.FinishInstall) and adds
 // the one piece that is genuinely terminal-only: opening the operator's
-// browser at the finished console once it is reachable from outside.
-func (u *terminalUI) finishInstall(ctx context.Context, runner setup.Runner, source setup.BinarySource, peers []string, remote bool) int {
+// browser at the finished console once it is reachable from outside. The
+// error is already reported when it returns one; callers only decide the
+// exit code.
+func (u *terminalUI) finishInstall(ctx context.Context, runner setup.Runner, source setup.BinarySource, peers []string, remote bool) (setup.InstallResult, error) {
 	result, err := setup.FinishInstall(ctx, u, runner, source, peers, remote)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %v\n", u.paint.red("✗"), err)
-		return 1
+		return setup.InstallResult{}, err
 	}
 	if !result.Loopback {
 		openBrowser(result.ConsoleURL, u.paint)
 	}
-	return 0
+	return result, nil
 }
 
 func openBrowser(url string, paint style) {

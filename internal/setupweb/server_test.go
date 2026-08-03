@@ -391,12 +391,79 @@ func TestChooseListenMapsModeString(t *testing.T) {
 	}
 }
 
-func TestProgressAccumulatesAndSummaryEndsThePolledState(t *testing.T) {
+func TestProgressAccumulatesAndSummaryReachesThePolledState(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.Progress("uploading manager binary")
 	s.Progress("starting service")
 	s.Summary(setup.InstallResult{ConsoleURL: "http://192.168.99.134:7070", Token: "PAIR-000000"})
 
+	got := fetchState(t, s)
+	if got.Phase != "summary" {
+		t.Errorf("Phase = %q, want summary", got.Phase)
+	}
+	if len(got.Progress) != 2 {
+		t.Errorf("Progress = %v, want 2 accumulated lines", got.Progress)
+	}
+	if len(got.Summaries) != 1 || got.Summaries[0].Token != "PAIR-000000" {
+		t.Errorf("Summaries = %+v", got.Summaries)
+	}
+	if got.Done {
+		t.Error("Done must stay false until the flow itself ends")
+	}
+}
+
+// The second machine's questions arrive after the first machine's card, so a
+// summary must not be the end of the state machine: another question can
+// still be published, answered, and followed by a second card.
+func TestAQuestionCanFollowASummary(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.Summary(setup.InstallResult{ConsoleURL: "http://192.168.99.134:7070", Token: "PAIR-000000"})
+
+	answered := make(chan bool, 1)
+	go func() {
+		proceed, err := s.ConfirmAlways("Set up spark-worker as well?")
+		if err != nil {
+			t.Error(err)
+		}
+		answered <- proceed
+	}()
+	waitForPending(t, s, "confirm")
+	if got := fetchState(t, s); got.Phase != "confirm" {
+		t.Errorf("Phase = %q, want the pending question to take over from the card", got.Phase)
+	}
+
+	resp := postAnswer(t, s, `{"kind":"confirm","proceed":true}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	select {
+	case proceed := <-answered:
+		if !proceed {
+			t.Error("ConfirmAlways = false, want the posted answer")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ConfirmAlways never returned")
+	}
+
+	s.Summary(setup.InstallResult{ConsoleURL: "http://192.168.99.137:7070", Token: "PAIR-111111"})
+	s.NextSteps([]string{"Next: pair them, so models that need two Sparks can run."})
+	s.markFinished()
+
+	got := fetchState(t, s)
+	if len(got.Summaries) != 2 {
+		t.Errorf("Summaries = %+v, want both machines", got.Summaries)
+	}
+	if len(got.NextSteps) != 1 {
+		t.Errorf("NextSteps = %v", got.NextSteps)
+	}
+	if !got.Done {
+		t.Error("Done = false after the flow ended; the page would poll forever")
+	}
+}
+
+func fetchState(t *testing.T, s *Server) stateView {
+	t.Helper()
 	resp, err := http.Get("http://" + s.addr + "/setup/" + s.token + "/api/state")
 	if err != nil {
 		t.Fatal(err)
@@ -406,15 +473,7 @@ func TestProgressAccumulatesAndSummaryEndsThePolledState(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Phase != "summary" {
-		t.Errorf("Phase = %q, want summary", got.Phase)
-	}
-	if len(got.Progress) != 2 {
-		t.Errorf("Progress = %v, want 2 accumulated lines", got.Progress)
-	}
-	if got.Summary == nil || got.Summary.Token != "PAIR-000000" {
-		t.Errorf("Summary = %+v", got.Summary)
-	}
+	return got
 }
 
 func TestRedactPathHidesTheToken(t *testing.T) {

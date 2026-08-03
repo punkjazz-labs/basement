@@ -14,8 +14,15 @@ type stateView struct {
 	Prompt     string          `json:"prompt,omitempty"`    // Password/Confirm: the exact prompt text (SSH may ask more than once)
 	Remote     bool            `json:"remote,omitempty"`    // ChooseListen: whether the target differs from this machine
 	Progress   []string        `json:"progress"`
-	Summary    *summaryView    `json:"summary,omitempty"`
-	Error      string          `json:"error,omitempty"`
+	// Summaries holds one entry per machine this run installed, in install
+	// order — a run can set up two Sparks, and the first machine's card must
+	// still be readable after the second one finishes.
+	Summaries []summaryView `json:"summaries,omitempty"`
+	NextSteps []string      `json:"nextSteps,omitempty"` // closing guidance, shown under the cards
+	Error     string        `json:"error,omitempty"`
+	// Done reports that the flow has ended, whatever the outcome. The page
+	// stops polling on it.
+	Done bool `json:"done,omitempty"`
 }
 
 // candidateView renders one discovery.Candidate for the page: display name,

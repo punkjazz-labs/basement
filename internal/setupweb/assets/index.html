@@ -119,6 +119,7 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--gr
 .summary-row .value { font-family: var(--mono); font-size: 12.5px; word-break: break-all; text-align: right; }
 .copy-btn { margin-left: 8px; }
 .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+.steps { display: grid; gap: 6px; color: var(--muted); font-size: 12.5px; }
 .error-text { color: var(--fail); font-size: 13px; white-space: pre-wrap; }
 </style>
 </head>
@@ -285,8 +286,7 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--gr
     ]));
   }
 
-  function renderSummary(state) {
-    var summary = state.summary || {};
+  function summaryCard(summary) {
     var rows = [
       ["Console", summary.consoleUrl, true]
     ];
@@ -309,13 +309,29 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--gr
     var note = summary.loopback
       ? el("div", { class: "note", text: "Loopback only — from another device use an SSH tunnel, or rerun setup and pick the Tailscale or local network option." })
       : null;
-    app.replaceChildren(el("div", { class: "card" }, [
+    return el("div", { class: "card" }, [
       el("h2", { text: "basement is running" }),
       el("div", { class: "sub" }, []),
       el("div", {}, rowEls),
       note
-    ]));
-    polling = false;
+    ]);
+  }
+
+  // A run can install more than one machine, so the page shows one card per
+  // finished machine plus the closing guidance, and keeps polling until the
+  // flow itself reports it is done.
+  function renderSummary(state) {
+    var cards = (state.summaries || []).map(summaryCard);
+    var steps = state.nextSteps || [];
+    if (steps.length) {
+      cards.push(el("div", { class: "card" }, [
+        el("h2", { text: steps[0] }),
+        el("div", { class: "steps" }, steps.slice(1).map(function (line) {
+          return el("div", { text: line });
+        }))
+      ]));
+    }
+    app.replaceChildren.apply(app, cards);
   }
 
   function renderError(state) {
@@ -371,6 +387,9 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--gr
           lastSeq = state.seq;
           render(state);
         }
+        // Only the flow reporting itself finished ends the polling: a
+        // summary card can be followed by another machine's questions.
+        if (state.done) polling = false;
         if (polling) setTimeout(poll, 1000);
       })
       .catch(function () {
