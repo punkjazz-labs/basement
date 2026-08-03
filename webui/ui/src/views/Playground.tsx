@@ -6,6 +6,7 @@ import { logoFor } from '../catalog'
 interface Message {
   role: 'user' | 'assistant'
   content: string
+  thinking?: string
 }
 
 // Thinking models sometimes leak reasoning into the text stream in two
@@ -20,6 +21,14 @@ const visibleText = (text: string) =>
     .replace(/<think>[\s\S]*?(?:<\/think>|$)/g, '')
     .replace(/^[\s\S]*?<\/think>\s*/, '')
     .replace(/^\s+/, '')
+
+// The reasoning a reply cost, whichever way it arrived: the reasoning_content
+// stream when the runtime parses it out, or the inline think block otherwise.
+const thinkingText = (message: Message) => {
+  const tagged = [...message.content.matchAll(/<think>([\s\S]*?)(?:<\/think>|$)/g)].map(m => m[1]).join('\n')
+  const bare = tagged ? '' : (message.content.match(/^([\s\S]*?)<\/think>/)?.[1] ?? '')
+  return [message.thinking, tagged || bare].filter(Boolean).join('\n').trim()
+}
 
 // Models speak markdown; render it, sanitized, so replies read like answers
 // rather than markup.
@@ -38,6 +47,7 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
   const [draft, setDraft] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [stats, setStats] = useState('')
+  const [showThinking, setShowThinking] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const chatRef = useRef<HTMLDivElement>(null)
 
@@ -50,9 +60,10 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
     const content = draft.trim()
     if (!content || streaming || !ready) return
     const history = [
-      ...messages.map(message =>
-        message.role === 'assistant' ? { ...message, content: visibleText(message.content) } : message,
-      ),
+      ...messages.map(message => ({
+        role: message.role,
+        content: message.role === 'assistant' ? visibleText(message.content) : message.content,
+      })),
       { role: 'user' as const, content },
     ]
     setMessages([...history, { role: 'assistant', content: '' }])
@@ -64,13 +75,19 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
     const started = performance.now()
     let firstToken = 0
     let chunks = 0
+    let completionTokens = 0
     try {
       const response = await fetch('/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // No token cap: thinking models spend freely before the visible answer,
         // and a cap cuts replies mid-sentence. The stop button is the limit.
-        body: JSON.stringify({ model: modelID, messages: history, stream: true }),
+        // The usage frame makes the meter count what the engine generated,
+        // thinking included — the same arithmetic as the model benchmark.
+        body: JSON.stringify({
+          model: modelID, messages: history, stream: true,
+          stream_options: { include_usage: true },
+        }),
         signal: controller.signal,
       })
       if (!response.ok || !response.body) {
@@ -93,15 +110,20 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
           if (payload === '[DONE]') continue
           try {
             const chunk = JSON.parse(payload)
-            const delta: string = chunk.choices?.[0]?.delta?.content ?? ''
-            if (delta) {
+            if (chunk.usage?.completion_tokens > 0) completionTokens = chunk.usage.completion_tokens
+            const delta = chunk.choices?.[0]?.delta
+            const text: string = delta?.content ?? ''
+            const thought: string = delta?.reasoning_content ?? delta?.reasoning ?? ''
+            if (text || thought) {
               if (!firstToken) firstToken = performance.now()
-              chunks += 1
+              if (text) chunks += 1
               setMessages(previous => {
                 const next = [...previous]
+                const current = next[next.length - 1]
                 next[next.length - 1] = {
                   role: 'assistant',
-                  content: next[next.length - 1].content + delta,
+                  content: current.content + text,
+                  thinking: thought ? (current.thinking ?? '') + thought : current.thinking,
                 }
                 return next
               })
@@ -113,8 +135,9 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
       }
       if (firstToken) {
         const generation = (performance.now() - firstToken) / 1000
-        const rate = generation > 0 ? (chunks / generation).toFixed(1) : 'n/a'
-        setStats(`${chunks} tokens · ${rate} tok/s · first token in ${Math.round(firstToken - started)} ms`)
+        const total = completionTokens || chunks
+        const rate = generation > 0 ? (total / generation).toFixed(1) : 'n/a'
+        setStats(`${total} tokens · ${rate} tok/s · first token in ${Math.round(firstToken - started)} ms`)
       }
     } catch (problem) {
       if ((problem as Error).name !== 'AbortError') {
@@ -150,6 +173,10 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
           <strong>{modelName}</strong>
           <div className="faint">Serving on this Spark, through your own endpoint</div>
         </div>
+        <label className="think-toggle">
+          <input type="checkbox" checked={showThinking} onChange={event => setShowThinking(event.target.checked)} />
+          Show thinking
+        </label>
       </div>
       <div className="chat card" ref={chatRef} aria-live="polite">
         {messages.length === 0 && (
@@ -161,9 +188,11 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
             return <div key={index} className="msg user">{message.content}</div>
           }
           const text = visibleText(message.content)
+          const thought = showThinking ? thinkingText(message) : ''
           const waiting = streaming && last && !text
           return (
             <div key={index} className={`msg assistant ${streaming && last ? 'streaming' : ''} ${waiting ? 'waiting' : ''}`}>
+              {thought && <div className="think-stream">{thought}</div>}
               {waiting
                 ? <span className="thinking">Thinking</span>
                 : <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />}

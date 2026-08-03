@@ -543,6 +543,16 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .storage-row .grow strong { font-weight: 600; }
 
 .play-head { align-items: center; gap: 12px; }
+.think-toggle {
+  margin-left: auto; display: flex; align-items: center; gap: 6px;
+  color: var(--faint); font-size: 12px; cursor: pointer; user-select: none;
+}
+.think-toggle:hover { color: var(--muted); }
+.think-toggle input { accent-color: var(--accent); margin: 0; }
+.msg .think-stream {
+  color: var(--faint); font-size: 12px; line-height: 1.6; white-space: pre-wrap;
+  border-left: 2px solid var(--line-strong); padding-left: 10px; margin-bottom: 10px;
+}
 .play-head img { border-radius: 8px; flex: none; }
 .play-head strong { font-size: 14px; font-weight: 600; display: block; }
 .play-head .faint { font-size: 12px; }
