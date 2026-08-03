@@ -5,7 +5,7 @@ import {
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
-import { LOGOS, readableWeights } from '../catalog'
+import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 
 const USE: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
@@ -19,8 +19,6 @@ const REFERENCE_TPS: Record<string, number> = {
   'qwen36-27b-nvfp4-1s': 33,
   'laguna-s-2-1-nvfp4-dflash-1s': 19.4,
 }
-const ORDER = ['qwen36-35b-a3b-nvfp4-1s', 'qwen36-27b-nvfp4-1s', 'laguna-s-2-1-nvfp4-dflash-1s']
-
 // How each runtime kind is written in a sentence. An unknown kind keeps the
 // recipe's own word rather than being renamed to something friendlier.
 const RUNTIME_NAME: Record<string, string> = { vllm: 'vLLM', sglang: 'SGLang' }
@@ -111,10 +109,7 @@ export default function Models({
   }, [peerSummary]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const installed = useMemo(() => new Map(models.map(model => [model.recipe_id, model])), [models])
-  const sorted = useMemo(
-    () => [...recipes].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id)),
-    [recipes],
-  )
+  const sorted = useMemo(() => sortCatalog(recipes), [recipes])
   const detected = system?.hardware_scope.detected_spark_count ?? 0
   // Every Spark this console can install on: the one it runs on, plus the
   // ones paired on the Fleet tab. Pairing a second Spark is what makes a
@@ -331,7 +326,7 @@ export default function Models({
     preflight.checks.find(check => !check.ok && check.operation === 'verify_disk')?.receipt?.reclaim_candidates
 
   const firstRun = models.length === 0
-  const featured = firstRun ? sorted.find(recipe => recipe.id === ORDER[0]) : undefined
+  const featured = firstRun ? sorted.find(recipe => recipe.id === RECOMMENDED_ID) : undefined
   const rows = featured ? sorted.filter(recipe => recipe.id !== featured.id) : sorted
   // Installed models are the user's own shelf; they always sit above the
   // remaining catalog, each group keeping the curated order.
@@ -394,7 +389,7 @@ export default function Models({
           <div className="m-id">
             <img src={LOGOS[recipe.id] ?? '/logos/nvidia.webp'} alt="" width="28" height="28" />
             <div>
-              <div className="nm">{recipe.display_name} {recipe.id === ORDER[0] && <span className="tag">Recommended</span>}</div>
+              <div className="nm">{recipe.display_name} {recipe.id === RECOMMENDED_ID && <span className="tag">Recommended</span>}</div>
               <div className="use">{USE[recipe.id] ?? 'Local model for your Spark.'}</div>
             </div>
           </div>

@@ -11,6 +11,44 @@ export const LOGOS: Record<string, string> = {
 export const logoFor = (recipeIDs: string[]): string =>
   LOGOS[recipeIDs[0]] ?? '/logos/nvidia.webp'
 
+// CURATED is the shelf basement puts its name to, in the order it means. It
+// holds only the recipes this console has written copy for (the USE lines and
+// reference speeds in Models.tsx), and its first entry is the recommendation
+// the hero makes.
+//
+// Every recipe outside it is real and installable, it simply has not been
+// written up, so it sorts after the curated ones rather than before them. It
+// used to sort before them by accident: indexOf returns -1 for an unlisted
+// id, and -1 sorts ahead of 0.
+export const CURATED = [
+  'qwen36-35b-a3b-nvfp4-1s',
+  'qwen36-27b-nvfp4-1s',
+  'laguna-s-2-1-nvfp4-dflash-1s',
+] as const
+
+export const RECOMMENDED_ID: string = CURATED[0]
+
+// The tail is ordered from the recipe's own data rather than from another
+// list that could fall out of date: models that run on one Spark before
+// models that need two, then alphabetically. Every shipped recipe today
+// declares the same trust and verification, so neither can order anything.
+interface Sortable {
+  id: string
+  display_name: string
+  topology: { spark_count: number }
+}
+
+export function sortCatalog<T extends Sortable>(recipes: readonly T[]): T[] {
+  const rank = (id: string) => {
+    const index = CURATED.indexOf(id as (typeof CURATED)[number])
+    return index === -1 ? CURATED.length : index
+  }
+  return [...recipes].sort((a, b) =>
+    rank(a.id) - rank(b.id) ||
+    a.topology.spark_count - b.topology.spark_count ||
+    a.display_name.localeCompare(b.display_name))
+}
+
 const QUANTS = new Set(['NVFP4', 'FP8', 'FP4', 'INT8', 'INT4', 'BF16', 'FP16', 'AWQ', 'GPTQ', 'GGUF'])
 const OWNERS: Record<string, string> = { nvidia: 'NVIDIA', poolside: 'poolside', unsloth: 'Unsloth', qwen: 'Qwen' }
 
