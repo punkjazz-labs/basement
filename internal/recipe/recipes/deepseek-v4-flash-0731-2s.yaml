@@ -1,8 +1,10 @@
 schema_version: 1
-id: deepseek-v4-flash-nvfp4-2s
-# The first two-Spark recipe: NVIDIA's official NVFP4 build of DeepSeek V4
-# Flash 0731 (168.3 GB, does not fit one 128 GB Spark), served with vLLM
-# TP=2 across two DGX Sparks cabled back to back with ConnectX-7.
+id: deepseek-v4-flash-0731-2s
+# The first two-Spark recipe: DeepSeek's official V4 Flash 0731 release
+# (166.9 GB, natively FP8 attention + FP4 experts, does not fit one 128 GB
+# Spark), served with vLLM TP=2 across two GB10 machines cabled back to
+# back with ConnectX-7. The NVIDIA NVFP4 repo was rejected on provenance:
+# it quantizes the April preview (last modified 2026-06-15), not 0731.
 #
 # Launch topology follows the community recipe that runs this exact
 # workload (tonyd2wild/Deepseek-v4-Flash-TP2-DGX-Spark-500k-CTX): plain
@@ -26,16 +28,16 @@ id: deepseek-v4-flash-nvfp4-2s
 # - memory_model omitted: TP=2 shards weights across nodes and the flat
 #   single-node formula would be wrong by construction.
 version: 1
-display_name: DeepSeek V4 Flash
-publisher: DeepSeek + NVIDIA
+display_name: DeepSeek V4 Flash 0731
+publisher: DeepSeek
 model_by: DeepSeek
 recipe_by: tonyd2wild (community launch topology)
 model_released: July 2026
 trust: basement-candidate
 verification: candidate
 source:
-  url: https://huggingface.co/nvidia/DeepSeek-V4-Flash-NVFP4
-  revision: e3cd60e7de98e9867116860d522499a728de1cf9
+  url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731
+  revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
 topology:
   spark_count: 2
   interconnect:
@@ -66,11 +68,11 @@ runtime:
   ipc_lock: true
 artifacts:
   - role: primary
-    repository: nvidia/DeepSeek-V4-Flash-NVFP4
-    revision: e3cd60e7de98e9867116860d522499a728de1cf9
-    expected_bytes: 168305308121
+    repository: deepseek-ai/DeepSeek-V4-Flash-0731
+    revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+    expected_bytes: 166898661074
     licence: MIT
-    licence_url: https://huggingface.co/nvidia/DeepSeek-V4-Flash-NVFP4/blob/e3cd60e7de98e9867116860d522499a728de1cf9/LICENSE
+    licence_url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/e3cd60e7de98e9867116860d522499a728de1cf9/LICENSE
 requirements:
   architecture: aarch64
   dgx_spark: true
@@ -84,7 +86,7 @@ requirements:
 service:
   internal_port: 8000
   default_host_port: 8000
-  served_model_id: nvidia/DeepSeek-V4-Flash-NVFP4
+  served_model_id: deepseek-ai/DeepSeek-V4-Flash-0731
   vllm:
     tensor_parallel_size: 2
     kv_cache_dtype: fp8
