@@ -93,11 +93,16 @@ type Requirements struct {
 	RequiredLicenceAccept bool     `yaml:"required_licence_acceptance" json:"required_licence_acceptance"`
 }
 
+// Service carries exactly one per-runtime block, and it must be the block
+// named by runtime.kind. A recipe that sets both, or neither, is rejected:
+// the command, memory model, health path and metric prefixes all follow from
+// the kind, so an ambiguous recipe has no single meaning.
 type Service struct {
-	InternalPort    int        `yaml:"internal_port" json:"internal_port"`
-	DefaultHostPort int        `yaml:"default_host_port" json:"default_host_port"`
-	ServedModelID   string     `yaml:"served_model_id" json:"served_model_id"`
-	VLLM            VLLMConfig `yaml:"vllm" json:"vllm"`
+	InternalPort    int           `yaml:"internal_port" json:"internal_port"`
+	DefaultHostPort int           `yaml:"default_host_port" json:"default_host_port"`
+	ServedModelID   string        `yaml:"served_model_id" json:"served_model_id"`
+	VLLM            *VLLMConfig   `yaml:"vllm,omitempty" json:"vllm,omitempty"`
+	SGLang          *SGLangConfig `yaml:"sglang,omitempty" json:"sglang,omitempty"`
 }
 
 type VLLMConfig struct {
@@ -126,6 +131,44 @@ type VLLMConfig struct {
 	AsyncScheduling      bool                `yaml:"async_scheduling" json:"async_scheduling"`
 	PrefixCaching        bool                `yaml:"prefix_caching" json:"prefix_caching"`
 	AutoToolChoice       bool                `yaml:"auto_tool_choice" json:"auto_tool_choice"`
+}
+
+// SGLangConfig mirrors the subset of sglang.launch_server arguments a recipe
+// is allowed to pin. Zero and empty fields are omitted from the command line,
+// leaving the runtime's own default in place.
+type SGLangConfig struct {
+	TensorParallelSize int `yaml:"tensor_parallel_size" json:"tensor_parallel_size"`
+	// MemFractionStatic stays a string for the same reason vLLM's
+	// gpu_memory_utilization does: the recipe's exact decimal reaches the
+	// runtime unrounded.
+	MemFractionStatic         string `yaml:"mem_fraction_static" json:"mem_fraction_static"`
+	ContextLength             int    `yaml:"context_length" json:"context_length"`
+	MaxRunningRequests        int    `yaml:"max_running_requests" json:"max_running_requests"`
+	Quantization              string `yaml:"quantization" json:"quantization"`
+	KVCacheDType              string `yaml:"kv_cache_dtype" json:"kv_cache_dtype"`
+	SpeculativeAlgorithm      string `yaml:"speculative_algorithm" json:"speculative_algorithm"`
+	SpeculativeNumDraftTokens int    `yaml:"speculative_num_draft_tokens" json:"speculative_num_draft_tokens"`
+	// SpeculativeModelRole names a declared non-primary artifact role; the
+	// draft model is served from that artifact's mount, never from a path the
+	// recipe writes by hand.
+	SpeculativeModelRole string `yaml:"speculative_model_role" json:"speculative_model_role"`
+	ChatTemplateFile     string `yaml:"chat_template_file" json:"chat_template_file"`
+	ToolCallParser       string `yaml:"tool_call_parser" json:"tool_call_parser"`
+	ReasoningParser      string `yaml:"reasoning_parser" json:"reasoning_parser"`
+	AttentionBackend     string `yaml:"attention_backend" json:"attention_backend"`
+}
+
+// MemoryFraction reports the device memory fraction the active runtime block
+// pins, as written in the recipe. The second result is false when the recipe
+// carries no block for the given kind.
+func (s Service) MemoryFraction(kind string) (string, bool) {
+	switch {
+	case kind == "vllm" && s.VLLM != nil:
+		return s.VLLM.GPUMemoryUtil, true
+	case kind == "sglang" && s.SGLang != nil:
+		return s.SGLang.MemFractionStatic, true
+	}
+	return "", false
 }
 
 type ChatTemplateOptions struct {

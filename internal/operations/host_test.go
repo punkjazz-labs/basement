@@ -40,6 +40,39 @@ func TestHostMemoryGuardChecksCapacityAndLiveHeadroom(t *testing.T) {
 	}
 }
 
+// The guardrail reads mem_fraction_static for SGLang the way it reads
+// gpu_memory_utilization for vLLM, and the receipt keeps the shared field
+// names so a reader does not need to know the kind to read it.
+func TestHostMemoryGuardIsKindAware(t *testing.T) {
+	r := sglangRecipe()
+	r.Topology.SparkCount = 1
+	r.Requirements.MinimumMemoryBytes = 120_000_000_000
+	r.Requirements.MemoryReserveBytes = 16_000_000_000
+	provider := resourceInventory{system: inventory.System{
+		Hostname: "spark-sglang", MemoryTotal: 128_000_000_000, MemoryAvailable: 120_000_000_000,
+		GPUMemoryTotal: 128_000_000_000, GPUMemoryFree: 120_000_000_000,
+	}}
+	executor := &HostExecutor{inventory: provider}
+	receipt, err := executor.verifyMemory(context.Background(), r, false)
+	if err != nil {
+		t.Fatalf("static capacity should pass: %v", err)
+	}
+	if receipt["runtime_kind"] != "sglang" || receipt["kv_cache_dtype"] != "fp8_e4m3" || receipt["max_model_len"] != 262144 || receipt["max_num_seqs"] != 8 {
+		t.Fatalf("sglang memory receipt=%#v", receipt)
+	}
+	// 0.85 of a 128 GB machine leaves less than the 16 GB reserve free, so
+	// the live check must refuse the start.
+	if _, err := executor.verifyMemory(context.Background(), r, true); err == nil {
+		t.Fatal("live headroom check passed on an overcommitted machine")
+	}
+	// A recipe whose kind has no service block is a build error, not a
+	// silently zero memory plan.
+	r.Service.SGLang = nil
+	if _, err := executor.verifyMemory(context.Background(), r, false); err == nil || !strings.Contains(err.Error(), "without its service block") {
+		t.Fatalf("verifyMemory()=%v, want a missing-block error", err)
+	}
+}
+
 func TestStartTimeoutFallsBackToTwentyMinutes(t *testing.T) {
 	cases := []struct {
 		minutes int

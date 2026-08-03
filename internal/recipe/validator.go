@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,10 @@ var (
 	revisionPattern   = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	imagePattern      = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$`)
+	// parserNamePattern admits an empty value and otherwise a plain token: the
+	// runtime resolves the name against its own parser registry, and this only
+	// guarantees the value cannot be read as another command-line option.
+	parserNamePattern = regexp.MustCompile(`^([a-z0-9][a-z0-9_.-]*)?$`)
 )
 
 var allowedOperations = map[string]bool{
@@ -76,8 +81,8 @@ func Validate(r Recipe) error {
 	if r.Topology.SparkCount != 1 {
 		problems = append(problems, "only one Spark is supported")
 	}
-	if r.Runtime.Kind != "vllm" {
-		problems = append(problems, "runtime kind must be vllm")
+	if !allowedRuntimeKinds[r.Runtime.Kind] {
+		problems = append(problems, "runtime kind must be one of: "+strings.Join(runtimeKindNames(), ", "))
 	}
 	if !imagePattern.MatchString(r.Runtime.Image) {
 		problems = append(problems, "runtime image must be a repository path without a tag")
@@ -161,13 +166,13 @@ func Validate(r Recipe) error {
 	if primaryIndex, ok := r.ArtifactIndex("primary"); ok && r.Service.ServedModelID != r.Artifacts[primaryIndex].Repository {
 		problems = append(problems, "served_model_id must identify the pinned primary artifact")
 	}
-	if err := validateVLLM(r.Service.VLLM, roles); err != nil {
-		problems = append(problems, err.Error())
-	}
-	if util, err := strconv.ParseFloat(r.Service.VLLM.GPUMemoryUtil, 64); err == nil && r.Requirements.MinimumMemoryBytes > 0 {
-		nominalHeadroom := int64(math.Floor(float64(r.Requirements.MinimumMemoryBytes) * (1 - util)))
-		if nominalHeadroom < r.Requirements.MemoryReserveBytes {
-			problems = append(problems, "vllm GPU utilization does not preserve the per-node memory reserve")
+	problems = append(problems, validateRuntimeBlocks(r, roles)...)
+	if fraction, ok := r.Service.MemoryFraction(r.Runtime.Kind); ok {
+		if util, err := strconv.ParseFloat(fraction, 64); err == nil && r.Requirements.MinimumMemoryBytes > 0 {
+			nominalHeadroom := int64(math.Floor(float64(r.Requirements.MinimumMemoryBytes) * (1 - util)))
+			if nominalHeadroom < r.Requirements.MemoryReserveBytes {
+				problems = append(problems, r.Runtime.Kind+" device memory fraction does not preserve the per-node memory reserve")
+			}
 		}
 	}
 	if len(r.Operations) == 0 || len(r.Uninstall) == 0 {
@@ -207,6 +212,52 @@ func operationSequenceEqual(operations []Operation, expected []string) bool {
 	return true
 }
 
+// allowedRuntimeKinds grows one kind at a time, and only once the manager can
+// build that runtime's command, memory model, health wait and metric mapping.
+var allowedRuntimeKinds = map[string]bool{"vllm": true, "sglang": true}
+
+func runtimeKindNames() []string {
+	names := make([]string, 0, len(allowedRuntimeKinds))
+	for kind := range allowedRuntimeKinds {
+		names = append(names, kind)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// validateRuntimeBlocks enforces the one-block rule and validates whichever
+// block the recipe declares, so a wrong-kind block still reports its own
+// content errors instead of hiding behind the kind mismatch.
+func validateRuntimeBlocks(r Recipe, roles map[string]bool) []string {
+	var problems []string
+	declared := make([]string, 0, 2)
+	if r.Service.VLLM != nil {
+		declared = append(declared, "service.vllm")
+	}
+	if r.Service.SGLang != nil {
+		declared = append(declared, "service.sglang")
+	}
+	switch {
+	case len(declared) == 0:
+		problems = append(problems, "service must declare exactly one runtime block: service.vllm or service.sglang")
+	case len(declared) > 1:
+		problems = append(problems, "service declares "+strings.Join(declared, " and ")+"; keep only the block that matches runtime.kind")
+	case allowedRuntimeKinds[r.Runtime.Kind] && declared[0] != "service."+r.Runtime.Kind:
+		problems = append(problems, "runtime kind "+r.Runtime.Kind+" requires service."+r.Runtime.Kind+", but the recipe declares "+declared[0])
+	}
+	if r.Service.VLLM != nil {
+		if err := validateVLLM(*r.Service.VLLM, roles); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if r.Service.SGLang != nil {
+		if err := validateSGLang(*r.Service.SGLang, roles); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	return problems
+}
+
 func validateVLLM(v VLLMConfig, roles map[string]bool) error {
 	if v.TensorParallelSize != 1 || v.MaxModelLen <= 0 || v.MaxNumSeqs <= 0 || v.MaxBatchedTokens < 0 || v.MultimodalImageLimit < 0 || v.MultimodalImageLimit > 8 {
 		return errors.New("vllm numeric settings are invalid")
@@ -243,14 +294,63 @@ func validateVLLM(v VLLMConfig, roles map[string]bool) error {
 	if v.SpeculativeMethod == "dflash" && (v.SpeculativeModelRole == "" || !roles[v.SpeculativeModelRole] || v.SpeculativeModelRole == "primary") {
 		return errors.New("DFlash must reference a declared non-primary artifact role")
 	}
-	if v.ChatTemplateFile != "" {
-		clean := path.Clean(v.ChatTemplateFile)
-		if filepath.IsAbs(v.ChatTemplateFile) || strings.Contains(v.ChatTemplateFile, "\\") || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-			return errors.New("chat template file is unsafe")
-		}
+	if err := validateChatTemplateFile(v.ChatTemplateFile); err != nil {
+		return err
 	}
 	if err := validateGeneration(v.Generation); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateSGLang mirrors the vLLM policy: every value a recipe pins is a
+// value the maintainers have seen work, and the list widens only when a
+// recipe is qualified. Choice lists come from sglang.launch_server's own
+// server arguments; the parser names are resolved by the runtime against its
+// registry, so they are checked as plain tokens instead of an invented list.
+func validateSGLang(s SGLangConfig, roles map[string]bool) error {
+	if s.TensorParallelSize != 1 || s.ContextLength <= 0 || s.MaxRunningRequests <= 0 {
+		return errors.New("sglang numeric settings are invalid")
+	}
+	allowed := map[string]map[string]bool{
+		"quantization": {"": true, "fp8": true, "modelopt": true, "modelopt_fp8": true, "modelopt_fp4": true, "nvfp4_online": true},
+		"kv":           {"": true, "auto": true, "fp8_e5m2": true, "fp8_e4m3": true, "bf16": true, "nvfp4": true},
+		"attention":    {"": true, "flashinfer": true, "triton": true, "torch_native": true, "fa3": true},
+		"spec":         {"": true, "EAGLE": true, "EAGLE3": true, "NEXTN": true, "STANDALONE": true, "NGRAM": true},
+	}
+	if !allowed["quantization"][s.Quantization] || !allowed["kv"][s.KVCacheDType] ||
+		!allowed["attention"][s.AttentionBackend] || !allowed["spec"][s.SpeculativeAlgorithm] {
+		return errors.New("sglang setting is outside the recipe policy")
+	}
+	if !parserNamePattern.MatchString(s.ToolCallParser) || !parserNamePattern.MatchString(s.ReasoningParser) {
+		return errors.New("sglang parser names must be plain lowercase identifiers")
+	}
+	fraction, err := strconv.ParseFloat(s.MemFractionStatic, 64)
+	if err != nil || fraction <= 0 || fraction > 0.95 {
+		return errors.New("sglang mem_fraction_static must be a decimal above 0 and no greater than 0.95")
+	}
+	if s.SpeculativeAlgorithm == "" && (s.SpeculativeNumDraftTokens != 0 || s.SpeculativeModelRole != "") {
+		return errors.New("sglang speculative settings require speculative_algorithm")
+	}
+	if s.SpeculativeAlgorithm != "" && (s.SpeculativeNumDraftTokens <= 0 || s.SpeculativeNumDraftTokens > 32) {
+		return errors.New("sglang speculative_num_draft_tokens must be between 1 and 32")
+	}
+	if s.SpeculativeModelRole != "" && (!roles[s.SpeculativeModelRole] || s.SpeculativeModelRole == "primary") {
+		return errors.New("sglang speculative_model_role must name a declared non-primary artifact role")
+	}
+	return validateChatTemplateFile(s.ChatTemplateFile)
+}
+
+// validateChatTemplateFile keeps the template inside the primary artifact
+// mount: the value is joined to that mount path, so an absolute or climbing
+// path would read a file the recipe never pinned.
+func validateChatTemplateFile(file string) error {
+	if file == "" {
+		return nil
+	}
+	clean := path.Clean(file)
+	if filepath.IsAbs(file) || strings.Contains(file, "\\") || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return errors.New("chat template file is unsafe")
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -636,5 +637,49 @@ func TestFetchPeerJSONRefusesRedirects(t *testing.T) {
 	}
 	if elsewhere != 0 {
 		t.Fatal("the redirect target was contacted")
+	}
+}
+
+// The sampler reads each runtime's own series names. SGLang publishes no
+// equivalent of vLLM's KV cache usage gauge, so that field stays absent
+// rather than defaulting to zero, and label sets must not defeat the match.
+func TestRuntimeMetricsSamplerIsKindAware(t *testing.T) {
+	exposition := map[string]string{
+		"vllm": "# HELP vllm:num_requests_running Running.\n" +
+			"vllm:num_requests_running{model_name=\"m\"} 3\n" +
+			"vllm:num_requests_waiting{model_name=\"m\"} 1\n" +
+			"vllm:gpu_cache_usage_perc{model_name=\"m\"} 0.5\n" +
+			"vllm:generation_tokens_total{model_name=\"m\"} 120\n",
+		"sglang": "# HELP sglang:num_running_reqs Running.\n" +
+			"sglang:num_running_reqs{model_name=\"m\",tp_rank=\"0\"} 3\n" +
+			"sglang:num_queue_reqs{model_name=\"m\",tp_rank=\"0\"} 1\n" +
+			"sglang:cache_hit_rate{model_name=\"m\",tp_rank=\"0\"} 0.9\n" +
+			"sglang:prompt_tokens_total{model_name=\"m\",tp_rank=\"0\"} 40\n" +
+			"sglang:generation_tokens_total{model_name=\"m\",tp_rank=\"0\"} 120\n",
+	}
+	for kind, body := range exposition {
+		t.Run(kind, func(t *testing.T) {
+			metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer metrics.Close()
+			port, err := strconv.Atoi(metrics.URL[strings.LastIndex(metrics.URL, ":")+1:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := &Server{metrics: metrics.Client()}
+			r := recipe.Recipe{Runtime: recipe.Runtime{Kind: kind}, Service: recipe.Service{DefaultHostPort: port}}
+			sample := server.runtimeMetrics(context.Background(), r)
+			if sample["requests_running"] != 3 || sample["requests_waiting"] != 1 || sample["generation_tokens_total"] != 120 {
+				t.Fatalf("%s sample=%#v", kind, sample)
+			}
+			if _, hasKV := sample["kv_cache_usage"]; hasKV != (kind == "vllm") {
+				t.Fatalf("%s kv_cache_usage present=%v", kind, hasKV)
+			}
+		})
+	}
+	server := &Server{metrics: &http.Client{}}
+	if sample := server.runtimeMetrics(context.Background(), recipe.Recipe{Runtime: recipe.Runtime{Kind: "llamacpp"}}); sample != nil {
+		t.Fatalf("unmapped kind sampled=%#v", sample)
 	}
 }
