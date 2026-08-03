@@ -34,7 +34,10 @@ RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=no
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK is how Linux enumerates network interfaces; without it the fleet
+# sweep cannot see the LAN at all. The empty capability set above keeps that
+# netlink socket read-only: changing links or routes needs CAP_NET_ADMIN.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadWritePaths=/var/lib/basement
 
 [Install]
