@@ -505,6 +505,16 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, errors.New("an API key may only trigger an install on this Spark"))
 			return
 		}
+		// The head that delegated this refuses two-Spark recipes too, but it
+		// decides that against its own catalogue. This machine is the one
+		// that would run the recipe, so this machine's reading of the
+		// topology is the one that governs, and catalogue skew between the
+		// two managers cannot turn into a distributed deployment nobody
+		// asked for (ADR 0013).
+		if selected.Distributed() {
+			writeError(w, http.StatusBadRequest, errors.New("a two-Spark model cannot be placed from another Spark, so install it from this Spark's own console"))
+			return
+		}
 	} else if err := s.auth.AuthorizeMutation(r); err != nil {
 		writeError(w, http.StatusForbidden, err)
 		return
@@ -565,8 +575,16 @@ func (s *Server) install(w http.ResponseWriter, r *http.Request, selected recipe
 		}
 	}
 	// Activate defaults to true, preserving the historical install-and-serve
-	// behaviour for callers that omit it.
+	// behaviour for callers that omit it. A delegated install is the one
+	// exception: a bearer key may put a model on this Spark, but silently
+	// switching what this Spark serves is the same authority that start and
+	// stop deny it, so an omitted field means install only. Saying
+	// activate: true is still honoured, because that is a placement the
+	// owner asked for on the other console, and the head always says it.
 	activate := request.Activate == nil || *request.Activate
+	if delegatedInstall(r) && request.Activate == nil {
+		activate = false
+	}
 	s.createJob(w, r, "install", selected, map[string]any{"confirmed": true, "activate": activate})
 }
 
@@ -1014,14 +1032,17 @@ func (s *Server) peerAction(w http.ResponseWriter, r *http.Request) {
 // has a path of its own, in which THIS manager is the head and drives the
 // peer's worker rank step by step (internal/httpapi/node.go); handing the
 // whole recipe to the peer as well would run it twice, once per machine.
-// The head must therefore know the recipe to answer at all: it reads its own
-// catalogue for the topology, while the peer stays authoritative about
-// everything else, including which version of that recipe it will install.
+//
+// This is an early, friendly refusal and not the guarantee: the peer applies
+// the same rule to the recipe it actually resolved, and that is the check
+// that governs. Precisely because this one is advisory it stays on the
+// effective catalogue only. Delegation always starts a fresh install, which
+// resolves the effective entry on the peer, and an older version of the same
+// id can carry a different topology, so answering from version history would
+// be a guess about a machine we do not own. An id this manager cannot
+// currently install itself gets the honest 400 below.
 func (s *Server) delegatableRecipe(recipeID string) (recipe.Recipe, error) {
 	selected, ok := recipe.Find(s.effectiveRecipes(), recipeID)
-	if !ok {
-		selected, ok = recipe.Find(s.allRecipes(), recipeID)
-	}
 	if !ok {
 		return recipe.Recipe{}, errors.New("this Spark does not have that model in its catalogue, so it cannot place it on another Spark")
 	}

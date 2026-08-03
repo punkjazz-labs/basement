@@ -70,6 +70,23 @@ must know the recipe, so it reads its own catalog for the topology and
 refuses ids it does not have. Everything else about the recipe, including
 which version gets installed, remains the peer's to decide.
 
+That head-side refusal is a courtesy, not the guarantee. It arrives early
+and in the console the owner is looking at, which is worth having, but it
+is an opinion formed from the head's catalog about a recipe another
+machine will resolve for itself. The peer applies the same rule to the
+recipe it actually resolved, and refuses a delegated install of a
+distributed recipe with a 400 of its own. Catalogs at different versions
+therefore cannot smuggle a two-Spark deployment onto one machine: the
+machine that would run it is the machine that decides.
+
+For the same reason the head reads only its effective catalog here, and
+not the version history it keeps for already-installed models. Delegation
+always starts a fresh install, which the peer resolves against its own
+effective entry, and an older version of an id can carry a different
+topology than the current one. Answering from history would be a guess
+about a machine we do not own, so an id the head cannot currently install
+itself gets the honest 400 it already had for unknown ids.
+
 The only fact the head speaks for is the network between the two
 machines. An unreachable peer, a truncated reply, or a reply that is not
 JSON becomes a 502 with a plain sentence. A peer that answers is relayed
@@ -89,6 +106,24 @@ endpoints. The scope is deliberately narrow:
   console-session-only. A key that leaks never becomes control over what
   a machine is serving right now, and never becomes a way to delete
   anything.
+
+Install is not quite as inert as it sounds, so the install body is scoped
+as well. An install can activate the model it just placed, which is a
+change to what the machine is serving, reached by a different door than
+start. A delegated install therefore defaults `activate` to false when the
+field is absent, where a console install still defaults it to true. An
+explicit `activate: true` is honoured, because that is a placement the
+owner asked for on the other console, and the head always states it.
+
+The honest summary of the bearer scope is this. A key holder can change
+what the peer serves, but only by explicitly asking to activate an
+install of a recipe that is already in the peer's own catalog, that
+passes the peer's own preflight, and whose licence the peer accepts. It
+is one narrow, auditable action that leaves a job in the peer's own store,
+not open control. Start and stop stay console-only because they are the
+general form of that power: they can switch to anything already on the
+machine, repeatedly, with no install to show for it, and nothing about
+delegated placement needs them.
 
 This is enforced in the auth wrapper, before the handler is entered, and
 checked a second time inside the handler for a request that arrived
@@ -121,4 +156,9 @@ require CSRF, unchanged.
 - Two managers can now disagree about the same recipe id if their
   catalogs are at different versions. That is correct rather than a bug:
   the peer installs what its own catalog says, and reports back what it
-  did.
+  did. The one thing that disagreement cannot do is widen what delegation
+  is allowed to place, because the single-Spark rule is enforced on the
+  peer against the recipe the peer resolved.
+- A model placed on the peer without an explicit `activate` lands
+  installed and not serving. The owner starts it from the peer's own
+  console, which is where start has always lived.

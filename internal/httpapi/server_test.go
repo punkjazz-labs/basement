@@ -650,6 +650,136 @@ func TestBearerKeyOnlyReachesInstallOnModelRoutes(t *testing.T) {
 	}
 }
 
+// TestDelegatedInstallActivatesOnlyWhenAskedExplicitly pins the rest of the
+// least-privilege rule (ADR 0013). A bearer key may put a model on this
+// Spark, but an install that says nothing about activation must not switch
+// what this machine is serving, because that is exactly the authority start
+// and stop deny the same key. A head console states the intent, so placing a
+// model and serving it right away still works, and a console install on this
+// machine keeps installing and serving in one step as it always did.
+func TestDelegatedInstallActivatesOnlyWhenAskedExplicitly(t *testing.T) {
+	server, cookies, csrf, secret := newAPIKey(t)
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := singleSpark(recipes).ID
+	bearer := func(key string) map[string]string {
+		return map[string]string{"Authorization": "Bearer " + secret, "Idempotency-Key": key}
+	}
+	cases := []struct {
+		name    string
+		body    string
+		cookies []*http.Cookie
+		headers map[string]string
+		want    bool
+	}{
+		{"delegated install that says nothing about activation", `{"confirmed":true,"accept_licence":true}`, nil, bearer("delegated-default"), false},
+		{"delegated install that asks to serve it now", `{"confirmed":true,"accept_licence":true,"activate":true}`, nil, bearer("delegated-explicit"), true},
+		{"console install that says nothing about activation", `{"confirmed":true,"accept_licence":true}`, cookies,
+			map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf, "Idempotency-Key": "console-default"}, true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+target+"/install", testCase.body, testCase.cookies, testCase.headers)
+			data, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			if response.StatusCode != http.StatusAccepted {
+				t.Fatalf("install status=%d body=%s", response.StatusCode, data)
+			}
+			var created struct {
+				Job struct {
+					Payload struct {
+						Confirmed bool `json:"confirmed"`
+						Activate  bool `json:"activate"`
+					} `json:"payload"`
+				} `json:"job"`
+			}
+			if err := json.Unmarshal(data, &created); err != nil {
+				t.Fatal(err)
+			}
+			if !created.Job.Payload.Confirmed {
+				t.Fatalf("install job was not created from the confirmed request: %s", data)
+			}
+			if created.Job.Payload.Activate != testCase.want {
+				t.Fatalf("job payload activate=%v want=%v: %s", created.Job.Payload.Activate, testCase.want, data)
+			}
+		})
+	}
+}
+
+// TestDelegatedInstallRefusesDistributedRecipe pins the authoritative half of
+// the single-Spark rule. The head refuses to delegate a two-Spark recipe too,
+// but it decides that against its own catalogue; if the two managers are at
+// different catalogue versions, the machine that would actually run the
+// recipe has to refuse it itself, or skew becomes a way to smuggle a
+// distributed deployment onto one Spark.
+func TestDelegatedInstallRefusesDistributedRecipe(t *testing.T) {
+	server, cookies, _, secret := newAPIKey(t)
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := distributedRecipe(recipes).ID
+	if target == "" {
+		t.Fatal("the builtin catalogue carries no two-Spark recipe")
+	}
+	response := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+target+"/install", `{"confirmed":true,"accept_licence":true,"activate":true}`,
+		nil, map[string]string{"Authorization": "Bearer " + secret, "Idempotency-Key": "delegated-two-spark"})
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&refusal); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("delegated two-Spark install status=%d, want 400: %q", response.StatusCode, refusal.Error)
+	}
+	if refusal.Error != "a two-Spark model cannot be placed from another Spark, so install it from this Spark's own console" {
+		t.Fatalf("unhelpful refusal: %q", refusal.Error)
+	}
+
+	// The refusal must land before anything is written, so no job exists for
+	// that recipe at all.
+	jobs := doRequest(t, http.MethodGet, server.URL+"/api/v1/jobs", "", cookies, nil)
+	jobsBody, _ := io.ReadAll(jobs.Body)
+	jobs.Body.Close()
+	if bytes.Contains(jobsBody, []byte(target)) {
+		t.Fatalf("a refused delegated install still created a job: %s", jobsBody)
+	}
+}
+
+// TestDelegatableRecipeReadsTheEffectiveCatalogOnly pins the head's side of
+// the same rule. Delegation always starts a fresh install, which the peer
+// resolves against its own effective catalogue, and an older version of an id
+// can carry a different topology, so answering from this manager's version
+// history would be a guess about another machine. An id this manager cannot
+// install itself is refused outright instead.
+func TestDelegatableRecipeReadsTheEffectiveCatalogOnly(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := singleSpark(recipes)
+	retired := current
+	retired.ID = "retired-single-spark"
+	s := &Server{}
+	s.SetRecipes(append(append([]recipe.Recipe{}, recipes...), retired), recipes)
+
+	if _, err := s.delegatableRecipe(current.ID); err != nil {
+		t.Fatalf("a catalogue recipe was refused: %v", err)
+	}
+	_, err = s.delegatableRecipe(retired.ID)
+	if err == nil || !strings.Contains(err.Error(), "does not have that model in its catalogue") {
+		t.Fatalf("history-only id error=%v, want the unknown-recipe refusal", err)
+	}
+	_, err = s.delegatableRecipe(distributedRecipe(recipes).ID)
+	if err == nil || !strings.Contains(err.Error(), "runs across 2 Sparks") {
+		t.Fatalf("two-Spark id error=%v, want the topology refusal", err)
+	}
+}
+
 // TestModelInstallRequestClassifier pins the predicate both locks in the
 // least-privilege rule are built on: withModelAuth uses it to decide whether
 // a bearer key is admitted at all, and modelAction uses it again before
