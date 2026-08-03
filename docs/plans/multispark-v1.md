@@ -83,8 +83,9 @@ edited mid-job receive a stop meant for a different machine.
 
 ## What a worker will accept
 
-The node endpoints (`/api/v1/internal/node/preflight`, `/step`) take a fleet
-API key and no cookie, so a browser can never be walked into calling them.
+The node endpoints (`/api/v1/internal/node/preflight`, `/step`,
+`/step/progress`) take a fleet API key and no cookie, so a browser can never
+be walked into calling them.
 They are bounded further: a delegated step runs only when this Spark already
 holds that exact recipe id and version, byte for byte identical to the copy
 the head sent, and the LOCAL copy is what executes. An ordinary API key
@@ -96,6 +97,18 @@ onward instead of putting a rank on this machine.
 
 One delegated job holds a worker at a time, via a coarse single-flight lease
 that expires (45 minutes) so a head that dies cannot wedge the Spark.
+
+## Live progress on a worker step
+
+A delegated step answers only when it is finished, and it runs outside the
+worker's own engine, so nothing there records it. The worker keeps the
+running step's latest receipt in memory and `/step/progress` reports it to
+the job that owns it, and to no one else. The head polls that every two
+seconds while its own step call is blocked and republishes what comes back
+through the same progress callback a local step uses, stamped with the node
+it came from. The console therefore renders a forwarded weight download or
+image pull exactly as it renders a local one. A worker that cannot answer
+the poll leaves the step without live detail; it never fails it.
 
 ## Failure model
 

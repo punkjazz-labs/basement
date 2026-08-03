@@ -67,6 +67,57 @@ func (l *workerLease) release(jobID string) {
 	}
 }
 
+// delegatedProgress holds the latest receipt of the step this node is
+// currently running for a head Spark. A delegated step runs outside this
+// manager's engine, so no job row of ours records it, and the head's own
+// call does not return until the step is over; polling this is the only way
+// the console driving the job can watch a worker download move. It is in
+// memory by design: it describes work in flight, never history.
+type delegatedProgress struct {
+	mu        sync.Mutex
+	jobID     string
+	operation string
+	receipt   json.RawMessage
+}
+
+func (d *delegatedProgress) begin(jobID, operation string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.jobID, d.operation, d.receipt = jobID, operation, nil
+}
+
+func (d *delegatedProgress) update(jobID string, receipt json.RawMessage) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.jobID != jobID {
+		return
+	}
+	d.receipt = receipt
+}
+
+// finish clears the step only when it is still the one that ran, so a head
+// admitted after this job handed the node back never has its own progress
+// erased by the previous job's completion.
+func (d *delegatedProgress) finish(jobID, operation string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.jobID == jobID && d.operation == operation {
+		d.jobID, d.operation, d.receipt = "", "", nil
+	}
+}
+
+// snapshot answers only the job that owns the running step. Another head's
+// job id is told nothing, which is also what a job with no step in flight
+// gets.
+func (d *delegatedProgress) snapshot(jobID string) (string, json.RawMessage, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if jobID == "" || d.jobID != jobID {
+		return "", nil, false
+	}
+	return d.operation, d.receipt, true
+}
+
 // withNodeAuth accepts an API-key bearer token and nothing else. A console
 // session is deliberately not accepted: these endpoints mutate this node's
 // containers, and refusing cookies means a browser can never be walked into
@@ -169,14 +220,38 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		}
 		execution.SharedArtifacts = shared
 	}
+	s.nodeProgress.begin(request.JobID, request.Operation)
+	defer s.nodeProgress.finish(request.JobID, request.Operation)
+	// Redacted where it is held, not where it is read: the head folds this
+	// receipt straight into its own job timeline.
+	progress := func(value any) error {
+		s.nodeProgress.update(request.JobID, redact.JSON(value))
+		return nil
+	}
 	// The recipe executed is this Spark's own copy, never the bytes the
 	// caller sent, and it runs locally rather than being forwarded onward.
-	receipt, err := s.localExecutor().Execute(r.Context(), execution, recipe.Operation{Type: request.Operation}, trusted, nil)
+	receipt, err := s.localExecutor().Execute(r.Context(), execution, recipe.Operation{Type: request.Operation}, trusted, progress)
 	response := map[string]any{"receipt": receipt}
 	if err != nil {
 		response["error"] = redact.String(err.Error())
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// nodeStepProgress reports how far the step this node runs for the calling
+// job has got. It takes no lease, runs no operation and changes nothing: the
+// head polls it while its own step call is still blocked, so it must never
+// wait on anything that step holds.
+func (s *Server) nodeStepProgress(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		JobID string `json:"job_id"`
+	}
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	operation, receipt, running := s.nodeProgress.snapshot(request.JobID)
+	writeJSON(w, http.StatusOK, map[string]any{"operation": operation, "running": running, "receipt": receipt})
 }
 
 // trustedWorkerRecipe resolves what this node will actually run. The caller

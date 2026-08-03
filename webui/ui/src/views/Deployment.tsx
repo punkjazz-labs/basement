@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, formatBytes, terminal, startTimeoutMinutes, stateCopy, stepCopy, type Job, type Recipe, type Step } from '../api'
+import { api, formatBytes, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepOperation, type Job, type Recipe, type Step } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
 
+// verify_peer_node is the second Spark checking itself, planned only for a
+// two-Spark job; on every other job it simply never appears.
 const CHECKS = [
   'verify_architecture', 'verify_dgx_spark', 'verify_memory_capacity', 'verify_disk',
   'verify_port', 'verify_docker', 'verify_nvidia_runtime', 'verify_artifact_access',
+  'verify_peer_node',
 ]
 
 interface Phase {
@@ -68,9 +71,19 @@ function phasePlan(job: Job, recipe?: Recipe): Phase[] {
 // right. Transfer rate is derived client-side from receipt deltas.
 function LiveProgress({ step }: { step: Step }) {
   const receipt = (step.receipt ?? {}) as Record<string, unknown>
+  const operation = stepOperation(step.operation)
   const rateRef = useRef<{ key: string; at: number; bytes: number; rate: number; since: number } | null>(null)
 
   const asNumber = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
+
+  // Both Sparks of a two-Spark job run the same step, so a bar with no node
+  // on it cannot say which machine is working. Shown only when the receipt
+  // carries the node itself.
+  const node = (() => {
+    const name = typeof receipt.node === 'string' ? receipt.node : ''
+    if (!name) return null
+    return receipt.node_role === 'worker' ? `${name} · second Spark` : `${name} · this Spark`
+  })()
 
   // Smoothed bytes-per-second across receipt updates, reset when the
   // measured stream changes. A resumed download first sweeps the bytes
@@ -97,6 +110,7 @@ function LiveProgress({ step }: { step: Step }) {
 
   const row = (percent: number | null, left: string, right?: string) => (
     <div className="sub-progress">
+      {node && <span className="file">{node}</span>}
       {percent !== null && (
         <div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}>
           <span style={{ width: `${Math.max(percent, 0.5)}%` }} />
@@ -129,7 +143,7 @@ function LiveProgress({ step }: { step: Step }) {
     return `${(done / scale).toFixed(1)} of ${(total / scale).toFixed(1)} ${units[unit]}`
   }
 
-  if (step.operation === 'download_artifact') {
+  if (operation === 'download_artifact') {
     const done = asNumber(receipt.bytes_complete)
     const total = asNumber(receipt.bytes_total)
     if (total <= 0) return null
@@ -144,17 +158,18 @@ function LiveProgress({ step }: { step: Step }) {
     return row(percent, bytePair(done, total), speedAndETA(rate, total - done))
   }
 
-  if (step.operation === 'wait_http') {
+  if (operation === 'wait_http') {
     const attempt = asNumber(receipt.attempt)
     if (attempt <= 0) return null
     return (
       <div className="sub-progress">
+        {node && <span className="file">{node}</span>}
         <span className="mono nums">Health check #{attempt}. The model is still loading, this is normal.</span>
       </div>
     )
   }
 
-  if (step.operation === 'pull_image') {
+  if (operation === 'pull_image') {
     const done = asNumber(receipt.bytes_complete)
     const total = asNumber(receipt.bytes_total)
     const layersDone = asNumber(receipt.layers_done)
@@ -216,7 +231,7 @@ function activePhaseIndex(job: Job, phases: Phase[]): number {
   if (terminal(job.state) && job.state !== 'failed' && job.state !== 'cancelled') return phases.length
   const failed = [...job.steps].reverse().find(step => step.state === 'failed')
   if (failed) {
-    const index = phases.findIndex(phase => phase.operations.includes(failed.operation.replace(/^rollback_/, '')))
+    const index = phases.findIndex(phase => phase.operations.includes(stepOperation(failed.operation)))
     if (index >= 0) return index
   }
   const index = phases.findIndex(phase => phase.states.includes(job.state))
@@ -293,10 +308,10 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
             if (job.state === 'cancelled' && index === activeIndex) status = 'cancelled'
             if (activeIndex === phases.length) status = 'complete'
             const label = { complete: 'Complete', active: 'In progress', failed: 'Failed', cancelled: 'Cancelled', pending: 'Waiting' }[status]
-            const showsProgress = status === 'active' && current && phase.operations.includes(current.operation.replace(/^rollback_/, ''))
+            const showsProgress = status === 'active' && current && phase.operations.includes(stepOperation(current.operation))
             // Transfers estimate their own remaining time; elapsed time is
             // only for steps with no ETA, where it proves liveness.
-            const showsElapsed = showsProgress && current && !['download_artifact', 'pull_image'].includes(current.operation)
+            const showsElapsed = showsProgress && current && !['download_artifact', 'pull_image'].includes(stepOperation(current.operation))
             return (
               <li key={phase.title} className={status}>
                 <i aria-hidden="true" />

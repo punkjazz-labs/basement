@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/punkjazz-labs/basement/internal/recipe"
 )
@@ -282,4 +286,144 @@ func TestPlacementsRefuseWhenNoWorkerIsConfigured(t *testing.T) {
 	if _, err := fleet.Plan(context.Background(), r); err == nil || !strings.Contains(err.Error(), "Fleet first") {
 		t.Fatalf("got %v, want a refusal naming the missing peer", err)
 	}
+}
+
+// TestWorkerStepProgressReachesTheConsole is the two-Spark half of the
+// download and image-pull progress the console shows: the worker's step call
+// only answers when the step is over, so the head has to poll for what is
+// happening in between and fold it into the same progress channel a local
+// step uses.
+func TestWorkerStepProgressReachesTheConsole(t *testing.T) {
+	previous := peerProgressInterval
+	t.Cleanup(func() { peerProgressInterval = previous })
+	peerProgressInterval = time.Millisecond
+
+	r := twoSparkRecipe(t)
+	release := make(chan struct{})
+	var polls atomic.Int64
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/api/v1/internal/node/step":
+			<-release
+			_, _ = io.WriteString(w, `{"receipt":{"artifacts":[{"bytes_verified":900}]}}`)
+		case "/api/v1/internal/node/step/progress":
+			if body["job_id"] != "job-1" {
+				t.Errorf("the worker was polled for the wrong job: %#v", body)
+			}
+			count := polls.Add(1)
+			_, _ = fmt.Fprintf(w, `{"operation":"download_artifact","running":true,"receipt":{"bytes_complete":%d,"bytes_total":900}}`, count*100)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer peer.Close()
+
+	local := &recordingExecutor{}
+	target := PeerTarget{ID: "peer_1", Name: "spark-b", BaseURL: peer.URL, APIKey: "worker-key"}
+	fleet := NewFleetExecutor(local, NewPeerClient(func(context.Context) (PeerTarget, error) { return target, nil }))
+	fleet.localAddress = func(string) (string, error) { return "169.254.10.1", nil }
+	fleet.hostname = func() string { return "spark-a" }
+	deployment, err := fleet.Plan(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := deployment.Peer
+
+	var seen []map[string]any
+	var mu sync.Mutex
+	progress := func(receipt any) error {
+		mu.Lock()
+		defer mu.Unlock()
+		values, ok := receipt.(map[string]any)
+		if !ok {
+			t.Errorf("live receipt is %T, want a map", receipt)
+			return nil
+		}
+		seen = append(seen, values)
+		if len(seen) >= 2 {
+			close(release)
+		}
+		return nil
+	}
+	execution := Execution{JobID: "job-1", Placement: deployment.Worker, Peer: &pinned}
+	receipt, err := fleet.Execute(context.Background(), execution, recipe.Operation{Type: "download_artifact"}, r, progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt["node"] != "spark-b" {
+		t.Fatalf("final worker receipt does not name the node: %#v", receipt)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) < 2 {
+		t.Fatalf("the worker step reported %d live receipts, want the polled ones", len(seen))
+	}
+	for index, update := range seen {
+		if update["bytes_total"] != float64(900) || update["bytes_complete"] == nil {
+			t.Fatalf("live receipt %d lost the worker's own numbers: %#v", index, update)
+		}
+		// Without the node, the console cannot say which Spark is downloading.
+		if update["node"] != "spark-b" || update["node_role"] != RoleWorker {
+			t.Fatalf("live receipt %d does not name the node: %#v", index, update)
+		}
+	}
+}
+
+func TestHeadStepProgressIsNamedToo(t *testing.T) {
+	r := twoSparkRecipe(t)
+	local := &progressingExecutor{}
+	fleet := NewFleetExecutor(local, NewPeerClient(func(context.Context) (PeerTarget, error) {
+		return PeerTarget{ID: "peer_1", Name: "spark-b", BaseURL: "http://127.0.0.1:1", APIKey: "k"}, nil
+	}))
+	fleet.localAddress = func(string) (string, error) { return "169.254.10.1", nil }
+	fleet.hostname = func() string { return "spark-a" }
+	deployment, err := fleet.Plan(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []map[string]any
+	_, err = fleet.Execute(context.Background(), Execution{JobID: "job-1", Placement: deployment.Head}, recipe.Operation{Type: "download_artifact"}, r, func(receipt any) error {
+		seen = append(seen, receipt.(map[string]any))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0]["node"] != "spark-a" || seen[0]["node_role"] != RoleHead {
+		t.Fatalf("head live receipts do not name the node: %#v", seen)
+	}
+
+	// A single-Spark job must gain nothing at all from any of this.
+	recipes, _ := recipe.Builtin()
+	single, _ := recipe.Find(recipes, "qwen36-35b-a3b-nvfp4-1s")
+	seen = nil
+	if _, err := fleet.Execute(context.Background(), Execution{}, recipe.Operation{Type: "download_artifact"}, single, func(receipt any) error {
+		seen = append(seen, receipt.(map[string]any))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("single-Spark progress count changed: %#v", seen)
+	}
+	if _, named := seen[0]["node"]; named {
+		t.Fatalf("single-Spark live receipt grew a node field: %#v", seen[0])
+	}
+}
+
+// progressingExecutor reports one live receipt before it finishes, the way a
+// real download does.
+type progressingExecutor struct{ recordingExecutor }
+
+func (e *progressingExecutor) Execute(ctx context.Context, execution Execution, op recipe.Operation, r recipe.Recipe, progress Progress) (map[string]any, error) {
+	if progress != nil {
+		if err := progress(map[string]any{"bytes_complete": 10, "bytes_total": 100}); err != nil {
+			return nil, err
+		}
+	}
+	return e.recordingExecutor.Execute(ctx, execution, op, r, progress)
 }

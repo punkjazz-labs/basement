@@ -337,6 +337,11 @@ func TestDockerClientNegotiatesAPIVersion(t *testing.T) {
 }
 
 func TestPullAggregatesLayersIntoMonotonicProgress(t *testing.T) {
+	// Pacing is asserted separately; here every event has to be observed for
+	// the aggregate to be checked at all.
+	previousInterval := pullProgressInterval
+	t.Cleanup(func() { pullProgressInterval = previousInterval })
+	pullProgressInterval = 0
 	// Docker reports one layer per event; the receipt must aggregate them so
 	// the console bar never shrinks when the reported layer switches.
 	events := []string{
@@ -383,5 +388,34 @@ func TestPullAggregatesLayersIntoMonotonicProgress(t *testing.T) {
 	}
 	if last["status"] != "Extracting" || last["layers_done"] != 2 {
 		t.Fatalf("final status wrong: %v", last)
+	}
+}
+
+// TestPullPacesProgressWithoutHidingPhaseChanges guards the cost side of
+// live image progress: Docker emits an event per layer per chunk, and every
+// reported receipt costs a free-space check and a database write on the node
+// running the pull.
+func TestPullPacesProgressWithoutHidingPhaseChanges(t *testing.T) {
+	events := []string{
+		`{"status":"Downloading","id":"aaa","progressDetail":{"current":100,"total":1000}}`,
+		`{"status":"Downloading","id":"aaa","progressDetail":{"current":300,"total":1000}}`,
+		`{"status":"Downloading","id":"aaa","progressDetail":{"current":600,"total":1000}}`,
+		`{"status":"Downloading","id":"aaa","progressDetail":{"current":1000,"total":1000}}`,
+		`{"status":"Pull complete","id":"aaa","progressDetail":{}}`,
+	}
+	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(strings.Join(events, "\n")))}, nil
+	})}}
+	var statuses []string
+	if _, err := client.Pull(context.Background(), "vllm/vllm-openai@sha256:abc", func(update any) error {
+		statuses = append(statuses, update.(map[string]any)["status"].(string))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// One opening report, then nothing until unpacking starts: the four
+	// download events land inside a single interval.
+	if len(statuses) != 2 || statuses[0] != "Downloading" || statuses[1] != "Extracting" {
+		t.Fatalf("image pull reported %v, want the first download then the phase change", statuses)
 	}
 }

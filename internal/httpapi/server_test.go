@@ -35,6 +35,11 @@ type apiExecutor struct {
 	done     map[string]bool
 	running  bool
 	failPort bool
+	// started and hold let a test look at a step while it is still running:
+	// a download closes started once it has reported progress, then waits
+	// for the test to close hold. Both nil means no step ever blocks.
+	started chan struct{}
+	hold    chan struct{}
 }
 
 func (a *apiExecutor) ArtifactPath(r recipe.Recipe) string { return "/managed/" + r.ID }
@@ -54,8 +59,14 @@ func (a *apiExecutor) Execute(_ context.Context, _ operations.Execution, op reci
 	if op.Type == "stop_container" {
 		a.running = false
 	}
-	if progress != nil && op.Type == "download_artifact" {
-		_ = progress(map[string]any{"bytes_complete": 100, "bytes_total": 100, "percent": 100})
+	if op.Type == "download_artifact" {
+		if progress != nil {
+			_ = progress(map[string]any{"bytes_complete": 100, "bytes_total": 100, "percent": 100})
+		}
+		if a.hold != nil {
+			close(a.started)
+			<-a.hold
+		}
 	}
 	return map[string]any{"operation": op.Type, "response_non_empty": op.Type == "verify_openai_inference"}, nil
 }

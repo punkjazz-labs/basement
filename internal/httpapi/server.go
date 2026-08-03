@@ -72,6 +72,9 @@ type Server struct {
 
 	// nodeLease admits one delegated two-Spark job at a time (see node.go).
 	nodeLease workerLease
+	// nodeProgress carries the running delegated step's live receipt back to
+	// the head driving it (see node.go). In memory by design.
+	nodeProgress delegatedProgress
 
 	// adoption narrates the one console-driven adoption of a second Spark
 	// this manager runs at a time (see fleet.go). In memory by design.
@@ -145,6 +148,7 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	// these, authenticated by fleet API key only (see withNodeAuth).
 	mux.HandleFunc("/api/v1/internal/node/preflight", server.withNodeAuth(server.nodePreflight))
 	mux.HandleFunc("/api/v1/internal/node/step", server.withNodeAuth(server.nodeStep))
+	mux.HandleFunc("/api/v1/internal/node/step/progress", server.withNodeAuth(server.nodeStepProgress))
 	mux.HandleFunc("/v1/", server.proxyModel)
 	assets, _ := fs.Sub(webui.Assets, "assets")
 	fileServer := http.FileServer(http.FS(assets))

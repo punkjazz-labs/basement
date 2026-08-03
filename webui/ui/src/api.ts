@@ -503,6 +503,9 @@ export const operationCopy: Record<string, string> = {
   verify_docker: 'Check Docker',
   verify_nvidia_runtime: 'Check NVIDIA runtime',
   verify_artifact_access: 'Check model access',
+  // The peer preflight runs the other node's own guardrails; stepCopy adds
+  // which Spark that was.
+  verify_peer_node: 'Check hardware and memory',
   pull_image: 'Prepare vLLM runtime',
   download_artifact: 'Download model files',
   write_generated_config: 'Write runtime configuration',
@@ -517,6 +520,12 @@ export const operationCopy: Record<string, string> = {
   remove_artifact_if_unshared: 'Remove model files',
   teardown_stop_container: 'Stop model service',
 }
+
+// A step is stored as "[rollback_]operation[:role]". Anything deciding what
+// a step IS — which phase it belongs to, which progress shape its receipt
+// carries — wants the bare operation, or a two-Spark job matches nothing.
+export const stepOperation = (operation: string): string =>
+  operation.replace(/^rollback_/, '').split(':')[0]
 
 // A two-Spark job runs the same operation once per node and records each as
 // "operation:role". Nothing is invented here: the role shown is the one the

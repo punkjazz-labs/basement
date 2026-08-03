@@ -54,11 +54,13 @@ type PeerTarget struct {
 // fail rather than choose when zero or more than one peer is configured.
 type PeerDirectory func(ctx context.Context) (PeerTarget, error)
 
-// PeerRunner runs work on the worker Spark through its manager's API.
+// PeerRunner runs work on the worker Spark through its manager's API. Step
+// takes a progress callback because a forwarded download or image pull is as
+// long as a local one, and the console has no other way to see it move.
 type PeerRunner interface {
 	Target(ctx context.Context) (PeerTarget, error)
 	Preflight(ctx context.Context, target PeerTarget, execution Execution, r recipe.Recipe) (map[string]any, error)
-	Step(ctx context.Context, target PeerTarget, execution Execution, op recipe.Operation, r recipe.Recipe) (map[string]any, error)
+	Step(ctx context.Context, target PeerTarget, execution Execution, op recipe.Operation, r recipe.Recipe, progress Progress) (map[string]any, error)
 }
 
 // FleetExecutor routes each step to the node its placement names: head (and
@@ -163,10 +165,10 @@ func (f *FleetExecutor) Execute(ctx context.Context, execution Execution, op rec
 			receipt, err := f.peer.Preflight(ctx, target, execution, r)
 			return named(receipt, execution.Placement), err
 		}
-		receipt, err := f.peer.Step(ctx, target, execution, op, r)
+		receipt, err := f.peer.Step(ctx, target, execution, op, r, namedProgress(progress, execution.Placement))
 		return named(receipt, execution.Placement), err
 	}
-	receipt, err := f.local.Execute(ctx, execution, op, r, progress)
+	receipt, err := f.local.Execute(ctx, execution, op, r, namedProgress(progress, execution.Placement))
 	return named(receipt, execution.Placement), err
 }
 
@@ -205,6 +207,22 @@ func named(receipt map[string]any, placement Placement) map[string]any {
 	receipt["node"] = placement.NodeName
 	receipt["node_role"] = placement.Role
 	return receipt
+}
+
+// namedProgress stamps the node onto every live receipt as well. Both Sparks
+// run the same operation in a distributed job, so a bar carrying no node
+// cannot say which machine is moving the bytes it is drawing.
+func namedProgress(progress Progress, placement Placement) Progress {
+	if progress == nil || !placement.Distributed() {
+		return progress
+	}
+	return func(receipt any) error {
+		values, ok := receipt.(map[string]any)
+		if !ok {
+			return progress(receipt)
+		}
+		return progress(named(values, placement))
+	}
 }
 
 // PeerClient calls the worker manager's internal node endpoints. The peer's
@@ -258,7 +276,18 @@ func failedCheckSummary(checks []map[string]any) string {
 	return "no check reported a reason"
 }
 
-func (p *PeerClient) Step(ctx context.Context, target PeerTarget, execution Execution, op recipe.Operation, r recipe.Recipe) (map[string]any, error) {
+// peerProgressInterval paces how often the head asks a worker how far its
+// running step has got. The worker answers a step call only once it is
+// finished, so polling is the only channel a forwarded download has; two
+// seconds keeps the console moving without adding load to a busy node.
+var peerProgressInterval = 2 * time.Second
+
+// peerProgressTimeout bounds one poll, so a worker that stops answering
+// costs the next poll and nothing more. The step it describes is never
+// failed by a poll that does not come back.
+const peerProgressTimeout = 10 * time.Second
+
+func (p *PeerClient) Step(ctx context.Context, target PeerTarget, execution Execution, op recipe.Operation, r recipe.Recipe, progress Progress) (map[string]any, error) {
 	// Weight downloads and image pulls on the worker take as long as they do
 	// on the head, so this call is bounded by the job's own context.
 	var response struct {
@@ -272,6 +301,21 @@ func (p *PeerClient) Step(ctx context.Context, target PeerTarget, execution Exec
 		"remove_artifacts": execution.RemoveArtifacts,
 		"job_id":           execution.JobID,
 	}
+	if progress != nil {
+		following, stopFollowing := context.WithCancel(ctx)
+		followed := make(chan struct{})
+		go func() {
+			defer close(followed)
+			p.follow(following, target, execution, op, progress)
+		}()
+		// The follower has to be finished before this returns: the caller
+		// records the step's final receipt next, and a poll still in flight
+		// would overwrite it with a stale one.
+		defer func() {
+			stopFollowing()
+			<-followed
+		}()
+	}
 	if err := p.post(ctx, target, "/api/v1/internal/node/step", body, &response); err != nil {
 		return nil, fmt.Errorf("%s on the other Spark failed: %w", op.Type, err)
 	}
@@ -279,6 +323,38 @@ func (p *PeerClient) Step(ctx context.Context, target PeerTarget, execution Exec
 		return response.Receipt, fmt.Errorf("%s on the other Spark failed: %s", op.Type, response.Error)
 	}
 	return response.Receipt, nil
+}
+
+// follow republishes the worker's own view of the step it is running right
+// now as this step's live progress. The worker holds that receipt in memory
+// for as long as the step runs and nothing longer, so this can never
+// resurrect progress from a step that already finished, and a peer that
+// cannot answer at all simply leaves the step without live detail rather
+// than failing it.
+func (p *PeerClient) follow(ctx context.Context, target PeerTarget, execution Execution, op recipe.Operation, progress Progress) {
+	ticker := time.NewTicker(peerProgressInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		var status struct {
+			Operation string         `json:"operation"`
+			Running   bool           `json:"running"`
+			Receipt   map[string]any `json:"receipt"`
+		}
+		pollCtx, cancel := context.WithTimeout(ctx, peerProgressTimeout)
+		polled := p.post(pollCtx, target, "/api/v1/internal/node/step/progress", map[string]any{"job_id": execution.JobID}, &status)
+		cancel()
+		if polled != nil || !status.Running || status.Operation != op.Type || len(status.Receipt) == 0 {
+			continue
+		}
+		if err := progress(status.Receipt); err != nil {
+			return
+		}
+	}
 }
 
 func (p *PeerClient) post(ctx context.Context, target PeerTarget, endpoint string, body any, into any) error {

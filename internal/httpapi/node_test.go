@@ -59,7 +59,7 @@ func (p refusingPeer) Preflight(context.Context, operations.PeerTarget, operatio
 	p.t.Error("a delegated worker preflight was forwarded to another Spark")
 	return nil, errors.New("no peer")
 }
-func (p refusingPeer) Step(context.Context, operations.PeerTarget, operations.Execution, recipe.Operation, recipe.Recipe) (map[string]any, error) {
+func (p refusingPeer) Step(context.Context, operations.PeerTarget, operations.Execution, recipe.Operation, recipe.Recipe, operations.Progress) (map[string]any, error) {
 	p.t.Error("a delegated worker step was forwarded to another Spark instead of run locally")
 	return nil, errors.New("no peer")
 }
@@ -273,5 +273,56 @@ func TestWorkerLeaseExpiresSoADeadHeadCannotWedgeThisSpark(t *testing.T) {
 	}
 	if err := lease.acquire("job-b", "some-recipe", start.Add(workerLeaseTTL+time.Second)); err != nil {
 		t.Fatalf("an expired lease still blocked another job: %v", err)
+	}
+}
+
+// TestDelegatedStepProgressIsReadableWhileItRuns is the worker half of live
+// two-Spark progress: a delegated step runs outside this manager's engine
+// and its call does not answer until it is over, so the head can only see a
+// download move by reading this while the step runs.
+func TestDelegatedStepProgressIsReadableWhileItRuns(t *testing.T) {
+	fixture := newNodeFixture(t)
+
+	// Nothing is running yet.
+	status, body := fixture.post(t, "/api/v1/internal/node/step/progress", fixture.key, map[string]any{"job_id": "job-1"})
+	if status != http.StatusOK || body["running"] != false {
+		t.Fatalf("idle node reported status=%d body=%#v", status, body)
+	}
+
+	// The local executor reports one download receipt before it returns, so
+	// the last receipt is readable once the step is over only if it is held
+	// while the step runs.
+	fixture.localExec.started = make(chan struct{})
+	fixture.localExec.hold = make(chan struct{})
+	polled := make(chan map[string]any, 1)
+	go func() {
+		<-fixture.localExec.started
+		_, live := fixture.post(t, "/api/v1/internal/node/step/progress", fixture.key, map[string]any{"job_id": "job-1"})
+		polled <- live
+		close(fixture.localExec.hold)
+	}()
+	if status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("download_artifact", "job-1", fixture.distributed)); status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("worker download status=%d body=%#v", status, body)
+	}
+	live := <-polled
+	if live["running"] != true || live["operation"] != "download_artifact" {
+		t.Fatalf("a running delegated step was not reported: %#v", live)
+	}
+	receipt, ok := live["receipt"].(map[string]any)
+	if !ok || receipt["bytes_complete"] != float64(100) || receipt["bytes_total"] != float64(100) {
+		t.Fatalf("the running step's own numbers did not come through: %#v", live["receipt"])
+	}
+
+	// Progress belongs to the job that owns the step, and disappears with it.
+	if _, other := fixture.post(t, "/api/v1/internal/node/step/progress", fixture.key, map[string]any{"job_id": "job-2"}); other["running"] != false {
+		t.Fatalf("another head was told about this job's step: %#v", other)
+	}
+	if _, after := fixture.post(t, "/api/v1/internal/node/step/progress", fixture.key, map[string]any{"job_id": "job-1"}); after["running"] != false {
+		t.Fatalf("a finished step is still reported as running: %#v", after)
+	}
+
+	// Same key-only rule as every other node endpoint.
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step/progress", "", map[string]any{"job_id": "job-1"}); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated progress read status=%d", status)
 	}
 }

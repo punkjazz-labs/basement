@@ -15,9 +15,15 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/punkjazz-labs/basement/internal/recipe"
 )
+
+// pullProgressInterval is how often an image pull reports its aggregate
+// progress while a single phase runs. It matches the pace weight downloads
+// report at, so both bars in the console move the same way.
+var pullProgressInterval = time.Second
 
 type DockerClient struct {
 	client        *http.Client
@@ -127,6 +133,12 @@ func (d *DockerClient) Pull(ctx context.Context, ref string, progress Progress) 
 	}
 	layers := map[string]*layerState{}
 	last := map[string]any{"image": ref, "status": "pulling"}
+	// Docker emits an event per layer per chunk, which for a multi-gigabyte
+	// runtime image is hundreds a second. Each reported receipt costs a disk
+	// check and a database write, so they are paced the same way weight
+	// downloads are; the phase changing is always worth reporting at once.
+	var reported time.Time
+	reportedStatus := ""
 	for scanner.Scan() {
 		var event struct {
 			Status, ID, Error string
@@ -183,11 +195,16 @@ func (d *DockerClient) Pull(ctx context.Context, ref string, progress Progress) 
 			"bytes_complete": bytesComplete, "bytes_total": bytesTotal,
 			"layers_done": layersDone, "layers_total": len(layers),
 		}
-		if progress != nil {
-			if err := progress(last); err != nil {
-				return nil, fmt.Errorf("persist image progress: %w", err)
-			}
+		if progress == nil {
+			continue
 		}
+		if status == reportedStatus && time.Since(reported) < pullProgressInterval {
+			continue
+		}
+		if err := progress(last); err != nil {
+			return nil, fmt.Errorf("persist image progress: %w", err)
+		}
+		reported, reportedStatus = time.Now(), status
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read image pull: %w", err)
