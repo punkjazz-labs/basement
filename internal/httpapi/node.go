@@ -150,6 +150,33 @@ func (s *Server) localExecutor() operations.Executor {
 	return s.executor
 }
 
+// nodeFabric reports where on the cable this node can be met, and starts
+// listening there for exactly one connection from the head. It takes no lease
+// and runs no operation: it detects a port, opens an ephemeral socket bound
+// to that port's own address, and lets the socket close itself. A detection
+// that fails is a 200 carrying the reason, so the head records a real check
+// receipt saying what this Spark reported rather than a transport error.
+func (s *Server) nodeFabric(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Recipe recipe.Recipe `json:"recipe"`
+	}
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	trusted, err := s.trustedWorkerRecipe(request.Recipe)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	probe, err := operations.ServeFabricProbe(trusted)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"error": redact.String(err.Error())})
+		return
+	}
+	writeJSON(w, http.StatusOK, probe)
+}
+
 // nodePreflight runs this node's own guardrails for a recipe another Spark
 // proposes to run here. Each node evaluates itself (ADR 0004); this never
 // aggregates capacity with the caller's.

@@ -562,8 +562,10 @@ export const operationCopy: Record<string, string> = {
   verify_docker: 'Check Docker',
   verify_nvidia_runtime: 'Check NVIDIA runtime',
   verify_artifact_access: 'Check model access',
-  // The peer preflight runs the other node's own guardrails; stepCopy adds
-  // which Spark that was.
+  // The cable check runs on the head, which dials the second Spark over the
+  // link; the peer preflight runs the other node's own guardrails. stepCopy
+  // adds which Spark each was recorded against.
+  verify_fabric: 'Check the cable between Sparks',
   verify_peer_node: 'Check hardware and memory',
   pull_image: 'Prepare vLLM runtime',
   download_artifact: 'Download model files',

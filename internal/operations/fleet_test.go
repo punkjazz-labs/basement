@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -254,6 +255,139 @@ func TestFleetExecutorRoutesAndNamesEveryStep(t *testing.T) {
 
 	if _, err := fleet.Execute(context.Background(), Execution{Placement: worker, Peer: &pinned}, recipe.Operation{Type: "start_container"}, r, nil); err == nil || !strings.Contains(err.Error(), "exited during startup") {
 		t.Fatalf("a failed worker step must surface its reason, got %v", err)
+	}
+}
+
+// fabricPeer is a worker manager answering only the cable endpoint. body is
+// written verbatim so a test can hand the head a real listener, a reported
+// failure, or nonsense.
+func fabricPeer(t *testing.T, body func() string) PeerTarget {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer worker-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if request.URL.Path != "/api/v1/internal/node/fabric" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body())
+	}))
+	t.Cleanup(server.Close)
+	return PeerTarget{ID: "peer_1", Name: "spark-b", BaseURL: server.URL, APIKey: "worker-key"}
+}
+
+func fabricFleet(t *testing.T, headAddress string) *FleetExecutor {
+	t.Helper()
+	fleet := NewFleetExecutor(&recordingExecutor{}, NewPeerClient(func(context.Context) (PeerTarget, error) {
+		return PeerTarget{}, errors.New("the peer is pinned by the test")
+	}))
+	fleet.localAddress = func(string) (string, error) { return headAddress, nil }
+	fleet.hostname = func() string { return "spark-a" }
+	return fleet
+}
+
+// The passing case, end to end through the peer API: the worker opens a
+// listener on its own fabric address, the head dials it from its own, and the
+// receipt records both ports, both addresses and the round trip.
+func TestVerifyFabricProvesTheLinkAndRecordsBothEnds(t *testing.T) {
+	r := twoSparkRecipe(t)
+	withFabric(t, FabricLink{NetDev: "enp1s0f1np1", HCA: "rocep1s0f1"}, nil, "127.0.0.1", nil)
+	target := fabricPeer(t, func() string {
+		probe, err := ServeFabricProbe(r)
+		if err != nil {
+			t.Error(err)
+			return `{"error":"probe failed"}`
+		}
+		encoded, _ := json.Marshal(probe)
+		return string(encoded)
+	})
+
+	head := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2}
+	receipt, err := fabricFleet(t, "127.0.0.1").Execute(context.Background(), Execution{Placement: head, Peer: &target}, recipe.Operation{Type: VerifyFabric}, r, nil)
+	if err != nil {
+		t.Fatalf("the cable check failed: %v", err)
+	}
+	for key, want := range map[string]any{
+		"head_interface": "enp1s0f1np1", "head_address": "127.0.0.1", "head_hca": "rocep1s0f1",
+		"worker_node": "spark-b", "worker_interface": "enp1s0f1np1", "worker_address": "127.0.0.1",
+		"reachable": true, "node": "spark-a", "node_role": RoleHead,
+	} {
+		if receipt[key] != want {
+			t.Errorf("receipt[%s] = %v, want %v", key, receipt[key], want)
+		}
+	}
+	if _, timed := receipt["round_trip_ms"]; !timed {
+		t.Errorf("the receipt does not record the round trip: %#v", receipt)
+	}
+}
+
+// The worker's port is up but holds no address, so there is nothing to dial.
+// The head relays what the worker said and names which Spark said it.
+func TestVerifyFabricRelaysAWorkerWithNoAddress(t *testing.T) {
+	r := twoSparkRecipe(t)
+	withFabric(t, FabricLink{NetDev: "enp1s0f1np1"}, nil, "127.0.0.1", nil)
+	target := fabricPeer(t, func() string {
+		return `{"error":"high-speed port enp1s0f0np0 has no address, so the two Sparks have nothing to meet on"}`
+	})
+
+	head := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2}
+	receipt, err := fabricFleet(t, "127.0.0.1").Execute(context.Background(), Execution{Placement: head, Peer: &target}, recipe.Operation{Type: VerifyFabric}, r, nil)
+	if err == nil || !strings.Contains(err.Error(), "the other Spark could not join the cable: high-speed port enp1s0f0np0 has no address") {
+		t.Fatalf("got %v, want the worker's own reason relayed", err)
+	}
+	if receipt["head_address"] != "127.0.0.1" || receipt["worker_node"] != "spark-b" {
+		t.Errorf("a failed check must still record what was known: %#v", receipt)
+	}
+}
+
+// Both ends lit, no path between them. This is the failure the cable check
+// exists for, and it must not read as anything else.
+func TestVerifyFabricSaysWhenTheTwoPortsCannotMeet(t *testing.T) {
+	r := twoSparkRecipe(t)
+	withFabric(t, FabricLink{NetDev: "enp1s0f1np1"}, nil, "127.0.0.1", nil)
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := closed.Addr().(*net.TCPAddr).Port
+	closed.Close()
+	target := fabricPeer(t, func() string {
+		return fmt.Sprintf(`{"interface":"enP2p1s0f1np1","address":"127.0.0.1","port":%d,"token":"deadbeef"}`, port)
+	})
+
+	head := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2}
+	receipt, err := fabricFleet(t, "127.0.0.1").Execute(context.Background(), Execution{Placement: head, Peer: &target}, recipe.Operation{Type: VerifyFabric}, r, nil)
+	if err == nil || !strings.Contains(err.Error(), "cable is connected on both Sparks but their high-speed ports cannot reach each other") {
+		t.Fatalf("got %v, want the unreachable-ports sentence", err)
+	}
+	if receipt["reachable"] != false || receipt["worker_interface"] != "enP2p1s0f1np1" {
+		t.Errorf("a failed check must record both ends and the result: %#v", receipt)
+	}
+}
+
+// No cable on the head at all: nothing is asked of the worker, and the owner
+// is told to connect the cable rather than shown an interface name.
+func TestVerifyFabricAsksForTheCableBeforeCallingTheWorker(t *testing.T) {
+	r := twoSparkRecipe(t)
+	withFabric(t, FabricLink{}, errors.New("no high-speed port has link (rocep1s0f0/enp1s0f0np0: no link); connect the cable between the two Sparks"), "", nil)
+	target := fabricPeer(t, func() string {
+		t.Error("the worker was called even though this Spark has no cable")
+		return `{}`
+	})
+	fleet := NewFleetExecutor(&recordingExecutor{}, NewPeerClient(func(context.Context) (PeerTarget, error) {
+		return PeerTarget{}, errors.New("the peer is pinned by the test")
+	}))
+	fleet.localAddress = func(string) (string, error) {
+		return "", errors.New("high-speed port enp1s0f0np0 has no address, so the two Sparks have nothing to meet on")
+	}
+
+	head := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2}
+	_, err := fleet.Execute(context.Background(), Execution{Placement: head, Peer: &target}, recipe.Operation{Type: VerifyFabric}, r, nil)
+	if err == nil || !strings.Contains(err.Error(), "connect the cable between the two Sparks") {
+		t.Fatalf("got %v, want the cable request", err)
 	}
 }
 

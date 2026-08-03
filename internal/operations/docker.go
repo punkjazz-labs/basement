@@ -62,6 +62,11 @@ type ContainerState struct {
 	// it is created and never revisits them, so this is the only way to tell
 	// that a container is still pointed at a directory that has since moved.
 	Mounts map[string]string
+	// Command is the argument list the container was created with. Docker
+	// fixes it at creation too, and a distributed container carries the
+	// fabric address of the other rank inside it, so this is the only way to
+	// tell that a container is still pointed at an address that has changed.
+	Command []string
 }
 
 func NewDockerClient(socket string) *DockerClient {
@@ -231,7 +236,10 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 			Running bool
 			Status  string
 		}
-		Config struct{ Labels map[string]string }
+		Config struct {
+			Labels map[string]string
+			Cmd    []string
+		}
 		Mounts []struct {
 			Source      string
 			Destination string
@@ -246,7 +254,7 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 			mounts[mount.Destination] = mount.Source
 		}
 	}
-	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels, Mounts: mounts}, nil
+	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels, Mounts: mounts, Command: body.Config.Cmd}, nil
 }
 
 func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, r recipe.Recipe, placement Placement) (string, error) {
@@ -761,6 +769,70 @@ func staleMounts(state ContainerState, expected map[string]string) []mountMismat
 	}
 	sort.Slice(stale, func(i, j int) bool { return stale[i].MountPoint < stale[j].MountPoint })
 	return stale
+}
+
+// launchMismatch is a launch flag whose value was fixed into an existing
+// container and no longer matches what this job resolved.
+type launchMismatch struct {
+	Flag     string
+	Actual   string
+	Expected string
+}
+
+// staleLaunch reports the distributed launch flags an existing container
+// still carries from an earlier deployment. The fabric address is the reason
+// this exists: both ranks meet at the head's address on the cabled port, that
+// address is auto-assigned by the kernel, and nothing guarantees the kernel
+// hands out the same one after a reboot. The address is re-resolved live for
+// every job, but a container created by an earlier job keeps the old one
+// baked into its command line, and a start job creates no container - so
+// without this the ranks would be told to meet at an address that no longer
+// exists and would simply hang. A flag the container does not carry at all is
+// not evidence of staleness and is skipped: only a value that positively
+// disagrees counts.
+func staleLaunch(state ContainerState, placement Placement) []launchMismatch {
+	if !placement.Distributed() {
+		return nil
+	}
+	expected := map[string]string{"--node-rank": fmt.Sprint(placement.Rank())}
+	// An unresolved address or port is not a disagreement to act on: it means
+	// this call knows nothing about where the ranks meet, and a container is
+	// never rebuilt on the strength of what the caller failed to say.
+	if placement.MasterAddress != "" {
+		expected["--master-addr"] = placement.MasterAddress
+	}
+	if placement.MasterPort > 0 {
+		expected["--master-port"] = fmt.Sprint(placement.MasterPort)
+	}
+	drift := make([]launchMismatch, 0, len(expected))
+	for flag, want := range expected {
+		actual, carried := commandFlag(state.Command, flag)
+		if !carried || actual == want {
+			continue
+		}
+		drift = append(drift, launchMismatch{Flag: flag, Actual: actual, Expected: want})
+	}
+	sort.Slice(drift, func(i, j int) bool { return drift[i].Flag < drift[j].Flag })
+	return drift
+}
+
+func commandFlag(command []string, flag string) (string, bool) {
+	for index, argument := range command {
+		if argument == flag && index+1 < len(command) {
+			return command[index+1], true
+		}
+	}
+	return "", false
+}
+
+// launchMismatchReceipt renders launch drift for a job receipt, so the log
+// says which address the container was holding and which one it now uses.
+func launchMismatchReceipt(drift []launchMismatch) []map[string]any {
+	entries := make([]map[string]any, 0, len(drift))
+	for _, mismatch := range drift {
+		entries = append(entries, map[string]any{"flag": mismatch.Flag, "was": mismatch.Actual, "now": mismatch.Expected})
+	}
+	return entries
 }
 
 // mountMismatchReceipt renders mismatches for a job receipt, so an operator

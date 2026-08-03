@@ -605,7 +605,12 @@ func (e *Engine) deployment(ctx context.Context, r recipe.Recipe) (operations.De
 // disappears underneath it.
 func distributedPlans(ops []recipe.Operation, target recipe.Recipe, deployment operations.Deployment, previous *recipe.Recipe, previousDeployment operations.Deployment) []plannedOperation {
 	head, worker := deployment.Head, deployment.Worker
-	var plans, workerBringUp, headBringUp, tail []plannedOperation
+	// The cable comes first, always. Every other step of a two-Spark job
+	// depends on the two machines meeting over it, so an hour of downloading
+	// must never happen before the link that would carry the model is known
+	// to work. It is placed on the head because the head is what dials.
+	plans := []plannedOperation{{Operation: recipe.Operation{Type: operations.VerifyFabric}, Recipe: target, Placement: head}}
+	var workerBringUp, headBringUp, tail []plannedOperation
 	peerChecked := false
 	checkPeer := func() {
 		if peerChecked {
@@ -1036,6 +1041,7 @@ func stateFor(kind, operation string) string {
 	states := map[string]string{
 		"verify_architecture": "preflighting", "verify_dgx_spark": "preflighting", "verify_memory_capacity": "preflighting", "verify_memory": "checking_memory", "verify_disk": "preflighting", "verify_port": "preflighting", "verify_docker": "preflighting", "verify_nvidia_runtime": "preflighting", "verify_artifact_access": "preflighting",
 		"pull_image": "downloading_runtime", "download_artifact": "downloading_models", "write_generated_config": "configuring", "create_container": "configuring",
+		operations.VerifyFabric:   "preflighting",
 		operations.VerifyPeerNode: "preflighting",
 		"start_container":         "starting", "wait_http": "verifying_health", "verify_openai_inference": "verifying_inference", "stop_container": "stopping", "remove_container": "removing", "remove_artifact_if_unshared": "removing", "measure_throughput": "benchmarking",
 	}

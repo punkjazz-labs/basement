@@ -159,6 +159,7 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/fleet/adopt/status", server.withReadAuth(server.fleetAdoptStatus))
 	// Two-Spark serving: the head node drives this node's own rank through
 	// these, authenticated by fleet API key only (see withNodeAuth).
+	mux.HandleFunc("/api/v1/internal/node/fabric", server.withNodeAuth(server.nodeFabric))
 	mux.HandleFunc("/api/v1/internal/node/preflight", server.withNodeAuth(server.nodePreflight))
 	mux.HandleFunc("/api/v1/internal/node/step", server.withNodeAuth(server.nodeStep))
 	mux.HandleFunc("/api/v1/internal/node/step/progress", server.withNodeAuth(server.nodeStepProgress))

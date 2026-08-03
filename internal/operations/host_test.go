@@ -423,7 +423,7 @@ func writeArtifactFixture(t *testing.T, executor *HostExecutor, r recipe.Recipe)
 	}
 }
 
-func containerFixtureJSON(id string, running bool, labels, mounts map[string]string) string {
+func containerFixtureJSON(id string, running bool, labels, mounts map[string]string, command ...string) string {
 	status := "exited"
 	if running {
 		status = "running"
@@ -435,7 +435,7 @@ func containerFixtureJSON(id string, running bool, labels, mounts map[string]str
 	encoded, err := json.Marshal(map[string]any{
 		"ID":     id,
 		"State":  map[string]any{"Running": running, "Status": status},
-		"Config": map[string]any{"Labels": labels},
+		"Config": map[string]any{"Labels": labels, "Cmd": command},
 		"Mounts": entries,
 	})
 	if err != nil {
@@ -680,6 +680,103 @@ func TestStartContainerLeavesAMatchingContainerAlone(t *testing.T) {
 	}
 	if _, missing := receipt["recreated_missing"]; missing {
 		t.Error("a container that was right there was reported as missing")
+	}
+}
+
+// The two Sparks meet at whatever address the kernel gave the cabled port,
+// and nothing guarantees the same address after a reboot. A start job creates
+// no container, so the container built by the last deployment would otherwise
+// come back up telling its rank to meet at an address that no longer exists,
+// and the model would hang with nothing to show for it. The address is
+// re-resolved for every job; this is the container being rebuilt against it.
+func TestStartContainerRebuildsWhenTheFabricAddressChanged(t *testing.T) {
+	r := twoSparkRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	for index := range r.Artifacts {
+		if err := os.MkdirAll(executor.artifactPath(r, index), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version), labelNodeRole: RoleWorker}
+	// What the last deployment baked in: the head's address as it was then.
+	yesterday := []string{"serve", "/model", "--node-rank", "1", "--master-addr", "169.254.205.1", "--master-port", "29501"}
+	created, started, stopped, removed := false, false, false, false
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		path := request.URL.Path
+		switch {
+		case request.Method == http.MethodPost && strings.HasPrefix(path, "/containers/create"):
+			created = true
+			return dockerFixtureResponse(http.StatusCreated, `{"ID":"rebuilt-id"}`), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			stopped = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodDelete:
+			removed = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+			started = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case containerFromPath(path) == legacyContainerName(r):
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		case created:
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("rebuilt-id", started, labels, executor.expectedMounts(r), "serve", "/model", "--node-rank", "1", "--master-addr", "169.254.37.9", "--master-port", "29501")), nil
+		default:
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("stale-id", false, labels, executor.expectedMounts(r), yesterday...)), nil
+		}
+	})}}
+
+	// Today's address, resolved live by this job.
+	worker := Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.37.9", MasterPort: 29501}
+	receipt, err := executor.Execute(context.Background(), Execution{Placement: worker}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if !stopped || !removed || !created || !started {
+		t.Fatalf("stopped=%v removed=%v created=%v started=%v, want the container rebuilt at the new address", stopped, removed, created, started)
+	}
+	drift, ok := receipt["recreated_after_address_change"].([]map[string]any)
+	if !ok || len(drift) != 1 {
+		t.Fatalf("receipt does not report the address change: %#v", receipt["recreated_after_address_change"])
+	}
+	if drift[0]["flag"] != "--master-addr" || drift[0]["was"] != "169.254.205.1" || drift[0]["now"] != "169.254.37.9" {
+		t.Fatalf("receipt address detail = %#v", drift[0])
+	}
+	if _, moved := receipt["recreated_after_move"]; moved {
+		t.Errorf("an address change was reported as a moved directory: %#v", receipt["recreated_after_move"])
+	}
+}
+
+// A container already holding this job's address is left exactly as it is:
+// re-resolving live must not mean rebuilding every start.
+func TestStartContainerLeavesAnUnchangedFabricAddressAlone(t *testing.T) {
+	r := twoSparkRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	for index := range r.Artifacts {
+		if err := os.MkdirAll(executor.artifactPath(r, index), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version), labelNodeRole: RoleWorker}
+	command := []string{"serve", "/model", "--node-rank", "1", "--master-addr", "169.254.205.1", "--master-port", "29501"}
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/start"):
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodGet && containerFromPath(request.URL.Path) == containerName(r):
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("live-id", true, labels, executor.expectedMounts(r), command...)), nil
+		default:
+			t.Fatalf("a container already at the right address was disturbed: %s %s", request.Method, request.URL)
+			return nil, nil
+		}
+	})}}
+
+	worker := Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.205.1", MasterPort: 29501}
+	receipt, err := executor.Execute(context.Background(), Execution{Placement: worker}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if _, rebuilt := receipt["recreated_after_address_change"]; rebuilt {
+		t.Errorf("an unchanged address was reported as drift: %#v", receipt)
 	}
 }
 

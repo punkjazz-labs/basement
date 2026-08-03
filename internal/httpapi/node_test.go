@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,10 @@ func (p refusingPeer) Target(context.Context) (operations.PeerTarget, error) {
 func (p refusingPeer) Preflight(context.Context, operations.PeerTarget, operations.Execution, recipe.Recipe) (map[string]any, error) {
 	p.t.Error("a delegated worker preflight was forwarded to another Spark")
 	return nil, errors.New("no peer")
+}
+func (p refusingPeer) Fabric(context.Context, operations.PeerTarget, recipe.Recipe) (operations.FabricProbe, error) {
+	p.t.Error("a delegated cable check was forwarded to another Spark")
+	return operations.FabricProbe{}, errors.New("no peer")
 }
 func (p refusingPeer) Step(context.Context, operations.PeerTarget, operations.Execution, recipe.Operation, recipe.Recipe, operations.Progress) (map[string]any, error) {
 	p.t.Error("a delegated worker step was forwarded to another Spark instead of run locally")
@@ -203,6 +208,77 @@ func TestWorkerOnlyRunsRecipesFromItsOwnCatalogue(t *testing.T) {
 	// Single-Spark work is never delegated.
 	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("pull_image", "job-evil", fixture.single)); status != http.StatusBadRequest {
 		t.Fatalf("single-Spark delegation status=%d", status)
+	}
+}
+
+// stubFabricProbe replaces live detection for the length of a test. CI
+// runners can expose a real RDMA device, so a test about this endpoint has to
+// fake the machine or it is testing the runner it happens to land on.
+func stubFabricProbe(t *testing.T, probe operations.FabricProbe, err error) {
+	t.Helper()
+	previous := operations.ServeFabricProbe
+	t.Cleanup(func() { operations.ServeFabricProbe = previous })
+	operations.ServeFabricProbe = func(recipe.Recipe) (operations.FabricProbe, error) { return probe, err }
+}
+
+// The worker's half of the cable check: it says which port it detected, the
+// address that port holds, and where it is listening for the head's dial.
+func TestWorkerReportsWhereOnTheCableItCanBeMet(t *testing.T) {
+	fixture := newNodeFixture(t)
+	stubFabricProbe(t, operations.FabricProbe{Interface: "enP2p1s0f1np1", HCA: "roceP2p1s0f1", Address: "169.254.37.4", Port: 45111, Token: "abc123"}, nil)
+
+	status, body := fixture.post(t, "/api/v1/internal/node/fabric", fixture.key, map[string]any{"recipe": fixture.distributed})
+	if status != http.StatusOK {
+		t.Fatalf("cable status=%d body=%#v", status, body)
+	}
+	for key, want := range map[string]any{
+		"interface": "enP2p1s0f1np1", "hca": "roceP2p1s0f1", "address": "169.254.37.4", "port": float64(45111), "token": "abc123",
+	} {
+		if body[key] != want {
+			t.Errorf("body[%s] = %v, want %v", key, body[key], want)
+		}
+	}
+}
+
+// A worker that cannot join the cable answers with the reason, not a
+// transport failure, so the head records a real check receipt saying what
+// this Spark reported.
+func TestWorkerReportsWhyItCannotJoinTheCable(t *testing.T) {
+	fixture := newNodeFixture(t)
+	stubFabricProbe(t, operations.FabricProbe{}, errors.New("no high-speed port has link (rocep1s0f0/enp1s0f0np0: no link); connect the cable between the two Sparks"))
+
+	status, body := fixture.post(t, "/api/v1/internal/node/fabric", fixture.key, map[string]any{"recipe": fixture.distributed})
+	if status != http.StatusOK {
+		t.Fatalf("cable status=%d body=%#v", status, body)
+	}
+	message, _ := body["error"].(string)
+	if !strings.Contains(message, "connect the cable between the two Sparks") {
+		t.Fatalf("the worker did not say why it cannot join the cable: %#v", body)
+	}
+	if body["address"] != nil {
+		t.Fatalf("a failed probe reported an address anyway: %#v", body)
+	}
+}
+
+// The endpoint carries the same guards as every other node endpoint: a fleet
+// key, and only a two-Spark recipe this Spark itself holds.
+func TestWorkerCableEndpointIsKeyOnlyAndCatalogued(t *testing.T) {
+	fixture := newNodeFixture(t)
+	stubFabricProbe(t, operations.FabricProbe{Interface: "enp1s0f1np1", Address: "169.254.37.4", Port: 45111, Token: "abc123"}, nil)
+
+	if status, _ := fixture.post(t, "/api/v1/internal/node/fabric", "", map[string]any{"recipe": fixture.distributed}); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated cable check status=%d", status)
+	}
+	if status, _ := fixture.post(t, "/api/v1/internal/node/fabric", "not-a-key", map[string]any{"recipe": fixture.distributed}); status != http.StatusUnauthorized {
+		t.Fatalf("bad-key cable check status=%d", status)
+	}
+	if status, _ := fixture.post(t, "/api/v1/internal/node/fabric", fixture.key, map[string]any{"recipe": fixture.single}); status != http.StatusBadRequest {
+		t.Fatalf("a single-Spark recipe was accepted for a cable check, status=%d", status)
+	}
+	unknown := fixture.distributed
+	unknown.ID = "not-in-this-catalogue"
+	if status, _ := fixture.post(t, "/api/v1/internal/node/fabric", fixture.key, map[string]any{"recipe": unknown}); status != http.StatusBadRequest {
+		t.Fatalf("an unknown recipe was accepted for a cable check, status=%d", status)
 	}
 }
 

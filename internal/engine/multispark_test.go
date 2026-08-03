@@ -305,6 +305,76 @@ func TestTwoSparkRemoveTearsDownBothNodes(t *testing.T) {
 	}
 }
 
+// Every two-Spark job proves the cable before it does anything else. An hour
+// of downloading over a link that cannot carry the model is the failure this
+// prevents, so first means first, not "before the containers".
+func TestTwoSparkJobsCheckTheCableFirst(t *testing.T) {
+	ctx := context.Background()
+	done := map[string]string{"install": "ready", "start": "ready", "stop": "stopped", "remove": "removed"}
+	for _, kind := range []string{"install", "start", "stop", "remove"} {
+		t.Run(kind, func(t *testing.T) {
+			fake := newFleetExecutor()
+			runner, s, r := newTwoSparkEngine(t, fake)
+			if kind != "install" {
+				install, _, err := s.CreateJob(ctx, "install", r.ID, "install-before-"+kind, map[string]any{"confirmed": true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				runner.Start(install.ID)
+				waitJob(t, s, install.ID, "ready")
+			}
+			var payload any = map[string]any{"confirmed": true}
+			if kind == "remove" {
+				payload = RemovePayload{RemoveArtifacts: true}
+			}
+			job, _, err := s.CreateJob(ctx, kind, r.ID, "cable-first-"+kind, payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.Start(job.ID)
+			waitJob(t, s, job.ID, done[kind])
+
+			// The job's own recorded steps, not the executor's log: a
+			// follow-on job of the install (a benchmark) shares the executor
+			// and would otherwise be read as this job's first move.
+			finished, err := s.GetJob(ctx, job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(finished.Steps) == 0 || finished.Steps[0].Operation != operations.VerifyFabric+":"+operations.RoleHead {
+				t.Fatalf("%s recorded %v as its first step", kind, finished.Steps)
+			}
+		})
+	}
+}
+
+// A cable that cannot carry the model stops the job where it stands: nothing
+// is pulled, nothing is downloaded, and the worker is never even asked to
+// check itself.
+func TestTwoSparkInstallStopsWhenTheCableCannotCarryIt(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	fake.failStepNode = operations.VerifyFabric + "@head"
+	runner, s, r := newTwoSparkEngine(t, fake)
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "no-cable", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	failed := waitJob(t, s, job.ID, "failed")
+	if !strings.Contains(failed.Error, operations.VerifyFabric+" failed on head") {
+		t.Fatalf("unexpected failure: %s", failed.Error)
+	}
+	if fake.peerAsked != 0 {
+		t.Fatalf("the worker was asked to check itself over a cable that does not work")
+	}
+	for _, event := range fake.recorded() {
+		if strings.HasPrefix(event, "pull_image") || strings.HasPrefix(event, "download_artifact") {
+			t.Fatalf("staging started over a cable that does not work: %v", fake.recorded())
+		}
+	}
+}
+
 func TestSingleSparkJobsNeverConsultTheFleet(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))

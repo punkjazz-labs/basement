@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { api, formatBytes, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepOperation, type Job, type Recipe, type Step } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
 
-// verify_peer_node is the second Spark checking itself, planned only for a
-// two-Spark job; on every other job it simply never appears.
+// verify_fabric is the two Sparks meeting over the cable and verify_peer_node
+// is the second Spark checking itself, both planned only for a two-Spark job;
+// on every other job they simply never appear.
 const CHECKS = [
   'verify_architecture', 'verify_dgx_spark', 'verify_memory_capacity', 'verify_disk',
   'verify_port', 'verify_docker', 'verify_nvidia_runtime', 'verify_artifact_access',
-  'verify_peer_node',
+  'verify_fabric', 'verify_peer_node',
 ]
 
 interface Phase {

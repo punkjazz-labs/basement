@@ -243,7 +243,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := h.verifyRuntimeInputs(r); err != nil {
 			return nil, err
 		}
-		stale, err := h.replaceStaleContainer(ctx, r)
+		stale, drift, err := h.replaceStaleContainer(ctx, r, execution.Placement)
 		if err != nil {
 			return nil, err
 		}
@@ -254,6 +254,9 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		receipt := map[string]any{"container_id": id, "container_name": containerName(r)}
 		if len(stale) > 0 {
 			receipt["recreated_after_move"] = mountMismatchReceipt(stale)
+		}
+		if len(drift) > 0 {
+			receipt["recreated_after_address_change"] = launchMismatchReceipt(drift)
 		}
 		if execution.Placement.Distributed() {
 			receipt["node_rank"] = execution.Placement.Rank()
@@ -273,11 +276,11 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		// otherwise read as a container that was never there.
 		_, inspectErr := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		missing := errors.Is(inspectErr, ErrContainerNotFound)
-		stale, err := h.replaceStaleContainer(ctx, r)
+		stale, drift, err := h.replaceStaleContainer(ctx, r, execution.Placement)
 		if err != nil {
 			return nil, err
 		}
-		if missing || len(stale) > 0 {
+		if missing || len(stale) > 0 || len(drift) > 0 {
 			// A container is never created without the record of how it was
 			// launched; on a machine where remove_container deleted that record
 			// this writes it again first.
@@ -304,6 +307,13 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		}
 		if len(stale) > 0 {
 			receipt["recreated_after_move"] = mountMismatchReceipt(stale)
+		}
+		// A two-Spark model meets at an address the kernel assigns to the
+		// cabled port, and that address can differ after a reboot. The
+		// container built by the last deployment still holds the old one, so
+		// it is rebuilt here against the address this job just resolved.
+		if len(drift) > 0 {
+			receipt["recreated_after_address_change"] = launchMismatchReceipt(drift)
 		}
 		return receipt, nil
 	case "stop_container":
@@ -863,27 +873,33 @@ func (h *HostExecutor) createContainer(ctx context.Context, execution Execution,
 // replaceStaleContainer removes a container of ours that is still pointed at
 // a directory this manager has moved away from — an install adopted across
 // the rename (spec 10) is the case that produced this, its container holding
-// binds under the pre-rename data directory long after the files moved. It
-// returns what disagreed, so the caller can create the container again and
-// the receipt can say why. Nothing is touched unless a mount source
-// positively disagrees.
-func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recipe) ([]mountMismatch, error) {
+// binds under the pre-rename data directory long after the files moved — or,
+// on a two-Spark model, one still holding the fabric address the other rank
+// had during an earlier deployment. It returns what disagreed, so the caller
+// can create the container again and the receipt can say why. Nothing is
+// touched unless a mount source or a launch flag positively disagrees.
+func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recipe, placement Placement) ([]mountMismatch, []launchMismatch, error) {
 	name := h.resolveContainerName(ctx, r)
 	state, err := h.docker.Container(ctx, name)
 	if err != nil || !containerLabelsMatch(state.Labels, r) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	stale := staleMounts(state, h.expectedMounts(r))
-	if len(stale) == 0 {
-		return nil, nil
+	drift := staleLaunch(state, placement)
+	if len(stale) == 0 && len(drift) == 0 {
+		return nil, nil, nil
+	}
+	reason := "the addresses this job resolved"
+	if len(stale) > 0 {
+		reason = stale[0].Expected
 	}
 	if err := h.docker.Stop(ctx, name); err != nil {
-		return nil, fmt.Errorf("stop the model container so it can be rebuilt against %s: %w", stale[0].Expected, err)
+		return nil, nil, fmt.Errorf("stop the model container so it can be rebuilt against %s: %w", reason, err)
 	}
 	if err := h.docker.Remove(ctx, name); err != nil {
-		return nil, fmt.Errorf("remove the model container so it can be rebuilt against %s: %w", stale[0].Expected, err)
+		return nil, nil, fmt.Errorf("remove the model container so it can be rebuilt against %s: %w", reason, err)
 	}
-	return stale, nil
+	return stale, drift, nil
 }
 
 // verifyRuntimeInputs checks that every host path the generated command

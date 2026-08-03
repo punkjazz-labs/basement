@@ -60,6 +60,11 @@ type PeerDirectory func(ctx context.Context) (PeerTarget, error)
 type PeerRunner interface {
 	Target(ctx context.Context) (PeerTarget, error)
 	Preflight(ctx context.Context, target PeerTarget, execution Execution, r recipe.Recipe) (map[string]any, error)
+	// Fabric asks the worker where on the cable it can be met and to listen
+	// there. It is separate from Step because it is not an operation the
+	// worker runs on its own hardware: it is one half of a check the head
+	// completes by dialing the answer.
+	Fabric(ctx context.Context, target PeerTarget, r recipe.Recipe) (FabricProbe, error)
 	Step(ctx context.Context, target PeerTarget, execution Execution, op recipe.Operation, r recipe.Recipe, progress Progress) (map[string]any, error)
 }
 
@@ -111,7 +116,10 @@ func FabricAddress(name string) (string, error) {
 			return ipv4.String(), nil
 		}
 	}
-	return "", fmt.Errorf("interconnect interface %s has no IPv4 address, so the other Spark has nothing to connect to", name)
+	// Worded without naming which Spark is speaking: this same sentence is
+	// reported by the head about itself and relayed by the head about the
+	// worker, and "the other Spark" would mean a different machine in each.
+	return "", fmt.Errorf("high-speed port %s has no address, so the two Sparks have nothing to meet on", name)
 }
 
 // Plan resolves both nodes of a distributed serve, and the peer they will be
@@ -144,6 +152,41 @@ func (f *FleetExecutor) Plan(ctx context.Context, r recipe.Recipe) (Deployment, 
 	}, nil
 }
 
+// verifyFabric proves the two Sparks can meet over the cable before the job
+// spends an hour downloading weights they would never be able to serve. Both
+// addresses are resolved live, on their own machine, at the moment the job
+// runs: nothing about the fabric is read from a store or a previous job, so
+// an address the kernel handed out differently after a reboot is simply the
+// address this check uses. The receipt names both ports and both addresses
+// because "it did not work" is unactionable without them.
+func (f *FleetExecutor) verifyFabric(ctx context.Context, target PeerTarget, r recipe.Recipe) (map[string]any, error) {
+	link, address, err := fabricEndpoint(r, f.localAddress)
+	if err != nil {
+		return nil, err
+	}
+	receipt := map[string]any{"head_interface": link.NetDev, "head_address": address, "worker_node": target.Name}
+	if link.HCA != "" {
+		receipt["head_hca"] = link.HCA
+	}
+	probe, err := f.peer.Fabric(ctx, target, r)
+	if err != nil {
+		return receipt, err
+	}
+	receipt["worker_interface"] = probe.Interface
+	receipt["worker_address"] = probe.Address
+	if probe.HCA != "" {
+		receipt["worker_hca"] = probe.HCA
+	}
+	started := time.Now()
+	if err := dialFabricProbe(ctx, address, probe); err != nil {
+		receipt["reachable"] = false
+		return receipt, err
+	}
+	receipt["reachable"] = true
+	receipt["round_trip_ms"] = time.Since(started).Milliseconds()
+	return receipt, nil
+}
+
 // Local is the executor that runs work on this machine. A manager acting as
 // a worker must reach it: running a worker-placed step back through the
 // fleet executor would forward it to a peer again instead of executing it.
@@ -156,10 +199,14 @@ func (f *FleetExecutor) RuntimeImageBytes(ctx context.Context, r recipe.Recipe) 
 }
 
 func (f *FleetExecutor) Execute(ctx context.Context, execution Execution, op recipe.Operation, r recipe.Recipe, progress Progress) (map[string]any, error) {
-	if op.Type == VerifyPeerNode || execution.Placement.Role == RoleWorker {
+	if op.Type == VerifyFabric || op.Type == VerifyPeerNode || execution.Placement.Role == RoleWorker {
 		target, err := pinnedPeer(execution)
 		if err != nil {
 			return nil, err
+		}
+		if op.Type == VerifyFabric {
+			receipt, err := f.verifyFabric(ctx, target, r)
+			return named(receipt, execution.Placement), err
 		}
 		if op.Type == VerifyPeerNode {
 			receipt, err := f.peer.Preflight(ctx, target, execution, r)
@@ -177,7 +224,7 @@ func (f *FleetExecutor) Execute(ctx context.Context, execution Execution, op rec
 // resume and verify, container creation is name-keyed), so repeating one
 // after a resume is cheap and always safer than assuming.
 func (f *FleetExecutor) Completed(ctx context.Context, execution Execution, op recipe.Operation, r recipe.Recipe, receipt json.RawMessage) bool {
-	if op.Type == VerifyPeerNode || execution.Placement.Role == RoleWorker {
+	if op.Type == VerifyFabric || op.Type == VerifyPeerNode || execution.Placement.Role == RoleWorker {
 		return false
 	}
 	return f.local.Completed(ctx, execution, op, r, receipt)
@@ -259,6 +306,30 @@ func (p *PeerClient) Preflight(ctx context.Context, target PeerTarget, execution
 		return receipt, fmt.Errorf("the other Spark is not ready to run this model: %s", failedCheckSummary(response.Checks))
 	}
 	return receipt, nil
+}
+
+// fabricProbeTimeout bounds asking the worker where it can be met. The worker
+// only detects a port and opens a socket, so an answer that takes longer than
+// this is a peer in trouble, not a slow check.
+const fabricProbeTimeout = 30 * time.Second
+
+func (p *PeerClient) Fabric(ctx context.Context, target PeerTarget, r recipe.Recipe) (FabricProbe, error) {
+	callCtx, cancel := context.WithTimeout(ctx, fabricProbeTimeout)
+	defer cancel()
+	var response struct {
+		FabricProbe
+		Error string `json:"error"`
+	}
+	if err := p.post(callCtx, target, "/api/v1/internal/node/fabric", map[string]any{"recipe": r}, &response); err != nil {
+		return FabricProbe{}, fmt.Errorf("the other Spark could not be asked about the cable: %w", err)
+	}
+	if response.Error != "" {
+		return FabricProbe{}, fmt.Errorf("the other Spark could not join the cable: %s", response.Error)
+	}
+	if response.Address == "" || response.Port == 0 || response.Token == "" {
+		return FabricProbe{}, errors.New("the other Spark did not say where on the cable it can be reached")
+	}
+	return response.FabricProbe, nil
 }
 
 func failedCheckSummary(checks []map[string]any) string {
