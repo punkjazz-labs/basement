@@ -169,10 +169,59 @@ CREATE TABLE IF NOT EXISTS peers (
   name TEXT NOT NULL,
   base_url TEXT NOT NULL,
   api_key TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  singleton INTEGER NOT NULL DEFAULT 1
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
+	}
+	return s.migratePeersSingleton()
+}
+
+// migratePeersSingleton brings a database created before this column up to
+// the current shape: peers holds at most one row, and that is a property of
+// the schema rather than of a check somewhere in a handler.
+//
+// A database that somehow already holds several peers is left without the
+// index instead of refusing to open. It is already a broken fleet
+// (cmd/basement/main.go will not pick a worker from it) and the console is
+// how the owner removes the extra one, so locking them out of the console
+// would be the worse of the two failures. CreatePeer's conditional insert
+// still keeps such a database from growing another row.
+func (s *Store) migratePeersSingleton() error {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info('peers')`)
+	if err != nil {
+		return fmt.Errorf("inspect peers table: %w", err)
+	}
+	present := false
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			rows.Close()
+			return err
+		}
+		if column == "singleton" {
+			present = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !present {
+		if _, err := s.db.Exec(`ALTER TABLE peers ADD COLUMN singleton INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return fmt.Errorf("add peers.singleton: %w", err)
+		}
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM peers`).Scan(&count); err != nil {
+		return fmt.Errorf("count peers: %w", err)
+	}
+	if count > 1 {
+		return nil
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS peers_singleton ON peers(singleton)`); err != nil {
+		return fmt.Errorf("constrain peers to a single row: %w", err)
 	}
 	return nil
 }
@@ -545,9 +594,21 @@ func hashSecret(secret string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ErrPeerExists is what CreatePeer gives when the fleet already has its one
+// Spark. It is a plain sentence because it reaches the owner as one.
+var ErrPeerExists = errors.New("another Spark is already in the fleet, so remove it under Fleet before adding a different one")
+
 // CreatePeer records another Spark to poll for fleet status. The caller is
 // responsible for having already proven base_url and api_key work together
 // before this is called; this method only persists.
+//
+// At most one peer exists (ADR 0005 defers multi-peer fleets, and
+// cmd/basement/main.go refuses to pick a worker when there is more than one),
+// and that rule lives here rather than in the callers. Reading the table and
+// then inserting leaves a window between the two, and there are two doors
+// into this: a console adoption and a manual add can be in flight at the same
+// moment. The insert is conditional in a single statement, so exactly one of
+// them writes a row and the other is told why it did not.
 func (s *Store) CreatePeer(ctx context.Context, name, baseURL, apiKey string) (Peer, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 64 {
@@ -564,8 +625,15 @@ func (s *Store) CreatePeer(ctx context.Context, name, baseURL, apiKey string) (P
 		return Peer{}, err
 	}
 	peer := Peer{ID: id, Name: name, BaseURL: baseURL, CreatedAt: now()}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO peers(id,name,base_url,api_key,created_at) VALUES(?,?,?,?,?)`, peer.ID, peer.Name, peer.BaseURL, apiKey, peer.CreatedAt); err != nil {
+	result, err := s.db.ExecContext(ctx,
+		`INSERT INTO peers(id,name,base_url,api_key,created_at,singleton)
+		 SELECT ?,?,?,?,?,1 WHERE NOT EXISTS (SELECT 1 FROM peers)`,
+		peer.ID, peer.Name, peer.BaseURL, apiKey, peer.CreatedAt)
+	if err != nil {
 		return Peer{}, err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return Peer{}, ErrPeerExists
 	}
 	return peer, nil
 }

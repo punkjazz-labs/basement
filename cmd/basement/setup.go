@@ -391,6 +391,16 @@ func (p *terminalPrompter) Password(prompt string) (string, error) {
 	return string(secret), nil
 }
 
+// ServerNotice shows the free text a keyboard-interactive SSH server sends
+// with its challenge (a one-time-code hint, a login banner). This is the one
+// prompter that asks for it: there is a person at this terminal, they typed
+// the password themselves a moment ago, and the text is sanitized before it
+// gets here. The console's adoption path implements nothing of the sort, so
+// the same text is discarded there rather than written to the journal.
+func (p *terminalPrompter) ServerNotice(text string) {
+	fmt.Println(p.paint.dim(text))
+}
+
 func (p *terminalPrompter) Confirm(prompt string) (bool, error) {
 	if p.assumeYes {
 		return true, nil

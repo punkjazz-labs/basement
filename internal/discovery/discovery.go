@@ -218,3 +218,38 @@ var tailscaleRange = func() *net.IPNet {
 	_, block, _ := net.ParseCIDR("100.64.0.0/10")
 	return block
 }()
+
+// localFabricRanges are the address ranges a machine of the owner's own can
+// plausibly sit on: RFC 1918 private networks, link-local, the CGNAT block
+// Tailscale assigns from, and IPv6 unique-local and link-local. Anything
+// outside them is somebody else's computer on the public internet.
+var localFabricRanges = func() []*net.IPNet {
+	blocks := []string{
+		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+		"169.254.0.0/16", "100.64.0.0/10",
+		"fc00::/7", "fe80::/10",
+	}
+	parsed := make([]*net.IPNet, 0, len(blocks))
+	for _, block := range blocks {
+		if _, network, err := net.ParseCIDR(block); err == nil {
+			parsed = append(parsed, network)
+		}
+	}
+	return parsed
+}()
+
+// IsLocalFabric reports whether ip belongs to a network the owner could
+// reasonably own: their LAN, their link-local segment, or their tailnet.
+// Loopback is deliberately not local fabric — it is this machine, which is a
+// different question with a different answer (see the adoption self-check).
+func IsLocalFabric(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		return false
+	}
+	for _, network := range localFabricRanges {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}

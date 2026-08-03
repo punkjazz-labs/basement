@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -58,9 +59,23 @@ type Options struct {
 	// DiscoveredPeers are other machines found on the network, recorded on
 	// the master for future distributed (multi-GB10) recipes.
 	DiscoveredPeers []string
+	// ConsoleHost anchors the reported ConsoleURL to an address the caller
+	// already verified, instead of the one the target reports for itself.
+	// The console's adoption path sets it to the address the owner adopted
+	// and signed in to: `hostname -I` and `tailscale ip` are answers from a
+	// machine that is not ours yet, and a hostile endpoint naming an
+	// accomplice would otherwise redirect everything that follows the
+	// install. The terminal wizard leaves it empty, because there a person
+	// chose the address and reads the result before acting on it.
+	ConsoleHost string
 }
 
 // InstallResult is what the operator needs after a successful install.
+//
+// ConsoleURL is the address to use. AltURL is another address the same
+// console can be reached at, for display: when ConsoleHost was set, that is
+// an address the target reported for itself, and it is not to be used for
+// anything the caller's trust depends on.
 type InstallResult struct {
 	ConsoleURL string
 	AltURL     string
@@ -236,13 +251,30 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	if index := strings.LastIndex(listen, ":"); index >= 0 {
 		port = listen[index+1:]
 	}
-	if listen == "" {
-		result.ConsoleURL = "http://127.0.0.1:" + port
-	} else {
-		result.ConsoleURL = "http://" + listen
+	// Both of these are built out of what the target said about itself: the
+	// address it bound, and the name it calls itself. Useful to show a
+	// person, and never more than that.
+	reportedURL, localURL := "", ""
+	if listen != "" {
+		reportedURL = "http://" + listen
 		if short, err := runner.Run(ctx, "hostname -s 2>/dev/null || hostname", nil); err == nil && strings.TrimSpace(short) != "" {
-			result.AltURL = fmt.Sprintf("http://%s.local:%s", strings.TrimSpace(short), port)
+			localURL = fmt.Sprintf("http://%s.local:%s", strings.TrimSpace(short), port)
 		}
+	}
+	switch {
+	case listen == "":
+		result.ConsoleURL = "http://127.0.0.1:" + port
+	case opts.ConsoleHost != "":
+		result.ConsoleURL = "http://" + net.JoinHostPort(opts.ConsoleHost, port)
+		for _, alternate := range []string{reportedURL, localURL} {
+			if alternate != "" && alternate != result.ConsoleURL {
+				result.AltURL = alternate
+				break
+			}
+		}
+	default:
+		result.ConsoleURL = reportedURL
+		result.AltURL = localURL
 	}
 	return result, nil
 }

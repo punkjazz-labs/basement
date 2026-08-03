@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -224,5 +227,119 @@ func TestPeerCRUDNeverExposesTheAPIKey(t *testing.T) {
 	}
 	if err := s.DeletePeer(ctx, created.ID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected os.ErrNotExist deleting an already-removed peer, got %v", err)
+	}
+}
+
+// Two doors lead to a peer row: a console adoption and the manual add form.
+// If they can both be open at once, the fleet can end up with two peers, and
+// two peers is not a fleet: cmd/basement/main.go refuses to pick a worker
+// from it, so every two-Spark model stops being installable.
+func TestCreatePeerAdmitsExactlyOneWinner(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const racers = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	won := make([]bool, racers)
+	refused := make([]bool, racers)
+	other := make([]error, racers)
+	for index := 0; index < racers; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			_, err := s.CreatePeer(ctx, fmt.Sprintf("spark-%d", index), fmt.Sprintf("http://192.168.99.%d:7070", 100+index), "rosk_key")
+			switch {
+			case err == nil:
+				won[index] = true
+			case errors.Is(err, ErrPeerExists):
+				refused[index] = true
+			default:
+				other[index] = err
+			}
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+
+	winners := 0
+	for index := 0; index < racers; index++ {
+		if other[index] != nil {
+			t.Errorf("racer %d failed for an unrelated reason: %v", index, other[index])
+		}
+		if won[index] {
+			winners++
+		}
+		if !won[index] && !refused[index] && other[index] == nil {
+			t.Errorf("racer %d neither won nor was told why not", index)
+		}
+	}
+	if winners != 1 {
+		t.Errorf("%d concurrent CreatePeer calls succeeded, want exactly 1", winners)
+	}
+	peers, err := s.Peers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("the peers table holds %d rows: %+v", len(peers), peers)
+	}
+	// And the rule keeps holding once the race is over.
+	if _, err := s.CreatePeer(ctx, "one-more", "http://192.168.99.200:7070", "rosk_key"); !errors.Is(err, ErrPeerExists) {
+		t.Errorf("a later CreatePeer returned %v, want ErrPeerExists", err)
+	}
+	// Removing the one peer frees the slot again.
+	if err := s.DeletePeer(ctx, peers[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePeer(ctx, "replacement", "http://192.168.99.201:7070", "rosk_key"); err != nil {
+		t.Errorf("the slot was not free after removing the peer: %v", err)
+	}
+}
+
+// A database written before the singleton column exists must open, keep its
+// peer, and enforce the rule from then on.
+func TestPeersSingletonMigratesAnOlderDatabase(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	older, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := older.Exec(`CREATE TABLE peers (
+	  id TEXT PRIMARY KEY,
+	  name TEXT NOT NULL,
+	  base_url TEXT NOT NULL,
+	  api_key TEXT NOT NULL,
+	  created_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := older.Exec(`INSERT INTO peers(id,name,base_url,api_key,created_at) VALUES('peer_old','spark-worker','http://192.168.99.137:7070','rosk_old','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := older.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("an older database did not open: %v", err)
+	}
+	defer s.Close()
+	peers, err := s.Peers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].ID != "peer_old" {
+		t.Fatalf("the existing peer did not survive the migration: %+v", peers)
+	}
+	if _, err := s.CreatePeer(ctx, "second", "http://192.168.99.200:7070", "rosk_key"); !errors.Is(err, ErrPeerExists) {
+		t.Errorf("the migrated database accepted a second peer: %v", err)
 	}
 }

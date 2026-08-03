@@ -8,11 +8,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/punkjazz-labs/basement/internal/discovery"
 	"github.com/punkjazz-labs/basement/internal/redact"
@@ -52,6 +55,21 @@ const (
 	// consoleWait bounds how long the newly installed manager has to answer
 	// on its own console port after systemd starts it.
 	consoleWait = 90 * time.Second
+
+	// maxDiscoveredCandidates caps one sweep's answer. A home network with
+	// more than this many SSH hosts on it is not a home network, and mDNS
+	// announcements are unauthenticated: anything on the segment can send as
+	// many as it likes, and every candidate costs this machine a probe.
+	maxDiscoveredCandidates = 64
+
+	// maxProbeWorkers caps how many console fingerprints run at once. The
+	// sweep is bounded by fleetDiscoverBudget either way; this bounds the
+	// sockets and goroutines it takes to get there.
+	maxProbeWorkers = 8
+
+	// maxMachineNameLength is what the store accepts for a peer name, and
+	// what a name another machine reported for itself is held to.
+	maxMachineNameLength = 64
 )
 
 // tailscaleFleetRange is the CGNAT block Tailscale assigns from; a head that
@@ -78,6 +96,33 @@ var (
 	// sweep nor an adoption ever points the owner at the Spark they are
 	// already looking at.
 	selfAddresses = localAddresses
+
+	// resolveHost turns the address the owner typed into the addresses this
+	// manager would actually connect to. Comparing spellings is not enough:
+	// localhost., 127.0.0.2 and a DNS name pointing back here are all this
+	// machine, and installing over itself mid-run is not a mistake anyone
+	// recovers from gracefully.
+	resolveHost = func(ctx context.Context, host string) ([]net.IP, error) {
+		if ip := net.ParseIP(host); ip != nil {
+			return []net.IP{ip}, nil
+		}
+		return net.DefaultResolver.LookupIP(ctx, "ip", host)
+	}
+
+	// localIPs reports every address this machine holds on its interfaces.
+	localIPs = func() []net.IP {
+		addrs, err := net.InterfaceAddrs()
+		if err != nil {
+			return nil
+		}
+		ips := make([]net.IP, 0, len(addrs))
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok {
+				ips = append(ips, ipNet.IP)
+			}
+		}
+		return ips
+	}
 
 	// adoptDial opens an SSH session to the machine being adopted. The
 	// password is used for this connection (and for sudo on the other side)
@@ -198,10 +243,15 @@ func (s *Server) fleetDiscover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	self := selfAddresses()
-	candidates := make([]discoveredCandidate, 0, len(found))
+	candidates := make([]discoveredCandidate, 0, maxDiscoveredCandidates)
 	for _, candidate := range found {
+		if len(candidates) >= maxDiscoveredCandidates {
+			break
+		}
 		address := candidate.IP.String()
-		name := setup.DisplayHost(candidate)
+		// The name comes off the network, from a machine that is not ours
+		// yet, so it is held to something safe to store and to render.
+		name := sanitizeMachineName(setup.DisplayHost(candidate))
 		if self[address] || self[strings.ToLower(name)] {
 			continue
 		}
@@ -211,16 +261,54 @@ func (s *Server) fleetDiscover(w http.ResponseWriter, r *http.Request) {
 			GB10Hint: discovery.LikelyGB10Name(candidate.Hostname),
 		})
 	}
-	var wg sync.WaitGroup
-	for index := range candidates {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			candidates[index].Basement = s.probeBasement(ctx, candidates[index].Address)
-		}(index)
-	}
-	wg.Wait()
+	probeCandidates(ctx, candidates, s.probeBasement)
 	writeJSON(w, http.StatusOK, map[string]any{"candidates": candidates})
+}
+
+// probeCandidates fingerprints every candidate through a small worker pool.
+// One goroutine and one socket per advertised address is a flood waiting to
+// happen; a fixed pool makes the cost of a sweep the same whether the network
+// holds three machines or three hundred.
+func probeCandidates(ctx context.Context, candidates []discoveredCandidate, probe func(context.Context, string) *discoveredBasement) {
+	workers := min(maxProbeWorkers, len(candidates))
+	if workers == 0 {
+		return
+	}
+	queue := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range queue {
+				candidates[index].Basement = probe(ctx, candidates[index].Address)
+			}
+		}()
+	}
+	for index := range candidates {
+		queue <- index
+	}
+	close(queue)
+	wg.Wait()
+}
+
+// sanitizeMachineName holds a name another machine reported for itself to
+// something this manager can store and show: control characters removed and
+// the length capped to what the store accepts. It is remote-controlled data
+// in a field that ends up in the peers table and on screen, so it is treated
+// as untrusted text rather than as a hostname.
+func sanitizeMachineName(raw string) string {
+	var builder strings.Builder
+	for _, symbol := range strings.TrimSpace(raw) {
+		if unicode.IsControl(symbol) || symbol == utf8.RuneError {
+			continue
+		}
+		if builder.Len()+utf8.RuneLen(symbol) > maxMachineNameLength {
+			break
+		}
+		builder.WriteRune(symbol)
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 // probeBasement reports whether a machine is already running basement. The
@@ -434,8 +522,17 @@ func (r *adoptionRun) progress(format string, args ...any) {
 // fail ends the run. message is the sentence the owner reads; cause, when
 // there is one, is appended so the failure is diagnosable, scrubbed first.
 func (r *adoptionRun) fail(key, message string, cause error) {
+	r.failNoted(key, message, cause, "")
+}
+
+// failNoted is fail with one more sentence after the cause: what this manager
+// did about the state it left on the other machine.
+func (r *adoptionRun) failNoted(key, message string, cause error, note string) {
 	if cause != nil {
 		message += ": " + cause.Error()
+	}
+	if note != "" {
+		message += ". " + note
 	}
 	message = r.scrub(message)
 	r.state.update(func(view *adoptionView) {
@@ -446,7 +543,17 @@ func (r *adoptionRun) fail(key, message string, cause error) {
 	})
 }
 
+// succeed ends the run. The happy path is scrubbed exactly like the failure
+// path: some of these strings came from the machine on the other end, which
+// is free to answer `hostname` with the password it was just handed, and a
+// success result is as much outbound state as an error message is.
 func (r *adoptionRun) succeed(result adoptionResult) {
+	result.Peer.Name = r.scrub(result.Peer.Name)
+	result.Peer.BaseURL = r.scrub(result.Peer.BaseURL)
+	result.ConsoleURL = r.scrub(result.ConsoleURL)
+	result.AltURL = r.scrub(result.AltURL)
+	result.OwnerPairingURL = r.scrub(result.OwnerPairingURL)
+	result.OwnerPairingToken = r.scrub(result.OwnerPairingToken)
 	r.state.update(func(view *adoptionView) {
 		view.State = adoptionSucceeded
 		view.Result = &result
@@ -492,7 +599,11 @@ func (s *Server) fleetAdopt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if self := selfAddresses(); self[strings.ToLower(address)] {
-		writeError(w, http.StatusBadRequest, errors.New("that address is this Spark itself, so enter the address of the other machine"))
+		writeError(w, http.StatusBadRequest, errSelfAdoption)
+		return
+	}
+	if err := checkAdoptionTarget(r.Context(), address); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	// One peer, per the ADR 0005 deferral: cmd/basement/main.go refuses to
@@ -536,6 +647,9 @@ func (s *Server) fleetAdoptStatus(w http.ResponseWriter, r *http.Request) {
 // adoptionAddress accepts a bare host or IP and nothing else. A scheme, a
 // port, a path or embedded credentials would each mean the console URL this
 // manager builds from it points somewhere other than where it just installed.
+// The character set is the one a hostname or an IPv4 address is spelled with,
+// so nothing that reaches an error sentence, a log line or a URL carries
+// anything but letters, digits, dots and dashes.
 func adoptionAddress(raw string) (string, error) {
 	address := strings.TrimSpace(raw)
 	if address == "" {
@@ -544,12 +658,56 @@ func adoptionAddress(raw string) (string, error) {
 	if len(address) > 253 {
 		return "", errors.New("that address is too long to be a machine name")
 	}
-	for _, forbidden := range []string{"/", "@", ":", " ", "?", "#"} {
-		if strings.Contains(address, forbidden) {
+	for _, symbol := range address {
+		switch {
+		case symbol >= 'a' && symbol <= 'z', symbol >= 'A' && symbol <= 'Z',
+			symbol >= '0' && symbol <= '9', symbol == '.', symbol == '-', symbol == '_':
+		default:
 			return "", errors.New("enter just the machine's address, with no scheme, port or path")
 		}
 	}
 	return address, nil
+}
+
+// errSelfAdoption is the one sentence both self-checks give: the spelling
+// check on the way in, and the resolved check that catches the spellings.
+var errSelfAdoption = errors.New("that address is this Spark itself, so enter the address of the other machine")
+
+// checkAdoptionTarget decides whether this manager will spend an SSH session
+// on the address the owner typed. Two rules, both about what the address
+// actually resolves to rather than how it is written.
+//
+// It is never this machine. localhost., 127.0.0.2, any other loopback address
+// and any name that resolves to an address this machine holds all mean the
+// manager would install over itself, restarting the service running the
+// adoption halfway through.
+//
+// It is on a network the owner could own: a private range, a link-local
+// segment, or the CGNAT block Tailscale assigns from. That is what the
+// product is (Sparks on your own network), and it keeps a console session
+// from being used as a general-purpose SSH prober against the internet.
+func checkAdoptionTarget(ctx context.Context, address string) error {
+	resolved, err := resolveHost(ctx, address)
+	if err != nil || len(resolved) == 0 {
+		return fmt.Errorf("this Spark could not find %s on the network, so check the address", address)
+	}
+	own := localIPs()
+	for _, ip := range resolved {
+		if ip.IsLoopback() {
+			return errSelfAdoption
+		}
+		for _, mine := range own {
+			if mine.Equal(ip) {
+				return errSelfAdoption
+			}
+		}
+	}
+	for _, ip := range resolved {
+		if !discovery.IsLocalFabric(ip) {
+			return fmt.Errorf("%s is not on your own network or tailnet, and basement only adopts machines that are", address)
+		}
+	}
+	return nil
 }
 
 // runAdoption is the whole flow, one step at a time, each reported as it
@@ -569,24 +727,23 @@ func (s *Server) runAdoption(ctx context.Context, run *adoptionRun, address, use
 	run.begin("verify")
 	identity := adoptProbe(ctx, runner)
 	if !identity.IsGB10() {
-		found := identity.Product()
-		if gpu := strings.TrimSpace(identity.GPUName); gpu != "" && gpu != found {
+		found := sanitizeMachineName(identity.Product())
+		if gpu := sanitizeMachineName(identity.GPUName); gpu != "" && gpu != found {
 			found += " with " + gpu
 		}
 		run.fail("verify", fmt.Sprintf("%s is not a GB10 machine (it reports %s), so basement will not install there", address, found), nil)
 		return
 	}
 	// The peer's name in this console is the name the machine reports for
-	// itself, held to what the store accepts.
-	name := strings.TrimSpace(identity.Hostname)
+	// itself. That machine is not ours yet and its answers are whatever it
+	// chose to answer, so the name is scrubbed of the typed password and held
+	// to printable, bounded text before it is stored or shown anywhere.
+	name := sanitizeMachineName(run.scrub(identity.Hostname))
 	if name == "" {
 		name = address
 	}
-	if len(name) > 64 {
-		name = name[:64]
-	}
-	run.done("verify", identity.Product())
-	run.progress("confirmed %s (%s)", identity.Product(), name)
+	run.done("verify", sanitizeMachineName(identity.Product()))
+	run.progress("confirmed %s (%s)", sanitizeMachineName(identity.Product()), name)
 
 	run.begin("install")
 	source, err := adoptBinarySource()
@@ -596,22 +753,38 @@ func (s *Server) runAdoption(ctx context.Context, run *adoptionRun, address, use
 	}
 	listen := s.siblingListenMode()
 	run.progress("installing this manager's own build, listening on %s", listen)
-	result, err := adoptInstall(ctx, runner, source, setup.Options{Listen: listen}, func(format string, args ...any) {
+	result, err := adoptInstall(ctx, runner, source, setup.Options{Listen: listen, ConsoleHost: address}, func(format string, args ...any) {
 		run.progress(format, args...)
 	})
 	if err != nil {
 		run.fail("install", fmt.Sprintf("could not install basement on %s", address), err)
 		return
 	}
-	if result.Loopback || result.ConsoleURL == "" {
+	if result.Loopback {
 		run.fail("install", fmt.Sprintf("%s installed a console that only it can reach, so it cannot join the fleet", address), nil)
 		return
 	}
-	run.done("install", result.ConsoleURL)
+	// Everything from here on talks to the address the owner adopted and this
+	// manager has just signed in to over SSH, never to an address the machine
+	// reported for itself. A hostile SSH endpoint can answer `hostname -I` or
+	// `tailscale ip` with an accomplice's address; believing it would point
+	// the pairing, the fleet key and the stored peer row at that other host.
+	consoleURL := consoleBaseURL(address)
+	// Addresses the machine reported are kept for display only, and only
+	// when they are a bare origin like every other peer URL this manager
+	// accepts.
+	altURL := ""
+	for _, reported := range []string{result.AltURL, result.ConsoleURL} {
+		if alternate, err := normalizedPeerBaseURL(reported); err == nil && alternate != consoleURL {
+			altURL = alternate
+			break
+		}
+	}
+	run.done("install", consoleURL)
 
 	run.begin("start")
-	run.progress("waiting for %s to answer", result.ConsoleURL)
-	if err := s.waitForConsole(ctx, result.ConsoleURL); err != nil {
+	run.progress("waiting for %s to answer", consoleURL)
+	if err := s.waitForConsole(ctx, consoleURL); err != nil {
 		run.fail("start", fmt.Sprintf("%s installed basement but its console did not come up", address), err)
 		return
 	}
@@ -622,37 +795,40 @@ func (s *Server) runAdoption(ctx context.Context, run *adoptionRun, address, use
 		run.fail("pair", fmt.Sprintf("%s did not produce a pairing token, so this Spark cannot get a key from it", address), nil)
 		return
 	}
-	apiKey, err := s.mintFleetKey(ctx, result.ConsoleURL, result.Token)
+	key, err := s.mintFleetKey(ctx, consoleURL, result.Token)
 	if err != nil {
-		run.fail("pair", fmt.Sprintf("could not pair with the new console on %s", result.ConsoleURL), err)
+		run.fail("pair", fmt.Sprintf("could not pair with the new console on %s", consoleURL), err)
 		return
 	}
 	run.done("pair", "fleet key created on "+name)
 
+	// From here a fleet key exists on the other machine. Every failure below
+	// hands it back rather than leaving a credential behind that nobody can
+	// see and nobody asked for.
 	run.begin("peer")
 	// The single-peer rule is checked again here: the handler refused a
 	// second adoption, but a peer could have been added by hand while this
 	// one ran, and the store is the only thing that decides.
 	peers, err := s.store.Peers(ctx)
 	if err != nil {
-		run.fail("peer", "could not read this Spark's fleet", err)
+		run.failNoted("peer", "could not read this Spark's fleet", err, s.revokeFleetKey(ctx, consoleURL, key))
 		return
 	}
 	if len(peers) > 0 {
-		run.fail("peer", "another Spark was added to the fleet while this one was being set up, so nothing was recorded", nil)
+		run.failNoted("peer", "another Spark was added to the fleet while this one was being set up, so nothing was recorded", nil, s.revokeFleetKey(ctx, consoleURL, key))
 		return
 	}
-	peer, err := s.addPeer(ctx, name, result.ConsoleURL, apiKey)
+	peer, err := s.addPeer(ctx, name, consoleURL, key.secret)
 	if err != nil {
-		run.fail("peer", fmt.Sprintf("%s is set up, but this Spark could not record it as the fleet peer", address), err)
+		run.failNoted("peer", fmt.Sprintf("%s is set up, but this Spark could not record it as the fleet peer", address), err, s.revokeFleetKey(ctx, consoleURL, key))
 		return
 	}
 	run.done("peer", peer.Name)
 	run.succeed(adoptionResult{
 		Peer:              peerView{ID: peer.ID, Name: peer.Name, BaseURL: peer.BaseURL},
-		ConsoleURL:        result.ConsoleURL,
-		AltURL:            result.AltURL,
-		OwnerPairingURL:   result.ConsoleURL,
+		ConsoleURL:        consoleURL,
+		AltURL:            altURL,
+		OwnerPairingURL:   consoleURL,
 		OwnerPairingToken: result.Token,
 	})
 }
@@ -705,20 +881,20 @@ func (s *Server) waitForConsole(ctx context.Context, baseURL string) error {
 // Pairing does not consume the token: internal/auth compares every pair
 // against the same file-backed secret, so the owner can still pair their own
 // browser with the same token afterwards.
-func (s *Server) mintFleetKey(ctx context.Context, baseURL, token string) (string, error) {
+func (s *Server) mintFleetKey(ctx context.Context, baseURL, token string) (fleetKey, error) {
 	body, err := json.Marshal(map[string]string{"token": token})
 	if err != nil {
-		return "", err
+		return fleetKey{}, err
 	}
 	response, err := s.callNewSpark(ctx, http.MethodPost, baseURL, "/api/v1/auth/pair", body, nil)
 	if err != nil {
-		return "", err
+		return fleetKey{}, err
 	}
 	var paired struct {
 		CSRF string `json:"csrf_token"`
 	}
 	if err := json.Unmarshal(response.body, &paired); err != nil || paired.CSRF == "" {
-		return "", errors.New("it did not accept the pairing token it had just created")
+		return fleetKey{}, errors.New("it did not accept the pairing token it had just created")
 	}
 	// Rebuilt as a request cookie (name=value) rather than echoing the
 	// Set-Cookie line, whose attributes belong to the response.
@@ -728,26 +904,67 @@ func (s *Server) mintFleetKey(ctx context.Context, baseURL, token string) (strin
 	}
 	session := strings.Join(pairs, "; ")
 	if session == "" {
-		return "", errors.New("it did not open a session for this Spark")
+		return fleetKey{}, errors.New("it did not open a session for this Spark")
 	}
 	body, err = json.Marshal(map[string]string{"name": fleetKeyName()})
 	if err != nil {
-		return "", err
+		return fleetKey{}, err
 	}
 	response, err = s.callNewSpark(ctx, http.MethodPost, baseURL, "/api/v1/keys", body, map[string]string{
 		"Cookie":       session,
 		"X-CSRF-Token": paired.CSRF,
 	})
 	if err != nil {
-		return "", err
+		return fleetKey{}, err
 	}
 	var created struct {
+		Key struct {
+			ID string `json:"id"`
+		} `json:"key"`
 		Secret string `json:"secret"`
 	}
 	if err := json.Unmarshal(response.body, &created); err != nil || created.Secret == "" {
-		return "", errors.New("it did not return a fleet key")
+		// It answered the key request successfully and then said nothing
+		// usable, so a key may exist over there with no way to name it.
+		return fleetKey{}, errors.New("it accepted the request for a fleet key and did not return one, so check for a key named " + fleetKeyName() + " under Connect on its own console")
 	}
-	return created.Secret, nil
+	return fleetKey{secret: created.Secret, id: created.Key.ID, session: session, csrf: paired.CSRF}, nil
+}
+
+// fleetKey is the API key this manager created on the machine it is adopting,
+// together with the bootstrap session it was created with. The session is
+// held for one reason: if the run fails after this point, the key can be
+// handed straight back instead of living on that machine forever, unseen by
+// the owner and unremovable without a second bootstrap.
+type fleetKey struct {
+	secret  string
+	id      string
+	session string
+	csrf    string
+}
+
+// revokeFleetKey deletes the key this manager minted on the other machine and
+// returns the sentence that says what happened, for the failure the owner is
+// about to read. Best effort by nature: the machine may already be gone. When
+// it cannot be done, the sentence names the key so the owner can remove it
+// themselves rather than being left with a credential they never knew about.
+func (s *Server) revokeFleetKey(ctx context.Context, baseURL string, key fleetKey) string {
+	orphaned := "A fleet key named " + fleetKeyName() + " was left on that machine and could not be removed, so delete it under Connect on its own console"
+	if key.id == "" || key.session == "" {
+		return orphaned
+	}
+	// Detached from the run's context: an adoption that failed because it ran
+	// out of budget should still get its key back.
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	_, err := s.callNewSpark(revokeCtx, http.MethodDelete, baseURL, "/api/v1/keys/"+url.PathEscape(key.id), nil, map[string]string{
+		"Cookie":       key.session,
+		"X-CSRF-Token": key.csrf,
+	})
+	if err != nil {
+		return orphaned
+	}
+	return "The fleet key this Spark had created on that machine has been removed"
 }
 
 // fleetKeyName names the key after this machine, so the owner reading the
@@ -809,6 +1026,10 @@ func (s *Server) callNewSpark(ctx context.Context, method, baseURL, endpoint str
 // key actually reach a Spark together, then store. A peer entry that has
 // never been confirmed reachable is worse than no entry at all.
 func (s *Server) addPeer(ctx context.Context, name, rawBaseURL, apiKey string) (store.Peer, error) {
+	// A peer name is either typed by the owner or reported by the machine
+	// being adopted. The second kind is untrusted text, and this is the one
+	// door both kinds come through, so it is held to shape here.
+	name = sanitizeMachineName(name)
 	baseURL, err := normalizedPeerBaseURL(rawBaseURL)
 	if err != nil {
 		return store.Peer{}, err

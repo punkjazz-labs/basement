@@ -984,6 +984,12 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 	// arrives the same way whichever door it came through: normalized URL,
 	// proven reachable with its key, then stored.
 	peer, err := s.addPeer(r.Context(), request.Name, request.BaseURL, request.APIKey)
+	if errors.Is(err, store.ErrPeerExists) {
+		// The store, not this handler, is what decides: an adoption running
+		// in the console can have taken the one slot a moment ago.
+		writeError(w, http.StatusConflict, err)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

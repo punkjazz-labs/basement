@@ -329,3 +329,53 @@ func TestEmbeddedUnitMatchesPackaging(t *testing.T) {
 		t.Fatal("internal/setup/assets/basement.service differs from packaging/systemd/basement.service — keep them identical")
 	}
 }
+
+// The address a target reports for itself decides where its console binds,
+// and nothing else. When the caller already verified an address (the console
+// adopts the machine it signed in to over SSH), that is the address the
+// result names, and the machine's own answer is demoted to an alternate.
+func TestInstallConsoleURLFollowsTheVerifiedAddress(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	runner.outputs["pairing-token"] = "tok\n"
+	// The hostile answer: an accomplice's address.
+	runner.outputs["hostname -I"] = "203.0.113.9 \n"
+	runner.outputs["hostname -s"] = "accomplice\n"
+
+	result, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"},
+		Options{Listen: ListenLAN, ConsoleHost: "192.168.99.137"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConsoleURL != "http://192.168.99.137:7070" {
+		t.Errorf("ConsoleURL = %q, want the address the caller verified", result.ConsoleURL)
+	}
+	if result.AltURL != "http://203.0.113.9:7070" {
+		t.Errorf("AltURL = %q, want the target's own answer kept separate", result.AltURL)
+	}
+	// The service still binds the address the machine actually holds.
+	var dropIn string
+	for command, payload := range runner.writes {
+		if strings.Contains(command, dropInPath) {
+			dropIn = payload
+		}
+	}
+	if !strings.Contains(dropIn, "--listen 203.0.113.9:7070") {
+		t.Errorf("listen drop-in = %q, want the target's own address", dropIn)
+	}
+
+	// Without ConsoleHost (the terminal wizard, where a person chose the
+	// address and reads the result) nothing changes.
+	plain := newFakeRunner()
+	plain.outputs["docker info"] = "nvidia runc \n"
+	plain.outputs["pairing-token"] = "tok\n"
+	plain.outputs["hostname -I"] = "192.168.99.134 \n"
+	plain.outputs["hostname -s"] = "spark-head\n"
+	unanchored, err := Install(context.Background(), plain, LocalFileSource{Path: "/tmp/binary"}, Options{Listen: ListenLAN}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unanchored.ConsoleURL != "http://192.168.99.134:7070" || unanchored.AltURL != "http://spark-head.local:7070" {
+		t.Errorf("unanchored install = %+v", unanchored)
+	}
+}

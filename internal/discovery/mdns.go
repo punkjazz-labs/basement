@@ -21,25 +21,60 @@ type mdnsService struct {
 	hostname string
 }
 
+// maxMDNSServices caps one browse. mDNS is unauthenticated broadcast: anything
+// on the segment can answer, as often as it likes, with as many records as it
+// likes. A sweep is a convenience, so it stops collecting long before a flood
+// costs this machine anything.
+const maxMDNSServices = 128
+
 // browseMDNS asks for PTR records of a service type (e.g. "_ssh._tcp.local.")
 // and returns every announced instance with its host address.
 func browseMDNS(ctx context.Context, service string) []mdnsService {
-	var services []mdnsService
-	seen := map[string]bool{}
-	mdnsExchange(ctx, service, dnsmessage.TypePTR, func(payload []byte, from net.Addr) {
-		hostname, ip := parseServiceAnnouncement(payload)
-		if ip == nil {
-			if udp, ok := from.(*net.UDPAddr); ok && hostname != "" {
-				ip = udp.IP.To4()
-			}
-		}
-		if ip == nil || seen[ip.String()] {
-			return
-		}
-		seen[ip.String()] = true
-		services = append(services, mdnsService{ip: ip, hostname: hostname})
-	})
-	return services
+	collector := &mdnsCollector{seen: map[string]bool{}}
+	mdnsExchange(ctx, service, dnsmessage.TypePTR, collector.accept)
+	return collector.services
+}
+
+// mdnsCollector turns answers into candidates, capped and deduplicated.
+type mdnsCollector struct {
+	services []mdnsService
+	seen     map[string]bool
+}
+
+func (c *mdnsCollector) accept(payload []byte, from net.Addr) {
+	if len(c.services) >= maxMDNSServices {
+		return
+	}
+	udp, ok := from.(*net.UDPAddr)
+	if !ok {
+		return
+	}
+	hostname, advertised := parseServiceAnnouncement(payload)
+	ip := acceptedMDNSAddress(advertised, udp.IP)
+	if ip == nil || c.seen[ip.String()] {
+		return
+	}
+	c.seen[ip.String()] = true
+	c.services = append(c.services, mdnsService{ip: ip, hostname: hostname})
+}
+
+// acceptedMDNSAddress decides which address, if any, one mDNS answer may put
+// on the candidate list. An A record is a claim the responder makes, not a
+// fact: a machine on the segment can advertise any address at all, and every
+// address that reaches the list is one this manager will then connect to. So
+// only the address the answer actually came from is ever used, and only when
+// it is on a network the owner could own. An advertisement naming a different
+// address is dropped whole rather than half-believed, and nothing is said
+// about it: the text came from the same responder.
+func acceptedMDNSAddress(advertised, source net.IP) net.IP {
+	source = source.To4()
+	if source == nil || !IsLocalFabric(source) {
+		return nil
+	}
+	if advertised != nil && !advertised.Equal(source) {
+		return nil
+	}
+	return source
 }
 
 // reverseMDNS resolves an IP back to the .local hostname avahi publishes.

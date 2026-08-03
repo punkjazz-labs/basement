@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -23,6 +25,46 @@ import (
 type Prompter interface {
 	Password(prompt string) (string, error)
 	Confirm(prompt string) (bool, error)
+}
+
+// ServerNotice is an optional capability a Prompter may add when there is a
+// human at a terminal reading its output. Only such a prompter is ever shown
+// the free text an SSH server sends with a keyboard-interactive challenge.
+//
+// The default is to discard that text, and the default is what the console's
+// adoption path gets. A server can put anything in an instruction, including
+// the password it was just handed, and on that path the "output" is the
+// systemd journal rather than a person: printing it would put the owner's
+// password in a log file the adoption scrubber never sees. Nothing is lost by
+// dropping it, because nobody is reading.
+type ServerNotice interface {
+	ServerNotice(text string)
+}
+
+// serverTextLimit caps how much server-controlled text is ever rendered.
+const serverTextLimit = 200
+
+// sanitizeServerText makes text an SSH server chose safe to show a person:
+// control characters (terminal escapes among them) are dropped and the
+// length is capped. It does not make the text trustworthy, only harmless.
+func sanitizeServerText(text string) string {
+	var builder strings.Builder
+	for _, symbol := range text {
+		switch {
+		case symbol == '\n' || symbol == '\t':
+			builder.WriteRune(' ')
+		case unicode.IsControl(symbol):
+			continue
+		case symbol == utf8.RuneError:
+			continue
+		default:
+			builder.WriteRune(symbol)
+		}
+		if builder.Len() >= serverTextLimit {
+			break
+		}
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 // SSHRunner executes commands on a remote machine over SSH.
@@ -62,15 +104,20 @@ func DialSSH(ctx context.Context, addr, user string, prompter Prompter) (*SSHRun
 		return prompter.Password(fmt.Sprintf("%s@%s password: ", user, addr))
 	}), 3))
 	// Some sshd configurations offer keyboard-interactive instead of plain
-	// password auth; answer its prompts the same way.
+	// password auth; answer its prompts the same way. Both the instruction
+	// and the questions are text the server chose, so neither is printed
+	// here: they only reach a prompter that asked for them (ServerNotice) or
+	// that renders its own prompts, and they are sanitized on the way.
 	methods = append(methods, ssh.RetryableAuthMethod(ssh.KeyboardInteractive(
 		func(_, instruction string, questions []string, echos []bool) ([]string, error) {
-			if instruction != "" {
-				fmt.Println(strings.TrimSpace(instruction))
+			if notice, ok := prompter.(ServerNotice); ok {
+				if text := sanitizeServerText(instruction); text != "" {
+					notice.ServerNotice(text)
+				}
 			}
 			answers := make([]string, len(questions))
 			for index, question := range questions {
-				prompt := strings.TrimSpace(question)
+				prompt := sanitizeServerText(question)
 				if prompt == "" {
 					prompt = fmt.Sprintf("%s@%s response", user, addr)
 				}

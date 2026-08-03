@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,17 +130,23 @@ func (stubRunner) RunPrivileged(context.Context, string, io.Reader) (string, err
 func (stubRunner) Describe() string                                                 { return "fake machine" }
 
 // holdSeams restores every adoption seam after the test, so one test's fake
-// network can never leak into another's.
+// network can never leak into another's, and stands this machine on the fixed
+// network these tests describe: the head is 192.168.99.134, and nothing else
+// in 192.168.99.0/24 belongs to it. Without that, whether a test passes would
+// depend on the addresses of the laptop running it.
 func holdSeams(t *testing.T) {
 	t.Helper()
 	discoverBefore, probeBefore, installBefore := discoverCandidates, adoptProbe, adoptInstall
 	dialBefore, sourceBefore := adoptDial, adoptBinarySource
 	urlBefore, selfBefore := consoleBaseURL, selfAddresses
+	resolveBefore, localBefore := resolveHost, localIPs
 	t.Cleanup(func() {
 		discoverCandidates, adoptProbe, adoptInstall = discoverBefore, probeBefore, installBefore
 		adoptDial, adoptBinarySource = dialBefore, sourceBefore
 		consoleBaseURL, selfAddresses = urlBefore, selfBefore
+		resolveHost, localIPs = resolveBefore, localBefore
 	})
+	localIPs = func() []net.IP { return []net.IP{net.ParseIP("192.168.99.134")} }
 }
 
 // gb10Machine is what Probe reports for a real second Spark.
@@ -153,20 +161,29 @@ type fakeSpark struct {
 	server     *httptest.Server
 	token      string
 	secret     string
+	hostname   string
+	mu         sync.Mutex
 	pairs      int
 	badOrigins int
+	requests   int
+	revoked    []string
+	// refuseHandshake makes the reachability check at the end of adoption
+	// fail, which is how a test injects a failure after the fleet key exists.
+	refuseHandshake bool
 }
 
 func newFakeSpark(t *testing.T, token string) *fakeSpark {
 	t.Helper()
-	spark := &fakeSpark{token: token, secret: "rosk_fleetkeyfleetkeyfleetkey"}
+	spark := &fakeSpark{token: token, secret: "rosk_fleetkeyfleetkeyfleetkey", hostname: "spark-worker"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
 	mux.HandleFunc("/api/v1/auth/pair", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Origin") != "http://"+r.Host {
+			spark.mu.Lock()
 			spark.badOrigins++
+			spark.mu.Unlock()
 			writeError(w, http.StatusForbidden, errors.New("cross-origin mutation denied"))
 			return
 		}
@@ -179,7 +196,9 @@ func newFakeSpark(t *testing.T, token string) *fakeSpark {
 		}
 		// Like the real auth manager, the token is compared and kept: it is a
 		// file-backed shared secret, not a one-shot nonce.
+		spark.mu.Lock()
 		spark.pairs++
+		spark.mu.Unlock()
 		http.SetCookie(w, &http.Cookie{Name: "basement_session", Value: "session-value", Path: "/"})
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": "csrf-value"})
 	})
@@ -198,16 +217,60 @@ func newFakeSpark(t *testing.T, token string) *fakeSpark {
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"key": map[string]any{"id": "key_1", "name": request.Name}, "secret": spark.secret})
 	})
+	// Key revocation, the same shape this manager serves it in.
+	mux.HandleFunc("/api/v1/keys/", func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("basement_session")
+		if r.Method != http.MethodDelete || err != nil || cookie.Value != "session-value" || r.Header.Get("X-CSRF-Token") != "csrf-value" {
+			writeError(w, http.StatusForbidden, errors.New("valid CSRF token required"))
+			return
+		}
+		spark.mu.Lock()
+		spark.revoked = append(spark.revoked, strings.TrimPrefix(r.URL.Path, "/api/v1/keys/"))
+		spark.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"revoked": true})
+	})
 	mux.HandleFunc("/api/v1/system", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+spark.secret {
+		if r.Header.Get("Authorization") != "Bearer "+spark.secret || spark.refuseHandshake {
 			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"hostname": "spark-worker", "dgx_spark": true})
+		writeJSON(w, http.StatusOK, map[string]any{"hostname": spark.hostname, "dgx_spark": true})
 	})
-	spark.server = httptest.NewServer(mux)
+	spark.server = httptest.NewServer(&countingHandler{spark: spark, next: mux})
 	t.Cleanup(spark.server.Close)
 	return spark
+}
+
+// countingHandler records that this machine was talked to at all, which is
+// what an accomplice in the bootstrap-redirection tests is measured by.
+type countingHandler struct {
+	spark *fakeSpark
+	next  http.Handler
+}
+
+func (h *countingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.spark.mu.Lock()
+	h.spark.requests++
+	h.spark.mu.Unlock()
+	h.next.ServeHTTP(w, r)
+}
+
+func (s *fakeSpark) called() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requests
+}
+
+func (s *fakeSpark) handshakes() (pairs, badOrigins int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pairs, s.badOrigins
+}
+
+func (s *fakeSpark) revocations() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.revoked...)
 }
 
 func TestFleetDiscoverFingerprintsBasementAndExcludesThisMachine(t *testing.T) {
@@ -280,6 +343,14 @@ func TestFleetAdoptInstallsPairsAndRecordsThePeer(t *testing.T) {
 	fixture.api.SetListenAddress("192.168.99.134:7070")
 	spark := newFakeSpark(t, "pairing-token-value")
 
+	// The machine being adopted lives at 192.168.99.137 on this test's
+	// network, and that address is where its console is reached.
+	consoleBaseURL = func(address string) string {
+		if address == "192.168.99.137" {
+			return spark.server.URL
+		}
+		return "http://" + net.JoinHostPort(address, consolePort)
+	}
 	adoptDial = func(_ context.Context, address, username, _ string) (setup.Runner, func(), error) {
 		if address != "192.168.99.137" || username != "nvidia" {
 			t.Errorf("dialled %s@%s", username, address)
@@ -309,6 +380,9 @@ func TestFleetAdoptInstallsPairsAndRecordsThePeer(t *testing.T) {
 	if installedWith.Listen != setup.ListenLAN {
 		t.Errorf("sibling listen mode = %q, want the head's own lan mode", installedWith.Listen)
 	}
+	if installedWith.ConsoleHost != "192.168.99.137" {
+		t.Errorf("install was not anchored to the adopted address: %q", installedWith.ConsoleHost)
+	}
 	for _, step := range view.Steps {
 		if step.State != stepDone {
 			t.Errorf("step %s = %s, want every step done", step.Key, step.State)
@@ -326,8 +400,8 @@ func TestFleetAdoptInstallsPairsAndRecordsThePeer(t *testing.T) {
 	if view.Result.OwnerPairingToken != "pairing-token-value" {
 		t.Errorf("the owner was not given a way into the new console: %+v", view.Result)
 	}
-	if spark.pairs != 1 || spark.badOrigins != 0 {
-		t.Errorf("pairs = %d, bad origins = %d", spark.pairs, spark.badOrigins)
+	if pairs, bad := spark.handshakes(); pairs != 1 || bad != 0 {
+		t.Errorf("pairs = %d, bad origins = %d", pairs, bad)
 	}
 	peers, err := fixture.store.Peers(context.Background())
 	if err != nil {
@@ -631,5 +705,340 @@ func TestAdoptionAddressRejectsAnythingButAHost(t *testing.T) {
 		if _, err := adoptionAddress(good); err != nil {
 			t.Errorf("adoptionAddress(%q) = %v", good, err)
 		}
+	}
+}
+
+// The machine being adopted answers `hostname -I` and `tailscale ip`, and it
+// is not ours yet. If this manager believed those answers, a hostile SSH
+// endpoint could name an accomplice and get the pairing, the fleet key and
+// the stored peer row pointed at that other host. The bootstrap follows the
+// address the owner adopted and this manager actually signed in to.
+func TestFleetAdoptBootstrapsTheAddressItSignedInTo(t *testing.T) {
+	holdSeams(t)
+	fixture := newFleetFixture(t)
+	fixture.api.SetListenAddress("192.168.99.134:7070")
+	spark := newFakeSpark(t, "pairing-token-value")
+	accomplice := newFakeSpark(t, "pairing-token-value")
+	accomplice.secret = "rosk_accomplicekeyaccomplicekey"
+
+	consoleBaseURL = func(address string) string {
+		if address == "192.168.99.137" {
+			return spark.server.URL
+		}
+		return "http://" + net.JoinHostPort(address, consolePort)
+	}
+	adoptDial = func(context.Context, string, string, string) (setup.Runner, func(), error) {
+		return stubRunner{}, func() {}, nil
+	}
+	adoptProbe = func(context.Context, setup.Runner) setup.Identity { return gb10Machine() }
+	adoptBinarySource = func() (setup.BinarySource, error) {
+		return setup.LocalFileSource{Path: "/usr/lib/basement/basement"}, nil
+	}
+	// The hostile install: every address it reports is the accomplice's.
+	adoptInstall = func(context.Context, setup.Runner, setup.BinarySource, setup.Options, func(string, ...any)) (setup.InstallResult, error) {
+		return setup.InstallResult{ConsoleURL: accomplice.server.URL, AltURL: accomplice.server.URL, Token: "pairing-token-value"}, nil
+	}
+
+	if code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
+		`{"address":"192.168.99.137","username":"nvidia","password":"typed-by-the-owner"}`); code != http.StatusAccepted {
+		t.Fatalf("adopt code = %d, body = %s", code, payload)
+	}
+	view := fixture.waitAdoption(t)
+	if view.State != adoptionSucceeded {
+		t.Fatalf("state = %s, error = %q", view.State, view.Error)
+	}
+	if accomplice.called() != 0 {
+		t.Errorf("the address the target reported was contacted %d times", accomplice.called())
+	}
+	if pairs, _ := spark.handshakes(); pairs != 1 {
+		t.Errorf("the adopted machine was paired %d times", pairs)
+	}
+	if view.Result.ConsoleURL != spark.server.URL || view.Result.OwnerPairingURL != spark.server.URL {
+		t.Errorf("the owner was sent to an address the target chose: %+v", view.Result)
+	}
+	peers, err := fixture.store.Peers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].BaseURL != spark.server.URL {
+		t.Fatalf("stored peer = %+v, want the adopted address", peers)
+	}
+	_, storedKey, err := fixture.store.PeerCredentials(context.Background(), peers[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedKey != spark.secret {
+		t.Errorf("the stored key came from the wrong machine: %q", storedKey)
+	}
+}
+
+// A hostile machine controls everything it says about itself, including its
+// hostname, and the hostname becomes the peer's name: stored, listed and
+// echoed back in the success result. The scrubbing that guards the failure
+// path guards the happy path too.
+func TestFleetAdoptScrubsAHostileSuccessResult(t *testing.T) {
+	holdSeams(t)
+	fixture := newFleetFixture(t)
+	const password = "correct-horse-battery-staple"
+	spark := newFakeSpark(t, "pairing-token-value")
+	spark.hostname = password
+
+	consoleBaseURL = func(address string) string {
+		if address == "192.168.99.137" {
+			return spark.server.URL
+		}
+		return "http://" + net.JoinHostPort(address, consolePort)
+	}
+	adoptDial = func(context.Context, string, string, string) (setup.Runner, func(), error) {
+		return stubRunner{}, func() {}, nil
+	}
+	// The machine reports the password as its hostname, with control
+	// characters and far more of them than a name can hold.
+	adoptProbe = func(context.Context, setup.Runner) setup.Identity {
+		return setup.Identity{
+			Hostname:    "\x1b[2J" + password + strings.Repeat("-padding", 40),
+			GPUName:     "NVIDIA GB10",
+			DeviceModel: "NVIDIA DGX Spark",
+		}
+	}
+	adoptBinarySource = func() (setup.BinarySource, error) {
+		return setup.LocalFileSource{Path: "/usr/lib/basement/basement"}, nil
+	}
+	adoptInstall = func(context.Context, setup.Runner, setup.BinarySource, setup.Options, func(string, ...any)) (setup.InstallResult, error) {
+		return setup.InstallResult{ConsoleURL: spark.server.URL, Token: "pairing-token-value"}, nil
+	}
+
+	if code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
+		`{"address":"192.168.99.137","username":"nvidia","password":"`+password+`"}`); code != http.StatusAccepted {
+		t.Fatalf("adopt code = %d, body = %s", code, payload)
+	}
+	view := fixture.waitAdoption(t)
+	if view.State != adoptionSucceeded {
+		t.Fatalf("state = %s, error = %q", view.State, view.Error)
+	}
+	// The whole status payload, byte for byte, result included.
+	_, raw := fixture.call(t, http.MethodGet, "/api/v1/fleet/adopt/status", "")
+	if strings.Contains(string(raw), password) {
+		t.Fatalf("the status payload gave the SSH password back: %s", raw)
+	}
+	encoded, err := json.Marshal(view.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), password) {
+		t.Fatalf("the success result gave the SSH password back: %s", encoded)
+	}
+
+	peers, err := fixture.store.Peers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("peers = %+v", peers)
+	}
+	stored, _ := json.Marshal(peers)
+	if strings.Contains(string(stored), password) {
+		t.Fatalf("the peers table holds the SSH password: %s", stored)
+	}
+	name := peers[0].Name
+	if len(name) > maxMachineNameLength {
+		t.Errorf("the stored name is %d characters: %q", len(name), name)
+	}
+	if strings.ContainsAny(name, "\x1b\x00\n\r") {
+		t.Errorf("the stored name kept its control characters: %q", name)
+	}
+	// And what the console lists is the same sanitized name.
+	_, listed := fixture.call(t, http.MethodGet, "/api/v1/peers", "")
+	if strings.Contains(string(listed), password) {
+		t.Fatalf("the peers endpoint gave the SSH password back: %s", listed)
+	}
+}
+
+// A sweep must cost the same whether the network holds three machines or a
+// flood of mDNS announcements from one hostile host: candidates are capped
+// and probes go through a fixed pool.
+func TestFleetDiscoverCapsCandidatesAndProbeConcurrency(t *testing.T) {
+	holdSeams(t)
+	fixture := newFleetFixture(t)
+	var inFlight, peak atomic.Int64
+	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := inFlight.Add(1)
+		for {
+			highest := peak.Load()
+			if current <= highest || peak.CompareAndSwap(highest, current) {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+		inFlight.Add(-1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer probe.Close()
+
+	discoverCandidates = func(context.Context, func(string, ...any)) ([]discovery.Candidate, error) {
+		flood := make([]discovery.Candidate, 0, 500)
+		for index := 0; index < 500; index++ {
+			flood = append(flood, discovery.Candidate{
+				IP:       net.IPv4(10, byte(index/256), byte(index%256), 9),
+				Hostname: "spark-flood.local",
+			})
+		}
+		return flood, nil
+	}
+	selfAddresses = func() map[string]bool { return map[string]bool{} }
+	consoleBaseURL = func(string) string { return probe.URL }
+
+	code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/discover", "{}")
+	if code != http.StatusOK {
+		t.Fatalf("discover code = %d, body = %s", code, payload)
+	}
+	var result struct {
+		Candidates []discoveredCandidate `json:"candidates"`
+	}
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Candidates) != maxDiscoveredCandidates {
+		t.Errorf("a flood of %d announcements produced %d candidates, want the cap of %d",
+			500, len(result.Candidates), maxDiscoveredCandidates)
+	}
+	if got := peak.Load(); got > maxProbeWorkers {
+		t.Errorf("%d fingerprints ran at once, want at most %d", got, maxProbeWorkers)
+	}
+}
+
+// Self-exclusion by spelling is not exclusion: a manager that installs over
+// itself restarts the service running the adoption halfway through.
+func TestFleetAdoptRefusesItselfHoweverItIsSpelled(t *testing.T) {
+	holdSeams(t)
+	fixture := newFleetFixture(t)
+	selfAddresses = func() map[string]bool { return map[string]bool{"192.168.99.134": true, "spark-head": true} }
+	localIPs = func() []net.IP { return []net.IP{net.ParseIP("192.168.99.134")} }
+	resolveHost = func(_ context.Context, host string) ([]net.IP, error) {
+		switch host {
+		case "localhost.":
+			return []net.IP{net.ParseIP("127.0.0.1")}, nil
+		case "head.example.internal":
+			// A name in the owner's own DNS that points back at this machine.
+			return []net.IP{net.ParseIP("192.168.99.134")}, nil
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			return []net.IP{ip}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	adoptDial = func(context.Context, string, string, string) (setup.Runner, func(), error) {
+		t.Error("adoption dialled this machine itself")
+		return nil, func() {}, errors.New("unreachable")
+	}
+	for _, address := range []string{"127.0.0.2", "localhost.", "head.example.internal", "192.168.99.134"} {
+		code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
+			`{"address":"`+address+`","username":"nvidia","password":"typed-by-the-owner"}`)
+		if code != http.StatusBadRequest {
+			t.Fatalf("%s: code = %d, body = %s", address, code, payload)
+		}
+		if !strings.Contains(string(payload), "this Spark itself") {
+			t.Errorf("%s: refusal did not explain itself: %s", address, payload)
+		}
+		if view := fixture.status(t); view.State != adoptionIdle {
+			t.Errorf("%s: a refused adoption started anyway: %+v", address, view)
+		}
+	}
+}
+
+// Adoption is for Sparks on the owner's own network. Without that rule a
+// console session is an SSH prober aimed at anywhere on the internet.
+func TestFleetAdoptRefusesAddressesOffYourOwnNetwork(t *testing.T) {
+	holdSeams(t)
+	fixture := newFleetFixture(t)
+	resolveHost = func(_ context.Context, host string) ([]net.IP, error) {
+		if host == "customer.example.com" {
+			return []net.IP{net.ParseIP("198.51.100.7")}, nil
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			return []net.IP{ip}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	adoptDial = func(context.Context, string, string, string) (setup.Runner, func(), error) {
+		t.Error("adoption dialled a machine on the public internet")
+		return nil, func() {}, errors.New("unreachable")
+	}
+	for _, address := range []string{"203.0.113.9", "customer.example.com"} {
+		code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
+			`{"address":"`+address+`","username":"nvidia","password":"typed-by-the-owner"}`)
+		if code != http.StatusBadRequest {
+			t.Fatalf("%s: code = %d, body = %s", address, code, payload)
+		}
+		if !strings.Contains(string(payload), "your own network") {
+			t.Errorf("%s: refusal did not explain itself: %s", address, payload)
+		}
+	}
+	// The machines this product is about are still adoptable.
+	for _, address := range []string{"192.168.99.137", "100.64.0.14", "10.0.0.5"} {
+		if err := checkAdoptionTarget(context.Background(), address); err != nil {
+			t.Errorf("%s was refused: %v", address, err)
+		}
+	}
+}
+
+// A run that fails after minting the fleet key would otherwise leave a
+// credential on the other machine that the owner never saw and cannot find.
+func TestFleetAdoptRevokesTheFleetKeyWhenTheRunFailsAfterMintingIt(t *testing.T) {
+	holdSeams(t)
+	fixture := newFleetFixture(t)
+	spark := newFakeSpark(t, "pairing-token-value")
+	// The failure injected after the key exists: the reachability handshake
+	// that records the peer is refused.
+	spark.refuseHandshake = true
+
+	consoleBaseURL = func(address string) string {
+		if address == "192.168.99.137" {
+			return spark.server.URL
+		}
+		return "http://" + net.JoinHostPort(address, consolePort)
+	}
+	adoptDial = func(context.Context, string, string, string) (setup.Runner, func(), error) {
+		return stubRunner{}, func() {}, nil
+	}
+	adoptProbe = func(context.Context, setup.Runner) setup.Identity { return gb10Machine() }
+	adoptBinarySource = func() (setup.BinarySource, error) {
+		return setup.LocalFileSource{Path: "/usr/lib/basement/basement"}, nil
+	}
+	adoptInstall = func(context.Context, setup.Runner, setup.BinarySource, setup.Options, func(string, ...any)) (setup.InstallResult, error) {
+		return setup.InstallResult{ConsoleURL: spark.server.URL, Token: "pairing-token-value"}, nil
+	}
+
+	if code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
+		`{"address":"192.168.99.137","username":"nvidia","password":"typed-by-the-owner"}`); code != http.StatusAccepted {
+		t.Fatalf("adopt code = %d, body = %s", code, payload)
+	}
+	view := fixture.waitAdoption(t)
+	if view.State != adoptionFailed {
+		t.Fatalf("state = %s", view.State)
+	}
+	revoked := spark.revocations()
+	if len(revoked) != 1 || revoked[0] != "key_1" {
+		t.Fatalf("the fleet key was left behind: revocations = %v", revoked)
+	}
+	if !strings.Contains(view.Error, "has been removed") {
+		t.Errorf("the failure did not say what became of the key: %q", view.Error)
+	}
+	peers, err := fixture.store.Peers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 0 {
+		t.Errorf("a failed adoption left a peer row behind: %+v", peers)
+	}
+}
+
+// And when the key cannot be handed back, the owner is told what to delete
+// rather than left with a credential nobody knows about.
+func TestFleetAdoptSaysSoWhenTheFleetKeyCannotBeRevoked(t *testing.T) {
+	// No key id and no session: nothing to revoke with.
+	message := (&Server{}).revokeFleetKey(context.Background(), "http://192.168.99.137:7070", fleetKey{secret: "rosk_x"})
+	if !strings.Contains(message, "could not be removed") || !strings.Contains(message, fleetKeyName()) {
+		t.Errorf("the honest message does not name the key to delete: %q", message)
 	}
 }

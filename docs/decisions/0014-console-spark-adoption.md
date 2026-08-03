@@ -137,9 +137,25 @@ That is the intent; the enforcement is mechanical. The adoption's only
 handle on its own progress scrubs every string on the way in, removing
 the typed password and then applying `internal/redact` on top, so an SSH
 library that echoes the credentials it was handed back into an error
-string cannot get them into the status endpoint. A test drives a failed
-authentication whose error contains the password verbatim and asserts it
-appears in no byte of any progress, status or error output.
+string cannot get them into the status endpoint. The success result goes
+through the same scrubber as the failure path: a machine that answers
+`hostname` with the password it was just handed would otherwise get it
+back out through the peer name. A test drives a failed authentication
+whose error contains the password verbatim, and a second test drives a
+machine that returns the password as its hostname; neither may appear in
+any byte of any progress, status, result or stored row.
+
+Server-supplied text is never printed on this path either. A
+keyboard-interactive SSH server chooses the instruction it sends with a
+challenge, so it can ask for the password and then send a second
+challenge whose instruction repeats it. On the console's path the
+"output" is the systemd journal, which the scrubber never sees, so
+`internal/setup` discards that text by default and hands it only to a
+prompter that opted in through `ServerNotice`. The terminal wizard opts
+in, because a person is reading it and typed the password themselves;
+the console's prompter does not implement it at all. Everything that
+does reach a person has its control characters stripped and its length
+capped first.
 
 ### Console session only
 
@@ -156,10 +172,54 @@ both paths are fixed strings rather than anything a caller can steer.
 
 ## Consequences
 
+- Everything after the install talks to the address the owner adopted.
+  The machine being adopted answers `hostname -I` and `tailscale ip`, and
+  it is not ours yet: an SSH endpoint that names an accomplice would
+  otherwise get the console wait, the pairing, the fleet key and the
+  stored peer row pointed at that other host, and the owner would end up
+  with a peer they never chose. The bootstrap URL is built from the
+  address that was signed in to. Addresses the target reported are kept
+  as `alt_url` for display, and only when they parse as a bare origin.
+  `setup.Options.ConsoleHost` carries the same rule into
+  `internal/setup`, so the result that path returns is anchored too. The
+  terminal wizard leaves it empty and keeps its old behaviour, because
+  there a person chose the address and reads the result before acting on
+  it.
+- Adoption only reaches machines on the owner's own network. The address
+  is resolved rather than compared as a string: any resolved loopback
+  address or address this machine holds on an interface is refused as
+  itself, and anything outside the private, link-local and CGNAT ranges
+  is refused as somebody else's. That is the product (Sparks on your own
+  network), and it keeps a console session from being usable as an SSH
+  prober aimed at the internet. A Spark reachable only through a hostname
+  in the owner's own DNS still works, because what is checked is what the
+  name resolves to.
+- Everything the other machine says about itself is untrusted text. Its
+  hostname becomes the peer name, which is stored and rendered, so it is
+  scrubbed of the typed password, stripped of control characters and
+  capped to what the store accepts. The same holds for names that come
+  off an mDNS sweep. An mDNS answer only contributes the address it
+  actually came from, and only when that address is on a local range: an
+  advertised A record naming anything else is dropped, because a machine
+  on the segment can advertise any address at all and every candidate is
+  something this manager then connects to. A sweep is capped at 64
+  candidates and its fingerprints run through a pool of eight, so a flood
+  of announcements costs the same as a quiet network.
 - One peer, per the ADR 0005 deferral. Adoption refuses with a 409 when a
   peer is already configured, the same rule `cmd/basement/main.go`
   enforces when it picks a worker. Two peers would not be a fleet, they
-  would be a row that breaks every two-Spark model.
+  would be a row that breaks every two-Spark model. The rule is enforced
+  in the store rather than in the handlers: `CreatePeer` inserts
+  conditionally in one statement and returns `ErrPeerExists` otherwise,
+  and a unique index says the same thing in the schema. Reading the table
+  and then inserting leaves a window, and there are two doors into it,
+  since a manual add can arrive while an adoption is running.
+- A run that fails after the fleet key exists hands it back. The key is
+  minted on the other machine in step 5, and any failure after that
+  revokes it with the bootstrap session this manager still holds. When
+  the revocation cannot be made, the failure sentence names the key so
+  the owner can delete it under Connect on that machine, rather than
+  leaving a credential nobody knows about on hardware they own.
 - One adoption at a time. A second POST while one runs gets a 409 with a
   plain sentence. Two runs would race for the single peer row, and each
   one holds an SSH session installing a systemd service.
