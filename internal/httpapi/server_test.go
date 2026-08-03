@@ -155,13 +155,13 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	if node := systemResult.HardwareScope.ManagedNodes[0]; node.Hostname != "spark-test" || !node.Local || !node.Ready {
 		t.Fatalf("unexpected managed node: %#v", node)
 	}
-	denied := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+recipes[0].ID+"/install", `{"confirmed":true,"accept_licence":true}`, cookies, map[string]string{"Origin": server.URL, "Idempotency-Key": "install-one"})
+	denied := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+singleSpark(recipes).ID+"/install", `{"confirmed":true,"accept_licence":true}`, cookies, map[string]string{"Origin": server.URL, "Idempotency-Key": "install-one"})
 	if denied.StatusCode != http.StatusForbidden {
 		t.Fatalf("missing CSRF status=%d", denied.StatusCode)
 	}
 	denied.Body.Close()
 	headers := map[string]string{"Origin": server.URL, "Idempotency-Key": "install-one", "X-CSRF-Token": pairResult.CSRF}
-	installed := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+recipes[0].ID+"/install", `{"confirmed":true,"accept_licence":true}`, cookies, headers)
+	installed := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+singleSpark(recipes).ID+"/install", `{"confirmed":true,"accept_licence":true}`, cookies, headers)
 	if installed.StatusCode != http.StatusAccepted {
 		data, _ := io.ReadAll(installed.Body)
 		t.Fatalf("install status=%d body=%s", installed.StatusCode, data)
@@ -178,7 +178,7 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 		t.Fatal("install job not created")
 	}
 	waitAPIJob(t, server.URL, created.Job.ID, cookies, "ready")
-	duplicate := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+recipes[0].ID+"/install", `{"confirmed":true,"accept_licence":true}`, cookies, headers)
+	duplicate := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+singleSpark(recipes).ID+"/install", `{"confirmed":true,"accept_licence":true}`, cookies, headers)
 	var duplicateResult struct {
 		Job     store.Job `json:"job"`
 		Created bool      `json:"created"`
@@ -200,7 +200,7 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	executor.mu.Lock()
 	executor.failPort = true
 	executor.mu.Unlock()
-	managedPort := doRequest(t, http.MethodGet, server.URL+"/api/v1/preflight?recipe_id="+recipes[1].ID, "", cookies, nil)
+	managedPort := doRequest(t, http.MethodGet, server.URL+"/api/v1/preflight?recipe_id="+secondSingleSpark(recipes).ID, "", cookies, nil)
 	var switchPreflight preflightResponse
 	if err := json.NewDecoder(managedPort.Body).Decode(&switchPreflight); err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	executor.failPort = false
 	executor.mu.Unlock()
 
-	leakJob, _, err := database.CreateJob(context.Background(), "smoke-test", recipes[0].ID, "diagnostic-redaction", map[string]any{})
+	leakJob, _, err := database.CreateJob(context.Background(), "smoke-test", singleSpark(recipes).ID, "diagnostic-redaction", map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,4 +682,30 @@ func TestRuntimeMetricsSamplerIsKindAware(t *testing.T) {
 	if sample := server.runtimeMetrics(context.Background(), recipe.Recipe{Runtime: recipe.Runtime{Kind: "llamacpp"}}); sample != nil {
 		t.Fatalf("unmapped kind sampled=%#v", sample)
 	}
+}
+
+// singleSpark returns the first shipped single-Spark recipe. The pack now
+// also carries distributed recipes, and these fixtures run one node.
+func singleSpark(recipes []recipe.Recipe) recipe.Recipe {
+	for _, r := range recipes {
+		if !r.Distributed() {
+			return r
+		}
+	}
+	return recipe.Recipe{}
+}
+
+// secondSingleSpark returns a shipped single-Spark recipe distinct from
+// singleSpark(recipes), for switch and port-conflict fixtures.
+func secondSingleSpark(recipes []recipe.Recipe) recipe.Recipe {
+	count := 0
+	for _, r := range recipes {
+		if !r.Distributed() {
+			count++
+			if count == 2 {
+				return r
+			}
+		}
+	}
+	return recipe.Recipe{}
 }

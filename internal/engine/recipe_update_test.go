@@ -86,7 +86,7 @@ func TestRecipeUpdateDoesNotChangeAlreadyInstalledModelResolution(t *testing.T) 
 	}
 	defer s.Close()
 	embedded, _ := recipe.Builtin()
-	v1 := embedded[0]
+	v1 := singleSpark(embedded)
 	v2 := bumpedVersion(v1)
 	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: v1.ID, RecipeVersion: v1.Version, Status: "ready", ArtifactPath: "/managed/" + v1.ID, Active: true}); err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestSelfUpdateWhileServingSwitchesToNewVersion(t *testing.T) {
 	}
 	defer s.Close()
 	embedded, _ := recipe.Builtin()
-	v1 := embedded[0]
+	v1 := singleSpark(embedded)
 	v2 := bumpedVersion(v1)
 	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: v1.ID, RecipeVersion: v1.Version, Status: "ready", ArtifactPath: "/managed/" + v1.ID, Active: true}); err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestSelfUpdateFailureRestoresOldVersionNotNewOne(t *testing.T) {
 	}
 	defer s.Close()
 	embedded, _ := recipe.Builtin()
-	v1 := embedded[0]
+	v1 := singleSpark(embedded)
 	v2 := bumpedVersion(v1)
 	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: v1.ID, RecipeVersion: v1.Version, Status: "ready", ArtifactPath: "/managed/" + v1.ID, Active: true}); err != nil {
 		t.Fatal(err)

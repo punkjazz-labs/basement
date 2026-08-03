@@ -85,7 +85,10 @@ func TestSingleSparkRecipesAreUnaffected(t *testing.T) {
 			t.Fatalf("shipped recipe %s half-declares a fabric: %#v", r.ID, r.Topology)
 		}
 	}
-	half := recipes[0]
+	half, ok := Find(recipes, "qwen36-27b-nvfp4-1s")
+	if !ok {
+		t.Fatal("single-Spark recipe missing")
+	}
 	half.Topology.Interconnect = &Interconnect{Kind: "connectx7", MasterPort: 29501}
 	err = Validate(half)
 	if err == nil || !strings.Contains(err.Error(), "must not declare topology.interconnect") {

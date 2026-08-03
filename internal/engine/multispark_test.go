@@ -305,7 +305,7 @@ func TestSingleSparkJobsNeverConsultTheFleet(t *testing.T) {
 	}
 	fake := newFleetExecutor()
 	runner := New(s, fake, recipes)
-	job, _, err := s.CreateJob(ctx, "install", recipes[0].ID, "single-spark", map[string]any{"confirmed": true})
+	job, _, err := s.CreateJob(ctx, "install", singleSpark(recipes).ID, "single-spark", map[string]any{"confirmed": true})
 	if err != nil {
 		t.Fatal(err)
 	}
