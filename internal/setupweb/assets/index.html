@@ -6,26 +6,28 @@
 <meta name="robots" content="noindex">
 <title>basement setup</title>
 <style>
-/* Design tokens copied from webui/ui/src/styles.css (dark palette + pill
-   button family). This page ships inside the setup binary, not the
-   console build, so the values are copied rather than shared — keep them
-   in sync by hand if the console palette changes. */
+/* Design tokens copied from webui/ui/src/styles.css (basement palette:
+   orange for primary actions and the wordmark, forest chips for stamps,
+   NVIDIA green reserved for a serving model and therefore absent here).
+   This page ships inside the setup binary, not the console build, so the
+   values are copied rather than shared — keep them in sync by hand if the
+   console palette changes. */
 :root {
-  --bg: #101210;
-  --surface: #141614;
-  --surface-2: #1c1f1b;
-  --panel: #171a16;
-  --hover: #181b17;
-  --line: #242822;
-  --line-strong: #333731;
-  --ink: #edf0ea;
-  --muted: #a3aba0;
-  --faint: #6f776c;
-  --green: #76b900;
-  --green-ink: #101300;
-  --green-deep: #a4d94e;
-  --green-tint: #1a2410;
-  --green-line: #324420;
+  --bg: #12180f;
+  --surface: #171e13;
+  --surface-2: #202818;
+  --panel: #151b11;
+  --hover: #1b2316;
+  --line: #2a331f;
+  --line-strong: #3c4730;
+  --ink: #efe8d2;
+  --muted: #a9ab93;
+  --faint: #75795f;
+  --accent: #dd3c10;
+  --accent-ink: #fff4e8;
+  --accent-deep: #f2703c;
+  --chip: #1d4733;
+  --chip-line: #2f5f47;
   --warn: #d9a12f;
   --fail: #e0644e;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
@@ -41,13 +43,13 @@ body {
 code, .mono { font-family: var(--mono); font-size: 0.92em; }
 button { font: inherit; cursor: pointer; }
 h1, h2 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
-a { color: var(--green-deep); }
-:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; border-radius: 4px; }
+a { color: var(--accent-deep); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 
 .wrap { max-width: 560px; margin: 0 auto; padding: 48px 20px 80px; }
 .mark { display: flex; align-items: center; gap: 8px; margin-bottom: 28px; }
-.mark strong { font-size: 15px; font-weight: 650; }
-.mark .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+.mark strong { font-size: 15px; font-weight: 650; color: var(--accent); }
+.mark .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 
 .card {
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
@@ -57,7 +59,7 @@ a { color: var(--green-deep); }
 .card .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 16px; }
 
 button.primary {
-  background: var(--green); color: var(--green-ink); border: 1px solid var(--green); border-radius: 999px;
+  background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent); border-radius: 999px;
   padding: 6px 18px; font-weight: 650; font-size: 12.5px;
 }
 button.primary:hover { filter: brightness(1.05); }
@@ -85,8 +87,8 @@ button.quiet:hover { color: var(--ink); background: var(--surface-2); }
 .machine .name { font-weight: 550; min-width: 160px; }
 .machine .ip { color: var(--muted); font-family: var(--mono); font-size: 12px; flex: 1; }
 .badge {
-  font-size: 11px; font-weight: 550; color: var(--green-deep); background: var(--green-tint);
-  border: 1px solid var(--green-line); border-radius: 999px; padding: 2px 9px;
+  font-size: 11px; font-weight: 550; color: var(--ink); background: var(--chip);
+  border: 1px solid var(--chip-line); border-radius: 999px; padding: 2px 9px;
 }
 
 label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
@@ -94,22 +96,25 @@ input[type=text], input[type=password] {
   width: 100%; background: var(--panel); border: 1px solid var(--line-strong); color: var(--ink);
   border-radius: 8px; padding: 9px 12px; font: inherit; font-family: var(--mono); font-size: 13px;
 }
-input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--green); outline-offset: 1px; }
+input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .options { display: grid; gap: 8px; }
 .option {
   display: flex; align-items: flex-start; gap: 10px; padding: 12px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--panel);
 }
-.option input[type=radio] { margin-top: 3px; accent-color: var(--green); }
+.option input[type=radio] { margin-top: 3px; accent-color: var(--accent); }
 .option .opt-title { font-weight: 550; }
-.option .opt-title .rec { color: var(--green-deep); font-weight: 550; font-size: 11.5px; margin-left: 6px; }
+.option .opt-title .rec {
+  color: var(--ink); background: var(--chip); border: 1px solid var(--chip-line);
+  border-radius: 999px; padding: 1px 8px; font-weight: 550; font-size: 11px; margin-left: 6px;
+}
 .option .opt-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
 
 .progress-log { font-family: var(--mono); font-size: 12px; color: var(--muted); display: grid; gap: 4px; max-height: 220px; overflow-y: auto; }
 .spinner {
   width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-strong);
-  border-top-color: var(--green); display: inline-block; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: -2px;
+  border-top-color: var(--accent); display: inline-block; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: -2px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
