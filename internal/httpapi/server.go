@@ -73,6 +73,14 @@ type Server struct {
 	// nodeLease admits one delegated two-Spark job at a time (see node.go).
 	nodeLease workerLease
 
+	// adoption narrates the one console-driven adoption of a second Spark
+	// this manager runs at a time (see fleet.go). In memory by design.
+	adoption *adoptionState
+	// listenAddress is this manager's own configured listen address, set
+	// once at startup by SetListenAddress. It decides how a machine adopted
+	// from this console is configured to listen.
+	listenAddress atomic.Pointer[string]
+
 	updateMu      sync.Mutex
 	updateResult  map[string]any
 	updateFetched time.Time
@@ -99,7 +107,7 @@ type preflightResponse struct {
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{})}
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), adoption: newAdoptionState()}
 	server.SetRecipes(recipes, recipes)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.health)
@@ -127,6 +135,12 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateCheck))
 	mux.HandleFunc("/api/v1/peers", server.peersCollection)
 	mux.HandleFunc("/api/v1/peers/", server.withReadAuth(server.peerAction))
+	// Adopting a second Spark from the console (ADR 0014). Console session
+	// only, on all three: a bearer key never reaches them, and none of them
+	// is on peerAllowedPaths.
+	mux.HandleFunc("/api/v1/fleet/discover", server.fleetDiscover)
+	mux.HandleFunc("/api/v1/fleet/adopt", server.fleetAdopt)
+	mux.HandleFunc("/api/v1/fleet/adopt/status", server.withReadAuth(server.fleetAdoptStatus))
 	// Two-Spark serving: the head node drives this node's own rank through
 	// these, authenticated by fleet API key only (see withNodeAuth).
 	mux.HandleFunc("/api/v1/internal/node/preflight", server.withNodeAuth(server.nodePreflight))
@@ -966,23 +980,10 @@ func (s *Server) createPeer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	baseURL, err := normalizedPeerBaseURL(request.BaseURL)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if strings.TrimSpace(request.APIKey) == "" {
-		writeError(w, http.StatusBadRequest, errors.New("an API key is required"))
-		return
-	}
-	// Prove the URL and key actually reach a Spark before this is saved;
-	// a peer entry that has never been confirmed reachable is worse than
-	// no entry at all.
-	if _, err := s.fetchPeerJSON(r.Context(), baseURL, request.APIKey, "/api/v1/system"); err != nil {
-		writeError(w, http.StatusBadRequest, errors.New("could not reach that Spark with this key, so check the URL and key"))
-		return
-	}
-	peer, err := s.store.CreatePeer(r.Context(), request.Name, baseURL, request.APIKey)
+	// addPeer is shared with console-driven adoption (fleet.go), so a peer
+	// arrives the same way whichever door it came through: normalized URL,
+	// proven reachable with its key, then stored.
+	peer, err := s.addPeer(r.Context(), request.Name, request.BaseURL, request.APIKey)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
