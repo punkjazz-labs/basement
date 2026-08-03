@@ -80,16 +80,30 @@ button.quiet:hover { color: var(--ink); background: var(--surface-2); }
 
 .machine-list { display: grid; gap: 6px; }
 .machine {
-  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  position: relative; display: flex; align-items: center; gap: 11px; padding: 10px 12px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+  cursor: pointer; transition: border-color 120ms, background 120ms;
 }
-.machine.unlikely { opacity: 0.55; }
+.machine:hover { background: var(--hover); border-color: var(--line-strong); }
 .machine .name { font-weight: 550; min-width: 160px; }
 .machine .ip { color: var(--muted); font-family: var(--mono); font-size: 12px; flex: 1; }
-.badge {
-  font-size: 11px; font-weight: 550; color: var(--ink); background: var(--chip);
-  border: 1px solid var(--chip-line); border-radius: 999px; padding: 2px 9px;
+
+/* Machines that do not look GB10-class live behind a quiet disclosure,
+   demoted but still reachable: the hostname hint is a guess, a renamed
+   Spark lands here, and choosing one still passes the "connect anyway"
+   guard before any credentials are asked for. */
+details.others { margin-top: 10px; }
+details.others summary {
+  list-style: none; cursor: pointer; color: var(--faint); font-size: 12px;
+  padding: 4px 2px; user-select: none;
 }
+details.others summary::-webkit-details-marker { display: none; }
+details.others summary::before { content: "\25B8  "; }
+details.others[open] summary::before { content: "\25BE  "; }
+details.others summary:hover { color: var(--muted); }
+details.others .machine-list { margin-top: 8px; }
+details.others .machine { opacity: 0.6; }
+details.others .machine:hover, details.others .machine:has(input:checked) { opacity: 1; }
 
 label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
 input[type=text], input[type=password] {
@@ -100,11 +114,34 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--ac
 
 .options { display: grid; gap: 8px; }
 .option {
-  display: flex; align-items: flex-start; gap: 10px; padding: 12px; border-radius: 8px;
-  border: 1px solid var(--line); background: var(--panel);
+  position: relative; display: flex; align-items: center; gap: 11px; padding: 12px;
+  border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
+  cursor: pointer; transition: border-color 120ms, background 120ms;
 }
-.option input[type=radio] { margin-top: 3px; accent-color: var(--accent); }
+.option:hover { background: var(--hover); border-color: var(--line-strong); }
+.option .opt-body { flex: 1; }
 .option .opt-title { font-weight: 550; }
+
+/* Whole-row selection: the real radio is invisible but still focusable, the
+   row carries the state, and a check marks the chosen row. Nothing else on
+   these screens is saturated orange except the primary button. */
+.option input[type=radio], .machine input[type=radio] {
+  position: absolute; opacity: 0; inset: 0; width: 100%; height: 100%; margin: 0; cursor: pointer;
+}
+.option:has(input:checked), .machine:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+}
+.option:has(input:focus-visible), .machine:has(input:focus-visible) {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.check { flex: none; width: 14px; height: 14px; position: relative; visibility: hidden; }
+.check::before {
+  content: ""; position: absolute; left: 1px; top: 3px; width: 9px; height: 4px;
+  border-left: 2.2px solid var(--accent-deep); border-bottom: 2.2px solid var(--accent-deep);
+  border-radius: 1px; transform: rotate(-45deg);
+}
+.option:has(input:checked) .check, .machine:has(input:checked) .check { visibility: visible; }
 .option .opt-title .rec {
   color: var(--ink); background: var(--chip); border: 1px solid var(--chip-line);
   border-radius: 999px; padding: 1px 8px; font-weight: 550; font-size: 11px; margin-left: 6px;
@@ -177,16 +214,22 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--ac
 
   function renderMachines(state) {
     var chosen = null;
-    var rows = state.candidates.map(function (c, index) {
-      var badge = c.likely ? el("span", { class: "badge", text: "GB10-class" }) : null;
-      var row = el("label", { class: "machine" + (c.likely ? "" : " unlikely") }, [
+    var machineRow = function (c, index) {
+      return el("label", { class: "machine" }, [
         el("input", { type: "radio", name: "machine", value: String(index), onchange: function () { chosen = index; } }),
         el("span", { class: "name", text: c.name }),
         el("span", { class: "ip", text: c.ip }),
-        badge
+        el("span", { class: "check" })
       ]);
-      return row;
+    };
+    var likely = [], others = [];
+    state.candidates.forEach(function (c, index) {
+      (c.likely ? likely : others).push(machineRow(c, index));
     });
+    // A network where no hostname matches a GB10 product still needs a
+    // first list: promote everything rather than opening on an empty card.
+    var noneLikely = likely.length === 0;
+    if (noneLikely) { likely = others; others = []; }
     var continueBtn = el("button", {
       class: "primary", text: "Continue", onclick: function () {
         if (chosen === null) return;
@@ -194,12 +237,24 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--ac
         answer("machines", { index: chosen });
       }
     });
-    app.replaceChildren(el("div", { class: "card" }, [
+    var children = [
       el("h2", { text: "Choose a machine" }),
-      el("div", { class: "sub", text: "GB10-class machines are badged; other machines are dimmed." }),
-      el("div", { class: "machine-list" }, rows),
-      el("div", { class: "row" }, [continueBtn])
-    ]));
+      el("div", { class: "sub", text: noneLikely
+        ? "None of these look GB10-class by name. Setup checks the hardware after you connect."
+        : "These look like GB10-class machines. Setup checks the hardware after you connect." }),
+      el("div", { class: "machine-list" }, likely)
+    ];
+    if (others.length > 0) {
+      var label = others.length === 1
+        ? "Don't see your Spark? Show 1 more device"
+        : "Don't see your Spark? Show " + others.length + " more devices";
+      children.push(el("details", { class: "others" }, [
+        el("summary", { text: label }),
+        el("div", { class: "machine-list" }, others)
+      ]));
+    }
+    children.push(el("div", { class: "row" }, [continueBtn]));
+    app.replaceChildren(el("div", { class: "card" }, children));
   }
 
   function renderNonGB10(state) {
@@ -276,10 +331,11 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--ac
           checked: option.value === recommended ? "checked" : null,
           onchange: function () { chosen = option.value; }
         }),
-        el("div", {}, [
+        el("div", { class: "opt-body" }, [
           el("div", { class: "opt-title" }, [document.createTextNode(option.title), rec]),
           el("div", { class: "opt-sub", text: option.sub })
-        ])
+        ]),
+        el("span", { class: "check" })
       ]);
     });
     app.replaceChildren(el("div", { class: "card" }, [
