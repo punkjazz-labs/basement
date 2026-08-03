@@ -246,7 +246,11 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		for _, artifact := range r.Artifacts {
 			modelRevisions[artifact.Role] = artifact.Revision
 		}
-		config := map[string]any{"recipe_id": r.ID, "recipe_version": r.Version, "image": r.Runtime.Reference(), "model_revisions": modelRevisions, "container_name": containerName(r), "arguments": vllmArgs(r)}
+		entrypoint, arguments, err := runtimeCommand(r)
+		if err != nil {
+			return nil, err
+		}
+		config := map[string]any{"recipe_id": r.ID, "recipe_version": r.Version, "image": r.Runtime.Reference(), "model_revisions": modelRevisions, "container_name": containerName(r), "runtime_kind": r.Runtime.Kind, "entrypoint": entrypoint, "arguments": arguments}
 		if err := atomicJSON(path, config, 0o640); err != nil {
 			return nil, err
 		}
@@ -344,9 +348,9 @@ func (h *HostExecutor) verifyMemory(ctx context.Context, r recipe.Recipe, requir
 	if err != nil {
 		return nil, err
 	}
-	utilization, err := strconv.ParseFloat(r.Service.VLLM.GPUMemoryUtil, 64)
+	plan, err := memoryPlan(r)
 	if err != nil {
-		return nil, fmt.Errorf("parse GPU memory utilization: %w", err)
+		return nil, err
 	}
 	node := resourceguard.Node{
 		Name: system.Hostname, SystemMemoryTotal: system.MemoryTotal, SystemMemoryAvailable: system.MemoryAvailable,
@@ -354,13 +358,51 @@ func (h *HostExecutor) verifyMemory(ctx context.Context, r recipe.Recipe, requir
 	}
 	results, err := resourceguard.CheckMemory([]resourceguard.Node{node}, r.Topology.SparkCount, resourceguard.MemoryPolicy{
 		MinimumTotalBytes: r.Requirements.MinimumMemoryBytes, HostReserveBytes: r.Requirements.MemoryReserveBytes,
-		GPUUtilization: utilization, RequireLiveCapacity: requireLive,
+		GPUUtilization: plan.utilization, RequireLiveCapacity: requireLive,
 	})
-	receipt := map[string]any{"per_node": results, "live_capacity": requireLive, "kv_cache_dtype": r.Service.VLLM.KVCacheDType, "max_model_len": r.Service.VLLM.MaxModelLen, "max_num_seqs": r.Service.VLLM.MaxNumSeqs}
+	receipt := map[string]any{
+		"per_node": results, "live_capacity": requireLive, "runtime_kind": r.Runtime.Kind,
+		"kv_cache_dtype": plan.kvCacheDType, "max_model_len": plan.maxModelLen, "max_num_seqs": plan.maxConcurrentRequests,
+	}
 	if err != nil {
 		return receipt, err
 	}
 	return receipt, nil
+}
+
+// memoryPlan is the runtime-neutral view of a recipe's planned device memory:
+// the fraction of device memory the engine claims up front, the context
+// length it plans for, and how many requests it will run at once. Each kind
+// spells these differently (vLLM gpu_memory_utilization / max_model_len /
+// max_num_seqs, SGLang mem_fraction_static / context_length /
+// max_running_requests) but the guardrail and its receipt read the same
+// fields for every kind.
+type runtimeMemoryPlan struct {
+	utilization           float64
+	kvCacheDType          string
+	maxModelLen           int
+	maxConcurrentRequests int
+}
+
+func memoryPlan(r recipe.Recipe) (runtimeMemoryPlan, error) {
+	fraction, ok := r.Service.MemoryFraction(r.Runtime.Kind)
+	if !ok {
+		return runtimeMemoryPlan{}, fmt.Errorf("recipe declares runtime kind %q without its service block", r.Runtime.Kind)
+	}
+	utilization, err := strconv.ParseFloat(fraction, 64)
+	if err != nil {
+		return runtimeMemoryPlan{}, fmt.Errorf("parse %s device memory fraction: %w", r.Runtime.Kind, err)
+	}
+	plan := runtimeMemoryPlan{utilization: utilization}
+	switch r.Runtime.Kind {
+	case "vllm":
+		v := r.Service.VLLM
+		plan.kvCacheDType, plan.maxModelLen, plan.maxConcurrentRequests = v.KVCacheDType, v.MaxModelLen, v.MaxNumSeqs
+	case "sglang":
+		s := r.Service.SGLang
+		plan.kvCacheDType, plan.maxModelLen, plan.maxConcurrentRequests = s.KVCacheDType, s.ContextLength, s.MaxRunningRequests
+	}
+	return plan, nil
 }
 
 // verifyDisk checks free disk against this job's own requirement, minus
@@ -500,7 +542,7 @@ func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress P
 	for time.Now().Before(deadline) {
 		attempt++
 		if err := h.health(ctx, r); err == nil {
-			return map[string]any{"url": h.modelURL(r) + "/health", "attempts": attempt, "status": "ready"}, nil
+			return map[string]any{"url": h.modelURL(r) + healthPath(r), "attempts": attempt, "status": "ready"}, nil
 		}
 		// A dead container never becomes healthy — fail immediately with its
 		// exit state and last output instead of burning the whole deadline.
@@ -516,7 +558,7 @@ func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress P
 			}
 		}
 		if progress != nil {
-			if err := progress(map[string]any{"url": h.modelURL(r) + "/health", "attempt": attempt, "status": "waiting"}); err != nil {
+			if err := progress(map[string]any{"url": h.modelURL(r) + healthPath(r), "attempt": attempt, "status": "waiting"}); err != nil {
 				return nil, fmt.Errorf("persist health progress: %w", err)
 			}
 		}
@@ -529,13 +571,18 @@ func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress P
 	logs := h.docker.Logs(ctx, h.resolveContainerName(ctx, r), 40)
 	minutes := int(timeout / time.Minute)
 	if logs != "" {
-		return nil, fmt.Errorf("vLLM did not become HTTP-ready within %d minutes; last container output:\n%s", minutes, logs)
+		return nil, fmt.Errorf("the model server did not become HTTP-ready within %d minutes; last container output:\n%s", minutes, logs)
 	}
-	return nil, fmt.Errorf("vLLM did not become HTTP-ready within %d minutes", minutes)
+	return nil, fmt.Errorf("the model server did not become HTTP-ready within %d minutes", minutes)
 }
 
+// healthPath is the runtime's liveness route. vLLM and SGLang both serve
+// /health; a kind whose route differs adds a case here rather than changing
+// the wait loop.
+func healthPath(_ recipe.Recipe) string { return "/health" }
+
 func (h *HostExecutor) health(ctx context.Context, r recipe.Recipe) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, h.modelURL(r)+"/health", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, h.modelURL(r)+healthPath(r), nil)
 	resp, err := h.http.Do(req)
 	if err != nil {
 		return err
@@ -723,6 +770,7 @@ func (h *HostExecutor) cachePath(r recipe.Recipe) string {
 func (h *HostExecutor) modelURL(r recipe.Recipe) string {
 	return fmt.Sprintf("http://127.0.0.1:%d", r.Service.DefaultHostPort)
 }
+
 // containerName is the name new containers are created under. Callers about
 // to create a container must always use this directly; callers looking up
 // or operating on a container that may already exist should go through
@@ -732,7 +780,9 @@ func containerName(r recipe.Recipe) string { return fmt.Sprintf("basement-%s-v%d
 // legacyContainerName is the pre-rename (spec 10) naming scheme. Containers
 // created before the rename still carry it — live containers are never
 // renamed — so lookups fall back to it via resolveContainerName.
-func legacyContainerName(r recipe.Recipe) string { return fmt.Sprintf("runonspark-%s-v%d", r.ID, r.Version) }
+func legacyContainerName(r recipe.Recipe) string {
+	return fmt.Sprintf("runonspark-%s-v%d", r.ID, r.Version)
+}
 
 // resolveContainerName returns the name r's container actually has on the
 // host right now: the current scheme if a container exists under it,

@@ -85,6 +85,87 @@ func TestRecipePolicyRejectsUnsafeVariants(t *testing.T) {
 	}
 }
 
+// sglangCandidate is a pinned vLLM recipe re-pointed at SGLang. No SGLang
+// recipe ships yet (hardware qualification comes first), so the schema is
+// exercised against a recipe whose every other field is already policy-clean.
+func sglangCandidate(t *testing.T) Recipe {
+	t.Helper()
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := Find(recipes, "qwen36-27b-nvfp4-1s")
+	if !ok {
+		t.Fatal("Qwen 27 recipe missing")
+	}
+	base.Runtime.Kind = "sglang"
+	base.Service.VLLM = nil
+	base.Service.SGLang = &SGLangConfig{
+		TensorParallelSize: 1, MemFractionStatic: "0.85", ContextLength: 262144, MaxRunningRequests: 8,
+		Quantization: "modelopt_fp4", KVCacheDType: "fp8_e4m3", AttentionBackend: "flashinfer",
+		ReasoningParser: "qwen3", ToolCallParser: "qwen3_coder",
+	}
+	return base
+}
+
+func TestValidateAcceptsMinimalSGLangRecipe(t *testing.T) {
+	candidate := sglangCandidate(t)
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate()=%v, want nil", err)
+	}
+	// Only the four command-line essentials are mandatory; everything else
+	// may be left unset so the runtime's own default applies.
+	candidate.Service.SGLang = &SGLangConfig{TensorParallelSize: 1, MemFractionStatic: "0.85", ContextLength: 8192, MaxRunningRequests: 1}
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() on a bare sglang block=%v, want nil", err)
+	}
+}
+
+func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
+	vllmBlock := func() *VLLMConfig {
+		recipes, err := Builtin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		base, _ := Find(recipes, "qwen36-27b-nvfp4-1s")
+		return base.Service.VLLM
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Recipe)
+		want   string
+	}{
+		{"kind sglang with a vllm block", func(r *Recipe) {
+			r.Service.SGLang = nil
+			r.Service.VLLM = vllmBlock()
+		}, "runtime kind sglang requires service.sglang, but the recipe declares service.vllm"},
+		{"both blocks", func(r *Recipe) { r.Service.VLLM = vllmBlock() }, "keep only the block that matches runtime.kind"},
+		{"neither block", func(r *Recipe) { r.Service.SGLang = nil }, "service must declare exactly one runtime block"},
+		{"unknown kind", func(r *Recipe) { r.Runtime.Kind = "tensorrt" }, "runtime kind must be one of: sglang, vllm"},
+		{"draft tokens without an algorithm", func(r *Recipe) { r.Service.SGLang.SpeculativeNumDraftTokens = 4 }, "require speculative_algorithm"},
+		{"draft model that is not a declared role", func(r *Recipe) {
+			r.Service.SGLang.SpeculativeAlgorithm = "EAGLE3"
+			r.Service.SGLang.SpeculativeNumDraftTokens = 4
+			r.Service.SGLang.SpeculativeModelRole = "primary"
+		}, "non-primary artifact role"},
+		{"quantization outside policy", func(r *Recipe) { r.Service.SGLang.Quantization = "gguf" }, "outside the recipe policy"},
+		{"memory fraction overcommit", func(r *Recipe) { r.Service.SGLang.MemFractionStatic = "0.95" }, "does not preserve the per-node memory reserve"},
+		{"unsafe chat template", func(r *Recipe) { r.Service.SGLang.ChatTemplateFile = "../../etc/passwd" }, "chat template file is unsafe"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := sglangCandidate(t)
+			block := *candidate.Service.SGLang
+			candidate.Service.SGLang = &block
+			test.mutate(&candidate)
+			err := Validate(candidate)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate()=%v, want error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestDecodeStrictRejectsUnknownField(t *testing.T) {
 	_, err := DecodeStrict([]byte("schema_version: 1\nid: valid-recipe\nunexpected: true\n"))
 	if err == nil || !strings.Contains(err.Error(), "field unexpected not found") {

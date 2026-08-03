@@ -149,6 +149,86 @@ func TestChatTemplateKwargsAlwaysReachVLLM(t *testing.T) {
 	}
 }
 
+// sglangRecipe is the shape an SGLang recipe will have once one is
+// qualified: no such recipe ships yet, so the command builder is pinned
+// against a hand-built recipe rather than the catalog.
+func sglangRecipe() recipe.Recipe {
+	return recipe.Recipe{
+		Runtime: recipe.Runtime{Kind: "sglang"},
+		Artifacts: []recipe.Artifact{
+			{Role: "primary", Repository: "example-lab/Example-NVFP4"},
+			{Role: "drafter", Repository: "example-lab/Example-Draft"},
+		},
+		Service: recipe.Service{
+			InternalPort: 8000, DefaultHostPort: 8000, ServedModelID: "example-lab/Example-NVFP4",
+			SGLang: &recipe.SGLangConfig{
+				TensorParallelSize: 1, MemFractionStatic: "0.85", ContextLength: 262144, MaxRunningRequests: 8,
+				Quantization: "modelopt_fp4", KVCacheDType: "fp8_e4m3", AttentionBackend: "flashinfer",
+				SpeculativeAlgorithm: "EAGLE3", SpeculativeNumDraftTokens: 4, SpeculativeModelRole: "drafter",
+				ChatTemplateFile: "chat_template.jinja", ToolCallParser: "qwen3_coder", ReasoningParser: "qwen3",
+			},
+		},
+	}
+}
+
+func TestSGLangCommandIsPinnedAndComplete(t *testing.T) {
+	entrypoint, args, err := runtimeCommand(sglangRecipe())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(entrypoint, " ") != "python3 -m sglang.launch_server" {
+		t.Fatalf("entrypoint=%q", entrypoint)
+	}
+	want := []string{
+		"--model-path", "/model",
+		"--host", "0.0.0.0",
+		"--port", "8000",
+		"--served-model-name", "example-lab/Example-NVFP4",
+		"--enable-metrics",
+		"--tp-size", "1",
+		"--mem-fraction-static", "0.85",
+		"--context-length", "262144",
+		"--max-running-requests", "8",
+		"--quantization", "modelopt_fp4",
+		"--kv-cache-dtype", "fp8_e4m3",
+		"--attention-backend", "flashinfer",
+		"--speculative-algorithm", "EAGLE3",
+		"--speculative-num-draft-tokens", "4",
+		"--speculative-draft-model-path", "/drafter",
+		"--chat-template", "/model/chat_template.jinja",
+		"--tool-call-parser", "qwen3_coder",
+		"--reasoning-parser", "qwen3",
+	}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Fatalf("sglang arguments\n got: %s\nwant: %s", strings.Join(args, " "), strings.Join(want, " "))
+	}
+}
+
+// An unset field must leave the flag off the command line entirely, so the
+// runtime's own default applies instead of a value the manager invented.
+func TestSGLangCommandOmitsUnsetFields(t *testing.T) {
+	r := sglangRecipe()
+	r.Service.SGLang = &recipe.SGLangConfig{TensorParallelSize: 1, MemFractionStatic: "0.7", ContextLength: 8192, MaxRunningRequests: 1}
+	joined := strings.Join(sglangArgs(r), " ")
+	want := "--model-path /model --host 0.0.0.0 --port 8000 --served-model-name example-lab/Example-NVFP4 " +
+		"--enable-metrics --tp-size 1 --mem-fraction-static 0.7 --context-length 8192 --max-running-requests 1"
+	if joined != want {
+		t.Fatalf("sglang arguments\n got: %s\nwant: %s", joined, want)
+	}
+}
+
+func TestRuntimeCommandRejectsAMismatchedRecipe(t *testing.T) {
+	r := sglangRecipe()
+	r.Runtime.Kind = "vllm"
+	if _, _, err := runtimeCommand(r); err == nil || !strings.Contains(err.Error(), "service.vllm") {
+		t.Fatalf("runtimeCommand()=%v, want a missing-block error", err)
+	}
+	r.Runtime.Kind = "llamacpp"
+	if _, _, err := runtimeCommand(r); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("runtimeCommand()=%v, want an unsupported-kind error", err)
+	}
+}
+
 func toStrings(values []any) []string {
 	result := make([]string, len(values))
 	for index, value := range values {

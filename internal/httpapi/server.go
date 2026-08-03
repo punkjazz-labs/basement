@@ -1053,18 +1053,23 @@ func (s *Server) telemetry(w http.ResponseWriter, r *http.Request) {
 		"docker_storage_available": system.DockerStorageAvailable,
 	}
 	if active, ok := s.activeReadyRecipe(r.Context()); ok {
-		model := map[string]any{"recipe_id": active.ID, "served_model_id": active.Service.ServedModelID}
-		if metrics := s.vllmMetrics(r.Context(), active); metrics != nil {
-			model["vllm"] = metrics
+		model := map[string]any{"recipe_id": active.ID, "served_model_id": active.Service.ServedModelID, "runtime_kind": active.Runtime.Kind}
+		if metrics := s.runtimeMetrics(r.Context(), active); metrics != nil {
+			model["runtime_metrics"] = metrics
 		}
 		response["active_model"] = model
 	}
 	writeJSON(w, http.StatusOK, response)
 }
 
-// vllmMetrics samples the runtime's Prometheus endpoint for the handful of
-// series the console renders; absence of any series is not an error.
-func (s *Server) vllmMetrics(ctx context.Context, r recipe.Recipe) map[string]float64 {
+// runtimeMetrics samples the runtime's Prometheus endpoint for the handful of
+// series the console renders; absence of any series is not an error, and a
+// series this runtime does not publish stays absent rather than reading zero.
+func (s *Server) runtimeMetrics(ctx context.Context, r recipe.Recipe) map[string]float64 {
+	wanted := runtimeMetricNames(r.Runtime.Kind)
+	if len(wanted) == 0 {
+		return nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/metrics", r.Service.DefaultHostPort), nil)
 	if err != nil {
 		return nil
@@ -1080,13 +1085,6 @@ func (s *Server) vllmMetrics(ctx context.Context, r recipe.Recipe) map[string]fl
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil
-	}
-	wanted := map[string]string{
-		"vllm:num_requests_running":    "requests_running",
-		"vllm:num_requests_waiting":    "requests_waiting",
-		"vllm:gpu_cache_usage_perc":    "kv_cache_usage",
-		"vllm:prompt_tokens_total":     "prompt_tokens_total",
-		"vllm:generation_tokens_total": "generation_tokens_total",
 	}
 	result := map[string]float64{}
 	for _, line := range strings.Split(string(body), "\n") {
@@ -1118,6 +1116,34 @@ func (s *Server) vllmMetrics(ctx context.Context, r recipe.Recipe) map[string]fl
 		return nil
 	}
 	return result
+}
+
+// runtimeMetricNames maps a runtime's Prometheus series onto the console's
+// runtime-neutral field names. Only series verified against each runtime's
+// own source are listed: SGLang publishes no equivalent of vLLM's KV cache
+// usage gauge (sglang:cache_hit_rate is prefix cache hit rate, a different
+// quantity), so that field stays absent for SGLang rather than borrowing a
+// number that does not mean the same thing.
+func runtimeMetricNames(kind string) map[string]string {
+	switch kind {
+	case "vllm":
+		return map[string]string{
+			"vllm:num_requests_running":    "requests_running",
+			"vllm:num_requests_waiting":    "requests_waiting",
+			"vllm:gpu_cache_usage_perc":    "kv_cache_usage",
+			"vllm:prompt_tokens_total":     "prompt_tokens_total",
+			"vllm:generation_tokens_total": "generation_tokens_total",
+		}
+	case "sglang":
+		return map[string]string{
+			"sglang:num_running_reqs":        "requests_running",
+			"sglang:num_queue_reqs":          "requests_waiting",
+			"sglang:prompt_tokens_total":     "prompt_tokens_total",
+			"sglang:generation_tokens_total": "generation_tokens_total",
+		}
+	default:
+		return nil
+	}
 }
 
 func (s *Server) storageBreakdown(w http.ResponseWriter, r *http.Request) {

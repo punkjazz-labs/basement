@@ -252,10 +252,14 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 	if r.Runtime.IPCLock {
 		hostConfig["CapAdd"] = []string{"IPC_LOCK"}
 	}
+	entrypoint, command, err := runtimeCommand(r)
+	if err != nil {
+		return "", err
+	}
 	body := map[string]any{
 		"Image":        image,
-		"Entrypoint":   []string{"vllm"},
-		"Cmd":          vllmArgs(r),
+		"Entrypoint":   entrypoint,
+		"Cmd":          command,
 		"Env":          environment,
 		"Labels":       map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: fmt.Sprint(r.Version)},
 		"ExposedPorts": map[string]any{port: map[string]any{}},
@@ -443,8 +447,32 @@ func dockerError(resp *http.Response) error {
 	return fmt.Errorf("docker returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
 }
 
+// runtimeCommand returns the container entrypoint and arguments for the
+// recipe's runtime kind. A recipe whose kind and service block disagree never
+// reaches here (the validator rejects it), so an error means the caller built
+// a Recipe by hand.
+func runtimeCommand(r recipe.Recipe) ([]string, []string, error) {
+	switch r.Runtime.Kind {
+	case "vllm":
+		if r.Service.VLLM == nil {
+			return nil, nil, errors.New("recipe declares runtime kind vllm without a service.vllm block")
+		}
+		return []string{"vllm"}, vllmArgs(r), nil
+	case "sglang":
+		if r.Service.SGLang == nil {
+			return nil, nil, errors.New("recipe declares runtime kind sglang without a service.sglang block")
+		}
+		return []string{"python3", "-m", "sglang.launch_server"}, sglangArgs(r), nil
+	default:
+		return nil, nil, fmt.Errorf("runtime kind %q is not supported", r.Runtime.Kind)
+	}
+}
+
 func vllmArgs(r recipe.Recipe) []string {
-	v := r.Service.VLLM
+	if r.Service.VLLM == nil {
+		return nil
+	}
+	v := *r.Service.VLLM
 	specConfig := map[string]any{"method": v.SpeculativeMethod, "num_speculative_tokens": v.SpeculativeTokens}
 	if v.SpeculativeMoE != "" {
 		specConfig["moe_backend"] = v.SpeculativeMoE
@@ -495,6 +523,51 @@ func vllmArgs(r recipe.Recipe) []string {
 	if v.AutoToolChoice {
 		args = append(args, "--enable-auto-tool-choice")
 	}
+	return args
+}
+
+// sglangArgs builds the sglang.launch_server command line. Every flag beyond
+// the four positional essentials is omitted when the recipe leaves it unset,
+// so the runtime's own default applies and the manager never invents a value.
+func sglangArgs(r recipe.Recipe) []string {
+	if r.Service.SGLang == nil {
+		return nil
+	}
+	s := *r.Service.SGLang
+	// --enable-metrics is not a recipe choice: SGLang mounts /metrics only
+	// behind this flag, and the console's telemetry tiles read that endpoint.
+	args := []string{
+		"--model-path", artifactMountPath("primary"),
+		"--host", "0.0.0.0",
+		"--port", fmt.Sprint(r.Service.InternalPort),
+		"--served-model-name", r.Service.ServedModelID,
+		"--enable-metrics",
+	}
+	if s.TensorParallelSize > 0 {
+		args = append(args, "--tp-size", fmt.Sprint(s.TensorParallelSize))
+	}
+	args = appendOptional(args, "--mem-fraction-static", s.MemFractionStatic)
+	if s.ContextLength > 0 {
+		args = append(args, "--context-length", fmt.Sprint(s.ContextLength))
+	}
+	if s.MaxRunningRequests > 0 {
+		args = append(args, "--max-running-requests", fmt.Sprint(s.MaxRunningRequests))
+	}
+	args = appendOptional(args, "--quantization", s.Quantization)
+	args = appendOptional(args, "--kv-cache-dtype", s.KVCacheDType)
+	args = appendOptional(args, "--attention-backend", s.AttentionBackend)
+	args = appendOptional(args, "--speculative-algorithm", s.SpeculativeAlgorithm)
+	if s.SpeculativeNumDraftTokens > 0 {
+		args = append(args, "--speculative-num-draft-tokens", fmt.Sprint(s.SpeculativeNumDraftTokens))
+	}
+	if s.SpeculativeModelRole != "" {
+		args = append(args, "--speculative-draft-model-path", artifactMountPath(s.SpeculativeModelRole))
+	}
+	if s.ChatTemplateFile != "" {
+		args = append(args, "--chat-template", artifactMountPath("primary")+"/"+s.ChatTemplateFile)
+	}
+	args = appendOptional(args, "--tool-call-parser", s.ToolCallParser)
+	args = appendOptional(args, "--reasoning-parser", s.ReasoningParser)
 	return args
 }
 

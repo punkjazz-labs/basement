@@ -131,7 +131,10 @@ export interface Telemetry {
   active_model?: {
     recipe_id: string
     served_model_id: string
-    vllm?: {
+    runtime_kind?: string
+    // Every field is optional: each runtime publishes its own subset, and a
+    // series this runtime does not expose stays absent rather than zero.
+    runtime_metrics?: {
       requests_running?: number
       requests_waiting?: number
       kv_cache_usage?: number

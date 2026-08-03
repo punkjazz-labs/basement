@@ -58,12 +58,12 @@ export default function Monitor({ telemetry, activeName }: { telemetry: Telemetr
   useEffect(() => {
     if (!telemetry || telemetry.sampled_at === lastSample.current) return
     lastSample.current = telemetry.sampled_at
-    const vllm = telemetry.active_model?.vllm
+    const runtime = telemetry.active_model?.runtime_metrics
     const push = (values: number[], value: number) => [...values.slice(-(WINDOW - 1)), value]
     // Rate from the server's own sample timestamps: the client's polling
     // jitter must not distort tokens-per-second.
     let tps = -1
-    const total = vllm?.generation_tokens_total
+    const total = runtime?.generation_tokens_total
     if (typeof total === 'number') {
       const at = Date.parse(telemetry.sampled_at)
       const last = lastTotal.current
@@ -74,9 +74,12 @@ export default function Monitor({ telemetry, activeName }: { telemetry: Telemetr
     }
     setSeries(previous => ({
       tps: tps >= 0 ? push(previous.tps, tps) : previous.tps,
-      running: vllm ? push(previous.running, vllm.requests_running ?? 0) : previous.running,
-      waiting: vllm ? push(previous.waiting, vllm.requests_waiting ?? 0) : previous.waiting,
-      kv: vllm ? push(previous.kv, (vllm.kv_cache_usage ?? 0) * 100) : previous.kv,
+      // A series the running runtime does not publish keeps its previous
+      // (possibly empty) history, so the tile reads n/a instead of a zero
+      // the runtime never reported.
+      running: typeof runtime?.requests_running === 'number' ? push(previous.running, runtime.requests_running) : previous.running,
+      waiting: typeof runtime?.requests_waiting === 'number' ? push(previous.waiting, runtime.requests_waiting) : previous.waiting,
+      kv: typeof runtime?.kv_cache_usage === 'number' ? push(previous.kv, runtime.kv_cache_usage * 100) : previous.kv,
       gpuFree: push(previous.gpuFree, telemetry.gpu_memory_free),
       power: telemetry.gpu_power_draw_watts > 0 ? push(previous.power, telemetry.gpu_power_draw_watts) : previous.power,
       clock: telemetry.gpu_clock_mhz > 0 ? push(previous.clock, telemetry.gpu_clock_mhz) : previous.clock,

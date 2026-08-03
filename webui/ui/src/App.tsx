@@ -173,7 +173,7 @@ export default function App() {
         const next = await api<Telemetry>('/api/v1/telemetry')
         if (cancelled) return
         setTelemetry(next)
-        const total = next.active_model?.vllm?.generation_tokens_total
+        const total = next.active_model?.runtime_metrics?.generation_tokens_total
         if (typeof total === 'number') {
           const now = Date.now()
           const last = tokenRate.current
