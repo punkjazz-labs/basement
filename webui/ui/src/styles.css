@@ -439,7 +439,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .msg.assistant.waiting::after { content: none; }
 .thinking {
   font-weight: 550;
-  background: linear-gradient(90deg, var(--muted), var(--ink) 50%, var(--muted));
+  background: linear-gradient(90deg, var(--accent), var(--accent-ink) 50%, var(--accent));
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -451,7 +451,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   to { background-position: 0% 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .thinking { animation: none; background: none; color: var(--muted); }
+  .thinking { animation: none; background: none; color: var(--accent-deep); }
 }
 /* Markdown replies: normal flow inside the bubble, quiet code and lists. */
 .msg .md { white-space: normal; display: grid; gap: 8px; }
