@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -167,9 +168,19 @@ type fakeSpark struct {
 	badOrigins int
 	requests   int
 	revoked    []string
+	attempted  []string
+	minted     []map[string]string
 	// refuseHandshake makes the reachability check at the end of adoption
 	// fail, which is how a test injects a failure after the fleet key exists.
 	refuseHandshake bool
+	// mintFailure breaks the answer to a key creation that has already been
+	// committed: "transport" drops the connection without answering at all,
+	// and "garbage" answers 201 with a body nothing can parse. Either way the
+	// key exists on this machine and the caller never learns its id.
+	mintFailure string
+	// refuseDelete makes key removal fail, which is how a test reaches the
+	// sentence the owner is left to act on themselves.
+	refuseDelete bool
 }
 
 func newFakeSpark(t *testing.T, token string) *fakeSpark {
@@ -204,7 +215,20 @@ func newFakeSpark(t *testing.T, token string) *fakeSpark {
 	})
 	mux.HandleFunc("/api/v1/keys", func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("basement_session")
-		if err != nil || cookie.Value != "session-value" || r.Header.Get("X-CSRF-Token") != "csrf-value" {
+		if err != nil || cookie.Value != "session-value" {
+			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
+			return
+		}
+		// Listing, the same shape this manager serves it in: a bare array of
+		// keys, and no CSRF, because it changes nothing.
+		if r.Method == http.MethodGet {
+			spark.mu.Lock()
+			listed := append([]map[string]string(nil), spark.minted...)
+			spark.mu.Unlock()
+			writeJSON(w, http.StatusOK, listed)
+			return
+		}
+		if r.Header.Get("X-CSRF-Token") != "csrf-value" {
 			writeError(w, http.StatusForbidden, errors.New("valid CSRF token required"))
 			return
 		}
@@ -215,7 +239,28 @@ func newFakeSpark(t *testing.T, token string) *fakeSpark {
 			writeError(w, http.StatusBadRequest, errors.New("a key name is required"))
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"key": map[string]any{"id": "key_1", "name": request.Name}, "secret": spark.secret})
+		// The key is committed before anything is said about it, which is the
+		// order a real manager writes in and the reason a failed answer does
+		// not mean a failed creation.
+		spark.mu.Lock()
+		id := fmt.Sprintf("key_%d", len(spark.minted)+1)
+		spark.minted = append(spark.minted, map[string]string{"id": id, "name": request.Name})
+		failure := spark.mintFailure
+		spark.mu.Unlock()
+		switch failure {
+		case "transport":
+			// The connection drops after the write, before any answer.
+			if hijacker, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hijacker.Hijack(); err == nil {
+					conn.Close()
+				}
+			}
+		case "garbage":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"key":{"id":`))
+		default:
+			writeJSON(w, http.StatusCreated, map[string]any{"key": map[string]any{"id": id, "name": request.Name}, "secret": spark.secret})
+		}
 	})
 	// Key revocation, the same shape this manager serves it in.
 	mux.HandleFunc("/api/v1/keys/", func(w http.ResponseWriter, r *http.Request) {
@@ -224,9 +269,18 @@ func newFakeSpark(t *testing.T, token string) *fakeSpark {
 			writeError(w, http.StatusForbidden, errors.New("valid CSRF token required"))
 			return
 		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/v1/keys/")
 		spark.mu.Lock()
-		spark.revoked = append(spark.revoked, strings.TrimPrefix(r.URL.Path, "/api/v1/keys/"))
+		spark.attempted = append(spark.attempted, id)
+		refused := spark.refuseDelete
+		if !refused {
+			spark.revoked = append(spark.revoked, id)
+		}
 		spark.mu.Unlock()
+		if refused {
+			writeError(w, http.StatusInternalServerError, errors.New("the key could not be removed"))
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"revoked": true})
 	})
 	mux.HandleFunc("/api/v1/system", func(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +325,14 @@ func (s *fakeSpark) revocations() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.revoked...)
+}
+
+// deleteAttempts is every key this machine was asked to remove, whether or not
+// the removal was allowed to work.
+func (s *fakeSpark) deleteAttempts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.attempted...)
 }
 
 func TestFleetDiscoverFingerprintsBasementAndExcludesThisMachine(t *testing.T) {
@@ -974,10 +1036,16 @@ func TestFleetAdoptRefusesAddressesOffYourOwnNetwork(t *testing.T) {
 			t.Errorf("%s: refusal did not explain itself: %s", address, payload)
 		}
 	}
-	// The machines this product is about are still adoptable.
+	// The machines this product is about are still adoptable, and the address
+	// the run is pinned to is the one that was checked.
 	for _, address := range []string{"192.168.99.137", "100.64.0.14", "10.0.0.5"} {
-		if err := checkAdoptionTarget(context.Background(), address); err != nil {
+		pinned, err := checkAdoptionTarget(context.Background(), address)
+		if err != nil {
 			t.Errorf("%s was refused: %v", address, err)
+			continue
+		}
+		if pinned.String() != address {
+			t.Errorf("%s pinned %s", address, pinned)
 		}
 	}
 }
@@ -1040,5 +1108,284 @@ func TestFleetAdoptSaysSoWhenTheFleetKeyCannotBeRevoked(t *testing.T) {
 	message := (&Server{}).revokeFleetKey(context.Background(), "http://192.168.99.137:7070", fleetKey{secret: "rosk_x"})
 	if !strings.Contains(message, "could not be removed") || !strings.Contains(message, fleetKeyName()) {
 		t.Errorf("the honest message does not name the key to delete: %q", message)
+	}
+}
+
+// adoptionSeams stands up the fake machine every adoption test needs: an SSH
+// session that answers as a GB10, an install that reports the fake console,
+// and a console reachable at 192.168.99.137. Tests override what they are
+// about afterwards.
+func adoptionSeams(spark *fakeSpark) {
+	consoleBaseURL = func(address string) string {
+		if address == "192.168.99.137" {
+			return spark.server.URL
+		}
+		return "http://" + net.JoinHostPort(address, consolePort)
+	}
+	adoptDial = func(context.Context, string, string, string) (setup.Runner, func(), error) {
+		return stubRunner{}, func() {}, nil
+	}
+	adoptProbe = func(context.Context, setup.Runner) setup.Identity { return gb10Machine() }
+	adoptBinarySource = func() (setup.BinarySource, error) {
+		return setup.LocalFileSource{Path: "/usr/lib/basement/basement"}, nil
+	}
+	adoptInstall = func(context.Context, setup.Runner, setup.BinarySource, setup.Options, func(string, ...any)) (setup.InstallResult, error) {
+		return setup.InstallResult{ConsoleURL: spark.server.URL, Token: "pairing-token-value"}, nil
+	}
+}
+
+// leakedFragment reports the longest run of secret, of minLength characters or
+// more, that survived into text. A whole password is the obvious leak; a
+// fragment of one is still a fragment of the owner's password, and it is what
+// a length cap applied to unscrubbed text leaves behind.
+func leakedFragment(text, secret string, minLength int) string {
+	for length := len(secret); length >= minLength; length-- {
+		for start := 0; start+length <= len(secret); start++ {
+			if piece := secret[start : start+length]; strings.Contains(text, piece) {
+				return piece
+			}
+		}
+	}
+	return ""
+}
+
+// A hostile machine chooses the bytes of the name it reports, and this manager
+// both transforms that name (control characters out, length capped) and scrubs
+// the typed password out of it. Whichever order those two run in has to leave
+// the password gone: a transformation that runs after the scrub can put a
+// secret back together out of pieces the scrub did not recognise, and a cap
+// that runs before it can leave a fragment behind. The peers table is the
+// thing that matters, because the run's own result is scrubbed again on the
+// way out and the stored row is not.
+func TestFleetAdoptCannotBeTrickedIntoStoringThePassword(t *testing.T) {
+	const password = "correct-horse-battery-staple"
+	cases := []struct {
+		name     string
+		hostname string
+	}{
+		{
+			// The password split by a control character. A scrub that runs
+			// first does not match it, and the strip that runs after joins it.
+			name:     "split by a control character",
+			hostname: "correct-horse\x1b-battery-staple",
+		},
+		{
+			// The same trick with an invalid UTF-8 byte, which the strip
+			// deletes for a different reason.
+			name:     "split by an invalid byte",
+			hostname: "correct-horse\xff-battery-staple",
+		},
+		{
+			// Padded so the password straddles the length cap, with twelve of
+			// its characters left inside it. A cap that runs before the scrub
+			// cuts the password into a fragment no later scrub can recognise,
+			// and stores that.
+			name:     "padded past the length cap",
+			hostname: strings.Repeat("a", maxMachineNameLength-12) + password,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			holdSeams(t)
+			fixture := newFleetFixture(t)
+			spark := newFakeSpark(t, "pairing-token-value")
+			adoptionSeams(spark)
+			adoptProbe = func(context.Context, setup.Runner) setup.Identity {
+				return setup.Identity{
+					Hostname:    test.hostname,
+					GPUName:     "NVIDIA GB10",
+					DeviceModel: "NVIDIA DGX Spark",
+				}
+			}
+
+			if code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
+				`{"address":"192.168.99.137","username":"nvidia","password":"`+password+`"}`); code != http.StatusAccepted {
+				t.Fatalf("adopt code = %d, body = %s", code, payload)
+			}
+			view := fixture.waitAdoption(t)
+			if view.State != adoptionSucceeded {
+				t.Fatalf("state = %s, error = %q", view.State, view.Error)
+			}
+
+			peers, err := fixture.store.Peers(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(peers) != 1 {
+				t.Fatalf("peers = %+v", peers)
+			}
+			stored, err := json.Marshal(peers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := json.Marshal(view.Result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, listed := fixture.call(t, http.MethodGet, "/api/v1/peers", "")
+			_, raw := fixture.call(t, http.MethodGet, "/api/v1/fleet/adopt/status", "")
+			for _, place := range []struct{ what, text string }{
+				{"the peers table", string(stored)},
+				{"the peers endpoint", string(listed)},
+				{"the status payload", string(raw)},
+				{"the adoption result", string(result)},
+			} {
+				if strings.Contains(place.text, password) {
+					t.Fatalf("%s holds the SSH password: %s", place.what, place.text)
+				}
+				if piece := leakedFragment(place.text, password, 8); piece != "" {
+					t.Fatalf("%s holds %q, a piece of the SSH password: %s", place.what, piece, place.text)
+				}
+			}
+			if name := peers[0].Name; len(name) > maxMachineNameLength || strings.ContainsAny(name, "\x1b\x00\n\r") {
+				t.Errorf("the stored name is not the shape the store accepts: %q", name)
+			}
+		})
+	}
+}
+
+// The address is checked once and used many times: an SSH login carrying the
+// owner's password, an install, a console wait, a pairing, a fleet key and a
+// stored peer row. If every one of those looked the name up again, a name with
+// answers the attacker controls would be private for the check and whatever it
+// liked afterwards. The run is pinned to the address that passed.
+func TestFleetAdoptPinsTheAddressItValidated(t *testing.T) {
+	const rebind = "rebind.example.internal"
+	cases := []struct {
+		name  string
+		later net.IP
+	}{
+		{name: "loopback afterwards", later: net.ParseIP("127.0.0.1")},
+		{name: "public afterwards", later: net.ParseIP("198.51.100.7")},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			holdSeams(t)
+			fixture := newFleetFixture(t)
+			spark := newFakeSpark(t, "pairing-token-value")
+			accomplice := newFakeSpark(t, "pairing-token-value")
+			accomplice.secret = "rosk_accomplicekeyaccomplicekey"
+			adoptionSeams(spark)
+
+			var lookups atomic.Int64
+			resolveHost = func(_ context.Context, host string) ([]net.IP, error) {
+				if host != rebind {
+					if ip := net.ParseIP(host); ip != nil {
+						return []net.IP{ip}, nil
+					}
+					return nil, errors.New("no such host")
+				}
+				if lookups.Add(1) == 1 {
+					return []net.IP{net.ParseIP("192.168.99.137")}, nil
+				}
+				return []net.IP{test.later}, nil
+			}
+			// Anything that resolves the name a second time, or that keeps the
+			// name in a URL, reaches the accomplice instead of the Spark.
+			consoleBaseURL = func(address string) string {
+				switch address {
+				case "192.168.99.137":
+					return spark.server.URL
+				case rebind, test.later.String():
+					return accomplice.server.URL
+				}
+				return "http://" + net.JoinHostPort(address, consolePort)
+			}
+			var dialled atomic.Value
+			adoptDial = func(_ context.Context, address, _, _ string) (setup.Runner, func(), error) {
+				dialled.Store(address)
+				return stubRunner{}, func() {}, nil
+			}
+
+			if code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
+				`{"address":"`+rebind+`","username":"nvidia","password":"typed-by-the-owner"}`); code != http.StatusAccepted {
+				t.Fatalf("adopt code = %d, body = %s", code, payload)
+			}
+			view := fixture.waitAdoption(t)
+			if view.State != adoptionSucceeded {
+				t.Fatalf("state = %s, error = %q", view.State, view.Error)
+			}
+			if got, _ := dialled.Load().(string); got != "192.168.99.137" {
+				t.Errorf("the SSH password was carried to %q, not to the address that was validated", got)
+			}
+			if accomplice.called() != 0 {
+				t.Errorf("the rebound address was contacted %d times", accomplice.called())
+			}
+			if got := lookups.Load(); got != 1 {
+				t.Errorf("the name was resolved %d times, want exactly the one validation lookup", got)
+			}
+			if view.Result.ConsoleURL != spark.server.URL || view.Result.OwnerPairingURL != spark.server.URL {
+				t.Errorf("the owner was sent to the rebound address: %+v", view.Result)
+			}
+			peers, err := fixture.store.Peers(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(peers) != 1 || peers[0].BaseURL != spark.server.URL {
+				t.Fatalf("stored peer = %+v, want the pinned address", peers)
+			}
+			_, storedKey, err := fixture.store.PeerCredentials(context.Background(), peers[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if storedKey != spark.secret {
+				t.Errorf("the stored key came from the rebound address: %q", storedKey)
+			}
+		})
+	}
+}
+
+// The other machine commits the fleet key and then answers. A dropped
+// connection or an answer nothing can parse therefore says nothing about
+// whether the key exists, so sending the request is the point of no return:
+// the key is chased down by the name this run used and handed back, and when
+// even that fails the owner is told exactly what to delete and where.
+func TestFleetAdoptHandsBackAKeyItNeverSawTheIdOf(t *testing.T) {
+	cases := []struct {
+		name         string
+		failure      string
+		refuseDelete bool
+	}{
+		{name: "the connection drops", failure: "transport"},
+		{name: "the answer is unreadable", failure: "garbage"},
+		{name: "and the delete fails too", failure: "transport", refuseDelete: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			holdSeams(t)
+			fixture := newFleetFixture(t)
+			spark := newFakeSpark(t, "pairing-token-value")
+			spark.mintFailure = test.failure
+			spark.refuseDelete = test.refuseDelete
+			adoptionSeams(spark)
+
+			if code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
+				`{"address":"192.168.99.137","username":"nvidia","password":"typed-by-the-owner"}`); code != http.StatusAccepted {
+				t.Fatalf("adopt code = %d, body = %s", code, payload)
+			}
+			view := fixture.waitAdoption(t)
+			if view.State != adoptionFailed {
+				t.Fatalf("state = %s", view.State)
+			}
+			attempted := spark.deleteAttempts()
+			if len(attempted) != 1 || attempted[0] != "key_1" {
+				t.Fatalf("the minted key was not handed back: delete attempts = %v", attempted)
+			}
+			if test.refuseDelete {
+				if !strings.Contains(view.Error, fleetKeyName()) || !strings.Contains(view.Error, "could not be removed") {
+					t.Errorf("the failure did not name the key the owner has to delete: %q", view.Error)
+				}
+				if !strings.Contains(view.Error, "Connect") {
+					t.Errorf("the failure did not say where to delete it: %q", view.Error)
+				}
+				return
+			}
+			if !strings.Contains(view.Error, "has been removed") {
+				t.Errorf("the failure did not say what became of the key: %q", view.Error)
+			}
+			if revoked := spark.revocations(); len(revoked) != 1 || revoked[0] != "key_1" {
+				t.Errorf("revocations = %v", revoked)
+			}
+		})
 	}
 }

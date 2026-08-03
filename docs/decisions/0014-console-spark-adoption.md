@@ -145,6 +145,26 @@ whose error contains the password verbatim, and a second test drives a
 machine that returns the password as its hostname; neither may appear in
 any byte of any progress, status, result or stored row.
 
+Scrubbing is the last thing that happens to remote text, and that is a
+rule about ordering rather than a detail of it. The same text is also
+transformed: control characters and invalid UTF-8 are stripped out of it
+and its length is capped to what the store accepts. A scrub that runs
+before either of those is not a scrub. A machine that answers `hostname`
+with the password split by an escape byte defeats the match, and the
+strip that runs afterwards puts the password back together and hands it
+to the store. A cap that runs after the scrub is safe; a cap that runs
+before it cuts the password into a fragment the scrub no longer
+recognises and stores that fragment instead. So remote text goes through
+one door, `adoptionRun.safeRemoteText`, which strips, scrubs, caps and
+scrubs again: the middle scrub is what makes the cap safe, and the last
+one is what everything persisted or displayed is held to. The reported
+console URLs are scrubbed after they are parsed for the same reason,
+because parsing unescapes what it is given. Tests drive a hostname
+carrying the password split by a control character, split by an invalid
+byte, and padded so it straddles the length cap; none of them may leave
+the password, or any eight-character run of it, in the peers table, the
+peers endpoint, the status payload or the result.
+
 Server-supplied text is never printed on this path either. A
 keyboard-interactive SSH server chooses the instruction it sends with a
 challenge, so it can ask for the password and then send a second
@@ -156,6 +176,44 @@ in, because a person is reading it and typed the password themselves;
 the console's prompter does not implement it at all. Everything that
 does reach a person has its control characters stripped and its length
 capped first.
+
+### One address, checked once and used everywhere
+
+The address the owner types is resolved once, by the handler, before any
+credential is spent. What the run then uses is the IP that check accepted,
+never the name again. Checking a name and letting each later step look it
+up again is not checking it: a name with a short TTL and an attacker at
+the other end of it can answer with a private address for the check and
+with loopback or a public address for the SSH login that carries the
+owner's password, the binary upload, the pairing, the key minting and the
+reachability handshake. Any one of those would be a different machine
+than the one that was approved, and the first of them hands over the
+owner's credentials.
+
+So `checkAdoptionTarget` returns the address it accepted, the SSH dial
+connects to that literal, and every HTTP call in the run is built from
+it. There is no name left in any URL on this path, so there is no dialer
+override and no hostname-versus-certificate question to answer; the
+console speaks plain HTTP here, as the peer URL rules already allow on a
+LAN. The rules on what may be accepted have not changed: every record in
+the answer must be off loopback, off this machine's own interfaces and
+inside the private, link-local or CGNAT ranges, so a mixed answer is
+still refused outright. When several acceptable addresses come back, one
+of them is pinned and it is the only one used.
+
+The peer's stored `base_url` is that same pinned address, and this is the
+trade that was made deliberately. The alternative, storing the hostname
+the owner typed, reads better in the Fleet table and survives the machine
+moving, but every later call to that peer carries the fleet API key, and
+those calls would resolve the name again on a machine nobody is watching.
+That is the same rebinding window reopened, permanently, against a stored
+credential rather than a typed one. The residual risk of the choice made
+is the other one: the Fleet table shows an IP address rather than a name,
+and if DHCP moves the second Spark the peer stops answering. The recovery
+is the one the console already has, removing the peer under Fleet and
+adding it again, and the recommendation for anyone who wants this to be
+stable is a DHCP reservation or a Tailscale address. A wrong address is a
+row the owner can see and fix; a leaked fleet key is not.
 
 ### Console session only
 
@@ -172,7 +230,8 @@ both paths are fixed strings rather than anything a caller can steer.
 
 ## Consequences
 
-- Everything after the install talks to the address the owner adopted.
+- Everything after the install talks to the pinned address: the address
+  the owner adopted, resolved once and used as a literal from then on.
   The machine being adopted answers `hostname -I` and `tailscale ip`, and
   it is not ours yet: an SSH endpoint that names an accomplice would
   otherwise get the console wait, the pairing, the fleet key and the
@@ -193,11 +252,12 @@ both paths are fixed strings rather than anything a caller can steer.
   network), and it keeps a console session from being usable as an SSH
   prober aimed at the internet. A Spark reachable only through a hostname
   in the owner's own DNS still works, because what is checked is what the
-  name resolves to.
+  name resolves to, and that answer is then what the run and the stored
+  peer row use.
 - Everything the other machine says about itself is untrusted text. Its
   hostname becomes the peer name, which is stored and rendered, so it is
-  scrubbed of the typed password, stripped of control characters and
-  capped to what the store accepts. The same holds for names that come
+  stripped of control characters, capped to what the store accepts and
+  scrubbed of the typed password last, in that order. The same holds for names that come
   off an mDNS sweep. An mDNS answer only contributes the address it
   actually came from, and only when that address is on a local range: an
   advertised A record naming anything else is dropped, because a machine
@@ -220,6 +280,21 @@ both paths are fixed strings rather than anything a caller can steer.
   the revocation cannot be made, the failure sentence names the key so
   the owner can delete it under Connect on that machine, rather than
   leaving a credential nobody knows about on hardware they own.
+- The point of no return is the moment the mint request is sent, not the
+  moment a key comes back. The other machine writes the key and then
+  answers, so a dropped connection, a timeout or an answer this manager
+  cannot parse says nothing about whether the key exists; it only says
+  that its id will never be learned. Treating those as ordinary failures
+  left a working credential on the owner's other Spark with nothing
+  naming it. So every failure from that request onward runs the same
+  cleanup, and the cleanup does not need the id: the key's name is
+  `fleet-<head hostname>`, decided before the request was sent and the
+  same on both ends, so the keys on the new machine are listed with the
+  bootstrap session and the one carrying that name is deleted. A key
+  already named that is a leftover from an earlier attempt by this same
+  head, and removing it is the point. If the listing, the match or the
+  delete fails, the sentence the owner reads names the key and says to
+  delete it under Connect on that Spark's own console.
 - One adoption at a time. A second POST while one runs gets a 409 with a
   plain sentence. Two runs would race for the single peer row, and each
   one holds an SSH session installing a systemd service.
