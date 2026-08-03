@@ -146,3 +146,28 @@ including SGLang. Design and phasing recorded in
 `docs/decisions/0011-multi-runtime-support.md`. The evidence above is the
 rationale: Inkling needs SGLang, single-Spark DeepSeek lives in ds4/llama.cpp
 territory, Qwen family is vLLM. No single runtime covers the frontier.
+
+## Round 3 — 2026-08-03 evening, MiniMax H3 deep-check (the owner request)
+
+### MiniMax H3 — the community moment, and why we cannot catalog it
+- Traction confirmed by live X recent-search (36 posts/72h): 304-like ComfyUI
+  T2V post (1280x736/15s in 1h20m on one Spark), 250-like text-rendering demo,
+  79-like single-Spark vLLM-Omni run (SM121 + online FP8 + pinned build),
+  52-like dual-Spark run. The dual-Spark repo is
+  `joeynyc/MiniMax-H3-2x-DGX-Spark` (7 stars, single commit): Ulysses sequence
+  parallel over RoCEv2, 154.9s -> ~65s for the same clip, batch-size-one,
+  patched vLLM-Omni hook, self-described not production-validated.
+- Artifact: `MiniMaxAI/MiniMax-H3`, 33B dense, video+stereo-audio out
+  (T2VA/FL2VA/Ref2VA), up to 2K/15s/24fps.
+- LICENCE (fetched verbatim 2026-08-03): "'Excluded Territories' means the
+  European Union, the United Kingdom, the Republic of Korea and the United
+  States of America." Use is licensed only OUTSIDE those territories, plus a
+  $20M revenue gate. This alone disqualifies catalog inclusion: our users are
+  overwhelmingly in the excluded territories.
+- Product-surface mismatch, independent of licence: output is a video file
+  produced over minutes to hours via ComfyUI or a patched vLLM-Omni fork.
+  Nothing in our serve/verify/benchmark/playground surface applies. Adding it
+  is not a recipe; it is a second product (job queue, file outputs, video UI).
+- Decision: do NOT add a recipe (neither 1s nor 2s). Ride the moment
+  editorially instead. If video-on-Spark becomes a product goal, start from a
+  model whose licence permits US/EU use, and design the video surface first.
