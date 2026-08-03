@@ -1,33 +1,49 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for Basement Setup.app. The two version keys below are
+     placeholders: packaging/build-macos-installer.sh overwrites them with the
+     release tag before signing, so a bundle assembled straight from this file
+     is still valid, just versioned 0.0.0. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>basement setup</string>
+	<string>Basement Setup</string>
 	<key>CFBundleDisplayName</key>
-	<string>basement setup</string>
+	<string>Basement Setup</string>
 	<key>CFBundleIdentifier</key>
 	<string>ai.punkjazz.basement.setup</string>
 	<key>CFBundleExecutable</key>
 	<string>basement-setup</string>
+	<key>CFBundleIconFile</key>
+	<string>basement</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>0.0.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>0.0.0</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<!-- 12.0 is the oldest macOS this bundle claims. The Go toolchain will
+	     happily run on older releases, but nothing before Monterey is tested,
+	     and a claim the bundle cannot stand behind is worse than a version
+	     floor a few people have to upgrade past. -->
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>12.0</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<!-- Hides the app from the Dock and Cmd-Tab: it never shows a window of
-	     its own (the wizard is the browser tab it opens), so a normal Dock
-	     icon would just bounce and then sit there looking unresponsive. This
-	     is an Info.plist visibility key, not a code signing entitlement. -->
+	<!-- Hides the app from the Dock and Cmd-Tab. The wizard is a browser tab,
+	     so this process never opens a window of its own and never runs a Cocoa
+	     event loop. Given a Dock presence, macOS looks for that event loop,
+	     does not find one, and marks the icon as not responding within seconds
+	     of launch: an installer that looks hung while it is working perfectly.
+	     Without one, attention goes where the work actually is, which is the
+	     browser tab that just opened. The cost is that there is no Dock icon to
+	     quit from; the server covers that itself by exiting once the run has
+	     finished and had time to be read (setupweb.idleAfterFinish).
+	     This is an Info.plist visibility key, not a code signing entitlement. -->
 	<key>LSUIElement</key>
 	<true/>
 </dict>

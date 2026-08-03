@@ -1,16 +1,22 @@
 #!/bin/sh
-# Signs and notarizes the macOS binaries of a published release, then
-# replaces the release assets with the signed ones.
+# The macOS half of cutting a release: everything that cannot run in Linux CI
+# because it needs the Developer ID identity and the notarytool credentials.
 #
-# Run on the Mac that holds the Developer ID identity and the notarytool
-# keychain profile (created with: xcrun notarytool store-credentials).
+# Run on the Mac that holds both (the profile is created with:
+# xcrun notarytool store-credentials).
 #
 #   packaging/sign-macos-release.sh v0.9.3
 #
-# The workflow publishes unsigned binaries from Linux CI; this script is
-# the signing step that cannot run there. It downloads the darwin assets,
-# signs them with the hardened runtime, notarizes the zips, verifies, and
-# uploads the signed artifacts back over the originals.
+# Two things happen, in this order:
+#
+#   1. The manager binaries (basement-darwin-arm64, basement-darwin-amd64) are
+#      signed and notarized in place. These are what packaging/setup.sh
+#      downloads for the curl|sh path and what `basement setup --binary`
+#      installs, so their names and their being bare executables are fixed.
+#   2. packaging/build-macos-installer.sh builds the double-clickable
+#      installer: the two darwin slices of cmd/basement-setup lipo'd into one
+#      universal binary inside Basement Setup.app, wrapped in a signed,
+#      notarized and stapled basement-setup-macos.dmg.
 set -eu
 
 TAG="${1:?usage: sign-macos-release.sh <tag>}"
@@ -41,3 +47,7 @@ for arch in arm64 amd64; do
 done
 
 echo "==> done: signed and notarized darwin binaries replaced on $TAG"
+
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+SIGN_IDENTITY="$IDENTITY" NOTARY_PROFILE="$PROFILE" \
+  "$HERE/build-macos-installer.sh" "$TAG"

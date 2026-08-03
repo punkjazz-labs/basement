@@ -1,6 +1,7 @@
 /bin/
 /var/
 /dist/
+/basement-setup-macos-REHEARSAL.dmg
 *.db
 *.db-shm
 *.db-wal

@@ -17,7 +17,10 @@ jobs:
         with:
           go-version: '1.25'
 
-      - name: Build release binaries
+      # The manager: what runs on the GB10, and what the curl|sh bootstrap
+      # (packaging/setup.sh, setup.ps1) and `basement setup --binary` download.
+      # These names and this asset set must not change.
+      - name: Build manager binaries
         run: |
           mkdir -p dist
           for os in linux darwin windows; do
@@ -31,6 +34,45 @@ jobs:
               (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
             done
           done
+
+      # The installer: what a person downloads onto their own laptop and
+      # double-clicks. It only ever installs a GB10 over SSH, so it is built
+      # for the two desktop platforms and never for linux.
+      #
+      # macOS: the two slices published here are build inputs, not the
+      # user-facing download. This job runs on Linux and cannot run lipo, and
+      # a universal binary has to be assembled on a Mac anyway because the
+      # bundle around it has to be signed, notarized and stapled on the Mac
+      # that holds the Developer ID. So packaging/build-macos-installer.sh
+      # downloads both slices, lipos them into one universal binary, and
+      # publishes the single thing people actually click: a stapled
+      # basement-setup-macos.dmg. Adding a macos runner here to move the lipo
+      # into CI would buy nothing: the Mac step exists regardless.
+      #
+      # Windows: -H=windowsgui marks the executable as a GUI subsystem binary
+      # so double-clicking it opens no console window. There is no Windows
+      # code signing certificate, so these are unsigned and SmartScreen warns
+      # on first run; the README documents that plainly rather than working
+      # around it.
+      - name: Build installer binaries
+        run: |
+          for arch in arm64 amd64; do
+            out="dist/basement-setup-darwin-${arch}"
+            GOOS=darwin GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -o "$out" ./cmd/basement-setup
+            (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
+          done
+          for arch in arm64 amd64; do
+            out="dist/basement-setup-windows-${arch}.exe"
+            GOOS=windows GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -H=windowsgui -X main.version=${GITHUB_REF_NAME}" \
+              -o "$out" ./cmd/basement-setup
+            (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
+          done
+
+      - name: Collect bootstrap scripts
+        run: |
           cp packaging/setup.sh dist/setup.sh
           cp packaging/setup.ps1 dist/setup.ps1
           tar -C packaging -czf dist/packaging.tar.gz .

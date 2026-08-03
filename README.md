@@ -10,8 +10,48 @@ OpenAI-compatible endpoint. Your prompts never leave your network.
 
 ## Install
 
-From any macOS or Linux machine on the same network as your Spark, or on
-the Spark itself:
+Two computers are involved, and it is worth being clear about which is
+which. The **Spark** is the GB10 machine that will run the models. The
+**laptop** is whatever computer you are sitting at right now, on the same
+network as the Spark.
+
+You run the installer on the laptop. It looks for GB10 machines on your
+network, lets you pick one, connects to it over SSH with the credentials
+you already use (nothing is stored), installs basement on the Spark, and
+opens the paired console in your browser. Nothing stays behind on the
+laptop: the installer is a one-shot tool, not something you keep.
+
+There are three ways to run it. They all do the same install.
+
+### macOS, no terminal
+
+Download [**basement-setup-macos.dmg**](https://github.com/punkjazz-labs/basement/releases/latest/download/basement-setup-macos.dmg),
+open it, and double-click **Basement Setup**. The wizard opens in your
+browser and takes it from there. When it is done, eject the disk image.
+
+One download covers both Apple Silicon and Intel Macs. It is signed with
+our Apple Developer ID and notarized by Apple, and the notarization ticket
+is stapled to the download itself, so it opens without a warning even on a
+Mac that is offline.
+
+### Windows, no terminal
+
+Download
+[**basement-setup-windows-amd64.exe**](https://github.com/punkjazz-labs/basement/releases/latest/download/basement-setup-windows-amd64.exe)
+and double-click it. The wizard opens in your browser. On an Arm PC take
+`basement-setup-windows-arm64.exe` instead.
+
+We do not have a Windows code signing certificate, so the first time you
+run it Windows shows a blue box: *Windows protected your PC*. Click **More
+info**, then **Run anyway**. SmartScreen is telling you something true,
+which is that this file is not signed by a certificate it recognises, and
+we would rather say so than work around it. If you want to check the file
+yourself first, every release publishes
+`basement-setup-windows-amd64.exe.sha256` next to the binary.
+
+### Either, with a terminal
+
+On macOS or Linux:
 
 ```bash
 curl -fsSL https://github.com/punkjazz-labs/basement/releases/latest/download/setup.sh | sh
@@ -23,10 +63,13 @@ On Windows (PowerShell):
 irm https://github.com/punkjazz-labs/basement/releases/latest/download/setup.ps1 | iex
 ```
 
-The installer discovers GB10 machines on your network, lets you pick one,
-installs over SSH with your existing credentials (nothing is stored), and
-opens the paired console in your browser. Run it on the machine itself and
-it installs locally instead.
+This downloads the basement binary for the machine you are on, checks it
+against its published SHA-256, and runs `basement setup`, which is the same
+flow as the two installers above with terminal prompts instead of a browser
+page. This is also the path to use when you are sitting at the Spark
+itself: run it there and it installs locally, no SSH involved.
+
+### What a run does
 
 Two Sparks are one run, not two. If the sweep found another GB10-class
 machine, the installer offers to set that one up as well, asking once per
@@ -237,3 +280,67 @@ numbered ADRs; `docs/runbooks/` operational runbooks. Start with ADRs
 0003 (transactional single active model), 0004 (guardrails), 0007
 (stable endpoint), 0009 (signed feed), 0010 (setup security), 0011
 (runtimes), 0012 (curated model trust, proposed).
+
+## Releases
+
+There are two programs. `cmd/basement` is the manager: it runs on the
+Spark, and it is what the `curl | sh` bootstrap and `basement setup
+--binary` download. `cmd/basement-setup` is the installer: it runs on the
+operator's laptop, opens the wizard as a loopback-only browser page, and
+only ever installs a Spark over SSH. It is built for macOS and Windows and
+never for Linux, because a Spark installs itself through the manager.
+
+Pushing a `v*` tag runs `.github/workflows/release.yml` on Linux, which
+publishes, each with a `.sha256` beside it:
+
+- `basement-{linux,darwin,windows}-{amd64,arm64}`, the manager;
+- `basement-setup-darwin-{amd64,arm64}`, the two macOS installer slices;
+- `basement-setup-windows-{amd64,arm64}.exe`, the Windows installer, linked
+  with `-H=windowsgui` so double-clicking it opens no console window;
+- `setup.sh`, `setup.ps1`, `packaging.tar.gz`.
+
+Then, on the Mac that holds the Developer ID identity and the notarytool
+keychain profile:
+
+```sh
+packaging/sign-macos-release.sh v0.9.3
+```
+
+That signs and notarizes the two darwin manager binaries in place, then
+calls `packaging/build-macos-installer.sh`, which lipos the two installer
+slices into one universal binary, wraps it in `Basement Setup.app`, and
+signs, notarizes, staples and verifies `basement-setup-macos.dmg` before
+uploading it. Verification is fatal: a disk image that cannot prove it
+carries a stapled ticket is never uploaded.
+
+The lipo happens there rather than in CI because the Mac step is required
+anyway. The signing identity and the notarization credentials exist on one
+laptop and nowhere else, so adding a macOS CI runner purely to run `lipo`
+would remove nothing from the local script. The two darwin slices stay
+published as honest build inputs; the single user-facing macOS download is
+the disk image.
+
+The Windows executables are unsigned. There is no Windows code signing
+certificate, so SmartScreen warns on first run, and the install section
+above documents the click-through instead of hiding it.
+
+To rehearse the macOS packaging without cutting a release:
+
+```sh
+mkdir -p /tmp/slices
+for arch in arm64 amd64; do
+  GOOS=darwin GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+    -o /tmp/slices/basement-setup-darwin-$arch ./cmd/basement-setup
+done
+REHEARSE=1 SETUP_SLICE_DIR=/tmp/slices packaging/build-macos-installer.sh v0.0.0
+```
+
+That assembles and signs the bundle and stops: nothing is notarized,
+stapled or uploaded, and the output is named `-REHEARSAL` so it cannot be
+mistaken for a release artifact.
+
+The app icon is `packaging/macos/basement.icns`, built from
+`packaging/macos/icon.svg`, which is the product favicon copied verbatim
+from the website. `packaging/macos/make-icon.sh` regenerates it; the
+release scripts only copy the committed `.icns`, so cutting a release needs
+no SVG renderer.
