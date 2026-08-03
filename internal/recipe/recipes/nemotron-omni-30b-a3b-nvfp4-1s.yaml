@@ -1,0 +1,131 @@
+schema_version: 1
+id: nemotron-omni-30b-a3b-nvfp4-1s
+# Serve flags mirror NVIDIA's own DGX Spark section (fetched live
+# 2026-08-03): vllm/vllm-openai:v0.20.0, --gpu-memory-utilization 0.8,
+# --max-model-len 131072, --tensor-parallel-size 1, --trust-remote-code,
+# --max-num-seqs 8, --max-num-batched-tokens 32768, --enable-prefix-caching,
+# --enable-auto-tool-choice --tool-call-parser qwen3_coder, --shm-size=16g.
+# The card requires vLLM >= 0.20.0 exactly; the pinned image below is the
+# same generic vllm/vllm-openai pin the Laguna recipe uses and has not been
+# confirmed to satisfy that floor. Verify the actual served vLLM version at
+# qualification before shipping this as basement-verified.
+# Text-only serving first: the card's omni (image/audio/video) inputs use
+# custom code (CRADIO v4-H + Parakeet encoders) that is not confirmed as a
+# stock vLLM multimodal path, so --limit-mm-per-prompt and the video/audio
+# flags are left out and multimodal_image_limit is 0.
+#
+# One deviation from the card, flagged for follow-up:
+# - speculative_method is empty: the card documents no speculative decoding
+#   for this model (README has zero mentions of speculative/draft/MTP), so
+#   the recipe declares none rather than a value the model cannot honour.
+# - reasoning_parser: the card's own parser is nemotron_v3, which is not in
+#   this schema's allowlist (qwen3/poolside_v1 only), and there is no empty
+#   option either. The card's "Budget-Controlled Reasoning" example (and its
+#   raw content shows literal <think>...</think> tags, the same delimiter
+#   convention vLLM's built-in qwen3 parser splits on, so "qwen3" is used as
+#   the closer functional match rather than an arbitrary guess. This is
+#   still unverified against the model's actual output and should be
+#   confirmed at qualification.
+version: 1
+display_name: Nemotron Omni 30B-A3B
+publisher: NVIDIA
+model_by: NVIDIA
+recipe_by: NVIDIA
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+  revision: dc5f0b0bfddf8b6e0f5891475be9af05b80126fe
+topology:
+  spark_count: 1
+runtime:
+  kind: vllm
+  image: vllm/vllm-openai
+  digest: sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089
+  image_bytes: 10238912364
+  image_disk_bytes: 30716737092
+  environment:
+    CUTE_DSL_ARCH: sm_121a
+    MAX_JOBS: "4"
+  shm_bytes: 17179869184
+  memory_lock: true
+  ipc_lock: true
+artifacts:
+  - role: primary
+    repository: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+    revision: dc5f0b0bfddf8b6e0f5891475be9af05b80126fe
+    expected_bytes: 22431647821
+    licence: NVIDIA Open Model Agreement
+    # The card's licence_link is https://www.nvidia.com/en-us/agreements/
+    # enterprise-software/nvidia-open-model-agreement/ (verified live:
+    # license: other, license_name: nvidia-open-model-agreement). This
+    # schema's licence_url must be an HTTPS Hugging Face URL, so it cannot
+    # point at nvidia.com directly. Linking the repo's own pinned README
+    # (which states the same governing terms and link) so the user still
+    # sees the artifact they are accepting, per the ADR 0006 pattern.
+    licence_url: https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4/blob/dc5f0b0bfddf8b6e0f5891475be9af05b80126fe/README.md
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 16000000000
+  safety_margin_bytes: 10000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+  vllm:
+    tensor_parallel_size: 1
+    kv_cache_dtype: fp8
+    attention_backend: ""
+    moe_backend: ""
+    linear_backend: ""
+    gpu_memory_utilization: "0.8"
+    max_model_len: 131072
+    max_num_seqs: 8
+    max_num_batched_tokens: 32768
+    multimodal_image_limit: 0
+    speculative_method: ""
+    speculative_tokens: 0
+    speculative_moe_backend: ""
+    speculative_model_role: ""
+    reasoning_parser: qwen3
+    tool_call_parser: qwen3_coder
+    load_format: ""
+    chat_template_file: ""
+    chat_template:
+      enable_thinking: true
+      preserve_thinking: true
+    generation:
+      temperature: 0.6
+      top_p: 0.95
+    trust_remote_code: true
+    chunked_prefill: false
+    async_scheduling: false
+    prefix_caching: true
+    auto_tool_choice: true
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_memory_capacity
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: verify_memory
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared

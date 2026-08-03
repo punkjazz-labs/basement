@@ -2,7 +2,9 @@
 export const LOGOS: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': '/logos/qwen.webp',
   'qwen36-27b-nvfp4-1s': '/logos/qwen.webp',
+  'qwen35-122b-a10b-nvfp4-1s': '/logos/qwen.webp',
   'laguna-s-2-1-nvfp4-dflash-1s': '/logos/poolside.webp',
+  'nemotron-omni-30b-a3b-nvfp4-1s': '/logos/nvidia.webp',
 }
 
 export const logoFor = (recipeIDs: string[]): string =>

@@ -214,7 +214,7 @@ func validateVLLM(v VLLMConfig, roles map[string]bool) error {
 	allowed := map[string]map[string]bool{
 		"kv": {"": true, "fp8": true}, "attention": {"": true, "flashinfer": true},
 		"moe": {"": true, "auto": true, "marlin": true}, "linear": {"": true, "flashinfer_b12x": true},
-		"spec_method": {"mtp": true, "dflash": true}, "spec_moe": {"": true, "triton": true},
+		"spec_method": {"": true, "mtp": true, "dflash": true}, "spec_moe": {"": true, "triton": true},
 		"reasoning": {"qwen3": true, "poolside_v1": true},
 		"tool":      {"qwen3_xml": true, "qwen3_coder": true, "poolside_v1": true},
 		"load":      {"": true, "fastsafetensors": true},
@@ -226,8 +226,16 @@ func validateVLLM(v VLLMConfig, roles map[string]bool) error {
 		return errors.New("vllm setting is outside the recipe policy")
 	}
 	util, err := strconv.ParseFloat(v.GPUMemoryUtil, 64)
-	if err != nil || util <= 0 || util > 0.95 || v.SpeculativeTokens <= 0 || v.SpeculativeTokens > 32 {
+	if err != nil || util <= 0 || util > 0.95 || v.SpeculativeTokens < 0 || v.SpeculativeTokens > 32 {
 		return errors.New("vllm resource settings are outside the verified candidate")
+	}
+	// An empty method means the model has no speculative decoding; a recipe
+	// must not carry draft settings it cannot honour.
+	if v.SpeculativeMethod == "" && (v.SpeculativeTokens != 0 || v.SpeculativeModelRole != "" || v.SpeculativeMoE != "") {
+		return errors.New("speculative settings require a speculative method")
+	}
+	if v.SpeculativeMethod != "" && v.SpeculativeTokens <= 0 {
+		return errors.New("a speculative method requires a positive draft token count")
 	}
 	if v.SpeculativeMethod == "mtp" && v.SpeculativeModelRole != "" {
 		return errors.New("MTP must not reference a separate speculative model")

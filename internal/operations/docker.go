@@ -445,18 +445,21 @@ func dockerError(resp *http.Response) error {
 
 func vllmArgs(r recipe.Recipe) []string {
 	v := r.Service.VLLM
-	specConfig := map[string]any{"method": v.SpeculativeMethod, "num_speculative_tokens": v.SpeculativeTokens}
-	if v.SpeculativeMoE != "" {
-		specConfig["moe_backend"] = v.SpeculativeMoE
-	}
-	if v.SpeculativeModelRole != "" {
-		specConfig["model"] = artifactMountPath(v.SpeculativeModelRole)
-	}
-	spec, _ := json.Marshal(specConfig)
 	args := []string{"serve", "/model", "--host", "0.0.0.0", "--port", fmt.Sprint(r.Service.InternalPort), "--served-model-name", r.Service.ServedModelID,
 		"--tensor-parallel-size", fmt.Sprint(v.TensorParallelSize), "--gpu-memory-utilization", v.GPUMemoryUtil, "--max-model-len", fmt.Sprint(v.MaxModelLen),
-		"--max-num-seqs", fmt.Sprint(v.MaxNumSeqs), "--speculative-config", string(spec),
+		"--max-num-seqs", fmt.Sprint(v.MaxNumSeqs),
 		"--reasoning-parser", v.ReasoningParser, "--tool-call-parser", v.ToolCallParser}
+	if v.SpeculativeMethod != "" {
+		specConfig := map[string]any{"method": v.SpeculativeMethod, "num_speculative_tokens": v.SpeculativeTokens}
+		if v.SpeculativeMoE != "" {
+			specConfig["moe_backend"] = v.SpeculativeMoE
+		}
+		if v.SpeculativeModelRole != "" {
+			specConfig["model"] = artifactMountPath(v.SpeculativeModelRole)
+		}
+		spec, _ := json.Marshal(specConfig)
+		args = append(args, "--speculative-config", string(spec))
+	}
 	args = appendOptional(args, "--kv-cache-dtype", v.KVCacheDType)
 	args = appendOptional(args, "--attention-backend", v.AttentionBackend)
 	args = appendOptional(args, "--moe-backend", v.MoEBackend)
