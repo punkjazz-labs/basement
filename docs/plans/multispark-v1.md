@@ -77,10 +77,37 @@ recipe's uninstall sequence on head then worker for every step.
 Every step receipt carries `node` (the node's name) and `node_role`
 (`head`/`worker`), so a two-node job's timeline is unambiguous.
 
+The worker peer is resolved once, when the job is planned, and pinned for
+every later step including teardown. Re-resolving per step would let a peer
+edited mid-job receive a stop meant for a different machine.
+
+## What a worker will accept
+
+The node endpoints (`/api/v1/internal/node/preflight`, `/step`) take a fleet
+API key and no cookie, so a browser can never be walked into calling them.
+They are bounded further: a delegated step runs only when this Spark already
+holds that exact recipe id and version, byte for byte identical to the copy
+the head sent, and the LOCAL copy is what executes. An ordinary API key
+already authorizes installs of this Spark's own catalogue; delegation must
+not widen that into running a caller-chosen image with host networking, RDMA
+devices and the GPU. Delegated steps also execute against the local executor
+directly, never back through the fleet executor, which would forward them
+onward instead of putting a rank on this machine.
+
+One delegated job holds a worker at a time, via a coarse single-flight lease
+that expires (45 minutes) so a head that dies cannot wedge the Spark.
+
 ## Failure model
 
 Any step failing on either node tears both nodes down to stopped, then the
-job fails. Teardown issues `stop_container` on the worker and on the head,
+job fails. This includes failures that are not the model's fault: a state
+write that cannot be persisted goes down the same path, and the teardown
+issues both container stops even when its own receipts cannot be written. A
+database problem must never be the reason a rank keeps holding memory.
+
+Switching away from a model stops every rank THAT model runs on, read from
+its own topology rather than the incoming one, and a rollback brings every
+one of its ranks back (worker first, then head). Teardown issues `stop_container` on the worker and on the head,
 recorded as `teardown_stop_container` receipts naming each node, and is
 best-effort: a teardown failure is reported, never swallowed, but does not
 mask the original cause.
@@ -109,6 +136,15 @@ Worker arguments add the same distributed flags with `--node-rank 1` and
 
 - Pairing with short-lived local codes, persistent node identity, mutual TLS.
   This reuses the existing peer API key, which is what exists today.
+- Peer-scoped credentials. Any unrevoked API key can drive the node
+  endpoints; what bounds the damage is the catalogue match described above,
+  not the identity of the caller. A key dedicated to one paired peer, and a
+  way to tell one head from another, are still missing.
+- Real admission control on a worker. The single-flight lease is a coarse
+  stand-in: delegated steps run outside the worker's own engine, so they take
+  neither its runtime lock nor its disk reservation, and a local install
+  started on the worker itself can still race a delegated one. Routing
+  delegated work through the worker's engine is the actual fix.
 - Signed heartbeats, staleness exclusion, controller/agent split.
 - Leases. Two concurrent two-Spark jobs from two different heads against the
   same worker are not prevented.
@@ -136,3 +172,7 @@ plus `mp` backend behaves as the recipe reports, startup timing, and whether
 the worker container's exit is visible to the head's health wait. The tests
 in this change are deterministic fakes of orchestration order, receipts and
 rollback, not of vLLM.
+
+Also untested on hardware: whether the lease TTL is long enough for a real
+168 GB download on a slow link, and how a two-node timeline reads in the
+console.

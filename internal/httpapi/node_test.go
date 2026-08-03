@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/punkjazz-labs/runonspark-manager/internal/auth"
 	"github.com/punkjazz-labs/runonspark-manager/internal/engine"
+	"github.com/punkjazz-labs/runonspark-manager/internal/operations"
 	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
 	"github.com/punkjazz-labs/runonspark-manager/internal/store"
 )
@@ -43,31 +46,67 @@ func twoSparkRecipe(t *testing.T) recipe.Recipe {
 	return r
 }
 
-func TestWorkerNodeEndpointsAreKeyOnlyAndAllowlisted(t *testing.T) {
-	ctx := context.Background()
+// refusingPeer stands in for the other Spark. A worker must never call one:
+// if the node endpoints forwarded delegated work instead of running it, this
+// fails the test loudly rather than silently recursing.
+type refusingPeer struct{ t *testing.T }
+
+func (p refusingPeer) Target(context.Context) (operations.PeerTarget, error) {
+	p.t.Error("a delegated worker step was forwarded to another Spark instead of run locally")
+	return operations.PeerTarget{}, errors.New("no peer")
+}
+func (p refusingPeer) Preflight(context.Context, operations.PeerTarget, operations.Execution, recipe.Recipe) (map[string]any, error) {
+	p.t.Error("a delegated worker preflight was forwarded to another Spark")
+	return nil, errors.New("no peer")
+}
+func (p refusingPeer) Step(context.Context, operations.PeerTarget, operations.Execution, recipe.Operation, recipe.Recipe) (map[string]any, error) {
+	p.t.Error("a delegated worker step was forwarded to another Spark instead of run locally")
+	return nil, errors.New("no peer")
+}
+
+type nodeFixture struct {
+	key         string
+	distributed recipe.Recipe
+	single      recipe.Recipe
+	localExec   *apiExecutor
+	post        func(t *testing.T, path, key string, body any) (int, map[string]any)
+}
+
+// newNodeFixture wires the server exactly as production does: the executor
+// handed to httpapi.New is the FleetExecutor, the same object the engine
+// uses. That composition is the whole point of the local-execution test.
+func newNodeFixture(t *testing.T) nodeFixture {
+	t.Helper()
 	dataDir := t.TempDir()
 	database, err := store.Open(filepath.Join(dataDir, "manager.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
+	t.Cleanup(func() { database.Close() })
 	authManager, err := auth.Open(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recipes, err := recipe.Builtin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor := &apiExecutor{done: map[string]bool{}}
-	runner := engine.New(database, executor, recipes)
-	server := httptest.NewServer(New("test-version", dataDir, authManager, database, readyInventory{}, executor, runner, recipes).Handler())
-	defer server.Close()
-	_, secret, err := database.CreateAPIKey(ctx, "other-spark")
+	builtin, err := recipe.Builtin()
 	if err != nil {
 		t.Fatal(err)
 	}
 	distributed := twoSparkRecipe(t)
+	// A worker only runs what its own catalogue holds, so the two-Spark
+	// recipe has to be in it, under its own id.
+	distributed.ID = "qwen36-35b-a3b-nvfp4-2s"
+	single, _ := recipe.Find(builtin, "qwen36-35b-a3b-nvfp4-1s")
+	catalog := append(append([]recipe.Recipe{}, builtin...), distributed)
+
+	local := &apiExecutor{done: map[string]bool{}}
+	executor := operations.NewFleetExecutor(local, refusingPeer{t: t})
+	runner := engine.New(database, executor, catalog)
+	server := httptest.NewServer(New("test-version", dataDir, authManager, database, readyInventory{}, executor, runner, catalog).Handler())
+	t.Cleanup(server.Close)
+	_, secret, err := database.CreateAPIKey(context.Background(), "other-spark")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	post := func(t *testing.T, path, key string, body any) (int, map[string]any) {
 		t.Helper()
@@ -93,15 +132,91 @@ func TestWorkerNodeEndpointsAreKeyOnlyAndAllowlisted(t *testing.T) {
 		_ = json.Unmarshal(raw, &decoded)
 		return response.StatusCode, decoded
 	}
+	return nodeFixture{key: secret, distributed: distributed, single: single, localExec: local, post: post}
+}
 
-	if status, _ := post(t, "/api/v1/internal/node/step", "", map[string]any{}); status != http.StatusUnauthorized {
+// executed reports whether the local executor actually ran an operation.
+func (a *apiExecutor) executed(operation string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.done[operation]
+}
+
+func workerStep(operation, jobID string, r recipe.Recipe) map[string]any {
+	return map[string]any{
+		"operation": operation, "recipe": r, "job_id": jobID,
+		"placement": map[string]any{"role": "worker", "node": "spark-b", "node_count": 2},
+	}
+}
+
+func TestDelegatedWorkerStepsRunLocallyAndAreNotForwarded(t *testing.T) {
+	fixture := newNodeFixture(t)
+	status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("create_container", "job-1", fixture.distributed))
+	if status != http.StatusOK {
+		t.Fatalf("worker step status=%d body=%#v", status, body)
+	}
+	if body["error"] != nil {
+		t.Fatalf("worker step reported %v", body["error"])
+	}
+	receipt, ok := body["receipt"].(map[string]any)
+	if !ok || receipt["operation"] != "create_container" {
+		t.Fatalf("worker step receipt=%#v", body["receipt"])
+	}
+	// refusingPeer fails the test if anything was forwarded; this asserts the
+	// work actually landed on the local executor.
+	if !fixture.localExec.executed("create_container") {
+		t.Fatal("the worker container was never created on this node")
+	}
+
+	if status, _ := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-1"}); status != http.StatusOK {
+		t.Fatalf("worker preflight status=%d", status)
+	}
+}
+
+func TestWorkerOnlyRunsRecipesFromItsOwnCatalogue(t *testing.T) {
+	fixture := newNodeFixture(t)
+
+	tampered := fixture.distributed
+	tampered.Runtime.Image = "ghcr.io/attacker/anything"
+	status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("create_container", "job-evil", tampered))
+	if status != http.StatusBadRequest {
+		t.Fatalf("an attacker-chosen image was accepted, status=%d body=%#v", status, body)
+	}
+	if fixture.localExec.executed("create_container") {
+		t.Fatal("a container was created from a recipe this Spark does not hold")
+	}
+
+	// A schema-valid recipe this Spark simply does not have is refused too.
+	unknown := fixture.distributed
+	unknown.ID = "not-in-this-catalogue"
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("pull_image", "job-evil", unknown)); status != http.StatusBadRequest {
+		t.Fatalf("an unknown recipe was accepted, status=%d", status)
+	}
+
+	// So is a version this Spark has never verified.
+	future := fixture.distributed
+	future.Version = fixture.distributed.Version + 1
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("pull_image", "job-evil", future)); status != http.StatusBadRequest {
+		t.Fatalf("an unknown recipe version was accepted, status=%d", status)
+	}
+
+	// Single-Spark work is never delegated.
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("pull_image", "job-evil", fixture.single)); status != http.StatusBadRequest {
+		t.Fatalf("single-Spark delegation status=%d", status)
+	}
+}
+
+func TestWorkerNodeEndpointsAreKeyOnlyAndAllowlisted(t *testing.T) {
+	fixture := newNodeFixture(t)
+
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", "", map[string]any{}); status != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated worker step status=%d", status)
 	}
-	if status, _ := post(t, "/api/v1/internal/node/step", "not-a-key", map[string]any{}); status != http.StatusUnauthorized {
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", "not-a-key", map[string]any{}); status != http.StatusUnauthorized {
 		t.Fatalf("bad-key worker step status=%d", status)
 	}
 
-	status, body := post(t, "/api/v1/internal/node/preflight", secret, map[string]any{"recipe": distributed})
+	status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-1"})
 	if status != http.StatusOK || body["ready"] != true {
 		t.Fatalf("worker preflight status=%d body=%#v", status, body)
 	}
@@ -112,49 +227,51 @@ func TestWorkerNodeEndpointsAreKeyOnlyAndAllowlisted(t *testing.T) {
 		}
 	}
 
-	status, body = post(t, "/api/v1/internal/node/step", secret, map[string]any{
-		"operation": "pull_image", "recipe": distributed,
-		"placement": map[string]any{"role": "worker", "node": "spark-b", "node_count": 2},
-	})
-	if status != http.StatusOK {
-		t.Fatalf("worker step status=%d body=%#v", status, body)
-	}
-	if receipt, ok := body["receipt"].(map[string]any); !ok || receipt["operation"] != "pull_image" {
-		t.Fatalf("worker step receipt=%#v", body["receipt"])
-	}
-
 	// Policy steps stay local to each manager.
-	status, body = post(t, "/api/v1/internal/node/step", secret, map[string]any{
-		"operation": "verify_openai_inference", "recipe": distributed,
-		"placement": map[string]any{"role": "worker", "node": "spark-b", "node_count": 2},
-	})
-	if status != http.StatusBadRequest {
+	if status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("verify_openai_inference", "job-1", fixture.distributed)); status != http.StatusBadRequest {
 		t.Fatalf("off-allowlist worker step status=%d body=%#v", status, body)
 	}
 
 	// A head that forgets it is talking to a worker gets nothing.
-	status, _ = post(t, "/api/v1/internal/node/step", secret, map[string]any{
-		"operation": "pull_image", "recipe": distributed,
-		"placement": map[string]any{"role": "head", "node": "spark-a", "node_count": 2},
-	})
-	if status != http.StatusBadRequest {
+	headRole := workerStep("pull_image", "job-1", fixture.distributed)
+	headRole["placement"] = map[string]any{"role": "head", "node": "spark-a", "node_count": 2}
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, headRole); status != http.StatusBadRequest {
 		t.Fatalf("head-role worker step status=%d", status)
 	}
+}
 
-	// Single-Spark work is never delegated, and an invalid recipe is refused
-	// on this node's own rules rather than on the caller's word.
-	single, _ := recipe.Find(recipes, "qwen36-35b-a3b-nvfp4-1s")
-	status, _ = post(t, "/api/v1/internal/node/step", secret, map[string]any{
-		"operation": "pull_image", "recipe": single,
-		"placement": map[string]any{"role": "worker", "node": "spark-b", "node_count": 2},
-	})
-	if status != http.StatusBadRequest {
-		t.Fatalf("single-Spark delegation status=%d", status)
+func TestWorkerAdmitsOneDelegatedJobAtATime(t *testing.T) {
+	fixture := newNodeFixture(t)
+	if status, _ := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-a"}); status != http.StatusOK {
+		t.Fatalf("first head was refused, status=%d", status)
 	}
-	tampered := distributed
-	tampered.Runtime.Digest = "sha256:nope"
-	status, _ = post(t, "/api/v1/internal/node/preflight", secret, map[string]any{"recipe": tampered})
-	if status != http.StatusBadRequest {
-		t.Fatalf("unpinned recipe accepted from a peer, status=%d", status)
+	status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("pull_image", "job-b", fixture.distributed))
+	if status != http.StatusConflict {
+		t.Fatalf("a second head was admitted while another job holds this Spark, status=%d body=%#v", status, body)
+	}
+	// The holder keeps working.
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("pull_image", "job-a", fixture.distributed)); status != http.StatusOK {
+		t.Fatalf("the lease holder was blocked by its own lease, status=%d", status)
+	}
+	// Teardown hands this Spark back.
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("stop_container", "job-a", fixture.distributed)); status != http.StatusOK {
+		t.Fatalf("teardown status=%d", status)
+	}
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("pull_image", "job-b", fixture.distributed)); status != http.StatusOK {
+		t.Fatalf("the next head was not admitted after teardown, status=%d", status)
+	}
+}
+
+func TestWorkerLeaseExpiresSoADeadHeadCannotWedgeThisSpark(t *testing.T) {
+	var lease workerLease
+	start := time.Now()
+	if err := lease.acquire("job-a", "some-recipe", start); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.acquire("job-b", "some-recipe", start); err == nil {
+		t.Fatal("a second job took a live lease")
+	}
+	if err := lease.acquire("job-b", "some-recipe", start.Add(workerLeaseTTL+time.Second)); err != nil {
+		t.Fatalf("an expired lease still blocked another job: %v", err)
 	}
 }

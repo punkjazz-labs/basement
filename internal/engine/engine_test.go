@@ -219,10 +219,11 @@ func TestPlanForDownloadOnlyInstallExcludesContainerAndSwitchOperations(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, _, err := runner.plan(ctx, job, recipes[0], operations.Placement{}, operations.Placement{})
+	planned, err := runner.plan(ctx, job, recipes[0], operations.Deployment{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans := planned.plans
 	forbidden := map[string]bool{
 		"write_generated_config": true, "create_container": true, "verify_memory": true,
 		"start_container": true, "wait_http": true, "verify_openai_inference": true,
@@ -359,10 +360,11 @@ func TestPlanForStartingADownloadOnlyModelWhileAnotherServesComposesWithSwitch(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, previous, err := runner.plan(ctx, job, target, operations.Placement{}, operations.Placement{})
+	planned, err := runner.plan(ctx, job, target, operations.Deployment{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans, previous := planned.plans, planned.previous
 	if previous == nil || previous.ID != serving.ID {
 		t.Fatalf("expected %s to be reported as the previously active model, got %+v", serving.ID, previous)
 	}

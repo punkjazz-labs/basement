@@ -2,9 +2,16 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/punkjazz-labs/runonspark-manager/internal/operations"
 	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
@@ -19,6 +26,45 @@ var workerOperations = map[string]bool{
 	"verify_memory": true, "pull_image": true, "download_artifact": true,
 	"write_generated_config": true, "create_container": true, "start_container": true,
 	"stop_container": true, "remove_container": true, "remove_artifact_if_unshared": true,
+}
+
+// releasingOperations end this node's part in a delegated deployment, so the
+// single-flight lease is handed back once one of them runs.
+var releasingOperations = map[string]bool{"stop_container": true, "remove_container": true, "remove_artifact_if_unshared": true}
+
+// workerLeaseTTL bounds how long a head Spark may hold this node without
+// saying anything. A head that dies mid-job must not wedge this Spark
+// forever, and a real two-node step (a weight download) can be long.
+const workerLeaseTTL = 45 * time.Minute
+
+// workerLease is a coarse single-flight guard: one head Spark drives this
+// node at a time. Delegated steps run outside this manager's own engine, so
+// they take neither its runtime lock nor its disk reservation; without this,
+// two heads (or a head and a local install) could both pass preflight and
+// then fight over the same GPU. Proper engine integration is deferred.
+type workerLease struct {
+	mu       sync.Mutex
+	jobID    string
+	recipeID string
+	expires  time.Time
+}
+
+func (l *workerLease) acquire(jobID, recipeID string, now time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.jobID != "" && l.jobID != jobID && now.Before(l.expires) {
+		return fmt.Errorf("this Spark is already working as the second node for %s, so wait for that to finish", l.recipeID)
+	}
+	l.jobID, l.recipeID, l.expires = jobID, recipeID, now.Add(workerLeaseTTL)
+	return nil
+}
+
+func (l *workerLease) release(jobID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.jobID == jobID {
+		l.jobID, l.recipeID, l.expires = "", "", time.Time{}
+	}
 }
 
 // withNodeAuth accepts an API-key bearer token and nothing else. A console
@@ -40,23 +86,42 @@ func (s *Server) withNodeAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// localExecutor is what a delegated step must run through. This server is
+// wired with the fleet executor, which forwards a worker-placed step to a
+// peer; running a delegated step through it would send the work straight
+// back out instead of putting a rank on this machine.
+func (s *Server) localExecutor() operations.Executor {
+	if fleet, ok := s.executor.(interface {
+		Local() operations.Executor
+	}); ok {
+		return fleet.Local()
+	}
+	return s.executor
+}
+
 // nodePreflight runs this node's own guardrails for a recipe another Spark
 // proposes to run here. Each node evaluates itself (ADR 0004); this never
 // aggregates capacity with the caller's.
 func (s *Server) nodePreflight(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Recipe recipe.Recipe `json:"recipe"`
+		JobID  string        `json:"job_id"`
 	}
 	if err := decodeBody(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := acceptedWorkerRecipe(request.Recipe); err != nil {
+	trusted, err := s.trustedWorkerRecipe(request.Recipe)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := s.nodeLease.acquire(request.JobID, trusted.ID, time.Now()); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
 	// A worker rank serves no HTTP, so the head's host port is not its concern.
-	writeJSON(w, http.StatusOK, s.runPreflightSkipping(r.Context(), request.Recipe, map[string]bool{"verify_port": true}))
+	writeJSON(w, http.StatusOK, s.runPreflightSkipping(r.Context(), trusted, map[string]bool{"verify_port": true}))
 }
 
 // nodeStep runs exactly one typed operation on this node on behalf of the
@@ -69,12 +134,14 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		Recipe          recipe.Recipe        `json:"recipe"`
 		Placement       operations.Placement `json:"placement"`
 		RemoveArtifacts bool                 `json:"remove_artifacts"`
+		JobID           string               `json:"job_id"`
 	}
 	if err := decodeBody(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := acceptedWorkerRecipe(request.Recipe); err != nil {
+	trusted, err := s.trustedWorkerRecipe(request.Recipe)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -86,16 +153,25 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("this Spark can only be driven as a worker node"))
 		return
 	}
+	if err := s.nodeLease.acquire(request.JobID, trusted.ID, time.Now()); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if releasingOperations[request.Operation] {
+		defer s.nodeLease.release(request.JobID)
+	}
 	execution := operations.Execution{Kind: "worker", RemoveArtifacts: request.RemoveArtifacts, Placement: request.Placement}
 	if request.RemoveArtifacts {
-		shared, err := s.sharedArtifacts(r.Context(), request.Recipe.ID)
+		shared, err := s.sharedArtifacts(r.Context(), trusted.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 		execution.SharedArtifacts = shared
 	}
-	receipt, err := s.executor.Execute(r.Context(), execution, recipe.Operation{Type: request.Operation}, request.Recipe, nil)
+	// The recipe executed is this Spark's own copy, never the bytes the
+	// caller sent, and it runs locally rather than being forwarded onward.
+	receipt, err := s.localExecutor().Execute(r.Context(), execution, recipe.Operation{Type: request.Operation}, trusted, nil)
 	response := map[string]any{"receipt": receipt}
 	if err != nil {
 		response["error"] = redact.String(err.Error())
@@ -103,17 +179,42 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-// acceptedWorkerRecipe re-validates the recipe the head sent. The head is
-// authenticated, not trusted to have validated anything: this node executes
-// against its own schema rules or not at all.
-func acceptedWorkerRecipe(r recipe.Recipe) error {
-	if err := recipe.Validate(r); err != nil {
-		return errors.New("the proposed recipe is not valid on this Spark: " + err.Error())
+// trustedWorkerRecipe resolves what this node will actually run. The caller
+// holds an ordinary API key, which already grants it installs of THIS
+// Spark's own catalogue and nothing more; a delegated step must not widen
+// that into running an attacker-chosen image with host networking, RDMA
+// devices and the GPU. So a proposal is accepted only when this Spark
+// already holds that exact recipe id and version, byte for byte, and the
+// local copy is what executes.
+func (s *Server) trustedWorkerRecipe(proposed recipe.Recipe) (recipe.Recipe, error) {
+	local, ok := recipe.FindVersion(s.allRecipes(), proposed.ID, proposed.Version)
+	if !ok {
+		return recipe.Recipe{}, fmt.Errorf("this Spark does not have recipe %s version %d in its own catalogue", proposed.ID, proposed.Version)
 	}
-	if !r.Distributed() {
-		return errors.New("a single-Spark recipe is never run on behalf of another Spark")
+	localSum, err := recipeFingerprint(local)
+	if err != nil {
+		return recipe.Recipe{}, err
 	}
-	return nil
+	proposedSum, err := recipeFingerprint(proposed)
+	if err != nil {
+		return recipe.Recipe{}, err
+	}
+	if subtle.ConstantTimeCompare([]byte(localSum), []byte(proposedSum)) != 1 {
+		return recipe.Recipe{}, fmt.Errorf("the proposed recipe %s does not match this Spark's own copy", proposed.ID)
+	}
+	if !local.Distributed() {
+		return recipe.Recipe{}, errors.New("a single-Spark recipe is never run on behalf of another Spark")
+	}
+	return local, nil
+}
+
+func recipeFingerprint(r recipe.Recipe) (string, error) {
+	encoded, err := json.Marshal(r)
+	if err != nil {
+		return "", errors.New("a recipe could not be canonicalized for comparison")
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // sharedArtifacts reports artifact keys and paths this node's OTHER

@@ -48,10 +48,14 @@ func twoSparkRecipe(t *testing.T) recipe.Recipe {
 // step as "operation@node" so orchestration order is asserted directly, and
 // it can be told which node fails which step.
 type fleetExecutor struct {
-	mu           sync.Mutex
-	events       []string
+	mu     sync.Mutex
+	events []string
+	// detail additionally records which recipe each step was for, needed
+	// once more than one model is involved in a job.
+	detail       []string
 	running      map[string]bool
 	failStepNode string // "operation@role"
+	failRecipeOp string // "operation/recipe-id"
 	peerReady    bool
 	peerAsked    int
 }
@@ -60,13 +64,15 @@ func newFleetExecutor() *fleetExecutor {
 	return &fleetExecutor{running: map[string]bool{}, peerReady: true}
 }
 
-func (f *fleetExecutor) Placements(_ context.Context, r recipe.Recipe) (operations.Placement, operations.Placement, error) {
+func (f *fleetExecutor) Plan(_ context.Context, r recipe.Recipe) (operations.Deployment, error) {
 	if !r.Distributed() {
-		return operations.Placement{}, operations.Placement{}, nil
+		return operations.Deployment{}, nil
 	}
-	head := operations.Placement{Role: operations.RoleHead, NodeName: "spark-a", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501}
-	worker := operations.Placement{Role: operations.RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501}
-	return head, worker, nil
+	return operations.Deployment{
+		Head:   operations.Placement{Role: operations.RoleHead, NodeName: "spark-a", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501},
+		Worker: operations.Placement{Role: operations.RoleWorker, NodeName: "spark-b", PeerID: "peer_1", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501},
+		Peer:   operations.PeerTarget{ID: "peer_1", Name: "spark-b", BaseURL: "http://spark-b:8181", APIKey: "worker-key"},
+	}, nil
 }
 
 func (f *fleetExecutor) ArtifactPath(r recipe.Recipe) string { return "/managed/" + r.ID }
@@ -87,6 +93,7 @@ func (f *fleetExecutor) Execute(_ context.Context, execution operations.Executio
 	node := f.node(execution.Placement)
 	key := op.Type + "@" + node
 	f.events = append(f.events, key)
+	f.detail = append(f.detail, op.Type+"/"+r.ID+"@"+node)
 	receipt := map[string]any{"operation": op.Type, "node": execution.Placement.NodeName, "node_role": execution.Placement.Role}
 	if op.Type == operations.VerifyPeerNode {
 		f.peerAsked++
@@ -95,7 +102,7 @@ func (f *fleetExecutor) Execute(_ context.Context, execution operations.Executio
 		}
 		return receipt, nil
 	}
-	if key == f.failStepNode {
+	if key == f.failStepNode || op.Type+"/"+r.ID == f.failRecipeOp {
 		return receipt, fmt.Errorf("%s failed on %s", op.Type, node)
 	}
 	switch op.Type {
@@ -119,6 +126,12 @@ func (f *fleetExecutor) recorded() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string{}, f.events...)
+}
+
+func (f *fleetExecutor) recordedDetail() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.detail...)
 }
 
 func indexOf(events []string, want string) int {
@@ -358,6 +371,143 @@ func assertBothNodesTornDown(t *testing.T, s *store.Store, jobID string, events 
 	for _, role := range []string{operations.RoleHead, operations.RoleWorker} {
 		if !teardowns["teardown_stop_container:"+role] {
 			t.Fatalf("no teardown receipt for the %s node: %v", role, teardowns)
+		}
+	}
+}
+
+// mixedFleet installs a distributed model, then activates a single-node one,
+// which is the case where reading the TARGET's topology would leave the
+// predecessor's worker rank running.
+func mixedFleet(t *testing.T, fake *fleetExecutor) (*Engine, *store.Store, recipe.Recipe, recipe.Recipe) {
+	t.Helper()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	distributed := twoSparkRecipe(t)
+	distributed.ID = "two-spark-model"
+	builtin, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	single, _ := recipe.Find(builtin, "qwen36-35b-a3b-nvfp4-1s")
+	return New(s, fake, []recipe.Recipe{distributed, single}), s, distributed, single
+}
+
+func TestSwitchingAwayFromADistributedModelStopsBothOfItsRanks(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, distributed, single := mixedFleet(t, fake)
+
+	first, _, err := s.CreateJob(ctx, "install", distributed.ID, "install-distributed", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	waitJob(t, s, first.ID, "ready")
+
+	fake.mu.Lock()
+	fake.events, fake.detail = nil, nil
+	fake.mu.Unlock()
+
+	second, _, err := s.CreateJob(ctx, "install", single.ID, "install-single", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	waitJob(t, s, second.ID, "ready")
+
+	detail := fake.recordedDetail()
+	for _, want := range []string{"stop_container/two-spark-model@head", "stop_container/two-spark-model@worker"} {
+		if indexOf(detail, want) < 0 {
+			t.Fatalf("%s was not stopped when a single-node model took over: %v", want, detail)
+		}
+	}
+	if indexOf(detail, "stop_container/two-spark-model@head") > indexOf(detail, "stop_container/two-spark-model@worker") {
+		t.Fatalf("the outgoing head must stop serving before its worker rank: %v", detail)
+	}
+	// The incoming single-node model never touches a second Spark.
+	for _, event := range detail {
+		if strings.HasSuffix(event, "@worker") && !strings.Contains(event, distributed.ID) {
+			t.Fatalf("a single-node install reached the other Spark: %s", event)
+		}
+	}
+}
+
+func TestRollbackRestoresADistributedPredecessorOnBothItsNodes(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, distributed, single := mixedFleet(t, fake)
+
+	first, _, err := s.CreateJob(ctx, "install", distributed.ID, "install-distributed", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	waitJob(t, s, first.ID, "ready")
+
+	// The single-node model comes up and fails its health check, so the
+	// distributed model it displaced has to come back on both of its nodes.
+	fake.failRecipeOp = "wait_http/" + single.ID
+	second, _, err := s.CreateJob(ctx, "install", single.ID, "install-single", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	failed := waitJob(t, s, second.ID, "failed")
+	if !strings.Contains(failed.Error, "restored and verified") {
+		t.Fatalf("the previous model was not restored: %s", failed.Error)
+	}
+
+	job, err := s.GetJob(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	for _, step := range job.Steps {
+		names = append(names, step.Operation)
+	}
+	for _, want := range []string{"rollback_verify_memory:worker", "rollback_start_container:worker", "rollback_start_container:head", "rollback_verify_openai_inference:head"} {
+		if indexOf(names, want) < 0 {
+			t.Fatalf("rollback did not follow the previous model's topology: %v", names)
+		}
+	}
+	if indexOf(names, "rollback_start_container:worker") > indexOf(names, "rollback_start_container:head") {
+		t.Fatalf("the restored worker rank must come up before its head: %v", names)
+	}
+	models, err := s.Models(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range models {
+		if model.RecipeID == distributed.ID && !model.Active {
+			t.Fatalf("the distributed model was not made active again: %#v", model)
+		}
+	}
+}
+
+func TestTeardownStopsBothRanksEvenWhenReceiptsCannotBePersisted(t *testing.T) {
+	fake := newFleetExecutor()
+	runner, s, r := newTwoSparkEngine(t, fake)
+	job, _, err := s.CreateJob(context.Background(), "install", r.ID, "teardown-without-storage", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := fake.Plan(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Losing the state database must not become a reason to leave ranks
+	// running on either Spark.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runner.teardownDistributed(job, r, 0, deployment)
+	events := fake.recorded()
+	for _, want := range []string{"stop_container@head", "stop_container@worker"} {
+		if indexOf(events, want) < 0 {
+			t.Fatalf("%s did not run once receipts could not be written: %v", want, events)
 		}
 	}
 }
