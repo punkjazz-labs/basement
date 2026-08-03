@@ -322,13 +322,41 @@ export class ApiError extends Error {
   }
 }
 
+// Thrown when fetch itself rejects rather than answering with a status: the
+// browser never got a response, so the manager either never saw this request
+// or never got the chance to answer it. Every cause the browser can hit here
+// (the machine off, Wi-Fi dropped, the manager mid-restart, this tab offline)
+// collapses into the same opaque rejection, so the message does not guess
+// which one it was. It also does not promise the request went unhandled: a
+// manager can act on a request and lose the connection before answering, and
+// from here those two look identical.
+export class OfflineError extends Error {
+  constructor() {
+    super('Cannot reach this Spark. It may be offline, or its manager may be restarting. Try again once it answers.')
+    this.name = 'OfflineError'
+  }
+}
+
+// A caller passing its own AbortSignal wants a cancelled request reported as
+// exactly that, not folded into "the machine is unreachable" — the two have
+// nothing to do with each other and calling code may want to ignore an abort
+// entirely.
+const isAbort = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError'
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (options.method && options.method !== 'GET') {
     headers.set('X-CSRF-Token', csrf)
     headers.set('Content-Type', 'application/json')
   }
-  const response = await fetch(path, { ...options, headers })
+  let response: Response
+  try {
+    response = await fetch(path, { ...options, headers })
+  } catch (cause) {
+    if (isAbort(cause)) throw cause
+    throw new OfflineError()
+  }
   const body = await response.json().catch(() => ({ error: response.statusText }))
   if (!response.ok) throw new ApiError(response.status, (body as { error?: string }).error ?? response.statusText)
   return body as T

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  api, setCSRF, terminal, formatBytes,
+  api, setCSRF, terminal, formatBytes, OfflineError,
   type SystemInfo, type Recipe, type InstalledModel, type Job, type Peer, type Telemetry, type UpdateInfo,
 } from './api'
 import Pairing from './views/Pairing'
@@ -93,8 +93,10 @@ export default function App() {
       setJobs(nextJobs)
       setPeers(nextPeers)
       setConnected(true)
-    } catch {
-      setConnected(false)
+    } catch (problem) {
+      // A real HTTP error still means this Spark answered; only a fetch
+      // that never got a response means the rail should read Disconnected.
+      if (problem instanceof OfflineError) setConnected(false)
     }
   }, [])
 
