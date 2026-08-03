@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1266,6 +1267,125 @@ func TestTokenUsageAccumulatesAcrossARuntimeRestart(t *testing.T) {
 	}
 	if len(usage) != 1 {
 		t.Fatalf("an unmapped runtime was counted: %+v", usage)
+	}
+}
+
+// The 45s ticker and the engine's pre-stop sample can both call
+// CaptureTokenUsage for the same model at once. Before tokenMu, a slower
+// scrape's response could be stored after a faster, later scrape's,
+// which tokenDelta then reads as the runtime having restarted and
+// re-adds in full. This proves the two are now serialized: the second
+// scrape cannot even reach the runtime until the first's whole
+// read-then-record has finished, so accumulation stays ordered and
+// deterministic.
+func TestCaptureTokenUsageSerializesConcurrentScrapes(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	firstArrived := make(chan struct{})
+	release := make(chan struct{})
+	var served int32
+	var secondArrivedEarly bool
+
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&served, 1) == 1 {
+			close(firstArrived)
+			<-release
+			_, _ = io.WriteString(w, "vllm:prompt_tokens_total{model_name=\"m\"} 110\nvllm:generation_tokens_total{model_name=\"m\"} 40\n")
+			return
+		}
+		select {
+		case <-release:
+		default:
+			secondArrivedEarly = true
+		}
+		_, _ = io.WriteString(w, "vllm:prompt_tokens_total{model_name=\"m\"} 120\nvllm:generation_tokens_total{model_name=\"m\"} 45\n")
+	}))
+	defer metrics.Close()
+	port, err := strconv.Atoi(metrics.URL[strings.LastIndex(metrics.URL, ":")+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{metrics: metrics.Client(), store: database}
+	r := recipe.Recipe{ID: "qwen", Runtime: recipe.Runtime{Kind: "vllm"}, Service: recipe.Service{DefaultHostPort: port}}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); server.CaptureTokenUsage(ctx, r) }() // the slow, "older" scrape
+	<-firstArrived
+	go func() { defer wg.Done(); server.CaptureTokenUsage(ctx, r) }() // the fast, "newer" scrape
+	// Give the second call every chance to reach the runtime before the
+	// first is released; under the fix it cannot, because CaptureTokenUsage
+	// holds tokenMu across the whole read-then-record, including the HTTP
+	// round trip.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if secondArrivedEarly {
+		t.Fatal("the second scrape reached the runtime before the first scrape's read-then-record finished; they are not serialized")
+	}
+	usage, err := database.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both readings are stored in the order they were taken (110 then 120),
+	// so the total is the higher, later reading rather than 110 (a stale
+	// write clobbering a newer one) or 230 (a spurious restart double-count).
+	if len(usage) != 1 || usage[0].PromptTokens != 120 || usage[0].GenerationTokens != 45 {
+		t.Fatalf("usage=%+v", usage)
+	}
+}
+
+// CaptureFinalTokenUsage is what the engine's pre-stop hook is bound to: it
+// samples exactly like CaptureTokenUsage and then, in the same locked call,
+// resets the stored last-seen counters so the next container's first
+// reading counts in full instead of comparing against a container that can
+// never publish again.
+func TestCaptureFinalTokenUsageSamplesThenResetsCounters(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	counters := "vllm:prompt_tokens_total{model_name=\"m\"} 500\nvllm:generation_tokens_total{model_name=\"m\"} 200\n"
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, counters)
+	}))
+	defer metrics.Close()
+	port, err := strconv.Atoi(metrics.URL[strings.LastIndex(metrics.URL, ":")+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{metrics: metrics.Client(), store: database}
+	r := recipe.Recipe{ID: "qwen", Runtime: recipe.Runtime{Kind: "vllm"}, Service: recipe.Service{DefaultHostPort: port}}
+	server.CaptureFinalTokenUsage(ctx, r)
+
+	usage, err := database.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].PromptTokens != 500 || usage[0].GenerationTokens != 200 {
+		t.Fatalf("the final sample was not recorded: %+v", usage)
+	}
+
+	// A fresh container for the same model starts publishing above zero
+	// immediately. If the reset above had not run, this would be read as
+	// only the rise past the dead container's counters (a large amount would
+	// be lost); with the reset, the whole reading counts.
+	counters = "vllm:prompt_tokens_total{model_name=\"m\"} 12\nvllm:generation_tokens_total{model_name=\"m\"} 5\n"
+	server.CaptureTokenUsage(ctx, r)
+	usage, err = database.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].PromptTokens != 512 || usage[0].GenerationTokens != 205 {
+		t.Fatalf("counters were not reset before the next container's reading: %+v", usage)
 	}
 }
 

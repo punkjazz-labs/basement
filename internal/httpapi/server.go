@@ -87,6 +87,16 @@ type Server struct {
 	updateMu      sync.Mutex
 	updateResult  map[string]any
 	updateFetched time.Time
+
+	// tokenMu serializes every read-then-record of a model's runtime token
+	// counters (CaptureTokenUsage and CaptureFinalTokenUsage both take it for
+	// their whole call). Reading the counters is a network round trip, so two
+	// scrapes — the 45s ticker and the engine's pre-stop sample — can finish
+	// out of the order they started in; without one lock around the read and
+	// the store write together, an older, slower reading could land in the
+	// store after a newer one already did, and tokenDelta would read the drop
+	// as the runtime having restarted and re-add it.
+	tokenMu sync.Mutex
 }
 
 // peerDelegationTimeout bounds a delegated placement call. The peer answers
@@ -1404,14 +1414,18 @@ func (s *Server) captureActiveTokenUsage(ctx context.Context) {
 }
 
 // CaptureTokenUsage records one reading of a model's runtime token counters.
-// It is exported because the engine calls it immediately before it stops a
-// container: the counters live inside that container, so afterwards there is
-// nothing left to read.
+// See tokenMu for why the read and the store write happen under one lock.
 //
 // A reading is the pair or nothing: both supported runtimes publish the two
 // series together, and reading an absent one as zero would look like a
 // restarted counter and add its next value a second time.
 func (s *Server) CaptureTokenUsage(ctx context.Context, r recipe.Recipe) {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	s.captureTokenUsageLocked(ctx, r)
+}
+
+func (s *Server) captureTokenUsageLocked(ctx context.Context, r recipe.Recipe) {
 	metrics := s.runtimeMetrics(ctx, r)
 	prompt, hasPrompt := metrics["prompt_tokens_total"]
 	generation, hasGeneration := metrics["generation_tokens_total"]
@@ -1421,6 +1435,24 @@ func (s *Server) CaptureTokenUsage(ctx context.Context, r recipe.Recipe) {
 	// Best effort by design: a reading that cannot be stored is dropped, and
 	// the next one still carries the usage forward from the last one stored.
 	_ = s.store.RecordTokenSample(ctx, r.ID, prompt, generation)
+}
+
+// CaptureFinalTokenUsage is what the engine's TokenSampler hook is bound to:
+// it is called immediately before the engine stops a container on this
+// machine, the last moment the counters inside it can be read. It samples
+// exactly like CaptureTokenUsage and then, still under the same lock, resets
+// the stored last-seen counters to zero — the container about to die can
+// never publish another reading for those counters to be compared against,
+// so leaving them in place would make the next container's first reading
+// look like a continuation of this one and undercount it. Only the last-seen
+// counters are reset; accumulated totals are untouched. Taking the lock
+// across both steps keeps the ticker in CountTokens from storing a reading
+// of the dying container between this sample and the reset.
+func (s *Server) CaptureFinalTokenUsage(ctx context.Context, r recipe.Recipe) {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	s.captureTokenUsageLocked(ctx, r)
+	_ = s.store.ResetTokenCounters(ctx, r.ID)
 }
 
 // tokenUsage reports what each model has served on this Spark since basement

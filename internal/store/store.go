@@ -593,6 +593,19 @@ func tokenDelta(current, last float64) int64 {
 	return int64(current - last)
 }
 
+// ResetTokenCounters zeroes a model's stored last-seen runtime counters
+// without touching its accumulated totals. Call this once basement itself
+// has taken the final reading from a container it is about to stop: those
+// counters can never rise again, so leaving them in place would make the
+// next container's first reading compare against a dead series and read as
+// only a partial rise (or a "restart" it already correctly is, but at the
+// wrong, undercounted split). A model with no usage row yet has nothing to
+// reset, so this is a no-op rather than an error.
+func (s *Store) ResetTokenCounters(ctx context.Context, recipeID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE model_token_usage SET last_prompt_counter=0, last_generation_counter=0 WHERE recipe_id=?`, recipeID)
+	return err
+}
+
 func (s *Store) TokenUsage(ctx context.Context) ([]ModelTokenUsage, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT recipe_id,prompt_tokens,generation_tokens,first_counted_at,updated_at FROM model_token_usage ORDER BY prompt_tokens+generation_tokens DESC`)
 	if err != nil {

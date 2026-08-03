@@ -420,3 +420,68 @@ func TestTokenUsageIsEmptyBeforeAnythingIsCounted(t *testing.T) {
 		t.Fatalf("an installed model with no readings reported usage: %+v", usage)
 	}
 }
+
+// basement resets a model's last-seen counters right after it takes the
+// final reading from a container it is about to stop itself, because that
+// container can never publish another value for tokenDelta to compare
+// against. The reset must leave totals exactly as they were, and the next
+// container's first reading (which, being a fresh container, can legitimately
+// start above the old counters) must count in full rather than only the
+// portion above them.
+func TestResetTokenCountersLeavesTotalsAndCountsNextReadingInFull(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.RecordTokenSample(ctx, "qwen", 100, 40); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResetTokenCounters(ctx, "qwen"); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := s.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].PromptTokens != 100 || usage[0].GenerationTokens != 40 {
+		t.Fatalf("reset changed totals: %+v", usage)
+	}
+	// A new container starts publishing above zero immediately. Without the
+	// reset, tokenDelta would compare this against the dead container's last
+	// counter (100/40) and only count the rise past it; with the counters
+	// zeroed, the whole of this first reading is new usage.
+	if err := s.RecordTokenSample(ctx, "qwen", 90, 30); err != nil {
+		t.Fatal(err)
+	}
+	usage, err = s.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].PromptTokens != 190 || usage[0].GenerationTokens != 70 {
+		t.Fatalf("next reading after reset was not counted in full: %+v", usage)
+	}
+}
+
+// A model with no usage row yet has no counters to reset, and that must not
+// be an error: basement's pre-stop path calls this even for a model that was
+// never successfully sampled.
+func TestResetTokenCountersIsNoOpWithoutARow(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.ResetTokenCounters(ctx, "qwen"); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := s.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 0 {
+		t.Fatalf("reset without a row created one: %+v", usage)
+	}
+}

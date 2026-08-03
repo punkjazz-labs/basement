@@ -102,6 +102,18 @@ func main() {
 	cachedAll, cachedEffective := feed.Snapshot()
 	jobEngine.SetRecipes(cachedAll, cachedEffective)
 
+	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, cachedEffective)
+	api.SetRecipes(cachedAll, cachedEffective)
+	// A Spark adopted from this console is installed to listen the same way
+	// this one does (ADR 0014), so the API needs to know how that is.
+	api.SetListenAddress(cfg.Listen)
+	// Token counters die with the container that publishes them, so the
+	// engine reads them one last time before it stops one. Installed before
+	// ResumeInterrupted below runs a single step: a resumed stop job can
+	// reach stop_container as soon as it starts, and this must never be nil
+	// when that happens.
+	jobEngine.SetTokenSampler(api.CaptureFinalTokenUsage)
+
 	if err := jobEngine.ResumeInterrupted(context.Background()); err != nil {
 		logger.Error("resume interrupted jobs", "error", err)
 		exit(1)
@@ -110,14 +122,6 @@ func main() {
 		logger.Error("reconcile active model", "error", err)
 		exit(1)
 	}
-	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, cachedEffective)
-	api.SetRecipes(cachedAll, cachedEffective)
-	// A Spark adopted from this console is installed to listen the same way
-	// this one does (ADR 0014), so the API needs to know how that is.
-	api.SetListenAddress(cfg.Listen)
-	// Token counters die with the container that publishes them, so the
-	// engine reads them one last time before it stops one.
-	jobEngine.SetTokenSampler(api.CaptureTokenUsage)
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
 	// Progress streams stay open indefinitely by design; without this hook a
 	// restart waits out the whole drain timeout whenever a console is open.
@@ -149,16 +153,18 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	stopFeed()
-	// Waited on, not just cancelled: the accounting loop takes one final
-	// token reading on its way out, and the database it writes to is closed
-	// by this function's defers.
-	stopCounting()
-	<-counting
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
+	// Waited on, not just cancelled, and only after the drain above: the
+	// accounting loop takes one final token reading on its way out, and
+	// taking it before the drain finished would miss whatever tokens
+	// in-flight requests generated while the server was still handling them.
+	// The database it writes to is closed by this function's defers.
+	stopCounting()
+	<-counting
 	// Not exit(0): the deferred db.Close() above must run on this path (the
 	// systemctl stop / SIGTERM path on every GB10 machine), so pause first,
 	// then let main return and its defers fire normally.
