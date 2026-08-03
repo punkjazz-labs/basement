@@ -112,6 +112,9 @@ func main() {
 	}
 	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, cachedEffective)
 	api.SetRecipes(cachedAll, cachedEffective)
+	// A Spark adopted from this console is installed to listen the same way
+	// this one does (ADR 0014), so the API needs to know how that is.
+	api.SetListenAddress(cfg.Listen)
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
 	// Progress streams stay open indefinitely by design; without this hook a
 	// restart waits out the whole drain timeout whenever a console is open.

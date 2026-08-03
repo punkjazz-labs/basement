@@ -1,0 +1,191 @@
+# ADR 0014: Adopting a second Spark from the console
+
+Date: 2026-08-03. Status: accepted. Backend implemented 2026-08-03.
+
+## Context
+
+People do not buy two GB10 machines at once. They buy one, live with it,
+and add the second later, when a model they want needs two Sparks or when
+the first one is always busy. By then the installer is a thing that
+happened months ago on a laptop that may not exist any more.
+
+Everything needed to set the second machine up already exists in the
+manager binary that is running on the first one. `internal/discovery`
+sweeps the local network for SSH-reachable machines and ranks GB10-class
+hostnames. `internal/setup` connects over SSH, confirms the GB10 superchip
+with `nvidia-smi` rather than trusting a hostname, stages a binary, writes
+the systemd unit, starts the service and waits for the pairing token the
+new manager mints. Until now all of that was reachable only from
+`basement setup`, a terminal command run from a third machine.
+
+So the owner who wants a second Spark is told to find a laptop, find the
+installer, and run a wizard, in order to make two machines they own talk
+to each other. Then they are told to open the new console, create an API
+key, copy it, open the old console, and paste it into a form. That is a
+terminal-shaped answer to a console-shaped need. The console is already
+open, the owner is already authenticated on it, and the machine that
+would do the work is the one they are looking at.
+
+There is also an accident worth removing. The two machines have to run
+the same version of basement, and the installer's release download does
+not know what version the first machine is on.
+
+## Decision
+
+The head bootstraps its sibling. Two endpoints, both console-session
+authenticated with CSRF, exactly like every other console mutation.
+
+`POST /api/v1/fleet/discover` runs one time-bounded sweep and returns
+what it found:
+
+```json
+{"candidates": [
+  {"name": "spark-worker", "address": "192.168.99.137", "gb10_hint": true,
+   "basement": null},
+  {"name": "gx10-office", "address": "192.168.99.140", "gb10_hint": true,
+   "basement": {"base_url": "http://192.168.99.140:7070"}}
+]}
+```
+
+`gb10_hint` is the hostname ranking discovery already does, and it is a
+hint in the same sense it has always been: OEM machines ship the same
+superchip under vendor default names, and the only proof is the SSH
+identity probe that runs later. `basement` is null unless something on
+that machine's console port answered `GET /api/v1/system` with a 401 in
+this manager's own error shape. That endpoint answers nothing else
+without credentials, and none are offered, so the fingerprint needs no
+authority on a machine that is not ours yet. A machine that already runs
+basement does not need adopting, it needs pairing, and the console can
+say so.
+
+The sweep excludes this machine's own addresses and names. It changes
+nothing and can be run as often as the console likes. It is a POST rather
+than a GET because it makes this machine talk to every address on its
+network, which is not something a link, a prefetch or a page load should
+be able to trigger.
+
+`POST /api/v1/fleet/adopt` takes `{address, username, password}` and runs
+the whole flow. The SSH credentials the owner types are the proof of
+ownership: being able to log in to a machine as an administrator is what
+owning it means on a home network, and no weaker claim would do. The
+handler answers immediately with the first status snapshot; the console
+follows the run through `GET /api/v1/fleet/adopt/status`, which reports
+the six steps, their state, and the progress lines the install engine
+emits:
+
+1. connect: SSH in with the typed credentials.
+2. verify: `setup.Probe`, and refuse a machine that is not a GB10, naming
+   the hardware it did find.
+3. install: `setup.Install`, with **this manager's own binary** as the
+   source. The two Sparks are then on the same version by construction,
+   not by coincidence. A manager that is not itself a linux/arm64 build
+   refuses here with a plain sentence rather than uploading a binary the
+   target could never execute, which is what a developer running the
+   server on a Mac gets.
+4. start: wait for the new manager to answer on its own console.
+5. pair: use the pairing token the install produced to pair with the new
+   console and create one API key on it, named `fleet-<head hostname>`.
+6. peer: prove the URL and that key reach a Spark together, then record
+   the peer, through the same `addPeer` path the manual add-by-address
+   form uses.
+
+The sibling is installed to listen the way the head listens: a head on a
+Tailscale address gets a sibling on Tailscale, and everything else gets
+the local network. A head that only listens on loopback also gets a
+sibling on the local network, because loopback is the one mode that could
+never be reachable from the other machine, and a peer that cannot be
+reached is not a fleet. That is also what the installer recommends for a
+machine set up remotely.
+
+### The pairing token is not consumed
+
+This flow spends the new machine's pairing token before the owner ever
+sees it, so the question is whether that locks them out of their own new
+console. It does not. `internal/auth` reads the token from
+`<data-dir>/pairing-token` at startup and compares every pair against it;
+nothing deletes or rotates it, and a token that already opened one
+session opens the next one too. It is a file-backed shared secret, not a
+one-shot nonce. A test pins that, because the whole flow depends on it.
+
+So the successful run ends with the standard pairing card, in the payload
+the console already has open:
+
+```json
+{"peer": {"id": "peer_...", "name": "spark-worker",
+          "base_url": "http://192.168.99.137:7070"},
+ "console_url": "http://192.168.99.137:7070",
+ "owner_pairing_url": "http://192.168.99.137:7070",
+ "owner_pairing_token": "..."}
+```
+
+`owner_pairing_url` opens the new console in the owner's browser and
+`owner_pairing_token` is what they type into it, which is exactly the
+card `basement pairing-url` prints on the machine itself. No second SSH
+round trip is needed to fetch a fresh one.
+
+### The password
+
+The password is the one secret the owner types into this console, and it
+belongs to their user account on another machine, not to basement. It
+lives in the request body, in the handler's arguments and in the
+goroutine that runs the adoption. It is never written to the store, the
+jobs table, a log line, a progress line, an error message or any status
+payload. The manager has no request-body logging middleware, so there was
+nothing to exclude, and this route adds none.
+
+That is the intent; the enforcement is mechanical. The adoption's only
+handle on its own progress scrubs every string on the way in, removing
+the typed password and then applying `internal/redact` on top, so an SSH
+library that echoes the credentials it was handed back into an error
+string cannot get them into the status endpoint. A test drives a failed
+authentication whose error contains the password verbatim and asserts it
+appears in no byte of any progress, status or error output.
+
+### Console session only
+
+Neither endpoint accepts a bearer API key, and neither is on
+`peerAllowedPaths`. A fleet key is what another manager holds; adoption
+spends the owner's authority over their own hardware, which is a
+different thing entirely. The two bootstrap calls this manager makes on
+the machine it is adopting (`/api/v1/auth/pair` and `/api/v1/keys`) are
+deliberately not added to that allowlist either: the allowlist governs
+calls made with a stored peer credential, and nothing on it may mutate
+the other machine. These two are a one-time bootstrap against a machine
+this manager just installed, with a token that machine just minted, and
+both paths are fixed strings rather than anything a caller can steer.
+
+## Consequences
+
+- One peer, per the ADR 0005 deferral. Adoption refuses with a 409 when a
+  peer is already configured, the same rule `cmd/basement/main.go`
+  enforces when it picks a worker. Two peers would not be a fleet, they
+  would be a row that breaks every two-Spark model.
+- One adoption at a time. A second POST while one runs gets a 409 with a
+  plain sentence. Two runs would race for the single peer row, and each
+  one holds an SSH session installing a systemd service.
+- Adoption progress is in memory. It survives page reloads, which is what
+  the console needs, and it does not survive a manager restart, which
+  nothing needs: the run cannot be resumed after a restart anyway,
+  because the password that made it possible is gone by then, on purpose.
+  The jobs table stays the engine's, keyed by recipe id and replayed by
+  `ResumeInterrupted`; teaching it a job kind it can never finish would
+  be a worse trade than losing narration nobody can act on.
+- A failed adoption leaves no peer row. The store is written in the last
+  step and nowhere else, so every earlier failure leaves this machine
+  exactly as it was. The other machine is a different matter: a failure
+  after step 3 leaves basement installed there, running, with its own
+  console and its own pairing token. That is a working Spark, not
+  wreckage, and the failure message says which step it reached.
+- The manual add-by-address path stays. A Spark on another subnet, behind
+  a router the sweep cannot cross, or reachable only over Tailscale, is
+  not going to turn up in a local /24 sweep, and adoption is not the only
+  way in.
+- Typing SSH credentials into a console served over plain LAN HTTP puts
+  them on the wire. The recommendation is to run the head on loopback
+  (over an SSH tunnel) or on Tailscale when doing this. Transport
+  security for the console itself is a separate piece of work; this ADR
+  does not pretend to have done it.
+- The head installs its own bytes, so the sibling can never be on a newer
+  or older release than the head. The corollary is that upgrading the
+  fleet is still two upgrades, and nothing here makes the head able to
+  update its sibling.
