@@ -58,6 +58,31 @@ The pipeline behind the pack is documented in
 which models the community actually runs on this hardware, verified
 against primary sources before anything enters the catalog.
 
+## What we do
+
+Five steps, always in this order.
+
+1. **Research.** We sweep what the community actually runs on GB10
+   hardware: X, NVIDIA forums, Hugging Face. Every artifact is checked
+   against primary sources: repository, revision, bytes, licence. The
+   current sweep is
+   [`docs/MODEL-CANDIDATES-2026-08.md`](docs/MODEL-CANDIDATES-2026-08.md).
+2. **Validate.** We install and run each recipe on our own Sparks. Real
+   hardware, real inference, measured speeds, not a vendor claim. The
+   protocol is [`docs/DGX-QUALIFICATION.md`](docs/DGX-QUALIFICATION.md).
+3. **Promote.** A recipe that passes qualification moves from candidate
+   to verified. The label in the console always tells the truth: right
+   now every recipe in the pack is still a candidate, because none has
+   completed the full lifecycle on real hardware yet.
+4. **Package.** The recipe pins everything: weights by revision and byte
+   count, runtime by image digest, the licence you are accepting, and
+   the resources the model needs.
+5. **Ship.** Recipes reach you through a signed feed and install with
+   one click. That is the standard we are building toward: the feed
+   design is set but not live yet
+   ([`docs/decisions/0009`](docs/decisions/0009-signed-recipe-feed-design.md)).
+   Until it ships, recipes travel inside the binary itself.
+
 ## Why you can trust an install
 
 Every model comes from a recipe: an immutable file that pins the exact
@@ -189,4 +214,4 @@ source; `internal/webui/assets` the embedded production build;
 numbered ADRs; `docs/runbooks/` operational runbooks. Start with ADRs
 0003 (transactional single active model), 0004 (guardrails), 0007
 (stable endpoint), 0009 (signed feed), 0010 (setup security), 0011
-(runtimes).
+(runtimes), 0012 (curated model trust, proposed).
