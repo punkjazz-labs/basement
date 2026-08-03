@@ -1,6 +1,6 @@
 # 0011 — Multi-runtime support
 
-Date: 2026-08-03. Status: accepted (direction), not yet implemented.
+Date: 2026-08-03. Status: accepted. Phase 1 (sglang kind) implemented 2026-08-03; recipes await hardware qualification.
 Decided by the owner: basement must be able to run any model independently
 of the inference runtime, including SGLang.
 
