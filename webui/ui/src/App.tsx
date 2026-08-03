@@ -118,7 +118,13 @@ export default function App() {
   useEffect(() => {
     if (!authed) return
     refresh()
-    api<UpdateInfo>('/api/v1/update').then(setUpdate).catch(() => {})
+    // A console left open should still learn about a new release: re-ask
+    // hourly rather than only at page load. The manager caches upstream, so
+    // this costs at most one GitHub call an hour per machine.
+    const checkUpdate = () => api<UpdateInfo>('/api/v1/update').then(setUpdate).catch(() => {})
+    checkUpdate()
+    const timer = setInterval(checkUpdate, 60 * 60 * 1000)
+    return () => clearInterval(timer)
   }, [authed, refresh])
 
   // The manager refreshes its recipe catalog from the signed remote index in

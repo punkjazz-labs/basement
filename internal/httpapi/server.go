@@ -1643,7 +1643,7 @@ func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
-	if s.updateResult != nil && time.Since(s.updateFetched) < 6*time.Hour {
+	if s.updateResult != nil && time.Since(s.updateFetched) < time.Hour {
 		writeJSON(w, http.StatusOK, s.updateResult)
 		return
 	}

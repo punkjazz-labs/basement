@@ -173,10 +173,14 @@ export default function Playground({ ready, modelID, modelName, recipeID }: {
           <strong>{modelName}</strong>
           <div className="faint">Serving on this Spark, through your own endpoint</div>
         </div>
-        <label className="think-toggle">
-          <input type="checkbox" checked={showThinking} onChange={event => setShowThinking(event.target.checked)} />
-          Show thinking
-        </label>
+        {/* Only a conversation that has actually produced reasoning offers to
+            show it; on a model that never thinks, the control never appears. */}
+        {messages.some(message => message.role === 'assistant' && thinkingText(message)) && (
+          <label className="think-toggle">
+            <input type="checkbox" checked={showThinking} onChange={event => setShowThinking(event.target.checked)} />
+            Show thinking
+          </label>
+        )}
       </div>
       <div className="chat card" ref={chatRef} aria-live="polite">
         {messages.length === 0 && (
