@@ -521,6 +521,17 @@ func interconnectEnvironment(r recipe.Recipe, placement Placement) map[string]st
 	for name, value := range link.SharedEnvironment {
 		merged[name] = value
 	}
+	// This node's own cabled port beats the recipe's pinned names: the two
+	// machines need not even have the cable in the same port as each other,
+	// and each rank pins its transports to the port it actually holds.
+	if detected, err := resolveFabric(r); err == nil {
+		merged["NCCL_SOCKET_IFNAME"] = detected.NetDev
+		merged["GLOO_SOCKET_IFNAME"] = detected.NetDev
+		merged["TP_SOCKET_IFNAME"] = detected.NetDev
+		if detected.HCA != "" {
+			merged["NCCL_IB_HCA"] = detected.HCA
+		}
+	}
 	perRole := link.HeadEnvironment
 	if placement.Role == RoleWorker {
 		perRole = link.WorkerEnvironment

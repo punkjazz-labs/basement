@@ -86,8 +86,8 @@ func localHostname() string {
 }
 
 // FabricAddress is the IPv4 address this node holds on the named interface.
-// It becomes --master-addr for both ranks, so it is resolved from the
-// recipe's own NCCL_SOCKET_IFNAME rather than guessed or configured twice.
+// It becomes --master-addr for both ranks. The name comes from resolveFabric:
+// the detected cabled port, or the recipe's pinned fallback.
 func FabricAddress(name string) (string, error) {
 	if name == "" {
 		return "", errors.New("the recipe does not name an interconnect interface")
@@ -126,7 +126,11 @@ func (f *FleetExecutor) Plan(ctx context.Context, r recipe.Recipe) (Deployment, 
 	if err != nil {
 		return Deployment{}, err
 	}
-	address, err := f.localAddress(r.Topology.SocketInterface())
+	link, err := resolveFabric(r)
+	if err != nil {
+		return Deployment{}, err
+	}
+	address, err := f.localAddress(link.NetDev)
 	if err != nil {
 		return Deployment{}, err
 	}

@@ -9,10 +9,11 @@ id: deepseek-v4-flash-0731-2s
 # Launch topology follows the community recipe that runs this exact
 # workload (tonyd2wild/Deepseek-v4-Flash-TP2-DGX-Spark-500k-CTX): plain
 # vllm serve with --nnodes 2, worker rank first, weights pre-downloaded on
-# both nodes, NCCL pinned to the RoCE fabric. The interconnect environment
-# below carries that recipe's interface names (rocep1s0f0 / enp1s0f0np0);
-# if a unit reports different names, this recipe needs a revision, not an
-# override.
+# both nodes, NCCL pinned to the RoCE fabric. Each node detects its own
+# cabled ConnectX port at deploy time and pins NCCL to that; the interface
+# names below are the community recipe's, kept as the fallback for when the
+# kernel's answer is missing or ambiguous (no link yet, or both ports
+# cabled).
 #
 # Qualification flags, in honesty order:
 # - runtime image is the same pinned vllm/vllm-openai the pack already
