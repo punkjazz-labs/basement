@@ -260,19 +260,21 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		}
 		return map[string]any{"path": path, "contains_secrets": false}, nil
 	case "create_container":
-		artifactPaths := make([]string, len(r.Artifacts))
-		for index := range r.Artifacts {
-			artifactPaths[index] = h.artifactPath(r, index)
-		}
-		cachePath := h.cachePath(r)
-		if err := os.MkdirAll(cachePath, 0o750); err != nil {
+		if err := h.verifyRuntimeInputs(r); err != nil {
 			return nil, err
 		}
-		id, err := h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, r, execution.Placement)
+		stale, err := h.replaceStaleContainer(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		id, err := h.createContainer(ctx, execution, r)
 		if err != nil {
 			return nil, err
 		}
 		receipt := map[string]any{"container_id": id, "container_name": containerName(r)}
+		if len(stale) > 0 {
+			receipt["recreated_after_move"] = mountMismatchReceipt(stale)
+		}
 		if execution.Placement.Distributed() {
 			receipt["node_rank"] = execution.Placement.Rank()
 			receipt["master_address"] = execution.Placement.MasterAddress
@@ -280,6 +282,20 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		}
 		return receipt, nil
 	case "start_container":
+		if err := h.verifyRuntimeInputs(r); err != nil {
+			return nil, err
+		}
+		// A start job carries no create step, so a container left pointing at
+		// a directory that has since moved is repaired here or not at all.
+		stale, err := h.replaceStaleContainer(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		if len(stale) > 0 {
+			if _, err := h.createContainer(ctx, execution, r); err != nil {
+				return nil, err
+			}
+		}
 		name := h.resolveContainerName(ctx, r)
 		if err := h.docker.Start(ctx, name); err != nil {
 			return nil, err
@@ -288,7 +304,11 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"container_id": state.ID, "running": state.Running}, nil
+		receipt := map[string]any{"container_id": state.ID, "running": state.Running}
+		if len(stale) > 0 {
+			receipt["recreated_after_move"] = mountMismatchReceipt(stale)
+		}
+		return receipt, nil
 	case "stop_container":
 		name := h.resolveContainerName(ctx, r)
 		if err := h.docker.Stop(ctx, name); err != nil {
@@ -501,7 +521,11 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 		return true
 	case "create_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
-		return err == nil && containerLabelsMatch(state.Labels, r)
+		// Labels alone say the container is ours and for this recipe version;
+		// they say nothing about where it reads the model from. One whose
+		// binds no longer match this machine's layout is not "already
+		// created" — it has to be built again (see staleMounts).
+		return err == nil && containerLabelsMatch(state.Labels, r) && len(staleMounts(state, h.expectedMounts(r))) == 0
 	case "start_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		return err == nil && state.Running
@@ -771,6 +795,82 @@ func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (
 func (h *HostExecutor) artifactPath(r recipe.Recipe, index int) string {
 	artifact := r.Artifacts[index]
 	return filepath.Join(h.dataDir, "artifacts", strings.ReplaceAll(artifact.Repository, "/", "--"), artifact.Revision)
+}
+
+// expectedMounts is what a container for r would be created with right now.
+func (h *HostExecutor) expectedMounts(r recipe.Recipe) map[string]string {
+	paths := make([]string, len(r.Artifacts))
+	for index := range r.Artifacts {
+		paths[index] = h.artifactPath(r, index)
+	}
+	return containerMounts(r, paths, h.cachePath(r))
+}
+
+// createContainer builds the container for r against this machine's current
+// layout. Callers about to create must go through it rather than reaching
+// for the Docker client, so the mount sources always come from one place.
+func (h *HostExecutor) createContainer(ctx context.Context, execution Execution, r recipe.Recipe) (string, error) {
+	artifactPaths := make([]string, len(r.Artifacts))
+	for index := range r.Artifacts {
+		artifactPaths[index] = h.artifactPath(r, index)
+	}
+	cachePath := h.cachePath(r)
+	if err := os.MkdirAll(cachePath, 0o750); err != nil {
+		return "", err
+	}
+	return h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, r, execution.Placement)
+}
+
+// replaceStaleContainer removes a container of ours that is still pointed at
+// a directory this manager has moved away from — an install adopted across
+// the rename (spec 10) is the case that produced this, its container holding
+// binds under the pre-rename data directory long after the files moved. It
+// returns what disagreed, so the caller can create the container again and
+// the receipt can say why. Nothing is touched unless a mount source
+// positively disagrees.
+func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recipe) ([]mountMismatch, error) {
+	name := h.resolveContainerName(ctx, r)
+	state, err := h.docker.Container(ctx, name)
+	if err != nil || !containerLabelsMatch(state.Labels, r) {
+		return nil, nil
+	}
+	stale := staleMounts(state, h.expectedMounts(r))
+	if len(stale) == 0 {
+		return nil, nil
+	}
+	if err := h.docker.Stop(ctx, name); err != nil {
+		return nil, fmt.Errorf("stop the model container so it can be rebuilt against %s: %w", stale[0].Expected, err)
+	}
+	if err := h.docker.Remove(ctx, name); err != nil {
+		return nil, fmt.Errorf("remove the model container so it can be rebuilt against %s: %w", stale[0].Expected, err)
+	}
+	return stale, nil
+}
+
+// verifyRuntimeInputs checks that every host path the generated command
+// names is really on this machine before a container is created or started.
+// The runtime validates its own arguments and dies with a language-level
+// traceback when one names a file it cannot find; whether a file this
+// manager downloaded is on disk is a manager-side fact, and it must be
+// reported as a plain sentence naming the file.
+func (h *HostExecutor) verifyRuntimeInputs(r recipe.Recipe) error {
+	for index, artifact := range r.Artifacts {
+		path := h.artifactPath(r, index)
+		if info, err := os.Stat(path); err != nil || !info.IsDir() {
+			return fmt.Errorf("the downloaded files for %s are not on this machine at %s, so the model cannot start; install it again to download them", artifact.Repository, path)
+		}
+	}
+	for _, reference := range runtimeFileReferences(r) {
+		index, ok := r.ArtifactIndex(reference.Role)
+		if !ok {
+			return fmt.Errorf("the recipe tells the runtime to read %s from its %s files, but it declares no %s artifact", reference.Name, reference.Role, reference.Role)
+		}
+		path := filepath.Join(h.artifactPath(r, index), reference.Name)
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is missing from the downloaded model files at %s, and the recipe tells the runtime to read it, so the model cannot start; install it again to download the missing file", reference.Name, path)
+		}
+	}
+	return nil
 }
 
 func (h *HostExecutor) configPath(r recipe.Recipe) string {

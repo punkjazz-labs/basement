@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -387,5 +389,234 @@ func TestRetryNetworkStopsWhenCancelled(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("retry ignored cancellation")
+	}
+}
+
+// chatTemplateRecipe is a recipe whose generated command names a file inside
+// the mounted weights, which is what makes the checks below meaningful.
+func chatTemplateRecipe(t *testing.T) recipe.Recipe {
+	t.Helper()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := recipe.Find(recipes, "qwen36-27b-nvfp4-1s")
+	if !ok {
+		t.Fatal("the Qwen 3.6 27B recipe is missing")
+	}
+	if r.Service.VLLM == nil || r.Service.VLLM.ChatTemplateFile == "" {
+		t.Fatal("the recipe no longer pins a chat template file")
+	}
+	return r
+}
+
+// writeArtifactFixture puts a complete-looking download where the executor
+// expects this recipe's weights.
+func writeArtifactFixture(t *testing.T, executor *HostExecutor, r recipe.Recipe) {
+	t.Helper()
+	target := executor.artifactPath(r, 0)
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, r.Service.VLLM.ChatTemplateFile), []byte("{{ messages }}"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func containerFixtureJSON(id string, running bool, labels, mounts map[string]string) string {
+	status := "exited"
+	if running {
+		status = "running"
+	}
+	entries := make([]map[string]string, 0, len(mounts))
+	for destination, source := range mounts {
+		entries = append(entries, map[string]string{"Type": "bind", "Source": source, "Destination": destination})
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"ID":     id,
+		"State":  map[string]any{"Running": running, "Status": status},
+		"Config": map[string]any{"Labels": labels},
+		"Mounts": entries,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
+
+func dockerFixtureResponse(status int, body string) *http.Response {
+	return &http.Response{StatusCode: status, Status: http.StatusText(status), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+}
+
+// containerFromPath reads the container name out of /containers/<name>/...
+func containerFromPath(path string) string {
+	name := strings.TrimPrefix(path, "/containers/")
+	if cut := strings.Index(name, "/"); cut >= 0 {
+		name = name[:cut]
+	}
+	unescaped, err := url.PathUnescape(name)
+	if err != nil {
+		return name
+	}
+	return unescaped
+}
+
+func legacyLabels(r recipe.Recipe) map[string]string {
+	return map[string]string{
+		legacyLabelManaged:       "true",
+		legacyLabelRecipeID:      r.ID,
+		legacyLabelRecipeVersion: strconv.Itoa(r.Version),
+	}
+}
+
+// A container keeps the bind mounts it was created with for life. An install
+// adopted across the rename (spec 10) has its files moved out from under a
+// container still pointed at the pre-rename data directory, and Docker fills
+// a bind source that no longer exists with an empty directory rather than
+// refusing to start — so the container comes back up with an empty /model and
+// the runtime rejects the chat template path before it loads a single weight.
+// Such a container has to be rebuilt, not started.
+func TestStartContainerRebuildsAContainerLeftAtAMovedPath(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	newName, legacyName := containerName(r), legacyContainerName(r)
+	staleMountSources := map[string]string{
+		"/model":       "/var/lib/runonspark-manager/artifacts/nvidia--Qwen3.6-27B-NVFP4/" + r.Artifacts[0].Revision,
+		cacheMountPath: "/var/lib/runonspark-manager/caches/" + r.ID,
+	}
+	created, started := false, false
+	var stopped, removed []string
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		path := request.URL.Path
+		name := containerFromPath(path)
+		switch {
+		case request.Method == http.MethodPost && strings.HasPrefix(path, "/containers/create"):
+			if got := request.URL.Query().Get("name"); got != newName {
+				t.Fatalf("rebuilt container name = %q, want %q", got, newName)
+			}
+			created = true
+			return dockerFixtureResponse(http.StatusCreated, `{"ID":"rebuilt-id"}`), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			stopped = append(stopped, name)
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodDelete:
+			removed = append(removed, name)
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+			if name != newName {
+				t.Fatalf("started %q, want the rebuilt container %q", name, newName)
+			}
+			started = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case name == newName:
+			if !created {
+				return dockerFixtureResponse(http.StatusNotFound, ""), nil
+			}
+			labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("rebuilt-id", started, labels, executor.expectedMounts(r))), nil
+		case name == legacyName:
+			for _, gone := range removed {
+				if gone == legacyName {
+					return dockerFixtureResponse(http.StatusNotFound, ""), nil
+				}
+			}
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("adopted-id", false, legacyLabels(r), staleMountSources)), nil
+		default:
+			t.Fatalf("unexpected Docker request: %s %s", request.Method, request.URL)
+			return nil, nil
+		}
+	})}}
+
+	// The stale container must not read as already created, or nothing ever
+	// rebuilds it.
+	if executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Error("a container pointed at a moved directory was accepted as already created")
+	}
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if !created || !started {
+		t.Fatalf("created=%v started=%v, want the container rebuilt and started", created, started)
+	}
+	if len(stopped) != 1 || stopped[0] != legacyName || len(removed) != 1 || removed[0] != legacyName {
+		t.Fatalf("stopped=%v removed=%v, want only the stale container %q", stopped, removed, legacyName)
+	}
+	moved, ok := receipt["recreated_after_move"].([]map[string]any)
+	if !ok || len(moved) != 2 {
+		t.Fatalf("receipt does not report the move: %#v", receipt["recreated_after_move"])
+	}
+	if moved[0]["mount_point"] != "/model" || moved[0]["now"] != executor.artifactPath(r, 0) {
+		t.Fatalf("receipt mount detail = %#v", moved[0])
+	}
+}
+
+// A container whose mounts still match is left exactly as it is: no stop, no
+// remove, no rebuild.
+func TestStartContainerLeavesAMatchingContainerAlone(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	newName := containerName(r)
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/start"):
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodGet && containerFromPath(request.URL.Path) == newName:
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("live-id", true, labels, executor.expectedMounts(r))), nil
+		default:
+			t.Fatalf("a matching container was disturbed: %s %s", request.Method, request.URL)
+			return nil, nil
+		}
+	})}}
+	if !executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Error("a container mounted from the current paths was not recognized as created")
+	}
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if receipt["container_id"] != "live-id" || receipt["running"] != true {
+		t.Fatalf("receipt=%#v", receipt)
+	}
+	if _, rebuilt := receipt["recreated_after_move"]; rebuilt {
+		t.Error("a matching container was reported as rebuilt")
+	}
+}
+
+// A recipe that names a file the download does not contain must fail as a
+// plain sentence naming the file, before any container runs. Left to the
+// runtime it surfaces as a Python traceback from argument validation.
+func TestStartContainerNamesAMissingChatTemplate(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		t.Fatalf("Docker was contacted before the missing file was reported: %s %s", request.Method, request.URL)
+		return nil, nil
+	})}}
+
+	// Nothing downloaded at all.
+	_, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err == nil || !strings.Contains(err.Error(), "the downloaded files for "+r.Artifacts[0].Repository+" are not on this machine") {
+		t.Fatalf("missing weights error = %v", err)
+	}
+
+	// Weights present, the one file the command names absent.
+	if err := os.MkdirAll(executor.artifactPath(r, 0), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	_, err = executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err == nil {
+		t.Fatal("a missing chat template started anyway")
+	}
+	for _, want := range []string{r.Service.VLLM.ChatTemplateFile, filepath.Join(executor.artifactPath(r, 0), r.Service.VLLM.ChatTemplateFile), "install it again"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "Traceback") {
+		t.Fatalf("error is not a plain sentence: %v", err)
 	}
 }

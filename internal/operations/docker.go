@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -50,6 +51,11 @@ type ContainerState struct {
 	Running bool
 	Status  string
 	Labels  map[string]string
+	// Mounts is where the container reads each of its mount points from on
+	// this host, keyed by mount point. Docker fixes a container's binds when
+	// it is created and never revisits them, so this is the only way to tell
+	// that a container is still pointed at a directory that has since moved.
+	Mounts map[string]string
 }
 
 func NewDockerClient(socket string) *DockerClient {
@@ -209,11 +215,21 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 			Status  string
 		}
 		Config struct{ Labels map[string]string }
+		Mounts []struct {
+			Source      string
+			Destination string
+		}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return ContainerState{}, err
 	}
-	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels}, nil
+	mounts := make(map[string]string, len(body.Mounts))
+	for _, mount := range body.Mounts {
+		if mount.Destination != "" && mount.Source != "" {
+			mounts[mount.Destination] = mount.Source
+		}
+	}
+	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels, Mounts: mounts}, nil
 }
 
 func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, r recipe.Recipe, placement Placement) (string, error) {
@@ -225,7 +241,7 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 	for index, artifactPath := range artifactPaths {
 		binds = append(binds, artifactPath+":"+artifactMountPath(r.Artifacts[index].Role)+":ro")
 	}
-	binds = append(binds, cachePath+":/root/.cache:rw")
+	binds = append(binds, cachePath+":"+cacheMountPath+":rw")
 	environment := make([]string, 0, len(r.Runtime.Environment)+1)
 	for name, value := range r.Runtime.Environment {
 		environment = append(environment, name+"="+value)
@@ -666,4 +682,90 @@ func artifactMountPath(role string) string {
 		return "/model"
 	}
 	return "/" + role
+}
+
+// cacheMountPath is the one writable mount a container gets; the rest of its
+// root filesystem is read-only.
+const cacheMountPath = "/root/.cache"
+
+// containerMounts is where a container for r must read each of its mount
+// points from on this host right now: one per artifact role, plus the
+// writable compilation cache. Keyed by mount point, which is what Docker
+// reports back on an existing container.
+func containerMounts(r recipe.Recipe, artifactPaths []string, cachePath string) map[string]string {
+	mounts := make(map[string]string, len(artifactPaths)+1)
+	for index, path := range artifactPaths {
+		if index < len(r.Artifacts) {
+			mounts[artifactMountPath(r.Artifacts[index].Role)] = path
+		}
+	}
+	if cachePath != "" {
+		mounts[cacheMountPath] = cachePath
+	}
+	return mounts
+}
+
+// mountMismatch is one mount point an existing container fills from the
+// wrong place on this host.
+type mountMismatch struct {
+	MountPoint string
+	Actual     string
+	Expected   string
+}
+
+// staleMounts reports the mount points an existing container fills from a
+// host directory this manager no longer uses. Docker records a container's
+// binds once, at creation, and silently creates an empty directory for a
+// bind source that has since disappeared instead of refusing to start — so
+// a container created before the data directory moved comes back up with an
+// empty /model, and the runtime dies inside its own argument validation
+// complaining about a file it was never shown. A mount point the container
+// does not report at all is not evidence of staleness and is skipped: only a
+// source that positively disagrees counts.
+func staleMounts(state ContainerState, expected map[string]string) []mountMismatch {
+	stale := make([]mountMismatch, 0, len(expected))
+	for mountPoint, want := range expected {
+		actual, reported := state.Mounts[mountPoint]
+		if !reported || filepath.Clean(actual) == filepath.Clean(want) {
+			continue
+		}
+		stale = append(stale, mountMismatch{MountPoint: mountPoint, Actual: actual, Expected: want})
+	}
+	sort.Slice(stale, func(i, j int) bool { return stale[i].MountPoint < stale[j].MountPoint })
+	return stale
+}
+
+// mountMismatchReceipt renders mismatches for a job receipt, so an operator
+// reading the log can see exactly which directory moved.
+func mountMismatchReceipt(stale []mountMismatch) []map[string]any {
+	entries := make([]map[string]any, 0, len(stale))
+	for _, mismatch := range stale {
+		entries = append(entries, map[string]any{"mount_point": mismatch.MountPoint, "was": mismatch.Actual, "now": mismatch.Expected})
+	}
+	return entries
+}
+
+// runtimeFileReference is a file inside a mounted artifact that the generated
+// command names by path. The runtime validates such a path itself and fails
+// with a language-level traceback when it is absent, so every entry here has
+// to be checked on disk before the container runs. This list and the argument
+// builders above must stay in step.
+type runtimeFileReference struct {
+	Role string
+	Name string
+}
+
+func runtimeFileReferences(r recipe.Recipe) []runtimeFileReference {
+	var refs []runtimeFileReference
+	switch r.Runtime.Kind {
+	case "vllm":
+		if r.Service.VLLM != nil && r.Service.VLLM.ChatTemplateFile != "" {
+			refs = append(refs, runtimeFileReference{Role: "primary", Name: r.Service.VLLM.ChatTemplateFile})
+		}
+	case "sglang":
+		if r.Service.SGLang != nil && r.Service.SGLang.ChatTemplateFile != "" {
+			refs = append(refs, runtimeFileReference{Role: "primary", Name: r.Service.SGLang.ChatTemplateFile})
+		}
+	}
+	return refs
 }
