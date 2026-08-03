@@ -95,10 +95,11 @@ func (h *HFClient) Download(ctx context.Context, artifact recipe.Artifact, targe
 			}
 			return nil
 		}
-		if err := h.downloadFile(ctx, artifact, file, path, delta); err != nil {
+		verified, err := h.downloadFile(ctx, artifact, file, path, delta)
+		if err != nil {
 			return nil, fmt.Errorf("download %s: %w", file.Name, err)
 		}
-		if !verifyFile(path, file) {
+		if !verified && !verifyFile(path, file) {
 			return nil, fmt.Errorf("content verification failed for %s", file.Name)
 		}
 		completed += file.Size
@@ -187,16 +188,23 @@ func (h *HFClient) manifest(ctx context.Context, artifact recipe.Artifact) (hfMa
 	return manifest, nil
 }
 
-func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, file hfFile, finalPath string, progress func(written int64, existing bool) error) error {
+// pageCacheWindow is how much freshly touched file data may stay in the
+// page cache before it is written back and dropped.
+const pageCacheWindow = 64 << 20
+
+// downloadFile reports whether the bytes it left at finalPath already
+// hashed to the manifest digest, so the caller can skip re-reading a
+// file that was hashed while it streamed.
+func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, file hfFile, finalPath string, progress func(written int64, existing bool) error) (bool, error) {
 	tempPath := finalPath + ".part"
 	var offset int64
 	if stat, err := os.Stat(tempPath); err == nil {
 		offset = stat.Size()
 		if offset == file.Size && verifyFile(tempPath, file) {
 			if err := os.Rename(tempPath, finalPath); err != nil {
-				return err
+				return false, err
 			}
-			return progress(offset, true)
+			return true, progress(offset, true)
 		}
 		if offset > file.Size {
 			_ = os.Remove(tempPath)
@@ -204,7 +212,7 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 		}
 	}
 	if err := progress(offset, true); err != nil {
-		return fmt.Errorf("check download capacity: %w", err)
+		return false, fmt.Errorf("check download capacity: %w", err)
 	}
 	endpoint := h.baseURL + "/" + escapeRepository(artifact.Repository) + "/resolve/" + url.PathEscape(artifact.Revision) + "/" + escapeFilePath(file.Name) + "?download=true"
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -216,7 +224,7 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 	}
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
 	flags := os.O_CREATE | os.O_WRONLY
@@ -227,26 +235,42 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 		flags |= os.O_TRUNC
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("server returned %s", resp.Status)
+		return false, fmt.Errorf("server returned %s", resp.Status)
+	}
+	// The hasher is seeded only once the response status has settled
+	// whether the existing prefix is being appended to or discarded.
+	digest, expected, streaming := fileDigest(file, file.Size)
+	if streaming && offset > 0 {
+		if err := hashPrefix(digest, tempPath, offset); err != nil {
+			streaming = false
+		}
 	}
 	out, err := os.OpenFile(tempPath, flags, 0o640)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer out.Close()
 	buffer := make([]byte, 4<<20)
 	written := offset
+	evicted := offset
 	lastReport := time.Now()
 	for {
 		n, readErr := resp.Body.Read(buffer)
 		if n > 0 {
 			if _, err := out.Write(buffer[:n]); err != nil {
-				return err
+				return false, err
+			}
+			if streaming {
+				digest.Write(buffer[:n])
 			}
 			written += int64(n)
+			if written-evicted >= pageCacheWindow {
+				syncAndEvict(out, evicted, written-evicted)
+				evicted = written
+			}
 			if time.Since(lastReport) >= time.Second {
 				if err := progress(written, false); err != nil {
-					return err
+					return false, err
 				}
 				lastReport = time.Now()
 			}
@@ -255,19 +279,87 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 			break
 		}
 		if readErr != nil {
-			return readErr
+			return false, readErr
 		}
 	}
 	if err := out.Sync(); err != nil {
-		return err
+		return false, err
 	}
+	syncAndEvict(out, evicted, written-evicted)
 	if err := out.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if err := progress(written, false); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		return false, err
+	}
+	verified := streaming && written == file.Size && strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), expected)
+	return verified, nil
+}
+
+// fileDigest returns the hash to run over a file's content and the
+// expected hex digest. The git-blob sha1 covers a "blob <size>\0"
+// header, so it can only be computed while the bytes stream past when
+// the final size is already known; size is that final size.
+func fileDigest(file hfFile, size int64) (hash.Hash, string, bool) {
+	if file.LFS != nil && file.LFS.SHA256 != "" {
+		return sha256.New(), file.LFS.SHA256, true
+	}
+	if len(file.BlobID) == 40 {
+		digest := sha1.New()
+		_, _ = io.WriteString(digest, "blob "+strconv.FormatInt(size, 10)+"\x00")
+		return digest, file.BlobID, true
+	}
+	return nil, "", false
+}
+
+// hashPrefix feeds the first length bytes of path into digest so a
+// resumed transfer can keep hashing in place instead of re-reading the
+// whole file once it completes.
+func hashPrefix(digest hash.Hash, path string, length int64) error {
+	f, err := os.Open(path)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tempPath, finalPath)
+	defer f.Close()
+	return hashReader(digest, f, length)
+}
+
+// hashReader hashes length bytes of f (to EOF when length is negative),
+// dropping each window from the page cache behind it. Hashing hundreds
+// of gigabytes must not leave that many pages resident on a host whose
+// memory is already committed to a served model.
+func hashReader(digest hash.Hash, f *os.File, length int64) error {
+	buffer := make([]byte, 4<<20)
+	var read, evicted int64
+	for length < 0 || read < length {
+		chunk := buffer
+		if length >= 0 && length-read < int64(len(chunk)) {
+			chunk = buffer[:length-read]
+		}
+		n, err := f.Read(chunk)
+		if n > 0 {
+			digest.Write(chunk[:n])
+			read += int64(n)
+			if read-evicted >= pageCacheWindow {
+				evict(f, evicted, read-evicted)
+				evicted = read
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	evict(f, evicted, read-evicted)
+	if length >= 0 && read != length {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 func verifyFile(path string, file hfFile) bool {
@@ -275,22 +367,16 @@ func verifyFile(path string, file hfFile) bool {
 	if err != nil || !stat.Mode().IsRegular() || stat.Size() != file.Size {
 		return false
 	}
+	digest, expected, ok := fileDigest(file, file.Size)
+	if !ok {
+		return false
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-	var digest hash.Hash
-	var expected string
-	if file.LFS != nil && file.LFS.SHA256 != "" {
-		digest, expected = sha256.New(), file.LFS.SHA256
-	} else if len(file.BlobID) == 40 {
-		digest, expected = sha1.New(), file.BlobID
-		_, _ = io.WriteString(digest, "blob "+strconv.FormatInt(file.Size, 10)+"\x00")
-	} else {
-		return false
-	}
-	if _, err := io.Copy(digest, f); err != nil {
+	if err := hashReader(digest, f, file.Size); err != nil {
 		return false
 	}
 	return strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), expected)
