@@ -362,17 +362,38 @@ export function formatBytes(value?: number): string {
 
 export async function copyText(value: string): Promise<void> {
   if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(value)
+  // A console reached over plain HTTP on a LAN address is not a secure
+  // context, so this fallback is the everyday path here, not an edge case.
+  // The holder must go inside the open modal dialog when there is one: a
+  // modal makes the rest of the document inert, and an inert textarea
+  // cannot be selected, so the copy would silently take nothing.
+  const host = document.querySelector('dialog[open]') ?? document.body
   const holder = document.createElement('textarea')
   holder.value = value
   holder.setAttribute('readonly', '')
   holder.style.position = 'fixed'
-  holder.style.opacity = '0'
-  document.body.appendChild(holder)
-  holder.select()
+  holder.style.top = '0'
+  holder.style.left = '0'
+  holder.style.width = '1px'
+  holder.style.height = '1px'
+  holder.style.padding = '0'
+  holder.style.border = 'none'
+  holder.style.outline = 'none'
+  holder.style.boxShadow = 'none'
+  holder.style.background = 'transparent'
+  host.appendChild(holder)
+  const selection = document.getSelection()
+  const previous = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null
+  holder.focus({ preventScroll: true })
+  holder.setSelectionRange(0, holder.value.length)
   try {
     if (!document.execCommand('copy')) throw new Error('Copy is unavailable in this browser context.')
   } finally {
     holder.remove()
+    if (previous && selection) {
+      selection.removeAllRanges()
+      selection.addRange(previous)
+    }
   }
 }
 

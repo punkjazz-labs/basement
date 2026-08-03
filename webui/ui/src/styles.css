@@ -342,6 +342,30 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .confirm-check small { display: block; color: var(--faint); font-weight: 400; margin-top: 1px; }
 
 .install-choice { display: grid; gap: 8px; }
+
+/* Whole-row selection, matching the setup wizard: the row is the control,
+   the chosen one takes an accent border, a faint wash and a check. The real
+   radio stays in the row, invisible but focusable, so keyboard and screen
+   readers still get a radio group. Scoped to .install-choice so the genuine
+   checkbox in the confirm dialog keeps its box. */
+.install-choice .confirm-check { position: relative; align-items: center; transition: border-color 120ms, background 120ms; }
+.install-choice .confirm-check:hover { background: var(--hover); border-color: var(--line-strong); }
+.install-choice .confirm-check input {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer;
+}
+.install-choice .confirm-check:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+}
+.install-choice .confirm-check:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.install-choice .confirm-check span { flex: 1; }
+.install-choice .row-check { flex: none; width: 14px; height: 14px; position: relative; visibility: hidden; }
+.install-choice .row-check::before {
+  content: ""; position: absolute; left: 1px; top: 3px; width: 9px; height: 4px;
+  border-left: 2.2px solid var(--accent-deep); border-bottom: 2.2px solid var(--accent-deep);
+  border-radius: 1px; transform: rotate(-45deg);
+}
+.install-choice .confirm-check:has(input:checked) .row-check { visibility: visible; }
 .dialog-form { display: grid; gap: 14px; }
 .field small { font-size: 11.5px; }
 /* The pairing token is typed into the other console, so it wraps in full

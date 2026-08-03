@@ -39,7 +39,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const [form, setForm] = useState<AddForm>(EMPTY_FORM)
   const [formError, setFormError] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [copied, setCopied] = useState<'' | 'done' | 'failed'>('')
   const dialogRef = useRef<HTMLDialogElement>(null)
   // A <dialog>'s children stay in the document while it is shut, so without
   // these flags the secret-shaped fields below would be mounted for as long
@@ -59,7 +59,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const [adoptError, setAdoptError] = useState('')
   const [starting, setStarting] = useState(false)
   const [status, setStatus] = useState<AdoptStatus | null>(null)
-  const [tokenCopied, setTokenCopied] = useState(false)
+  const [tokenCopied, setTokenCopied] = useState<'' | 'done' | 'failed'>('')
   const findRef = useRef<HTMLDialogElement>(null)
   // A sweep cannot be cancelled once it is out, so its answer is dropped if
   // the dialog moved on while it was in flight.
@@ -100,7 +100,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const openAdd = (prefill?: Partial<AddForm>) => {
     setForm({ ...EMPTY_FORM, ...prefill })
     setFormError('')
-    setCopied(false)
+    setCopied('')
     setAddOpen(true)
     dialogRef.current?.showModal()
   }
@@ -134,7 +134,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     setPassword('')
     setAdoptError('')
     setStatus(null)
-    setTokenCopied(false)
+    setTokenCopied('')
     setFindOpen(true)
     findRef.current?.showModal()
     // A setup started earlier and still running owns this dialog: show it
@@ -223,20 +223,24 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     if (!token) return
     try {
       await copyText(token)
-      setTokenCopied(true)
-      setTimeout(() => setTokenCopied(false), 1600)
+      setTokenCopied('done')
+      setTimeout(() => setTokenCopied(''), 1600)
     } catch {
-      /* the token is on screen and can still be selected by hand */
+      // Say so rather than looking like it worked: the token is on screen
+      // and can still be selected by hand.
+      setTokenCopied('failed')
+      setTimeout(() => setTokenCopied(''), 2600)
     }
   }
 
   const copyCommand = async () => {
     try {
       await copyText(INSTALL_COMMAND)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
+      setCopied('done')
+      setTimeout(() => setCopied(''), 1600)
     } catch {
-      /* the command is on screen and can still be selected by hand */
+      setCopied('failed')
+      setTimeout(() => setCopied(''), 2600)
     }
   }
 
@@ -442,7 +446,9 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
               <strong>Install basement on the other Spark</strong>
               <p>Run this in a terminal on that machine.</p>
               <div className="snippet">
-                <button type="button" className="ghost copy" onClick={copyCommand}>{copied ? 'Copied' : 'Copy'}</button>
+                <button type="button" className="ghost copy" onClick={copyCommand}>
+                  {copied === 'done' ? 'Copied' : copied === 'failed' ? 'Select it by hand' : 'Copy'}
+                </button>
                 <pre><code>{INSTALL_COMMAND}</code></pre>
               </div>
             </li>
@@ -714,7 +720,9 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                     Its console will ask for this pairing token the first time you open it. Type it in there.
                   </p>
                   <div className="snippet token">
-                    <button type="button" className="ghost copy" onClick={copyToken}>{tokenCopied ? 'Copied' : 'Copy'}</button>
+                    <button type="button" className="ghost copy" onClick={copyToken}>
+                      {tokenCopied === 'done' ? 'Copied' : tokenCopied === 'failed' ? 'Select it by hand' : 'Copy'}
+                    </button>
                     <pre><code>{result.owner_pairing_token}</code></pre>
                   </div>
                   <p className="faint dialog-note">It stays valid after that, so keep it like a password.</p>

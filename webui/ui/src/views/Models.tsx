@@ -660,6 +660,7 @@ export default function Models({
                       This Spark
                       <small>{system?.hostname ?? 'the machine this console runs on'}</small>
                     </span>
+                    <span className="row-check" />
                   </label>
                   <label className="confirm-check">
                     <input
@@ -672,6 +673,7 @@ export default function Models({
                       {peer.name}
                       <small>{peerSummary?.system?.hostname ?? peer.base_url}</small>
                     </span>
+                    <span className="row-check" />
                   </label>
                 </div>
               )}
@@ -805,6 +807,7 @@ export default function Models({
                               : `This stops ${nameOf(switchFrom)} while ${recipe.display_name} starts.`}
                           </small>
                         </span>
+                        <span className="row-check" />
                       </label>
                       <label className="confirm-check">
                         <input
@@ -821,6 +824,7 @@ export default function Models({
                               : `${nameOf(switchFrom)} keeps serving. Start ${recipe.display_name} later from the Models tab.`}
                           </small>
                         </span>
+                        <span className="row-check" />
                       </label>
                     </div>
                   )}
