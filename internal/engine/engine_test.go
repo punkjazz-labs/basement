@@ -166,15 +166,15 @@ func TestQwenLifecycleVerticalSlice(t *testing.T) {
 	}
 	fake := &fakeExecutor{}
 	runner := New(s, fake, recipes)
-	id := recipes[0].ID
+	id := singleSpark(recipes).ID
 	install, created, err := s.CreateJob(ctx, "install", id, "install-once", map[string]bool{"confirmed": true})
 	if err != nil || !created {
 		t.Fatalf("CreateJob() created=%v err=%v", created, err)
 	}
 	runner.Start(install.ID)
 	ready := waitJob(t, s, install.ID, "ready")
-	if len(ready.Steps) != len(recipes[0].Operations) {
-		t.Fatalf("install steps=%d want %d", len(ready.Steps), len(recipes[0].Operations))
+	if len(ready.Steps) != len(singleSpark(recipes).Operations) {
+		t.Fatalf("install steps=%d want %d", len(ready.Steps), len(singleSpark(recipes).Operations))
 	}
 	duplicate, created, err := s.CreateJob(ctx, "install", id, "install-once", map[string]bool{"confirmed": true})
 	if err != nil || created || duplicate.ID != install.ID {
@@ -215,14 +215,15 @@ func TestPlanForDownloadOnlyInstallExcludesContainerAndSwitchOperations(t *testi
 		t.Fatal(err)
 	}
 	runner := New(s, &fakeExecutor{}, recipes)
-	job, _, err := s.CreateJob(ctx, "install", recipes[0].ID, "download-only", map[string]any{"confirmed": true, "activate": false})
+	job, _, err := s.CreateJob(ctx, "install", singleSpark(recipes).ID, "download-only", map[string]any{"confirmed": true, "activate": false})
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, _, err := runner.plan(ctx, job, recipes[0])
+	planned, err := runner.plan(ctx, job, singleSpark(recipes), operations.Deployment{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans := planned.plans
 	forbidden := map[string]bool{
 		"write_generated_config": true, "create_container": true, "verify_memory": true,
 		"start_container": true, "wait_http": true, "verify_openai_inference": true,
@@ -254,7 +255,7 @@ func TestDownloadOnlyInstallLeavesModelStoppedAndSkipsTheContainer(t *testing.T)
 	}
 	fake := &fakeExecutor{}
 	runner := New(s, fake, recipes)
-	id := recipes[0].ID
+	id := singleSpark(recipes).ID
 	install, _, err := s.CreateJob(ctx, "install", id, "download-only", map[string]any{"confirmed": true, "activate": false})
 	if err != nil {
 		t.Fatal(err)
@@ -296,7 +297,7 @@ func TestDownloadOnlyInstallThenStartCreatesTheContainer(t *testing.T) {
 	}
 	fake := &fakeExecutor{}
 	runner := New(s, fake, recipes)
-	id := recipes[0].ID
+	id := singleSpark(recipes).ID
 	install, _, err := s.CreateJob(ctx, "install", id, "download-only", map[string]any{"confirmed": true, "activate": false})
 	if err != nil {
 		t.Fatal(err)
@@ -343,7 +344,7 @@ func TestPlanForStartingADownloadOnlyModelWhileAnotherServesComposesWithSwitch(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, serving := recipes[0], recipes[1]
+	target, serving := twoSingleSparks(recipes)
 	if target.Service.DefaultHostPort != serving.Service.DefaultHostPort {
 		t.Fatalf("test fixture assumes recipes share a host port: %d vs %d", target.Service.DefaultHostPort, serving.Service.DefaultHostPort)
 	}
@@ -359,10 +360,11 @@ func TestPlanForStartingADownloadOnlyModelWhileAnotherServesComposesWithSwitch(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, previous, err := runner.plan(ctx, job, target)
+	planned, err := runner.plan(ctx, job, target, operations.Deployment{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	plans, previous := planned.plans, planned.previous
 	if previous == nil || previous.ID != serving.ID {
 		t.Fatalf("expected %s to be reported as the previously active model, got %+v", serving.ID, previous)
 	}
@@ -405,7 +407,7 @@ func TestExecutorErrorsAreRedacted(t *testing.T) {
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
 	runner := New(s, &fakeExecutor{failPull: true}, recipes)
-	job, _, _ := s.CreateJob(ctx, "install", recipes[0].ID, "redact", map[string]any{})
+	job, _, _ := s.CreateJob(ctx, "install", singleSpark(recipes).ID, "redact", map[string]any{})
 	runner.Start(job.ID)
 	failed := waitJob(t, s, job.ID, "failed")
 	if strings.Contains(failed.Error, "hf_SUPERSECRET") || !strings.Contains(failed.Error, "[REDACTED]") {
@@ -421,7 +423,7 @@ func TestRestartReconcilesHealthBeforeRestoringReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	recipes, _ := recipe.Builtin()
-	id := recipes[0].ID
+	id := singleSpark(recipes).ID
 	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: id, RecipeVersion: 1, Status: "ready", ArtifactPath: "/managed/" + id, ContainerID: "existing-container", Active: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +465,7 @@ func TestSwitchMakesOnlyVerifiedTargetActive(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	previous, target := recipes[0], recipes[1]
+	previous, target := twoSingleSparks(recipes)
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
 		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
@@ -497,7 +499,7 @@ func TestSwitchFailureRestoresPreviousModel(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	previous, target := recipes[0], recipes[1]
+	previous, target := twoSingleSparks(recipes)
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
 		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
@@ -536,7 +538,7 @@ func TestInstallSecondModelDownloadsBeforeSwitch(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	previous, target := recipes[0], recipes[1]
+	previous, target := twoSingleSparks(recipes)
 	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +578,7 @@ func TestSwitchReportsWhenRollbackAlsoFails(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	previous, target := recipes[0], recipes[1]
+	previous, target := twoSingleSparks(recipes)
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
 		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
@@ -616,7 +618,7 @@ func TestSwitchMemoryGuardFailsBeforeTargetStartAndRollsBack(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	previous, target := recipes[0], recipes[1]
+	previous, target := twoSingleSparks(recipes)
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
 		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
@@ -653,7 +655,7 @@ func TestRestartFinalizesAlreadyVerifiedRollback(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	previous, target := recipes[0], recipes[1]
+	previous, target := twoSingleSparks(recipes)
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "switching", ArtifactPath: "/managed/" + previous.ID, Active: true},
 		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "starting", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
@@ -733,7 +735,7 @@ func TestStopOfUnrelatedModelIsNotBlockedByLongInstall(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	active, target := recipes[0], recipes[1]
+	active, target := twoSingleSparks(recipes)
 	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: active.ID, RecipeVersion: active.Version, Status: "ready", ArtifactPath: "/managed/" + active.ID, Active: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +773,7 @@ func TestCancelDuringSwitchStaysNonTerminalUntilRollbackFinishes(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	previous, target := recipes[0], recipes[1]
+	previous, target := twoSingleSparks(recipes)
 	for _, model := range []store.InstalledModel{
 		{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, Active: true},
 		{RecipeID: target.ID, RecipeVersion: target.Version, Status: "stopped", ArtifactPath: "/managed/" + target.ID, ContainerID: "existing-container"},
@@ -822,7 +824,7 @@ func TestRemovePassesSharedArtifactsFromOtherInstalledModels(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	removed, kept := recipes[0], recipes[1]
+	removed, kept := twoSingleSparks(recipes)
 	for _, model := range []store.InstalledModel{
 		{RecipeID: removed.ID, RecipeVersion: removed.Version, Status: "stopped", ArtifactPath: "/managed/shared-path"},
 		{RecipeID: kept.ID, RecipeVersion: kept.Version, Status: "stopped", ArtifactPath: "/managed/shared-path"},
@@ -896,7 +898,7 @@ func TestCancelledInstallStopsItsContainer(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	target := recipes[0]
+	target := singleSpark(recipes)
 	executor := &gateExecutor{
 		switchExecutor: switchExecutor{running: map[string]bool{}},
 		gateOp:         "wait_http", gateRecipe: target.ID,
@@ -952,7 +954,7 @@ func TestConcurrentInstallsOfDifferentRecipesProceedInParallel(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	blocked, other := recipes[0], recipes[1]
+	blocked, other := twoSingleSparks(recipes)
 	executor := &gateExecutor{
 		switchExecutor: switchExecutor{running: map[string]bool{}},
 		gateOp:         "download_artifact", gateRecipe: blocked.ID,
@@ -998,7 +1000,7 @@ func TestSecondInstallVerifyDiskSeesFirstJobsReservationExcludingItsOwn(t *testi
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	blocked, other := recipes[0], recipes[1]
+	blocked, other := twoSingleSparks(recipes)
 	executor := &gateExecutor{
 		switchExecutor: switchExecutor{running: map[string]bool{}},
 		gateOp:         "verify_disk", gateRecipe: blocked.ID,
@@ -1055,7 +1057,7 @@ func TestReservationReleasedOnCompletionFailureAndCancellation(t *testing.T) {
 	recipes, _ := recipe.Builtin()
 
 	completed := New(s, &fakeExecutor{}, recipes)
-	completeJob, _, err := s.CreateJob(ctx, "install", recipes[0].ID, "reserve-complete", map[string]any{"confirmed": true})
+	completeJob, _, err := s.CreateJob(ctx, "install", singleSpark(recipes).ID, "reserve-complete", map[string]any{"confirmed": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1074,11 +1076,11 @@ func TestReservationReleasedOnCompletionFailureAndCancellation(t *testing.T) {
 
 	executor := &gateExecutor{
 		switchExecutor: switchExecutor{running: map[string]bool{}},
-		gateOp:         "wait_http", gateRecipe: recipes[0].ID,
+		gateOp:         "wait_http", gateRecipe: singleSpark(recipes).ID,
 		entered: make(chan struct{}), release: make(chan struct{}),
 	}
 	cancelling := New(s, executor, recipes)
-	cancelJob, _, err := s.CreateJob(ctx, "install", recipes[0].ID, "reserve-cancel", map[string]any{"confirmed": true})
+	cancelJob, _, err := s.CreateJob(ctx, "install", singleSpark(recipes).ID, "reserve-cancel", map[string]any{"confirmed": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1141,7 +1143,7 @@ func TestRetriesWithinAStepNeverDoubleTheReservation(t *testing.T) {
 	}
 	defer s.Close()
 	recipes, _ := recipe.Builtin()
-	r := recipes[0]
+	r := singleSpark(recipes)
 	job, _, err := s.CreateJob(ctx, "install", r.ID, "retry-sim", map[string]any{"confirmed": true})
 	if err != nil {
 		t.Fatal(err)
@@ -1177,4 +1179,30 @@ func waitReservationReleased(t *testing.T, runner *Engine, jobID string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("reservation for job %s was never released", jobID)
+}
+
+// singleSpark returns the first shipped single-Spark recipe. The pack now
+// also carries distributed recipes, and these fixtures run one node.
+func singleSpark(recipes []recipe.Recipe) recipe.Recipe {
+	for _, r := range recipes {
+		if !r.Distributed() {
+			return r
+		}
+	}
+	return recipe.Recipe{}
+}
+
+// twoSingleSparks returns two distinct shipped single-Spark recipes for
+// switch fixtures.
+func twoSingleSparks(recipes []recipe.Recipe) (recipe.Recipe, recipe.Recipe) {
+	var picked []recipe.Recipe
+	for _, r := range recipes {
+		if !r.Distributed() {
+			picked = append(picked, r)
+			if len(picked) == 2 {
+				return picked[0], picked[1]
+			}
+		}
+	}
+	return recipe.Recipe{}, recipe.Recipe{}
 }

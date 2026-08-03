@@ -62,6 +62,9 @@ type Server struct {
 	closing   chan struct{}
 	closeOnce sync.Once
 
+	// nodeLease admits one delegated two-Spark job at a time (see node.go).
+	nodeLease workerLease
+
 	updateMu      sync.Mutex
 	updateResult  map[string]any
 	updateFetched time.Time
@@ -107,6 +110,10 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateCheck))
 	mux.HandleFunc("/api/v1/peers", server.peersCollection)
 	mux.HandleFunc("/api/v1/peers/", server.withReadAuth(server.peerAction))
+	// Two-Spark serving: the head node drives this node's own rank through
+	// these, authenticated by fleet API key only (see withNodeAuth).
+	mux.HandleFunc("/api/v1/internal/node/preflight", server.withNodeAuth(server.nodePreflight))
+	mux.HandleFunc("/api/v1/internal/node/step", server.withNodeAuth(server.nodeStep))
 	mux.HandleFunc("/v1/", server.proxyModel)
 	assets, _ := fs.Sub(webui.Assets, "assets")
 	fileServer := http.FileServer(http.FS(assets))
@@ -281,6 +288,13 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) preflightResponse {
+	return s.runPreflightSkipping(ctx, selected, nil)
+}
+
+// runPreflightSkipping omits checks that do not apply to this node's part in
+// the deployment. A two-Spark worker rank publishes no HTTP port, so
+// verify_port there would fail on a condition that never mattered.
+func (s *Server) runPreflightSkipping(ctx context.Context, selected recipe.Recipe, skip map[string]bool) preflightResponse {
 	response := preflightResponse{RecipeID: selected.ID, Ready: true, Secrets: map[string]bool{}}
 	// The advisory checks see other running installs' disk reservations,
 	// exactly like the real verify_disk step will, so the dialog and the
@@ -290,6 +304,9 @@ func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) prefl
 	for _, op := range selected.Operations {
 		if !strings.HasPrefix(op.Type, "verify_") {
 			break
+		}
+		if skip[op.Type] {
+			continue
 		}
 		receipt, err := s.executor.Execute(ctx, execution, op, selected, nil)
 		if err != nil && op.Type == "verify_port" {

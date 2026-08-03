@@ -66,6 +66,10 @@ type plannedOperation struct {
 	Recipe      recipe.Recipe
 	BeginSwitch bool
 	Receipt     map[string]any
+	// Placement names the node this step runs on. Its zero value means the
+	// local node with no distributed semantics, which is every single-Spark
+	// recipe.
+	Placement operations.Placement
 }
 
 // New starts the engine with recipes as both the effective catalog and the
@@ -308,11 +312,23 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 			execution.SharedArtifacts = shared
 		}
 	}
-	plans, previous, err := e.plan(ctx, job, r)
+	deployment, err := e.deployment(ctx, r)
 	if err != nil {
 		_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(err.Error()))
 		return
 	}
+	// Pinned once, for every step this job will ever run, including its
+	// teardown.
+	if deployment.Distributed() {
+		peer := deployment.Peer
+		execution.Peer = &peer
+	}
+	planned, err := e.plan(ctx, job, r, deployment)
+	if err != nil {
+		_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(err.Error()))
+		return
+	}
+	plans, previous := planned.plans, planned.previous
 	if previous != nil && rollbackWasVerified(job) {
 		if err := e.store.SetModelState(ctx, r.ID, "stopped", false); err != nil && !errors.Is(err, os.ErrNotExist) {
 			e.fail(ctx, jobID, len(plans)-1, fmt.Errorf("recover completed rollback target state: %w", err))
@@ -330,32 +346,44 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		return
 	}
 	switchStarted := false
+	// abort is the single failure path for this job. A two-Spark job first
+	// returns BOTH nodes to stopped, so a failure can never leave one rank
+	// running and holding memory on the other Spark, and only then records
+	// the failure (restoring a previously active model when this job had
+	// already begun switching away from one).
+	abort := func(index int, cause error) {
+		next := len(plans)
+		if deployment.Distributed() {
+			next = e.teardownDistributed(job, r, next, deployment)
+		}
+		if switchStarted && previous != nil {
+			e.failSwitch(job, r, deployment, *previous, planned.previousDeployment, next, index, cause)
+			return
+		}
+		e.fail(ctx, jobID, index, cause)
+	}
 	for index, plan := range plans {
 		if !runtimeHeld && (plan.BeginSwitch || runtimeOperations[plan.Operation.Type]) {
 			if err := e.acquireRuntime(ctx); err != nil {
-				if switchStarted && previous != nil {
-					e.failSwitch(job, r, *previous, plans, index, err)
-				} else {
-					e.fail(ctx, jobID, index, err)
-				}
+				abort(index, err)
 				return
 			}
 			runtimeHeld = true
 		}
 		if plan.BeginSwitch {
 			if previous == nil {
-				e.fail(ctx, jobID, index, errors.New("switch plan lost the previous model"))
+				abort(index, errors.New("switch plan lost the previous model"))
 				return
 			}
 			if err := e.store.BeginSwitch(ctx, previous.ID, r.ID); err != nil {
-				e.fail(ctx, jobID, index, fmt.Errorf("record switch intent: %w", err))
+				abort(index, fmt.Errorf("record switch intent: %w", err))
 				return
 			}
 			switchStarted = true
 		}
 		if ctx.Err() != nil {
 			if switchStarted && previous != nil {
-				e.failSwitch(job, r, *previous, plans, index, ctx.Err())
+				abort(index, ctx.Err())
 			} else {
 				_ = e.store.UpdateJobState(context.Background(), jobID, "cancelled", "cancelled at a safe operation boundary")
 				e.cleanupAfterCancel(jobID)
@@ -363,32 +391,29 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 			return
 		}
 		op, target := plan.Operation, plan.Recipe
+		execution.Placement = plan.Placement
 		previousStep, exists, err := e.store.Step(ctx, jobID, index)
 		if err != nil {
-			if switchStarted && previous != nil {
-				e.failSwitch(job, r, *previous, plans, index, err)
-			} else {
-				e.fail(ctx, jobID, index, err)
-			}
+			abort(index, err)
 			return
 		}
 		if exists && previousStep.State == "completed" && (plan.Receipt != nil || e.executor.Completed(ctx, execution, op, target, previousStep.Receipt)) {
 			continue
 		}
+		// A state write that fails must not return silently: on a two-Spark
+		// job that would leave a worker rank running with nothing left to
+		// stop it.
 		if err := e.store.UpdateJobState(ctx, jobID, stateFor(job.Kind, op.Type), ""); err != nil {
+			abort(index, err)
 			return
 		}
-		if err := e.store.BeginStep(ctx, jobID, index, op.Type); err != nil {
-			if switchStarted && previous != nil {
-				e.failSwitch(job, r, *previous, plans, index, err)
-			} else {
-				e.fail(ctx, jobID, index, err)
-			}
+		if err := e.store.BeginStep(ctx, jobID, index, stepName(op, plan.Placement)); err != nil {
+			abort(index, err)
 			return
 		}
 		if plan.Receipt != nil {
 			if err := e.store.CompleteStep(ctx, jobID, index, redact.JSON(plan.Receipt)); err != nil {
-				e.fail(ctx, jobID, index, err)
+				abort(index, err)
 				return
 			}
 			continue
@@ -399,33 +424,21 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		execution.ReservedBytes = e.reservedByOthers(jobID)
 		receipt, err := e.executor.Execute(ctx, execution, op, target, progress)
 		if err != nil {
-			if switchStarted && previous != nil {
-				e.failSwitch(job, r, *previous, plans, index, err)
-			} else {
-				e.fail(ctx, jobID, index, err)
-			}
+			abort(index, err)
 			return
 		}
 		if ctx.Err() != nil {
-			if switchStarted && previous != nil {
-				e.failSwitch(job, r, *previous, plans, index, ctx.Err())
-			} else {
-				e.fail(ctx, jobID, index, ctx.Err())
-			}
+			abort(index, ctx.Err())
 			return
 		}
 		if err := e.store.CompleteStep(ctx, jobID, index, redact.JSON(receipt)); err != nil {
-			if switchStarted && previous != nil {
-				e.failSwitch(job, r, *previous, plans, index, err)
-			} else {
-				e.fail(ctx, jobID, index, err)
-			}
+			abort(index, err)
 			return
 		}
 	}
 	if ctx.Err() != nil {
 		if switchStarted && previous != nil {
-			e.failSwitch(job, r, *previous, plans, len(plans)-1, ctx.Err())
+			abort(len(plans)-1, ctx.Err())
 		} else {
 			_ = e.store.UpdateJobState(context.Background(), jobID, "cancelled", "cancelled at a safe operation boundary")
 			e.cleanupAfterCancel(jobID)
@@ -433,16 +446,22 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		return
 	}
 	if err := e.finish(ctx, job, r); err != nil {
-		if switchStarted && previous != nil {
-			e.failSwitch(job, r, *previous, plans, len(plans)-1, err)
-		} else {
-			e.fail(ctx, jobID, len(plans)-1, err)
-		}
+		abort(len(plans)-1, err)
 		return
 	}
 }
 
-func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) ([]plannedOperation, *recipe.Recipe, error) {
+// jobPlan is everything run() needs to execute and, if necessary, undo one
+// job: the steps, the model being switched away from, and the nodes THAT
+// model runs on. The previous model's topology is its own and can differ
+// from the target's, so it is resolved separately.
+type jobPlan struct {
+	plans              []plannedOperation
+	previous           *recipe.Recipe
+	previousDeployment operations.Deployment
+}
+
+func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe, deployment operations.Deployment) (jobPlan, error) {
 	var ops []recipe.Operation
 	switch job.Kind {
 	case "install":
@@ -472,21 +491,40 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 		_ = json.Unmarshal(job.Payload, &payload)
 		ops = target.Uninstall
 	default:
-		return nil, nil, fmt.Errorf("unknown job kind %s", job.Kind)
+		return jobPlan{}, fmt.Errorf("unknown job kind %s", job.Kind)
 	}
 	plans := make([]plannedOperation, 0, len(ops)+1)
 	if job.Kind != "install" && job.Kind != "start" {
+		if target.Distributed() {
+			return jobPlan{plans: distributedPlans(ops, target, deployment, nil, operations.Deployment{})}, nil
+		}
 		for _, op := range ops {
 			plans = append(plans, plannedOperation{Operation: op, Recipe: target})
 		}
-		return plans, nil, nil
+		return jobPlan{plans: plans}, nil
 	}
 	previous, err := e.activeRecipe(ctx, target)
-	if err != nil || previous == nil {
+	if err != nil {
+		return jobPlan{}, err
+	}
+	// The model being switched away from is stopped on the nodes IT runs on.
+	// Reading the target's topology here is what leaves a distributed
+	// predecessor's worker rank alive when a single-node model takes over.
+	var previousDeployment operations.Deployment
+	if previous != nil {
+		previousDeployment, err = e.deployment(ctx, *previous)
+		if err != nil {
+			return jobPlan{}, err
+		}
+	}
+	if target.Distributed() {
+		return jobPlan{plans: distributedPlans(ops, target, deployment, previous, previousDeployment), previous: previous, previousDeployment: previousDeployment}, nil
+	}
+	if previous == nil {
 		for _, op := range ops {
 			plans = append(plans, plannedOperation{Operation: op, Recipe: target})
 		}
-		return plans, previous, err
+		return jobPlan{plans: plans}, nil
 	}
 	switchStopPlanned := false
 	for _, op := range ops {
@@ -495,12 +533,134 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe) 
 			continue
 		}
 		if !switchStopPlanned && (op.Type == "verify_memory" || op.Type == "start_container") {
-			plans = append(plans, plannedOperation{Operation: recipe.Operation{Type: "stop_container"}, Recipe: *previous, BeginSwitch: true})
+			plans = append(plans, previousStopPlans(*previous, previousDeployment)...)
 			switchStopPlanned = true
 		}
 		plans = append(plans, plannedOperation{Operation: op, Recipe: target})
 	}
-	return plans, previous, nil
+	return jobPlan{plans: plans, previous: previous, previousDeployment: previousDeployment}, nil
+}
+
+// previousStopPlans stops every rank of the model being switched away from.
+// A distributed predecessor needs both of its containers stopped, head first
+// so it stops serving before its worker rank goes away.
+func previousStopPlans(previous recipe.Recipe, deployment operations.Deployment) []plannedOperation {
+	stop := recipe.Operation{Type: "stop_container"}
+	if !deployment.Distributed() {
+		return []plannedOperation{{Operation: stop, Recipe: previous, BeginSwitch: true}}
+	}
+	return []plannedOperation{
+		{Operation: stop, Recipe: previous, BeginSwitch: true, Placement: deployment.Head},
+		{Operation: stop, Recipe: previous, Placement: deployment.Worker},
+	}
+}
+
+// placements resolves both nodes of a distributed serve before any step
+// runs, so a missing peer, an unusable interconnect, or a manager that
+// cannot reach a second Spark at all fails the job before it touches
+// anything. Single-Spark recipes get two zero placements and never consult
+// the fleet.
+func (e *Engine) deployment(ctx context.Context, r recipe.Recipe) (operations.Deployment, error) {
+	if !r.Distributed() {
+		return operations.Deployment{}, nil
+	}
+	fleet, ok := e.executor.(operations.Fleet)
+	if !ok {
+		return operations.Deployment{}, errors.New("this manager is not configured to run a model across two Sparks")
+	}
+	return fleet.Plan(ctx, r)
+}
+
+// distributedPlans expands a single-node operation list into the two-node
+// order the community two-Spark recipe requires: the head verifies itself,
+// the worker manager verifies itself, both nodes stage the image, weights
+// and config, the worker container starts first, the head container starts
+// second, and only the head is health-checked and inference-tested.
+// Teardown steps run head first so serving stops before the worker rank
+// disappears underneath it.
+func distributedPlans(ops []recipe.Operation, target recipe.Recipe, deployment operations.Deployment, previous *recipe.Recipe, previousDeployment operations.Deployment) []plannedOperation {
+	head, worker := deployment.Head, deployment.Worker
+	var plans, workerBringUp, headBringUp, tail []plannedOperation
+	peerChecked := false
+	checkPeer := func() {
+		if peerChecked {
+			return
+		}
+		plans = append(plans, plannedOperation{Operation: recipe.Operation{Type: operations.VerifyPeerNode}, Recipe: target, Placement: worker})
+		peerChecked = true
+	}
+	for _, op := range ops {
+		switch op.Type {
+		case "create_container", "verify_memory", "start_container":
+			workerBringUp = append(workerBringUp, plannedOperation{Operation: op, Recipe: target, Placement: worker})
+			headBringUp = append(headBringUp, plannedOperation{Operation: op, Recipe: target, Placement: head})
+		case "wait_http", "verify_openai_inference", "measure_throughput":
+			tail = append(tail, plannedOperation{Operation: op, Recipe: target, Placement: head})
+		case "pull_image", "download_artifact", "write_generated_config":
+			checkPeer()
+			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: head})
+			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: worker})
+		case "stop_container", "remove_container", "remove_artifact_if_unshared":
+			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: head})
+			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: worker})
+		case "verify_port":
+			if previous != nil && previous.Service.DefaultHostPort == target.Service.DefaultHostPort {
+				plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: head, Receipt: map[string]any{"host_port": target.Service.DefaultHostPort, "occupied_by_managed_recipe": previous.ID, "available_after_switch": true}})
+				continue
+			}
+			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: head})
+		default:
+			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: head})
+		}
+	}
+	if len(workerBringUp) > 0 {
+		// A start job carries no staging operations, so the worker's own
+		// guardrails would otherwise never be consulted before its rank runs.
+		checkPeer()
+		if previous != nil {
+			plans = append(plans, previousStopPlans(*previous, previousDeployment)...)
+		}
+	}
+	plans = append(plans, workerBringUp...)
+	plans = append(plans, headBringUp...)
+	return append(plans, tail...)
+}
+
+// stepName is what a step is recorded as. A distributed job runs the same
+// operation twice, so the node's role is part of the name and a stored
+// timeline can never be read as one node doing the work twice.
+func stepName(op recipe.Operation, placement operations.Placement) string {
+	if !placement.Distributed() {
+		return op.Type
+	}
+	return op.Type + ":" + placement.Role
+}
+
+// teardownDistributed returns both Sparks to stopped after any step of a
+// two-node job failed, and reports the next free step index. The head is
+// stopped first so it stops serving before its worker rank goes away. Best
+// effort by design: a teardown problem is recorded on its own step and never
+// allowed to mask the original failure.
+func (e *Engine) teardownDistributed(job store.Job, target recipe.Recipe, base int, deployment operations.Deployment) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	peer := deployment.Peer
+	execution := operations.Execution{JobID: job.ID, Kind: "teardown", Peer: &peer}
+	for offset, placement := range []operations.Placement{deployment.Head, deployment.Worker} {
+		index := base + offset
+		// Receipts are best effort here. Stopping the containers is not: a
+		// database that cannot be written must never be the reason a rank
+		// keeps holding memory on either Spark.
+		_ = e.store.BeginStep(ctx, job.ID, index, stepName(recipe.Operation{Type: "teardown_stop_container"}, placement))
+		execution.Placement = placement
+		receipt, err := e.executor.Execute(ctx, execution, recipe.Operation{Type: "stop_container"}, target, nil)
+		if err != nil {
+			_ = e.store.FailStep(context.Background(), job.ID, index, redact.String(err.Error()))
+			continue
+		}
+		_ = e.store.CompleteStep(ctx, job.ID, index, redact.JSON(receipt))
+	}
+	return base + 2
 }
 
 // downloadOnlyOperations trims an install plan to what a download-only
@@ -593,31 +753,62 @@ func (e *Engine) activeRecipe(ctx context.Context, target recipe.Recipe) (*recip
 
 func rollbackWasVerified(job store.Job) bool {
 	for _, step := range job.Steps {
-		if step.Operation == "rollback_verify_openai_inference" && step.State == "completed" {
+		// A distributed rollback names the node it ran on, so the recorded
+		// step is "rollback_verify_openai_inference:head".
+		if strings.HasPrefix(step.Operation, "rollback_verify_openai_inference") && step.State == "completed" {
 			return true
 		}
 	}
 	return false
 }
 
-func (e *Engine) failSwitch(job store.Job, target, previous recipe.Recipe, plans []plannedOperation, failedIndex int, cause error) {
+// rollbackPlans stops every rank of the model that failed and brings every
+// rank of the previous model back, each according to its own topology. A
+// worker rank comes up before the head that talks to it, exactly as a fresh
+// distributed start does.
+func rollbackPlans(target recipe.Recipe, targetDeployment operations.Deployment, previous recipe.Recipe, previousDeployment operations.Deployment) []plannedOperation {
+	stop := recipe.Operation{Type: "stop_container"}
+	plans := []plannedOperation{{Operation: stop, Recipe: target, Placement: targetDeployment.Head}}
+	if targetDeployment.Distributed() {
+		plans = append(plans, plannedOperation{Operation: stop, Recipe: target, Placement: targetDeployment.Worker})
+	}
+	if previousDeployment.Distributed() {
+		for _, op := range []string{"verify_memory", "start_container"} {
+			plans = append(plans, plannedOperation{Operation: recipe.Operation{Type: op}, Recipe: previous, Placement: previousDeployment.Worker})
+		}
+	}
+	for _, op := range []string{"verify_memory", "start_container", "wait_http", "verify_openai_inference"} {
+		plans = append(plans, plannedOperation{Operation: recipe.Operation{Type: op}, Recipe: previous, Placement: previousDeployment.Head})
+	}
+	return plans
+}
+
+// failSwitch restores the model this job switched away from, on the nodes
+// THAT model runs on. nextIndex is the first step index still free for this
+// job, so rollback receipts never overwrite a planned step or a distributed
+// teardown receipt.
+func (e *Engine) failSwitch(job store.Job, target recipe.Recipe, targetDeployment operations.Deployment, previous recipe.Recipe, previousDeployment operations.Deployment, nextIndex, failedIndex int, cause error) {
 	original := redact.String(cause.Error())
 	_ = e.store.FailStep(context.Background(), job.ID, failedIndex, original)
 	_ = e.store.UpdateJobState(context.Background(), job.ID, "rolling_back", original)
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
-	execution := operations.Execution{JobID: job.ID, Kind: "rollback"}
-	rollback := []plannedOperation{
-		{Operation: recipe.Operation{Type: "stop_container"}, Recipe: target},
-		{Operation: recipe.Operation{Type: "verify_memory"}, Recipe: previous},
-		{Operation: recipe.Operation{Type: "start_container"}, Recipe: previous},
-		{Operation: recipe.Operation{Type: "wait_http"}, Recipe: previous},
-		{Operation: recipe.Operation{Type: "verify_openai_inference"}, Recipe: previous},
-	}
+	rollback := rollbackPlans(target, targetDeployment, previous, previousDeployment)
 	var rollbackErr error
 	for offset, plan := range rollback {
-		index := len(plans) + offset
-		name := "rollback_" + plan.Operation.Type
+		index := nextIndex + offset
+		name := "rollback_" + stepName(plan.Operation, plan.Placement)
+		execution := operations.Execution{JobID: job.ID, Kind: "rollback", Placement: plan.Placement}
+		if plan.Placement.Distributed() {
+			// Each half of the rollback is pinned to the deployment it
+			// belongs to: the target's peer for stopping the target, the
+			// previous model's peer for bringing it back.
+			peer := previousDeployment.Peer
+			if plan.Recipe.ID == target.ID {
+				peer = targetDeployment.Peer
+			}
+			execution.Peer = &peer
+		}
 		if err := e.store.BeginStep(rollbackCtx, job.ID, index, name); err != nil {
 			rollbackErr = err
 			break
@@ -804,6 +995,15 @@ func (e *Engine) cleanupAfterCancel(jobID string) {
 	if !ok {
 		return
 	}
+	if r.Distributed() {
+		if deployment, err := e.deployment(background, r); err == nil {
+			peer := deployment.Peer
+			for _, placement := range []operations.Placement{deployment.Head, deployment.Worker} {
+				_, _ = e.executor.Execute(background, operations.Execution{Kind: job.Kind, Placement: placement, Peer: &peer}, recipe.Operation{Type: "stop_container"}, r, nil)
+			}
+			return
+		}
+	}
 	_, _ = e.executor.Execute(background, operations.Execution{Kind: job.Kind}, recipe.Operation{Type: "stop_container"}, r, nil)
 }
 
@@ -811,7 +1011,8 @@ func stateFor(kind, operation string) string {
 	states := map[string]string{
 		"verify_architecture": "preflighting", "verify_dgx_spark": "preflighting", "verify_memory_capacity": "preflighting", "verify_memory": "checking_memory", "verify_disk": "preflighting", "verify_port": "preflighting", "verify_docker": "preflighting", "verify_nvidia_runtime": "preflighting", "verify_artifact_access": "preflighting",
 		"pull_image": "downloading_runtime", "download_artifact": "downloading_models", "write_generated_config": "configuring", "create_container": "configuring",
-		"start_container": "starting", "wait_http": "verifying_health", "verify_openai_inference": "verifying_inference", "stop_container": "stopping", "remove_container": "removing", "remove_artifact_if_unshared": "removing", "measure_throughput": "benchmarking",
+		operations.VerifyPeerNode: "preflighting",
+		"start_container":         "starting", "wait_http": "verifying_health", "verify_openai_inference": "verifying_inference", "stop_container": "stopping", "remove_container": "removing", "remove_artifact_if_unshared": "removing", "measure_throughput": "benchmarking",
 	}
 	if state := states[operation]; state != "" {
 		return state

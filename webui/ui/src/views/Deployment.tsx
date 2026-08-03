@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, formatBytes, terminal, startTimeoutMinutes, stateCopy, operationCopy, type Job, type Recipe, type Step } from '../api'
+import { api, formatBytes, terminal, startTimeoutMinutes, stateCopy, stepCopy, type Job, type Recipe, type Step } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
 
 const CHECKS = [
@@ -349,7 +349,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
             <li className="faint">Job reference <code>{job.id}</code></li>
             {job.steps.map(step => (
               <li key={step.index}>
-                <strong style={{ fontSize: 13 }}>{operationCopy[step.operation] ?? step.operation}</strong>{' '}
+                <strong style={{ fontSize: 13 }}>{stepCopy(step.operation)}</strong>{' '}
                 <span className="faint">{step.state}</span>
                 <pre>{step.receipt && Object.keys(step.receipt).length ? JSON.stringify(step.receipt, null, 2) : 'No receipt yet'}</pre>
               </li>

@@ -246,11 +246,15 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		for _, artifact := range r.Artifacts {
 			modelRevisions[artifact.Role] = artifact.Revision
 		}
-		entrypoint, arguments, err := runtimeCommand(r)
+		entrypoint, arguments, err := runtimeCommand(r, execution.Placement)
 		if err != nil {
 			return nil, err
 		}
 		config := map[string]any{"recipe_id": r.ID, "recipe_version": r.Version, "image": r.Runtime.Reference(), "model_revisions": modelRevisions, "container_name": containerName(r), "runtime_kind": r.Runtime.Kind, "entrypoint": entrypoint, "arguments": arguments}
+		if execution.Placement.Distributed() {
+			config["node_role"] = execution.Placement.Role
+			config["node_count"] = execution.Placement.NodeCount
+		}
 		if err := atomicJSON(path, config, 0o640); err != nil {
 			return nil, err
 		}
@@ -264,11 +268,17 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := os.MkdirAll(cachePath, 0o750); err != nil {
 			return nil, err
 		}
-		id, err := h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, r)
+		id, err := h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, r, execution.Placement)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"container_id": id, "container_name": containerName(r)}, nil
+		receipt := map[string]any{"container_id": id, "container_name": containerName(r)}
+		if execution.Placement.Distributed() {
+			receipt["node_rank"] = execution.Placement.Rank()
+			receipt["master_address"] = execution.Placement.MasterAddress
+			receipt["master_port"] = execution.Placement.MasterPort
+		}
+		return receipt, nil
 	case "start_container":
 		name := h.resolveContainerName(ctx, r)
 		if err := h.docker.Start(ctx, name); err != nil {
@@ -356,7 +366,9 @@ func (h *HostExecutor) verifyMemory(ctx context.Context, r recipe.Recipe, requir
 		Name: system.Hostname, SystemMemoryTotal: system.MemoryTotal, SystemMemoryAvailable: system.MemoryAvailable,
 		GPUMemoryTotal: system.GPUMemoryTotal, GPUMemoryFree: system.GPUMemoryFree,
 	}
-	results, err := resourceguard.CheckMemory([]resourceguard.Node{node}, r.Topology.SparkCount, resourceguard.MemoryPolicy{
+	// Every node evaluates itself and only itself; a two-Spark recipe is
+	// checked by this step running on each node in turn, never by pooling.
+	results, err := resourceguard.CheckMemory([]resourceguard.Node{node}, 1, resourceguard.MemoryPolicy{
 		MinimumTotalBytes: r.Requirements.MinimumMemoryBytes, HostReserveBytes: r.Requirements.MemoryReserveBytes,
 		GPUUtilization: plan.utilization, RequireLiveCapacity: requireLive,
 	})
@@ -431,7 +443,7 @@ func (h *HostExecutor) verifyDisk(ctx context.Context, r recipe.Recipe, artifact
 		node.DataDiskAvailable -= reservedBytes
 		node.RuntimeDiskAvailable -= reservedBytes
 	}
-	results, err := resourceguard.CheckDisk([]resourceguard.Node{node}, r.Topology.SparkCount, resourceguard.DiskPolicy{
+	results, err := resourceguard.CheckDisk([]resourceguard.Node{node}, 1, resourceguard.DiskPolicy{
 		ArtifactBytes: artifactBytes, RuntimeBytes: runtimeBytes, SafetyMarginBytes: r.Requirements.SafetyMarginBytes,
 	})
 	receipt := map[string]any{

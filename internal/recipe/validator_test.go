@@ -10,8 +10,8 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recipes) != 5 {
-		t.Fatalf("got %d recipes, want 5", len(recipes))
+	if len(recipes) != 6 {
+		t.Fatalf("got %d recipes, want 6", len(recipes))
 	}
 	for _, r := range recipes {
 		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
