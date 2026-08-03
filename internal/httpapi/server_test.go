@@ -490,14 +490,13 @@ func TestPeerLifecycleOverAPI(t *testing.T) {
 	}
 }
 
-// TestPeerSideKeyAuthIsScopedToReadOnlyFleetEndpoints proves the extension
-// described in the spec: an API key now authenticates GET requests to
-// system, models and telemetry (so a peer manager can read them), but every
-// other /api/v1 route still requires a console session, exactly as before.
-func TestPeerSideKeyAuthIsScopedToReadOnlyFleetEndpoints(t *testing.T) {
-	server, cookies, csrf := newPairedTestServer(t)
-	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf, "Idempotency-Key": "make-a-key"}
-	created := doRequest(t, http.MethodPost, server.URL+"/api/v1/keys", `{"name":"fleet-peer"}`, cookies, headers)
+// newAPIKey pairs a fresh manager and mints one API key on it, returning the
+// server, a console session and the key secret a peer manager would hold.
+func newAPIKey(t *testing.T) (server *httptest.Server, cookies []*http.Cookie, csrf, secret string) {
+	t.Helper()
+	server, cookies, csrf = newPairedTestServer(t)
+	created := doRequest(t, http.MethodPost, server.URL+"/api/v1/keys", `{"name":"fleet-peer"}`, cookies,
+		map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf})
 	var createdKey struct {
 		Secret string `json:"secret"`
 	}
@@ -508,9 +507,24 @@ func TestPeerSideKeyAuthIsScopedToReadOnlyFleetEndpoints(t *testing.T) {
 	if createdKey.Secret == "" {
 		t.Fatal("key creation did not return a secret")
 	}
-	bearer := map[string]string{"Authorization": "Bearer " + createdKey.Secret}
+	return server, cookies, csrf, createdKey.Secret
+}
 
-	for _, path := range []string{"/api/v1/system", "/api/v1/models", "/api/v1/telemetry"} {
+// TestPeerSideKeyAuthIsScopedToReadOnlyFleetEndpoints proves the extension
+// described in the spec: an API key now authenticates GET requests to
+// system, models, telemetry and preflight (so a peer manager can read them
+// and can ask whether this machine could take an install), but every other
+// /api/v1 route still requires a console session, exactly as before.
+func TestPeerSideKeyAuthIsScopedToReadOnlyFleetEndpoints(t *testing.T) {
+	server, _, _, secret := newAPIKey(t)
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearer := map[string]string{"Authorization": "Bearer " + secret}
+
+	readable := []string{"/api/v1/system", "/api/v1/models", "/api/v1/telemetry", "/api/v1/preflight?recipe_id=" + singleSpark(recipes).ID}
+	for _, path := range readable {
 		response := doRequest(t, http.MethodGet, server.URL+path, "", nil, bearer)
 		if response.StatusCode != http.StatusOK {
 			data, _ := io.ReadAll(response.Body)
@@ -519,21 +533,156 @@ func TestPeerSideKeyAuthIsScopedToReadOnlyFleetEndpoints(t *testing.T) {
 		response.Body.Close()
 	}
 
-	for _, path := range []string{"/api/v1/recipes", "/api/v1/jobs", "/api/v1/storage", "/api/v1/diagnostics", "/api/v1/preflight", "/api/v1/update"} {
+	for _, path := range []string{"/api/v1/recipes", "/api/v1/jobs", "/api/v1/storage", "/api/v1/diagnostics", "/api/v1/update", "/api/v1/keys", "/api/v1/peers"} {
 		response := doRequest(t, http.MethodGet, server.URL+path, "", nil, bearer)
 		if response.StatusCode != http.StatusUnauthorized {
 			data, _ := io.ReadAll(response.Body)
-			t.Errorf("%s with API key status=%d, want 401 (key auth must not extend past system/models/telemetry): body=%s", path, response.StatusCode, data)
+			t.Errorf("%s with API key status=%d, want 401 (key auth must not extend past the fleet read surface): body=%s", path, response.StatusCode, data)
 		}
 		response.Body.Close()
 	}
 
-	// The same key must never authorize a mutation anywhere.
+	// The same key must never authorize a mutation outside install.
 	mutation := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers", `{"name":"x","base_url":"http://x","api_key":"y"}`, nil, bearer)
 	if mutation.StatusCode == http.StatusCreated {
 		t.Fatal("an inference API key must not be able to create a peer")
 	}
 	mutation.Body.Close()
+}
+
+// TestBearerKeyOnlyReachesInstallOnModelRoutes is the least-privilege pin for
+// delegated placement (ADR 0013). A head Spark holding this machine's API key
+// may ask it to install a model, because that is what its owner asked for on
+// the other console. It may not start, stop, benchmark, smoke-test or remove
+// anything, so a key that leaks never becomes control of what this Spark is
+// serving right now, and it may not touch keys or peers at all.
+func TestBearerKeyOnlyReachesInstallOnModelRoutes(t *testing.T) {
+	server, cookies, csrf, secret := newAPIKey(t)
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := singleSpark(recipes).ID
+	bearer := map[string]string{"Authorization": "Bearer " + secret, "Idempotency-Key": "delegated-install"}
+
+	// Install the model with a console session first, so the lifecycle
+	// subactions below fail on authentication rather than on "not installed".
+	installed := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+target+"/install", `{"confirmed":true,"accept_licence":true}`,
+		cookies, map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf, "Idempotency-Key": "console-install"})
+	if installed.StatusCode != http.StatusAccepted {
+		data, _ := io.ReadAll(installed.Body)
+		t.Fatalf("console install status=%d body=%s", installed.StatusCode, data)
+	}
+	var createdJob struct {
+		Job store.Job `json:"job"`
+	}
+	if err := json.NewDecoder(installed.Body).Decode(&createdJob); err != nil {
+		t.Fatal(err)
+	}
+	installed.Body.Close()
+	waitAPIJob(t, server.URL, createdJob.Job.ID, cookies, "ready")
+
+	// The one thing a key may do. No CSRF token and no Origin header are
+	// sent: a bearer header is never ambient, so CSRF does not apply.
+	delegated := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+target+"/install", `{"confirmed":true,"accept_licence":true}`, nil, bearer)
+	body, _ := io.ReadAll(delegated.Body)
+	delegated.Body.Close()
+	if delegated.StatusCode != http.StatusAccepted && delegated.StatusCode != http.StatusOK {
+		t.Fatalf("delegated install status=%d body=%s", delegated.StatusCode, body)
+	}
+
+	// The model subactions must be refused by withModelAuth itself, before
+	// modelAction is ever entered, which is what 401 (rather than 403) pins
+	// here: the wrapper is the lock, not a check further down the handler.
+	// The keys and peers routes were already console-only and answer with
+	// their own existing status, so they are allowed either.
+	refused := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		want   []int
+	}{
+		{"start", http.MethodPost, "/api/v1/models/" + target + "/start", "{}", []int{http.StatusUnauthorized}},
+		{"stop", http.MethodPost, "/api/v1/models/" + target + "/stop", "{}", []int{http.StatusUnauthorized}},
+		{"smoke-test", http.MethodPost, "/api/v1/models/" + target + "/smoke-test", "{}", []int{http.StatusUnauthorized}},
+		{"benchmark", http.MethodPost, "/api/v1/models/" + target + "/benchmark", "{}", []int{http.StatusUnauthorized}},
+		{"remove", http.MethodDelete, "/api/v1/models/" + target, `{"remove_artifacts":false,"expected_reclaim_bytes":0}`, []int{http.StatusUnauthorized}},
+		{"install with a trailing segment", http.MethodPost, "/api/v1/models/" + target + "/install/start", "{}", []int{http.StatusUnauthorized}},
+		{"create key", http.MethodPost, "/api/v1/keys", `{"name":"escalate"}`, []int{http.StatusUnauthorized, http.StatusForbidden}},
+		{"list keys", http.MethodGet, "/api/v1/keys", "", []int{http.StatusUnauthorized, http.StatusForbidden}},
+		{"create peer", http.MethodPost, "/api/v1/peers", `{"name":"x","base_url":"http://127.0.0.1:1","api_key":"y"}`, []int{http.StatusUnauthorized, http.StatusForbidden}},
+		{"list peers", http.MethodGet, "/api/v1/peers", "", []int{http.StatusUnauthorized, http.StatusForbidden}},
+		{"delete peer", http.MethodDelete, "/api/v1/peers/anything", "", []int{http.StatusUnauthorized, http.StatusForbidden}},
+	}
+	for _, testCase := range refused {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := doRequest(t, testCase.method, server.URL+testCase.path, testCase.body, nil, bearer)
+			data, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			accepted := false
+			for _, status := range testCase.want {
+				accepted = accepted || response.StatusCode == status
+			}
+			if !accepted {
+				t.Fatalf("%s with API key status=%d, want one of %v: body=%s", testCase.name, response.StatusCode, testCase.want, data)
+			}
+		})
+	}
+
+	// A console session with no CSRF token is still refused on install: the
+	// delegated path must not have become a way around CSRF for cookies.
+	noCSRF := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+target+"/install", `{"confirmed":true,"accept_licence":true}`,
+		cookies, map[string]string{"Origin": server.URL, "Idempotency-Key": "no-csrf"})
+	noCSRF.Body.Close()
+	if noCSRF.StatusCode != http.StatusForbidden {
+		t.Fatalf("cookie install without CSRF status=%d, want 403", noCSRF.StatusCode)
+	}
+
+	// A console session still drives everything, so the least-privilege rule
+	// narrowed the key and not the console.
+	console := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf, "Idempotency-Key": "console-stop"}
+	stopped := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+target+"/stop", "{}", cookies, console)
+	stoppedBody, _ := io.ReadAll(stopped.Body)
+	stopped.Body.Close()
+	if stopped.StatusCode != http.StatusAccepted {
+		t.Fatalf("console stop status=%d body=%s", stopped.StatusCode, stoppedBody)
+	}
+}
+
+// TestModelInstallRequestClassifier pins the predicate both locks in the
+// least-privilege rule are built on: withModelAuth uses it to decide whether
+// a bearer key is admitted at all, and modelAction uses it again before
+// acting on a request that arrived marked as delegated. Anything it
+// misclassifies as an install becomes reachable with a key alone.
+func TestModelInstallRequestClassifier(t *testing.T) {
+	cases := []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		{http.MethodPost, "/api/v1/models/qwen36-27b-nvfp4-1s/install", true},
+		{http.MethodPost, "/api/v1/models/qwen36-27b-nvfp4-1s/start", false},
+		{http.MethodPost, "/api/v1/models/qwen36-27b-nvfp4-1s/stop", false},
+		{http.MethodPost, "/api/v1/models/qwen36-27b-nvfp4-1s/smoke-test", false},
+		{http.MethodPost, "/api/v1/models/qwen36-27b-nvfp4-1s/benchmark", false},
+		{http.MethodDelete, "/api/v1/models/qwen36-27b-nvfp4-1s", false},
+		{http.MethodDelete, "/api/v1/models/qwen36-27b-nvfp4-1s/install", false},
+		{http.MethodGet, "/api/v1/models/qwen36-27b-nvfp4-1s/install", false},
+		{http.MethodPost, "/api/v1/models/qwen36-27b-nvfp4-1s/install/start", false},
+		{http.MethodPost, "/api/v1/models/qwen36-27b-nvfp4-1s/install/../start", false},
+		{http.MethodPost, "/api/v1/models//install", false},
+		{http.MethodPost, "/api/v1/models/install", false},
+		{http.MethodPost, "/api/v1/models/", false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.method+" "+testCase.path, func(t *testing.T) {
+			request := httptest.NewRequest(testCase.method, testCase.path, strings.NewReader("{}"))
+			if got := isModelInstallRequest(request); got != testCase.want {
+				t.Fatalf("isModelInstallRequest=%v want=%v", got, testCase.want)
+			}
+		})
+	}
 }
 
 // TestFetchPeerJSONRejectsNonAllowlistedPath is the acceptance test for the
@@ -570,6 +719,255 @@ func TestFetchPeerJSONRejectsNonAllowlistedPath(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("allowlisted path never reached the peer")
+	}
+}
+
+// delegatePeer stands in for the manager on the receiving end of a placement.
+// It answers the two endpoints a head delegates to and records exactly what
+// arrived, so the tests can assert the head forwarded the caller's intent
+// rather than inventing one of its own.
+type delegatePeer struct {
+	*httptest.Server
+	mu             sync.Mutex
+	authorization  string
+	idempotencyKey string
+	installBody    string
+	installPath    string
+	preflightQuery string
+	installStatus  int
+}
+
+func newDelegatePeer(t *testing.T, wantKey string) *delegatePeer {
+	t.Helper()
+	peer := &delegatePeer{installStatus: http.StatusAccepted}
+	mux := http.NewServeMux()
+	authed := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			peer.mu.Lock()
+			peer.authorization = r.Header.Get("Authorization")
+			peer.mu.Unlock()
+			if r.Header.Get("Authorization") != "Bearer "+wantKey {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+				return
+			}
+			next(w, r)
+		}
+	}
+	mux.HandleFunc("/api/v1/system", authed(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"hostname": "peer-host"})
+	}))
+	mux.HandleFunc("/api/v1/preflight", authed(func(w http.ResponseWriter, r *http.Request) {
+		peer.mu.Lock()
+		peer.preflightQuery = r.URL.RawQuery
+		peer.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"recipe_id": r.URL.Query().Get("recipe_id"), "ready": true, "licence_accepted": false})
+	}))
+	mux.HandleFunc("/api/v1/models/", authed(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		peer.mu.Lock()
+		peer.installPath, peer.installBody = r.URL.Path, string(data)
+		peer.idempotencyKey = r.Header.Get("Idempotency-Key")
+		status := peer.installStatus
+		peer.mu.Unlock()
+		if status != http.StatusAccepted {
+			writeJSON(w, status, map[string]any{"error": "preflight failed without mutating runtime state"})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"job": map[string]any{"id": "peer-job-1", "state": "pending"}, "created": true})
+	}))
+	peer.Server = httptest.NewServer(mux)
+	t.Cleanup(peer.Close)
+	return peer
+}
+
+// registerPeer saves a peer on the head, which also proves it is reachable.
+func registerPeer(t *testing.T, server *httptest.Server, cookies []*http.Cookie, csrf, baseURL, key string) string {
+	t.Helper()
+	created := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers", `{"name":"edgexpert-alpha","base_url":"`+baseURL+`","api_key":"`+key+`"}`,
+		cookies, map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf})
+	data, _ := io.ReadAll(created.Body)
+	created.Body.Close()
+	if created.StatusCode != http.StatusCreated {
+		t.Fatalf("peer create status=%d body=%s", created.StatusCode, data)
+	}
+	var peerView struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &peerView); err != nil {
+		t.Fatal(err)
+	}
+	return peerView.ID
+}
+
+// TestDelegatedPlacementProxy covers the head's side of ADR 0013: it is a
+// remote control, so it forwards the question and relays the peer's own
+// answer, status code included, without deciding anything about the peer's
+// machine itself.
+func TestDelegatedPlacementProxy(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := singleSpark(recipes).ID
+	peer := newDelegatePeer(t, "rosk_peerkey")
+	peerID := registerPeer(t, server, cookies, csrf, peer.URL, "rosk_peerkey")
+	mutating := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf, "Idempotency-Key": "place-on-peer"}
+
+	// Preflight is answered by the peer about the peer.
+	preflight := doRequest(t, http.MethodGet, server.URL+"/api/v1/peers/"+peerID+"/preflight?recipe_id="+target, "", cookies, nil)
+	preflightBody, _ := io.ReadAll(preflight.Body)
+	preflight.Body.Close()
+	if preflight.StatusCode != http.StatusOK {
+		t.Fatalf("peer preflight status=%d body=%s", preflight.StatusCode, preflightBody)
+	}
+	var preflightResult struct {
+		RecipeID string `json:"recipe_id"`
+		Ready    bool   `json:"ready"`
+	}
+	if err := json.Unmarshal(preflightBody, &preflightResult); err != nil {
+		t.Fatal(err)
+	}
+	if preflightResult.RecipeID != target || !preflightResult.Ready {
+		t.Fatalf("peer preflight was not relayed: %s", preflightBody)
+	}
+	peer.mu.Lock()
+	gotQuery, gotAuth := peer.preflightQuery, peer.authorization
+	peer.mu.Unlock()
+	if gotQuery != "recipe_id="+target {
+		t.Fatalf("peer saw preflight query %q", gotQuery)
+	}
+	if gotAuth != "Bearer rosk_peerkey" {
+		t.Fatalf("peer saw authorization %q, want the stored key", gotAuth)
+	}
+
+	// Install forwards the body and the caller's idempotency key, and the
+	// peer's job comes back untouched.
+	installed := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers/"+peerID+"/models/"+target+"/install",
+		`{"confirmed":true,"accept_licence":true,"activate":false}`, cookies, mutating)
+	installedBody, _ := io.ReadAll(installed.Body)
+	installed.Body.Close()
+	if installed.StatusCode != http.StatusAccepted {
+		t.Fatalf("delegated install status=%d body=%s", installed.StatusCode, installedBody)
+	}
+	if !bytes.Contains(installedBody, []byte("peer-job-1")) {
+		t.Fatalf("the peer's job was not relayed: %s", installedBody)
+	}
+	peer.mu.Lock()
+	gotPath, gotBody, gotKey := peer.installPath, peer.installBody, peer.idempotencyKey
+	peer.mu.Unlock()
+	if gotPath != "/api/v1/models/"+target+"/install" {
+		t.Fatalf("peer saw install path %q", gotPath)
+	}
+	if gotKey != "place-on-peer" {
+		t.Fatalf("peer saw Idempotency-Key %q, want the caller's", gotKey)
+	}
+	var forwarded struct {
+		Confirmed     bool  `json:"confirmed"`
+		AcceptLicence bool  `json:"accept_licence"`
+		Activate      *bool `json:"activate"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &forwarded); err != nil {
+		t.Fatalf("peer saw an unreadable body %q: %v", gotBody, err)
+	}
+	if !forwarded.Confirmed || !forwarded.AcceptLicence || forwarded.Activate == nil || *forwarded.Activate {
+		t.Fatalf("install intent was not forwarded faithfully: %s", gotBody)
+	}
+
+	// A refusal from the peer is the peer's to make, and reaches the console
+	// with the peer's own status code.
+	peer.mu.Lock()
+	peer.installStatus = http.StatusConflict
+	peer.mu.Unlock()
+	refused := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers/"+peerID+"/models/"+target+"/install",
+		`{"confirmed":true,"accept_licence":true}`, cookies, mutating)
+	refused.Body.Close()
+	if refused.StatusCode != http.StatusConflict {
+		t.Fatalf("peer refusal status=%d, want the peer's own 409", refused.StatusCode)
+	}
+
+	// Every other guard on the head side.
+	distributed := distributedRecipe(recipes).ID
+	unknownPeer := "peer-that-does-not-exist"
+	cases := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		headers map[string]string
+		want    int
+	}{
+		{"two-Spark install refused", http.MethodPost, "/api/v1/peers/" + peerID + "/models/" + distributed + "/install", `{"confirmed":true}`, mutating, http.StatusBadRequest},
+		{"two-Spark preflight refused", http.MethodGet, "/api/v1/peers/" + peerID + "/preflight?recipe_id=" + distributed, "", nil, http.StatusBadRequest},
+		{"unknown recipe refused", http.MethodPost, "/api/v1/peers/" + peerID + "/models/not-a-recipe/install", `{"confirmed":true}`, mutating, http.StatusBadRequest},
+		{"install without CSRF refused", http.MethodPost, "/api/v1/peers/" + peerID + "/models/" + target + "/install", `{"confirmed":true}`, map[string]string{"Origin": server.URL, "Idempotency-Key": "no-csrf"}, http.StatusForbidden},
+		{"unknown peer", http.MethodGet, "/api/v1/peers/" + unknownPeer + "/preflight?recipe_id=" + target, "", nil, http.StatusNotFound},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := doRequest(t, testCase.method, server.URL+testCase.path, testCase.body, cookies, testCase.headers)
+			data, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			if response.StatusCode != testCase.want {
+				t.Fatalf("status=%d want=%d body=%s", response.StatusCode, testCase.want, data)
+			}
+			if !bytes.Contains(data, []byte(`"error"`)) {
+				t.Fatalf("refusal carried no error message: %s", data)
+			}
+		})
+	}
+
+	// Unauthenticated callers never reach the peer at all.
+	for _, path := range []string{"/api/v1/peers/" + peerID + "/preflight?recipe_id=" + target, "/api/v1/peers/" + peerID + "/models/" + target + "/install"} {
+		response := doRequest(t, http.MethodPost, server.URL+path, `{"confirmed":true}`, nil, map[string]string{"Origin": server.URL})
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated %s status=%d, want 401", path, response.StatusCode)
+		}
+	}
+}
+
+// TestDelegatedPlacementReportsUnreachablePeer pins the one answer the head
+// speaks for itself: the network between the two machines.
+func TestDelegatedPlacementReportsUnreachablePeer(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := singleSpark(recipes).ID
+	peer := newDelegatePeer(t, "rosk_peerkey")
+	peerID := registerPeer(t, server, cookies, csrf, peer.URL, "rosk_peerkey")
+	peer.Close()
+
+	cases := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		headers map[string]string
+	}{
+		{"preflight", http.MethodGet, "/api/v1/peers/" + peerID + "/preflight?recipe_id=" + target, "", nil},
+		{"install", http.MethodPost, "/api/v1/peers/" + peerID + "/models/" + target + "/install", `{"confirmed":true,"accept_licence":true}`,
+			map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf, "Idempotency-Key": "unreachable"}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := doRequest(t, testCase.method, server.URL+testCase.path, testCase.body, cookies, testCase.headers)
+			var failure struct {
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&failure); err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status=%d, want 502", response.StatusCode)
+			}
+			if !strings.Contains(failure.Error, "could not reach that Spark") {
+				t.Fatalf("unhelpful error for a down peer: %q", failure.Error)
+			}
+		})
 	}
 }
 
@@ -689,6 +1087,17 @@ func TestRuntimeMetricsSamplerIsKindAware(t *testing.T) {
 func singleSpark(recipes []recipe.Recipe) recipe.Recipe {
 	for _, r := range recipes {
 		if !r.Distributed() {
+			return r
+		}
+	}
+	return recipe.Recipe{}
+}
+
+// distributedRecipe returns the first shipped two-Spark recipe, which is
+// never a candidate for delegation to one machine.
+func distributedRecipe(recipes []recipe.Recipe) recipe.Recipe {
+	for _, r := range recipes {
+		if r.Distributed() {
 			return r
 		}
 	}
