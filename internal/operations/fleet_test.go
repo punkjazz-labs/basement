@@ -202,15 +202,20 @@ func TestFleetExecutorRoutesAndNamesEveryStep(t *testing.T) {
 	fleet.localAddress = func(string) (string, error) { return "169.254.10.1", nil }
 	fleet.hostname = func() string { return "spark-a" }
 
-	head, worker, err := fleet.Placements(context.Background(), r)
+	deployment, err := fleet.Plan(context.Background(), r)
 	if err != nil {
 		t.Fatal(err)
 	}
+	head, worker := deployment.Head, deployment.Worker
 	if head.MasterAddress != "169.254.10.1" || worker.MasterAddress != "169.254.10.1" || worker.NodeName != "spark-b" || worker.Rank() != 1 {
 		t.Fatalf("placements are wrong: %#v %#v", head, worker)
 	}
+	if deployment.Peer.ID != "peer_1" || deployment.Peer.APIKey != "worker-key" {
+		t.Fatalf("the peer was not pinned when the job was planned: %#v", deployment.Peer)
+	}
+	pinned := deployment.Peer
 
-	receipt, err := fleet.Execute(context.Background(), Execution{Placement: worker}, recipe.Operation{Type: VerifyPeerNode}, r, nil)
+	receipt, err := fleet.Execute(context.Background(), Execution{Placement: worker, Peer: &pinned}, recipe.Operation{Type: VerifyPeerNode}, r, nil)
 	if err != nil {
 		t.Fatalf("peer preflight: %v", err)
 	}
@@ -218,7 +223,7 @@ func TestFleetExecutorRoutesAndNamesEveryStep(t *testing.T) {
 		t.Fatalf("peer preflight receipt does not name the node: %#v", receipt)
 	}
 
-	receipt, err = fleet.Execute(context.Background(), Execution{Placement: worker}, recipe.Operation{Type: "pull_image"}, r, nil)
+	receipt, err = fleet.Execute(context.Background(), Execution{Placement: worker, Peer: &pinned}, recipe.Operation{Type: "pull_image"}, r, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +242,7 @@ func TestFleetExecutorRoutesAndNamesEveryStep(t *testing.T) {
 		t.Fatalf("head step did not run locally and name its node: %#v %v", receipt, local.calls)
 	}
 
-	if _, err := fleet.Execute(context.Background(), Execution{Placement: worker}, recipe.Operation{Type: "start_container"}, r, nil); err == nil || !strings.Contains(err.Error(), "exited during startup") {
+	if _, err := fleet.Execute(context.Background(), Execution{Placement: worker, Peer: &pinned}, recipe.Operation{Type: "start_container"}, r, nil); err == nil || !strings.Contains(err.Error(), "exited during startup") {
 		t.Fatalf("a failed worker step must surface its reason, got %v", err)
 	}
 }
@@ -250,9 +255,9 @@ func TestFleetExecutorLeavesSingleSparkWorkAlone(t *testing.T) {
 		t.Fatal("a single-Spark recipe must never consult a peer")
 		return PeerTarget{}, nil
 	}))
-	head, worker, err := fleet.Placements(context.Background(), single)
-	if err != nil || head.Distributed() || worker.Distributed() {
-		t.Fatalf("single-Spark placements: %#v %#v %v", head, worker, err)
+	deployment, err := fleet.Plan(context.Background(), single)
+	if err != nil || deployment.Distributed() {
+		t.Fatalf("single-Spark deployment: %#v %v", deployment, err)
 	}
 	receipt, err := fleet.Execute(context.Background(), Execution{}, recipe.Operation{Type: "pull_image"}, single, nil)
 	if err != nil {
@@ -268,7 +273,7 @@ func TestPlacementsRefuseWhenNoWorkerIsConfigured(t *testing.T) {
 	fleet := NewFleetExecutor(&recordingExecutor{}, NewPeerClient(func(context.Context) (PeerTarget, error) {
 		return PeerTarget{}, errors.New("add the other Spark under Fleet first")
 	}))
-	if _, _, err := fleet.Placements(context.Background(), r); err == nil || !strings.Contains(err.Error(), "Fleet first") {
+	if _, err := fleet.Plan(context.Background(), r); err == nil || !strings.Contains(err.Error(), "Fleet first") {
 		t.Fatalf("got %v, want a refusal naming the missing peer", err)
 	}
 }

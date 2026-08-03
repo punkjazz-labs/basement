@@ -25,8 +25,21 @@ const VerifyPeerNode = "verify_peer_node"
 // Spark. The engine asks for it only when a recipe is distributed, so a
 // manager wired with a single-node executor keeps working unchanged.
 type Fleet interface {
-	Placements(ctx context.Context, r recipe.Recipe) (Placement, Placement, error)
+	Plan(ctx context.Context, r recipe.Recipe) (Deployment, error)
 }
+
+// Deployment is the set of nodes one model runs on, resolved once when a job
+// is planned. Peer is pinned for the whole job on purpose: re-resolving the
+// worker per step would send a later teardown to whatever peer happens to be
+// configured by then rather than to the machine this job actually started a
+// rank on.
+type Deployment struct {
+	Head   Placement
+	Worker Placement
+	Peer   PeerTarget
+}
+
+func (d Deployment) Distributed() bool { return d.Head.Distributed() }
 
 // PeerTarget is the one configured worker Spark: where it is and the API key
 // this manager authenticates to it with. The key is never put in a receipt.
@@ -44,7 +57,7 @@ type PeerDirectory func(ctx context.Context) (PeerTarget, error)
 // PeerRunner runs work on the worker Spark through its manager's API.
 type PeerRunner interface {
 	Target(ctx context.Context) (PeerTarget, error)
-	Preflight(ctx context.Context, target PeerTarget, r recipe.Recipe) (map[string]any, error)
+	Preflight(ctx context.Context, target PeerTarget, execution Execution, r recipe.Recipe) (map[string]any, error)
 	Step(ctx context.Context, target PeerTarget, execution Execution, op recipe.Operation, r recipe.Recipe) (map[string]any, error)
 }
 
@@ -99,28 +112,36 @@ func FabricAddress(name string) (string, error) {
 	return "", fmt.Errorf("interconnect interface %s has no IPv4 address, so the other Spark has nothing to connect to", name)
 }
 
-// Placements describes both nodes of a distributed serve. A single-node
-// recipe gets two zero placements, which every step then treats as local.
-func (f *FleetExecutor) Placements(ctx context.Context, r recipe.Recipe) (Placement, Placement, error) {
+// Plan resolves both nodes of a distributed serve, and the peer they will be
+// driven through, once. A single-node recipe gets a zero deployment, which
+// every step then treats as local.
+func (f *FleetExecutor) Plan(ctx context.Context, r recipe.Recipe) (Deployment, error) {
 	if !r.Distributed() {
-		return Placement{}, Placement{}, nil
+		return Deployment{}, nil
 	}
 	if r.Topology.Interconnect == nil {
-		return Placement{}, Placement{}, errors.New("this recipe needs two Sparks but does not describe the interconnect")
+		return Deployment{}, errors.New("this recipe needs two Sparks but does not describe the interconnect")
 	}
 	target, err := f.peer.Target(ctx)
 	if err != nil {
-		return Placement{}, Placement{}, err
+		return Deployment{}, err
 	}
 	address, err := f.localAddress(r.Topology.SocketInterface())
 	if err != nil {
-		return Placement{}, Placement{}, err
+		return Deployment{}, err
 	}
 	port := r.Topology.Interconnect.MasterPort
-	head := Placement{Role: RoleHead, NodeName: f.hostname(), NodeCount: r.Topology.SparkCount, MasterAddress: address, MasterPort: port}
-	worker := Placement{Role: RoleWorker, NodeName: target.Name, NodeCount: r.Topology.SparkCount, MasterAddress: address, MasterPort: port}
-	return head, worker, nil
+	return Deployment{
+		Head:   Placement{Role: RoleHead, NodeName: f.hostname(), NodeCount: r.Topology.SparkCount, MasterAddress: address, MasterPort: port},
+		Worker: Placement{Role: RoleWorker, NodeName: target.Name, PeerID: target.ID, NodeCount: r.Topology.SparkCount, MasterAddress: address, MasterPort: port},
+		Peer:   target,
+	}, nil
 }
+
+// Local is the executor that runs work on this machine. A manager acting as
+// a worker must reach it: running a worker-placed step back through the
+// fleet executor would forward it to a peer again instead of executing it.
+func (f *FleetExecutor) Local() Executor { return f.local }
 
 func (f *FleetExecutor) ArtifactPath(r recipe.Recipe) string { return f.local.ArtifactPath(r) }
 
@@ -129,18 +150,14 @@ func (f *FleetExecutor) RuntimeImageBytes(ctx context.Context, r recipe.Recipe) 
 }
 
 func (f *FleetExecutor) Execute(ctx context.Context, execution Execution, op recipe.Operation, r recipe.Recipe, progress Progress) (map[string]any, error) {
-	if op.Type == VerifyPeerNode {
-		target, err := f.peer.Target(ctx)
+	if op.Type == VerifyPeerNode || execution.Placement.Role == RoleWorker {
+		target, err := pinnedPeer(execution)
 		if err != nil {
 			return nil, err
 		}
-		receipt, err := f.peer.Preflight(ctx, target, r)
-		return named(receipt, Placement{Role: RoleWorker, NodeName: target.Name, NodeCount: r.Topology.SparkCount}), err
-	}
-	if execution.Placement.Role == RoleWorker {
-		target, err := f.peer.Target(ctx)
-		if err != nil {
-			return nil, err
+		if op.Type == VerifyPeerNode {
+			receipt, err := f.peer.Preflight(ctx, target, execution, r)
+			return named(receipt, execution.Placement), err
 		}
 		receipt, err := f.peer.Step(ctx, target, execution, op, r)
 		return named(receipt, execution.Placement), err
@@ -158,6 +175,17 @@ func (f *FleetExecutor) Completed(ctx context.Context, execution Execution, op r
 		return false
 	}
 	return f.local.Completed(ctx, execution, op, r, receipt)
+}
+
+// pinnedPeer is the worker this job was planned against. A step that reaches
+// here without one would otherwise be free to act on whichever peer is
+// configured right now, which is not necessarily the machine holding the
+// rank this step is about.
+func pinnedPeer(execution Execution) (PeerTarget, error) {
+	if execution.Peer == nil || execution.Peer.BaseURL == "" {
+		return PeerTarget{}, errors.New("the other Spark was not pinned when this job was planned, so it cannot be acted on")
+	}
+	return *execution.Peer, nil
 }
 
 // named stamps the node a receipt came from. Distributed jobs write two
@@ -193,7 +221,7 @@ func NewPeerClient(directory PeerDirectory) *PeerClient {
 
 func (p *PeerClient) Target(ctx context.Context) (PeerTarget, error) { return p.directory(ctx) }
 
-func (p *PeerClient) Preflight(ctx context.Context, target PeerTarget, r recipe.Recipe) (map[string]any, error) {
+func (p *PeerClient) Preflight(ctx context.Context, target PeerTarget, execution Execution, r recipe.Recipe) (map[string]any, error) {
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	var response struct {
@@ -201,7 +229,7 @@ func (p *PeerClient) Preflight(ctx context.Context, target PeerTarget, r recipe.
 		Checks []map[string]any `json:"checks"`
 		Error  string           `json:"error"`
 	}
-	if err := p.post(callCtx, target, "/api/v1/internal/node/preflight", map[string]any{"recipe": r}, &response); err != nil {
+	if err := p.post(callCtx, target, "/api/v1/internal/node/preflight", map[string]any{"recipe": r, "job_id": execution.JobID}, &response); err != nil {
 		return nil, fmt.Errorf("the other Spark could not be asked to check itself: %w", err)
 	}
 	receipt := map[string]any{"peer": target.Name, "ready": response.Ready, "checks": response.Checks}
@@ -238,6 +266,7 @@ func (p *PeerClient) Step(ctx context.Context, target PeerTarget, execution Exec
 		"recipe":           r,
 		"placement":        execution.Placement,
 		"remove_artifacts": execution.RemoveArtifacts,
+		"job_id":           execution.JobID,
 	}
 	if err := p.post(ctx, target, "/api/v1/internal/node/step", body, &response); err != nil {
 		return nil, fmt.Errorf("%s on the other Spark failed: %w", op.Type, err)

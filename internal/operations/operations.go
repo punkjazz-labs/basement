@@ -23,6 +23,11 @@ type Execution struct {
 	// Placement names this step's node in a two-Spark serve. Its zero value
 	// means single-node serving, which is what every shipped recipe uses.
 	Placement Placement
+	// Peer is the worker Spark this job was planned against, pinned for the
+	// job's whole life so a later step (a teardown especially) can never act
+	// on a machine that was configured after the job started. It is nil for
+	// single-node work and is never serialized anywhere.
+	Peer *PeerTarget
 }
 
 // Node roles in a distributed serve. The head runs the job, serves HTTP and
@@ -35,8 +40,11 @@ const (
 // Placement is a node's part in a distributed serve: which rank it is, what
 // it is called in receipts, and where rank 0 listens for the other rank.
 type Placement struct {
-	Role          string `json:"role"`
-	NodeName      string `json:"node"`
+	Role     string `json:"role"`
+	NodeName string `json:"node"`
+	// PeerID identifies the worker this placement was resolved against. The
+	// credential never travels with it.
+	PeerID        string `json:"peer_id,omitempty"`
 	NodeCount     int    `json:"node_count"`
 	MasterAddress string `json:"master_address,omitempty"`
 	MasterPort    int    `json:"master_port,omitempty"`

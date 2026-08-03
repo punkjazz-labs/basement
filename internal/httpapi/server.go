@@ -62,6 +62,9 @@ type Server struct {
 	closing   chan struct{}
 	closeOnce sync.Once
 
+	// nodeLease admits one delegated two-Spark job at a time (see node.go).
+	nodeLease workerLease
+
 	updateMu      sync.Mutex
 	updateResult  map[string]any
 	updateFetched time.Time
