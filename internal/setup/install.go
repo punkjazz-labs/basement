@@ -364,9 +364,27 @@ func resolveListen(ctx context.Context, runner Runner, mode ListenMode) (string,
 		}
 		return address + ":7070", nil
 	case ListenLAN:
-		out, err := runner.Run(ctx, "hostname -I 2>/dev/null | awk '{ print $1 }'", nil)
+		// hostname -I lists addresses in interface enumeration order, and a
+		// cluster port with link but no DHCP puts its self-assigned 169.254
+		// address first (two cabled Sparks do exactly this). The default
+		// route's source address is the one the LAN actually reaches; a
+		// machine without a default route falls back to the first address
+		// that is not link-local.
+		out, _ := runner.Run(ctx, "ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \\([0-9.]*\\).*/\\1/p' | head -n1", nil)
 		address := strings.TrimSpace(out)
-		if err != nil || address == "" {
+		if address == "" {
+			out, err := runner.Run(ctx, "hostname -I 2>/dev/null", nil)
+			if err != nil {
+				return "", fmt.Errorf("could not determine the target's LAN address")
+			}
+			for _, field := range strings.Fields(out) {
+				if ip := net.ParseIP(field); ip != nil && ip.To4() != nil && !ip.IsLinkLocalUnicast() {
+					address = field
+					break
+				}
+			}
+		}
+		if address == "" {
 			return "", fmt.Errorf("could not determine the target's LAN address")
 		}
 		return address + ":7070", nil

@@ -159,6 +159,44 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 	}
 }
 
+// Two cabled Sparks put a self-assigned 169.254 cluster address first in
+// `hostname -I`; the LAN listen address must never be that. The default
+// route's source address wins, and without one the first non-link-local
+// address does.
+func TestInstallLANSkipsLinkLocalAddress(t *testing.T) {
+	route := newFakeRunner()
+	route.outputs["docker info"] = "nvidia runc \n"
+	route.outputs["route get"] = "192.168.99.148\n"
+	route.outputs["hostname -I"] = "169.254.205.1 192.168.99.148 100.64.0.15 \n"
+	route.outputs["pairing-token"] = "tok\n"
+	result, err := Install(context.Background(), route, LocalFileSource{Path: "/tmp/binary"}, Options{Listen: ListenLAN}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConsoleURL != "http://192.168.99.148:7070" {
+		t.Errorf("ConsoleURL = %q, want the default route's source address", result.ConsoleURL)
+	}
+
+	fallback := newFakeRunner()
+	fallback.outputs["docker info"] = "nvidia runc \n"
+	fallback.outputs["hostname -I"] = "169.254.205.1 192.168.99.148 100.64.0.15 \n"
+	fallback.outputs["pairing-token"] = "tok\n"
+	result, err = Install(context.Background(), fallback, LocalFileSource{Path: "/tmp/binary"}, Options{Listen: ListenLAN}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConsoleURL != "http://192.168.99.148:7070" {
+		t.Errorf("ConsoleURL = %q, want the first non-link-local address", result.ConsoleURL)
+	}
+
+	linkLocalOnly := newFakeRunner()
+	linkLocalOnly.outputs["docker info"] = "nvidia runc \n"
+	linkLocalOnly.outputs["hostname -I"] = "169.254.205.1 \n"
+	if _, err := Install(context.Background(), linkLocalOnly, LocalFileSource{Path: "/tmp/binary"}, Options{Listen: ListenLAN}, nil); err == nil {
+		t.Error("a machine with only a link-local address was given a LAN listen address")
+	}
+}
+
 // A fresh OEM machine with Docker but no registered NVIDIA runtime gets the
 // runtime configured during install.
 func TestInstallRegistersNvidiaRuntimeWhenMissing(t *testing.T) {

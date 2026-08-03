@@ -41,7 +41,13 @@ install -m 0644 "$unit_source" /etc/systemd/system/basement.service
 listen="${BASEMENT_LISTEN:-}"
 if [ -z "$listen" ] && [ -t 0 ]; then
   tailscale_ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
-  lan_ip=$(hostname -I 2>/dev/null | awk '{ print $1 }' || true)
+  # The default route's source address, not the first `hostname -I` field: a
+  # cluster port with link but no DHCP puts a self-assigned 169.254 address
+  # first. Keep in sync with resolveListen in internal/setup/install.go.
+  lan_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -n1 || true)
+  if [ -z "$lan_ip" ]; then
+    lan_ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^169\.254\.' | grep . | head -n1 || true)
+  fi
   echo
   echo "Where should the basement console be reachable?"
   echo "  1) This machine only (127.0.0.1) [default]"
