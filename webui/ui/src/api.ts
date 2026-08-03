@@ -39,8 +39,19 @@ export interface Recipe {
     secrets: string[]
     required_licence_acceptance: boolean
   }
-  service: { internal_port: number; default_host_port: number; served_model_id: string }
-  runtime: { start_timeout_minutes: number }
+  // Exactly one of vllm/sglang is present, named by runtime.kind. Only the
+  // settings a person would feel are declared here; the wire object carries
+  // the recipe's whole serving block.
+  service: {
+    internal_port: number
+    default_host_port: number
+    served_model_id: string
+    vllm?: { max_model_len?: number; tensor_parallel_size?: number }
+    sglang?: { context_length?: number; tensor_parallel_size?: number; quantization?: string }
+  }
+  // image and digest together are the pinned runtime reference, the same
+  // string /api/v1/storage reports for an image already pulled here.
+  runtime: { kind?: string; image?: string; digest?: string; start_timeout_minutes: number }
   memory_model?: MemoryModel
   artifact_bytes: number
   required_bytes: number
@@ -374,6 +385,69 @@ export const terminal = (state: string) => ['ready', 'failed', 'cancelled', 'sto
 export function startTimeoutMinutes(recipe?: Recipe): number {
   const minutes = recipe?.runtime.start_timeout_minutes
   return minutes && minutes > 0 ? minutes : 20
+}
+
+// UpdatePlan answers "what am I getting?" for a model that is already
+// installed at an older recipe version, using only facts this console can
+// actually check: the two version numbers, what /api/v1/storage reports is
+// on this disk right now, and what the new recipe pins.
+//
+// What it deliberately does NOT contain is a diff of serving settings. The
+// manager keeps a full recipe per (id, version) in memory
+// (recipefeed.Fetcher.all, read through recipe.FindVersion), but that
+// history only ever holds versions this build has seen: the embedded set of
+// the running binary, plus anything fetched from the signed index. An update
+// that arrives by upgrading basement itself replaces the embedded recipe, so
+// the version the user installed is genuinely gone and no honest
+// setting-by-setting comparison is possible. The dialog says what is known
+// and does not imply a changelog exists.
+export interface UpdatePlan {
+  from: number
+  to: number
+  // Null while /api/v1/storage has not answered yet: unknown, not "absent".
+  weightsPresent: boolean | null
+  bytesToFetch: number
+  imagePresent: boolean | null
+  contextLength?: number
+  sparkCount: number
+  runtimeKind?: string
+  quantization?: string
+}
+
+// An artifact directory is treated as complete at 99% of the recipe's
+// expected bytes, the same threshold the Models view uses to tell a kept
+// download from a partial one.
+const COMPLETE_FRACTION = 0.99
+
+export function updatePlan(installedVersion: number, target: Recipe, storage: StorageInfo | null): UpdatePlan {
+  const plan: UpdatePlan = {
+    from: installedVersion,
+    to: target.version,
+    weightsPresent: null,
+    bytesToFetch: 0,
+    imagePresent: null,
+    contextLength: target.service.vllm?.max_model_len ?? target.service.sglang?.context_length,
+    sparkCount: target.topology.spark_count,
+    runtimeKind: target.runtime.kind,
+    quantization: target.service.sglang?.quantization,
+  }
+  if (!storage) return plan
+  // Matched on repository AND revision, so weights left over from another
+  // version of the same recipe never count as this version's.
+  let complete = true
+  for (const artifact of target.artifacts) {
+    const onDisk = storage.artifacts.find(
+      entry => entry.repository === artifact.repository && entry.revision === artifact.revision,
+    )?.bytes ?? 0
+    if (onDisk < artifact.expected_bytes * COMPLETE_FRACTION) complete = false
+    plan.bytesToFetch += Math.max(artifact.expected_bytes - onDisk, 0)
+  }
+  plan.weightsPresent = complete
+  if (target.runtime.image && target.runtime.digest) {
+    const reference = `${target.runtime.image}@${target.runtime.digest}`
+    plan.imagePresent = storage.images.some(image => image.reference === reference)
+  }
+  return plan
 }
 
 export const stateCopy: Record<string, string> = {

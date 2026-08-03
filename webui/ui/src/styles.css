@@ -375,6 +375,14 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .dialog-result .v { margin-top: 3px; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 650; color: var(--ink); }
 .dialog-result .v small { font-size: 11.5px; font-weight: 550; color: var(--muted); }
 
+/* The update dialog's answer to "what am I getting?". It is a list rather
+   than the three-tile install summary because every line is a sentence about
+   this Spark, not a headline number. */
+.update-plan { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 13px 15px; display: grid; gap: 11px; }
+.update-plan .facts { grid-template-columns: 116px 1fr; row-gap: 8px; }
+.update-plan .facts dd { color: var(--ink); }
+.update-plan .faint { font-size: 11.5px; margin: 0; }
+
 .model-facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 0; }
 .model-facts > div { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 .model-facts dt { font-size: 10.5px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }

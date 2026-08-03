@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  api, idempotency, terminal, formatBytes, startTimeoutMinutes, modelStateWord, peerModelList,
+  api, idempotency, terminal, formatBytes, startTimeoutMinutes, modelStateWord, peerModelList, updatePlan,
   type InstalledModel, type Job, type Peer, type Preflight, type Recipe, type StorageInfo, type PeerSummary,
 } from '../api'
 import type { AppState } from '../App'
@@ -20,6 +20,10 @@ const REFERENCE_TPS: Record<string, number> = {
   'laguna-s-2-1-nvfp4-dflash-1s': 19.4,
 }
 const ORDER = ['qwen36-35b-a3b-nvfp4-1s', 'qwen36-27b-nvfp4-1s', 'laguna-s-2-1-nvfp4-dflash-1s']
+
+// How each runtime kind is written in a sentence. An unknown kind keeps the
+// recipe's own word rather than being renamed to something friendlier.
+const RUNTIME_NAME: Record<string, string> = { vllm: 'vLLM', sglang: 'SGLang' }
 
 interface ConfirmState {
   recipe: Recipe
@@ -478,10 +482,10 @@ export default function Models({
               <dd>{recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
               <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
               <dt>Recipe version</dt><dd>v{recipe.version}</dd>
-              {updateAvailable && (
+              {updateAvailable && model && (
                 <>
-                  <dt>Recipe</dt>
-                  <dd className="update-line">Recipe updated</dd>
+                  <dt>Update</dt>
+                  <dd className="update-line">v{model.recipe_version} installed, v{recipe.version} available</dd>
                 </>
               )}
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
@@ -603,6 +607,23 @@ export default function Models({
           const verb = verbFor(recipe, placement)
           const switchFrom = switchFromFor(placement)
           const licenceAlready = onPeer ? Boolean(peerPreflight?.licence_accepted) : licenceAccepted(recipe)
+          // An update has a version already installed on the target machine
+          // to name. Only this Spark's disk is readable from this console, so
+          // a delegated update states the versions and leaves that Spark's
+          // files to that Spark.
+          const installedVersion = onPeer
+            ? peerInstalled.get(recipe.id)?.recipe_version
+            : installed.get(recipe.id)?.recipe_version
+          const isUpdate = verb === 'Update' && installedVersion !== undefined
+          const plan = isUpdate && !onPeer ? updatePlan(installedVersion, recipe, storage) : null
+          const runtimeWord = plan?.runtimeKind ? RUNTIME_NAME[plan.runtimeKind] ?? plan.runtimeKind : 'container'
+          // Nothing is fetched only when this Spark already has both the
+          // weights and the runtime image this version pins. Anything less
+          // than both, and the install does download something.
+          const nothingToFetch = plan?.weightsPresent === true && plan?.imagePresent === true
+          const weightsFormat =
+            recipe.service.sglang?.quantization ??
+            (recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant : undefined)
           const reclaim = shown ? reclaimFrom(shown) : undefined
           const close = () => dialogRef.current?.close()
           const foot = (confirmable: boolean) => (
@@ -615,7 +636,7 @@ export default function Models({
             <form method="dialog" className="dialog-pad" onSubmit={event => event.preventDefault()}>
               <div className="dialog-head">
                 <div>
-                  <p className="kicker">{verb === 'Install' ? 'Install model' : verb}</p>
+                  <p className="kicker">{verb === 'Install' ? 'Install model' : verb === 'Update' ? 'Update model' : verb}</p>
                   <h2>{recipe.display_name}</h2>
                 </div>
                 <button type="button" className="dialog-close" onClick={close} aria-label="Close">×</button>
@@ -665,18 +686,76 @@ export default function Models({
                 </>
               ) : shown && shown.ready ? (
                 <>
-                  <dl className="model-facts">
-                    <div>
-                      <dt>Download</dt>
-                      <dd>
-                        {verb === 'Resume install'
-                          ? `${formatBytes(Math.max(recipe.artifact_bytes - downloadedBytes(recipe), 0))} to go`
-                          : formatBytes(recipe.artifact_bytes)}
-                      </dd>
+                  {isUpdate ? (
+                    // Every line here is either a version number, something
+                    // this Spark reported about its own disk, or a setting
+                    // the new recipe pins. Nothing is a changelog, because
+                    // recipes carry no notes field and the recipe of the
+                    // installed version is not kept (see updatePlan).
+                    <div className="update-plan">
+                      <dl className="facts">
+                        <dt>Version</dt>
+                        <dd>v{installedVersion} → v{recipe.version}</dd>
+                        {plan ? (
+                          <>
+                            <dt>Weights</dt>
+                            <dd>
+                              {plan.weightsPresent === null
+                                ? 'Reading what is already on this Spark.'
+                                : plan.weightsPresent
+                                  ? 'This version pins the same weights that are already on this Spark. They are reused, so there is no large download.'
+                                  : `This version pins weights this Spark does not have yet. ${formatBytes(plan.bytesToFetch)} is downloaded.`}
+                            </dd>
+                            <dt>Runtime</dt>
+                            <dd>
+                              {plan.imagePresent === null
+                                ? `Pinned ${runtimeWord} image, by digest.`
+                                : plan.imagePresent
+                                  ? `The ${runtimeWord} image this version pins is already on this Spark.`
+                                  : `The ${runtimeWord} image this version pins is not on this Spark yet, so it is pulled.`}
+                            </dd>
+                          </>
+                        ) : (
+                          <>
+                            <dt>Files</dt>
+                            <dd>{machine} works out for itself which weights and which runtime image it already has.</dd>
+                          </>
+                        )}
+                        {plan?.contextLength ? (
+                          <>
+                            <dt>Context length</dt>
+                            <dd>{plan.contextLength.toLocaleString()} tokens</dd>
+                          </>
+                        ) : null}
+                        <dt>Runs on</dt>
+                        <dd>{recipe.topology.spark_count === 1 ? 'One Spark' : `${recipe.topology.spark_count} Sparks`}</dd>
+                        {weightsFormat ? (
+                          <>
+                            <dt>Weights format</dt>
+                            <dd>{weightsFormat}</dd>
+                          </>
+                        ) : null}
+                      </dl>
+                      <p className="faint">
+                        Basement does not keep the recipe of the version already installed, so it cannot list
+                        setting by setting what differs. These recipes carry no release notes, so there is no
+                        changelog to show.
+                      </p>
                     </div>
-                    <div><dt>Space needed</dt><dd>{formatBytes(recipe.required_bytes)}</dd></div>
-                    <div><dt>Typical speed</dt><dd>{REFERENCE_TPS[recipe.id] ? `~${REFERENCE_TPS[recipe.id]} tok/s` : 'n/a'}</dd></div>
-                  </dl>
+                  ) : (
+                    <dl className="model-facts">
+                      <div>
+                        <dt>Download</dt>
+                        <dd>
+                          {verb === 'Resume install'
+                            ? `${formatBytes(Math.max(recipe.artifact_bytes - downloadedBytes(recipe), 0))} to go`
+                            : formatBytes(recipe.artifact_bytes)}
+                        </dd>
+                      </div>
+                      <div><dt>Space needed</dt><dd>{formatBytes(recipe.required_bytes)}</dd></div>
+                      <div><dt>Typical speed</dt><dd>{REFERENCE_TPS[recipe.id] ? `~${REFERENCE_TPS[recipe.id]} tok/s` : 'n/a'}</dd></div>
+                    </dl>
+                  )}
                   {/* Read from whichever machine will run this, and only when
                       that machine actually reported both numbers. */}
                   {target && target.storage_available_bytes > 0 && target.memory_available_bytes > 0 && (
@@ -689,6 +768,12 @@ export default function Models({
                     <p className="muted" style={{ fontSize: 12.5 }}>
                       {machine} runs this install itself, so the live progress is on that Spark's own console.
                       The first start loads the model into memory and can take up to {startTimeoutMinutes(recipe)} minutes.
+                    </p>
+                  ) : nothingToFetch ? (
+                    <p className="muted" style={{ fontSize: 12.5 }}>
+                      Nothing is downloaded, so this goes straight to starting the model. Loading it into
+                      memory can take up to {startTimeoutMinutes(recipe)} minutes, with live progress the
+                      whole way, and later starts are much faster.
                     </p>
                   ) : (
                     <p className="muted" style={{ fontSize: 12.5 }}>
