@@ -42,9 +42,10 @@ Already in the catalog: Qwen 3.6 35B-A3B, Qwen 3.6 27B, Laguna S 2.1 + DFlash.
   uses custom code (CRADIO v4-H + Parakeet encoders, trust_remote_code) and is
   not confirmed as a stock vLLM multimodal path. Qualify text-only first.
 
-## Hold
+## Skip
 
 ### 3. Ornith-1.0-35B (DeepReinforce AI, Qwen3.5-MoE family)
+the owner (2026-08-03): skip; unfamiliar name, no pull. Data kept for reference.
 - Base artifact real: `deepreinforce-ai/Ornith-1.0-35B`, rev `5df2ed3f`,
   70,250,400,102 bytes BF16 safetensors; card documents vLLM ≥ 0.19.1.
 - Blockers: (a) MIT tag but the LICENSE file 404s in the base repo — trust
@@ -81,11 +82,67 @@ Already in the catalog: Qwen 3.6 35B-A3B, Qwen 3.6 27B, Laguna S 2.1 + DFlash.
   129,252,403,665 bytes — needs the 2-node cluster; measured ~31–32 tok/s decode
   with MTP at 262k ctx (forum 373163). Second 2s candidate after DeepSeek.
 
-## Strategic question raised by the sweep
+## Round 2 — 2026-08-03, X API sweep + deep verification
 
-The tweet's "one box" world is largely llama.cpp: both of its big-model
-single-Spark stories (DeepSeek 3-bit, StepFun IQ4) only exist there. Our
-runtime is vLLM-only. Options: (a) stay vLLM-pure and own the dual-Spark
-story for big models (consistent with the site's "two sparks" flagship);
-(b) add a llama.cpp runtime kind to the recipe schema later. Decision is
-the owner/the designer's; no work started.
+X recent-search (live API, ~last 72h) plus NVIDIA forum and HF verification.
+
+### Inkling-Small (Thinking Machines) — top new candidate, needs SGLang
+- The community event of the window: sgl_project announced official support
+  on 2x DGX Spark over ConnectX-7 (X, 2026-08-01, 83 likes). MiaAI Lab recipe
+  thread: ~34 tok/s single stream with dspark drafts, ~79 tok/s at 6 concurrent
+  (X, 2026-08-02, 121 likes). A vLLM path was also demonstrated by @Reederey:
+  21.4 tok/s C1 / ~94 tok/s C8, full 1M KV pool on 2x Spark, vLLM 0.26 with
+  two kernel bugs fixed (X, 2026-07-31/08-01).
+- Artifact verified: `thinkingmachines/Inkling-Small-NVFP4`, rev `b6a99534`,
+  170,764,923,366 bytes → strictly 2 Sparks. Apache-2.0, licence link fetched
+  live. Base `thinkingmachines/Inkling-Small`: 276B total / 12B active prose
+  (safetensors sum ~266B, discrepancy noted), 1,048,576 ctx confirmed in
+  config, natively multimodal (text+image+audio in). Draft model
+  `RadixArk/Inkling-Small-DSpark-Preview`, rev `fcc210dc`, 1,799,831,426 bytes.
+- The repo the owner linked (`MiaAI-Lab/Inkling-Small-NVFP4-Dual-DGX-Sparks`) is
+  a 6-star shell wrapper (created 2026-07-30) around
+  `drowzeys/keys-1M-CTX-…-SGlang-SM121-optimized` and the image
+  `ghcr.io/drowzeys/inkling-sglang-gb10:kvquant`. Its 1M-context claim is
+  disputed: forum testers report BF16-only KV capping usable context at
+  ~262-300K on 2x Spark. Qualify with skepticism; consider the vLLM path too.
+- vLLM's official Inkling recipe page does NOT list GB10 at all. On Spark,
+  SGLang is the documented path today.
+
+### ds4 / DwarfStar (antirez) — the single-Spark DeepSeek story
+- Salvatore Sanfilippo's native C inference engine, ~20k GitHub stars in days,
+  purpose-built for DeepSeek V4 Flash/Pro. Metal/CUDA/ROCm, GGUF mixed quants,
+  DFlash speculative decoding, OpenAI-compatible serve.
+- On one Spark: ~27 tok/s with DSpark drafts (@WescheNex1q measured 1x ds4
+  27.19 vs 2x vLLM NVFP4 67.58 on the same prompt); 14.7h/971-request soak
+  test clean (@MichaelGannotti); SparkBench quality 92.0 for the 1-Spark ds4
+  GGUF stack vs 87.6 for 2-Spark NVFP4 (@WescheNex1q) — quant mix beat NVFP4.
+- Implication: the best single-Spark DeepSeek experience is currently outside
+  both vLLM and stock llama.cpp. Watch item for a future runtime kind.
+
+### Watch: Qwen 3.8 (announced 2026-08-03, weights not yet out)
+- Qwen3.8-Max announced (2.4T MoE); open weights stated "next week", and
+  Qwen3.8-27B open weights announced alongside. The Spark community is
+  already planning around the 27B ("DGX Spark's best partner alongside
+  DeepSeek"). Revisit within days; likely replaces/joins Qwen 3.6 27B in
+  the catalog when weights land.
+
+### Other real traction in the window
+- MiniMax H3: text-to-video 33B + Qwen3-VL encoder running on ONE Spark
+  (pinned vLLM Omni build, SM121 workarounds). Different product surface
+  (video), notable for the movement narrative.
+- Gemma 4 31B: won a 29-case 30-stack comparison on a GX10 (@KI_Vater);
+  another user daily-drives it multimodal on one Spark.
+- GLM 5.2: active comparisons vs DeepSeek V4 Flash; `nvidia/GLM-5.2-NVFP4`
+  exists; dual-Spark llama.cpp RPC experiment ran IQ1_S at ~8 tok/s (toy).
+- Kimi K3: HF trending #1 but needs 8-24 GB10 nodes; not our market segment.
+- DeepSeek V4 Flash 0731 confirmed newest DeepSeek (HF author listing checked
+  live 2026-08-03; V4-Pro remains April preview). Param count reported as
+  284B in most sources, 304B in one; unreconciled.
+
+## Runtime direction (decided)
+
+the owner (2026-08-03): basement must run models independently of runtime,
+including SGLang. Design and phasing recorded in
+`docs/decisions/0011-multi-runtime-support.md`. The evidence above is the
+rationale: Inkling needs SGLang, single-Spark DeepSeek lives in ds4/llama.cpp
+territory, Qwen family is vLLM. No single runtime covers the frontier.
