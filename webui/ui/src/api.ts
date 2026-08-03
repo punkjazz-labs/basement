@@ -177,6 +177,34 @@ export interface PeerSummary {
   telemetry?: Telemetry
 }
 
+// The peer's installed models. The summary carries the peer's own
+// /api/v1/models body; the same list also rides inside its system payload,
+// so either read is the peer's own answer, never an inference.
+export const peerModelList = (summary?: PeerSummary | null): InstalledModel[] =>
+  summary?.models ?? summary?.system?.installed_models ?? []
+
+// The word a model's row shows for its own state, on this Spark or another.
+// Only statuses the manager actually stores are named; anything else is
+// shown as it arrived rather than guessed at.
+export function modelStateWord(model: InstalledModel): string {
+  if (model.active && model.status === 'ready') return 'Serving'
+  switch (model.status) {
+    case 'ready':
+    case 'stopped':
+      return 'Installed'
+    case 'starting':
+      return 'Starting'
+    case 'switching':
+      return 'Switching'
+    case 'recovering':
+      return 'Recovering'
+    case 'failed':
+      return 'Failed'
+    default:
+      return model.status
+  }
+}
+
 export interface UpdateInfo {
   current_version: string
   latest_version?: string

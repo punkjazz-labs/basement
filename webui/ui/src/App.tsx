@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   api, setCSRF, terminal, formatBytes,
-  type SystemInfo, type Recipe, type InstalledModel, type Job, type Telemetry, type UpdateInfo,
+  type SystemInfo, type Recipe, type InstalledModel, type Job, type Peer, type Telemetry, type UpdateInfo,
 } from './api'
 import Pairing from './views/Pairing'
 import Models from './views/Models'
@@ -32,10 +32,16 @@ export interface AppState {
   recipes: Recipe[]
   models: InstalledModel[]
   jobs: Job[]
+  // Every Spark added to the fleet. Models needs this as much as Fleet does:
+  // how many Sparks are available decides which recipes can be installed at
+  // all, and a paired Spark is a place a one-Spark model can run.
+  peers: Peer[]
   refresh: () => Promise<void>
   refreshModelsAndJobs: () => Promise<void>
+  refreshPeers: () => Promise<void>
   openDeployment: (jobID: string) => void
   openPlayground: () => void
+  openFleet: () => void
 }
 
 export default function App() {
@@ -45,6 +51,7 @@ export default function App() {
   const [recipes, setRecipes] = useState<Recipe[]>([])
   const [models, setModels] = useState<InstalledModel[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
+  const [peers, setPeers] = useState<Peer[]>([])
   const [connected, setConnected] = useState(true)
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null)
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
@@ -66,18 +73,25 @@ export default function App() {
     }
   }, [])
 
+  const refreshPeers = useCallback(async () => {
+    const next = await api<Peer[]>('/api/v1/peers')
+    setPeers(next)
+  }, [])
+
   const refresh = useCallback(async () => {
     try {
-      const [nextSystem, nextRecipes, nextModels, nextJobs] = await Promise.all([
+      const [nextSystem, nextRecipes, nextModels, nextJobs, nextPeers] = await Promise.all([
         api<SystemInfo>('/api/v1/system'),
         api<Recipe[]>('/api/v1/recipes'),
         api<InstalledModel[]>('/api/v1/models'),
         api<Job[]>('/api/v1/jobs'),
+        api<Peer[]>('/api/v1/peers'),
       ])
       setSystem(nextSystem)
       setRecipes(nextRecipes)
       setModels(nextModels)
       setJobs(nextJobs)
+      setPeers(nextPeers)
       setConnected(true)
     } catch {
       setConnected(false)
@@ -217,9 +231,10 @@ export default function App() {
   if (!authed) return <Pairing onPaired={() => setAuthed(true)} />
 
   const state: AppState = {
-    system, recipes, models, jobs, refresh, refreshModelsAndJobs,
+    system, recipes, models, jobs, peers, refresh, refreshModelsAndJobs, refreshPeers,
     openDeployment: id => setSelectedJobID(id),
     openPlayground: () => setTab('Playground'),
+    openFleet: () => setTab('Fleet'),
   }
   const selectedJob = jobs.find(job => job.id === selectedJobID) ?? null
 
