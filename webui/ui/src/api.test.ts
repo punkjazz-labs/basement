@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, OfflineError } from './api'
+import { api, ApiError, formatTokens, OfflineError } from './api'
 
 const jsonResponse = (body: unknown, init: { status?: number; ok?: boolean } = {}) => ({
   ok: init.ok ?? true,
@@ -47,5 +47,16 @@ describe('api', () => {
   it('returns the parsed body on success without touching either error path', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ok: true })))
     await expect(api('/api/v1/system')).resolves.toEqual({ ok: true })
+  })
+})
+
+describe('formatTokens', () => {
+  it('keeps small counts exact and shortens large ones', () => {
+    expect(formatTokens(0)).toBe('0')
+    expect(formatTokens(842)).toBe('842')
+    expect(formatTokens(1200)).toBe('1.2K')
+    expect(formatTokens(1_200_000)).toBe('1.2M')
+    expect(formatTokens(3_400_000_000)).toBe('3.4B')
+    expect(formatTokens(250_000_000)).toBe('250M')
   })
 })

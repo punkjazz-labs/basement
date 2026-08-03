@@ -343,3 +343,80 @@ func TestPeersSingletonMigratesAnOlderDatabase(t *testing.T) {
 		t.Errorf("the migrated database accepted a second peer: %v", err)
 	}
 }
+
+// A runtime's token counters restart with its container, and the manager's
+// own process restarts independently of both. Neither may lose a stretch of
+// usage or count one twice.
+func TestTokenUsageSurvivesRuntimeAndManagerRestarts(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordTokenSample(ctx, "qwen", 100, 40); err != nil {
+		t.Fatal(err)
+	}
+	// A rising counter contributes only what it rose by.
+	if err := s.RecordTokenSample(ctx, "qwen", 250, 90); err != nil {
+		t.Fatal(err)
+	}
+	// The serving container restarted: the counter is now below the last
+	// reading, so the whole of it is new usage.
+	if err := s.RecordTokenSample(ctx, "qwen", 30, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	// The manager restarted, the runtime did not: the counter carries on
+	// from where the last reading left it.
+	if err := s.RecordTokenSample(ctx, "qwen", 80, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordTokenSample(ctx, "nemotron", 7, 3); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := s.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 2 {
+		t.Fatalf("usage rows=%+v", usage)
+	}
+	if usage[0].RecipeID != "qwen" || usage[0].PromptTokens != 330 || usage[0].GenerationTokens != 115 {
+		t.Fatalf("qwen totals are wrong: %+v", usage[0])
+	}
+	if usage[1].RecipeID != "nemotron" || usage[1].PromptTokens != 7 || usage[1].GenerationTokens != 3 {
+		t.Fatalf("nemotron totals are wrong: %+v", usage[1])
+	}
+	if usage[0].FirstCountedAt == "" || usage[0].UpdatedAt == "" || usage[0].FirstCountedAt == usage[0].UpdatedAt {
+		t.Fatalf("first_counted_at was not held from the first reading: %+v", usage[0])
+	}
+}
+
+// A model nobody has served here yet has nothing to report, and reporting
+// zero would claim it served nothing, which is a different statement.
+func TestTokenUsageIsEmptyBeforeAnythingIsCounted(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.SetInstalled(ctx, InstalledModel{RecipeID: "qwen", RecipeVersion: 1, Status: "ready", ArtifactPath: "/managed/qwen"}); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := s.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 0 {
+		t.Fatalf("an installed model with no readings reported usage: %+v", usage)
+	}
+}

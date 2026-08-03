@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  api, idempotency, terminal, formatBytes, startTimeoutMinutes, modelStateWord, peerModelList, updatePlan,
+  api, idempotency, terminal, formatBytes, formatTokens, startTimeoutMinutes, modelStateWord, peerModelList, updatePlan,
   type InstalledModel, type Job, type Peer, type Preflight, type Recipe, type StorageInfo, type PeerSummary,
+  type TokenUsage,
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
@@ -52,6 +53,7 @@ export default function Models({
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState('')
   const [storage, setStorage] = useState<StorageInfo | null>(null)
+  const [tokens, setTokens] = useState<TokenUsage | null>(null)
   const [placement, setPlacement] = useState<Placement>('local')
   const [peerPreflight, setPeerPreflight] = useState<Preflight | null>(null)
   const [peerChecking, setPeerChecking] = useState(false)
@@ -69,6 +71,27 @@ export default function Models({
   useEffect(() => {
     api<StorageInfo>('/api/v1/storage').then(setStorage).catch(() => {})
   }, [jobs.length])
+
+  // Usage totals only move while a model serves, and the manager samples the
+  // runtime on its own slow tick, so this reads them at a similar pace
+  // rather than with every render.
+  useEffect(() => {
+    let cancelled = false
+    const read = () => {
+      if (document.hidden) return
+      api<TokenUsage>('/api/v1/tokens')
+        .then(next => {
+          if (!cancelled) setTokens(next)
+        })
+        .catch(() => {})
+    }
+    read()
+    const timer = setInterval(read, 30000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
 
   // The fleet holds one other Spark at most today. Everything this view says
   // about a peer names that one machine, so with any other number it says
@@ -116,6 +139,7 @@ export default function Models({
   }, [peerSummary]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const installed = useMemo(() => new Map(models.map(model => [model.recipe_id, model])), [models])
+  const usage = useMemo(() => new Map((tokens?.models ?? []).map(item => [item.recipe_id, item])), [tokens])
   const sorted = useMemo(() => sortCatalog(recipes), [recipes])
   const detected = system?.hardware_scope.detected_spark_count ?? 0
   // Every Spark this console can install on: the one it runs on, plus the
@@ -369,6 +393,10 @@ export default function Models({
     const dotClass = isActive || peerServing ? 'on' : busy || peerBusy ? 'busy' : ''
     const measured = model?.tokens_per_second
     const reference = REFERENCE_TPS[recipe.id]
+    // Counting happens only while basement serves the model on this Spark,
+    // so a model without a reading yet says so instead of showing zeros.
+    const served = usage.get(recipe.id)
+    const servedTotal = served ? served.prompt_tokens + served.generation_tokens : 0
     const updateAvailable = Boolean(model && model.recipe_version < recipe.version)
     const open = expanded === recipe.id
     const toggle = () => setExpanded(open ? '' : recipe.id)
@@ -469,6 +497,13 @@ export default function Models({
                 <div className="v">{model?.time_to_first_token_ms ? model.time_to_first_token_ms : 'n/a'} <small>ms</small></div>
               </div>
               <div className="cell">
+                <div className="l">Tokens served</div>
+                <div className="v" title={served ? servedTotal.toLocaleString() : undefined}>
+                  {served ? formatTokens(servedTotal) : 'n/a'}
+                </div>
+                <div className="q">{served ? 'since basement started counting' : 'no usage counted yet'}</div>
+              </div>
+              <div className="cell">
                 <div className="l">Download</div>
                 <div className="v">{formatBytes(recipe.artifact_bytes)}</div>
               </div>
@@ -488,6 +523,14 @@ export default function Models({
                 <>
                   <dt>Update</dt>
                   <dd className="update-line">v{model.recipe_version} installed, v{recipe.version} available</dd>
+                </>
+              )}
+              {served && (
+                <>
+                  <dt>Prompt tokens</dt>
+                  <dd title={served.prompt_tokens.toLocaleString()}>{formatTokens(served.prompt_tokens)}</dd>
+                  <dt>Generated tokens</dt>
+                  <dd title={served.generation_tokens.toLocaleString()}>{formatTokens(served.generation_tokens)}</dd>
                 </>
               )}
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
@@ -591,6 +634,28 @@ export default function Models({
           rows.map(rowFor)
         )}
       </div>
+      {/* Only shown once something has actually been counted. Basement
+          counts a model's tokens while it serves it here, so an empty total
+          means no serving has been sampled yet, not that nothing ran. */}
+      {tokens && tokens.totals.prompt_tokens + tokens.totals.generation_tokens > 0 && (
+        <div className="token-total">
+          <span
+            className="n"
+            title={(tokens.totals.prompt_tokens + tokens.totals.generation_tokens).toLocaleString()}
+          >
+            {formatTokens(tokens.totals.prompt_tokens + tokens.totals.generation_tokens)}
+          </span>
+          <span>
+            tokens served on this Spark since basement started counting
+            <small title={tokens.totals.prompt_tokens.toLocaleString()}>
+              {formatTokens(tokens.totals.prompt_tokens)} prompt
+            </small>
+            <small title={tokens.totals.generation_tokens.toLocaleString()}>
+              {formatTokens(tokens.totals.generation_tokens)} generated
+            </small>
+          </span>
+        </div>
+      )}
       <p className="table-note">
         Speeds marked “typical” are community-reported for a DGX Spark; basement measures the real number after install.
         Click a row for weights, revisions and licences.

@@ -44,6 +44,25 @@ type Engine struct {
 	// lets two concurrent installs see each other's claim on free space
 	// instead of each checking disk in isolation.
 	reserved map[string]int64
+	// tokenSampler is called just before a local container is stopped; see
+	// SetTokenSampler. Held atomically because it is installed after the
+	// engine may already be resuming interrupted jobs.
+	tokenSampler atomic.Pointer[TokenSampler]
+}
+
+// TokenSampler takes a reading of a model's runtime token counters.
+type TokenSampler func(ctx context.Context, r recipe.Recipe)
+
+// SetTokenSampler installs the hook the engine calls immediately before it
+// stops a container on this machine. The counters the sampler reads live
+// inside that container, so this is the last moment they can be read; with
+// no sampler installed, nothing is counted. Safe to call from any goroutine.
+func (e *Engine) SetTokenSampler(sample TokenSampler) { e.tokenSampler.Store(&sample) }
+
+func (e *Engine) sampleTokens(ctx context.Context, r recipe.Recipe) {
+	if sample := e.tokenSampler.Load(); sample != nil && *sample != nil {
+		(*sample)(ctx, r)
+	}
 }
 
 type RemovePayload struct {
@@ -422,6 +441,12 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		// Recomputed per step, not once for the whole job: a long download
 		// spans other installs starting and finishing around it.
 		execution.ReservedBytes = e.reservedByOthers(jobID)
+		// The token counters live inside the container this is about to
+		// stop, so the last reading has to be taken now. A worker rank runs
+		// on the other Spark, which counts its own.
+		if op.Type == "stop_container" && plan.Placement.Role != operations.RoleWorker {
+			e.sampleTokens(ctx, target)
+		}
 		receipt, err := e.executor.Execute(ctx, execution, op, target, progress)
 		if err != nil {
 			abort(index, err)

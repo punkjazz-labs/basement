@@ -1223,6 +1223,52 @@ func TestRuntimeMetricsSamplerIsKindAware(t *testing.T) {
 	}
 }
 
+// Token usage is accumulated from readings of a counter that restarts with
+// the serving container, so a restarted runtime must add its new counter
+// rather than reset the model's total.
+func TestTokenUsageAccumulatesAcrossARuntimeRestart(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	counters := "vllm:prompt_tokens_total{model_name=\"m\"} 500\nvllm:generation_tokens_total{model_name=\"m\"} 200\n"
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, counters)
+	}))
+	defer metrics.Close()
+	port, err := strconv.Atoi(metrics.URL[strings.LastIndex(metrics.URL, ":")+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{metrics: metrics.Client(), store: database}
+	r := recipe.Recipe{ID: "qwen", Runtime: recipe.Runtime{Kind: "vllm"}, Service: recipe.Service{DefaultHostPort: port}}
+	server.CaptureTokenUsage(ctx, r)
+	counters = "vllm:prompt_tokens_total{model_name=\"m\"} 60\nvllm:generation_tokens_total{model_name=\"m\"} 20\n"
+	server.CaptureTokenUsage(ctx, r)
+
+	usage, err := database.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].PromptTokens != 560 || usage[0].GenerationTokens != 220 {
+		t.Fatalf("usage=%+v", usage)
+	}
+
+	// A runtime that publishes no token series at all leaves the model with
+	// no row, rather than one claiming it served nothing.
+	quiet := &Server{metrics: &http.Client{}, store: database}
+	quiet.CaptureTokenUsage(ctx, recipe.Recipe{ID: "llamacpp-model", Runtime: recipe.Runtime{Kind: "llamacpp"}})
+	usage, err = database.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 {
+		t.Fatalf("an unmapped runtime was counted: %+v", usage)
+	}
+}
+
 // singleSpark returns the first shipped single-Spark recipe. The pack now
 // also carries distributed recipes, and these fixtures run one node.
 func singleSpark(recipes []recipe.Recipe) recipe.Recipe {

@@ -133,6 +133,9 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/keys", server.keys)
 	mux.HandleFunc("/api/v1/keys/", server.keyAction)
 	mux.HandleFunc("/api/v1/telemetry", server.withPeerReadAuth(server.telemetry))
+	// Token usage is this Spark's own accounting and stays on this Spark: a
+	// fleet does not add its members' totals up anywhere yet.
+	mux.HandleFunc("/api/v1/tokens", server.withReadAuth(server.tokenUsage))
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
 	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
 	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateCheck))
@@ -1363,6 +1366,85 @@ func (s *Server) runtimeMetrics(ctx context.Context, r recipe.Recipe) map[string
 		return nil
 	}
 	return result
+}
+
+// tokenAccountingInterval is how often the manager reads the serving
+// runtime's token counters while a model is up. Usage accumulates from
+// differences between readings, so the interval bounds only how recent the
+// console's number is, not how much of the usage is counted.
+const tokenAccountingInterval = 45 * time.Second
+
+// CountTokens keeps each model's cumulative token usage current for as long
+// as this manager runs. It samples on a slow tick, and once more on the way
+// out so the stretch between the last tick and a shutdown is counted rather
+// than lost with the process.
+func (s *Server) CountTokens(ctx context.Context) {
+	ticker := time.NewTicker(tokenAccountingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			final, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			s.captureActiveTokenUsage(final)
+			cancel()
+			return
+		case <-ticker.C:
+			s.captureActiveTokenUsage(ctx)
+		}
+	}
+}
+
+// captureActiveTokenUsage records a reading for whichever model is serving
+// here. Nothing serving means there is nothing to count, which is not an
+// error: usage is only ever counted while basement serves the model.
+func (s *Server) captureActiveTokenUsage(ctx context.Context) {
+	if active, ok := s.activeReadyRecipe(ctx); ok {
+		s.CaptureTokenUsage(ctx, active)
+	}
+}
+
+// CaptureTokenUsage records one reading of a model's runtime token counters.
+// It is exported because the engine calls it immediately before it stops a
+// container: the counters live inside that container, so afterwards there is
+// nothing left to read.
+//
+// A reading is the pair or nothing: both supported runtimes publish the two
+// series together, and reading an absent one as zero would look like a
+// restarted counter and add its next value a second time.
+func (s *Server) CaptureTokenUsage(ctx context.Context, r recipe.Recipe) {
+	metrics := s.runtimeMetrics(ctx, r)
+	prompt, hasPrompt := metrics["prompt_tokens_total"]
+	generation, hasGeneration := metrics["generation_tokens_total"]
+	if !hasPrompt || !hasGeneration {
+		return
+	}
+	// Best effort by design: a reading that cannot be stored is dropped, and
+	// the next one still carries the usage forward from the last one stored.
+	_ = s.store.RecordTokenSample(ctx, r.ID, prompt, generation)
+}
+
+// tokenUsage reports what each model has served on this Spark since basement
+// started counting, and the total across them. Models with no reading yet
+// are absent rather than listed at zero.
+func (s *Server) tokenUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	models, err := s.store.TokenUsage(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	totals := struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		GenerationTokens int64 `json:"generation_tokens"`
+	}{}
+	for _, model := range models {
+		totals.PromptTokens += model.PromptTokens
+		totals.GenerationTokens += model.GenerationTokens
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models, "totals": totals})
 }
 
 // runtimeMetricNames maps a runtime's Prometheus series onto the console's

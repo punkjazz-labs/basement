@@ -68,6 +68,22 @@ export interface InstalledModel {
   measured_at?: string
 }
 
+// What one model has served on this Spark since basement started counting.
+// Only models basement has taken a reading for appear at all: a model it has
+// never served here has no entry, which is not the same as a zero.
+export interface ModelTokenUsage {
+  recipe_id: string
+  prompt_tokens: number
+  generation_tokens: number
+  first_counted_at: string
+  updated_at: string
+}
+
+export interface TokenUsage {
+  models: ModelTokenUsage[]
+  totals: { prompt_tokens: number; generation_tokens: number }
+}
+
 export interface Step {
   index: number
   operation: string
@@ -386,6 +402,21 @@ export function formatBytes(value?: number): string {
     unit += 1
   }
   return `${amount.toFixed(amount >= 100 || unit <= 1 ? 0 : 1)} ${units[unit]}`
+}
+
+// Token counts reach the billions, so they are shown short. The exact
+// number always travels with them in a title attribute, so the rounding
+// never hides the real figure.
+export function formatTokens(value: number): string {
+  if (value < 1000) return String(Math.round(value))
+  const units = ['K', 'M', 'B', 'T']
+  let unit = -1
+  let amount = value
+  while (amount >= 1000 && unit < units.length - 1) {
+    amount /= 1000
+    unit += 1
+  }
+  return `${amount.toFixed(amount >= 100 ? 0 : 1)}${units[unit]}`
 }
 
 export async function copyText(value: string): Promise<void> {

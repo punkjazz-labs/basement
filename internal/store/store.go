@@ -56,6 +56,20 @@ type InstalledModel struct {
 	MeasuredAt         string  `json:"measured_at,omitempty"`
 }
 
+// ModelTokenUsage is how many tokens one model has served on this Spark
+// since basement started counting it. The serving runtime publishes
+// cumulative counters that restart at zero with its container, so these
+// totals are accumulated from readings rather than copied from a counter
+// (see RecordTokenSample). A model basement has never taken a reading for
+// has no row at all, which is not the same as one that has served nothing.
+type ModelTokenUsage struct {
+	RecipeID         string `json:"recipe_id"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	GenerationTokens int64  `json:"generation_tokens"`
+	FirstCountedAt   string `json:"first_counted_at"`
+	UpdatedAt        string `json:"updated_at"`
+}
+
 type APIKey struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
@@ -163,6 +177,15 @@ CREATE TABLE IF NOT EXISTS model_metrics (
   tokens_per_second REAL NOT NULL,
   time_to_first_token_ms INTEGER NOT NULL DEFAULT 0,
   measured_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS model_token_usage (
+  recipe_id TEXT PRIMARY KEY,
+  prompt_tokens INTEGER NOT NULL DEFAULT 0,
+  generation_tokens INTEGER NOT NULL DEFAULT 0,
+  last_prompt_counter REAL NOT NULL DEFAULT 0,
+  last_generation_counter REAL NOT NULL DEFAULT 0,
+  first_counted_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS peers (
   id TEXT PRIMARY KEY,
@@ -521,6 +544,70 @@ func (s *Store) SetModelMetrics(ctx context.Context, recipeID string, tokensPerS
 ON CONFLICT(recipe_id) DO UPDATE SET tokens_per_second=excluded.tokens_per_second,time_to_first_token_ms=excluded.time_to_first_token_ms,measured_at=excluded.measured_at`,
 		recipeID, tokensPerSecond, timeToFirstTokenMS, now())
 	return err
+}
+
+// RecordTokenSample folds one reading of a runtime's cumulative token
+// counters into a model's running totals. The counters live inside the
+// serving container and restart at zero with it, so a reading at or above
+// the previous one contributes the difference and a lower one contributes
+// its whole value: the drop is a restart, not work that did not happen. The
+// last reading is persisted next to the totals, so a manager restart neither
+// loses a stretch of usage nor counts it twice.
+func (s *Store) RecordTokenSample(ctx context.Context, recipeID string, promptCounter, generationCounter float64) error {
+	if promptCounter < 0 || generationCounter < 0 {
+		return errors.New("token counters cannot be negative")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	usage := ModelTokenUsage{RecipeID: recipeID}
+	var lastPrompt, lastGeneration float64
+	err = tx.QueryRowContext(ctx, `SELECT prompt_tokens,generation_tokens,last_prompt_counter,last_generation_counter,first_counted_at FROM model_token_usage WHERE recipe_id=?`, recipeID).
+		Scan(&usage.PromptTokens, &usage.GenerationTokens, &lastPrompt, &lastGeneration, &usage.FirstCountedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	usage.UpdatedAt = now()
+	if errors.Is(err, sql.ErrNoRows) {
+		usage.FirstCountedAt = usage.UpdatedAt
+	}
+	usage.PromptTokens += tokenDelta(promptCounter, lastPrompt)
+	usage.GenerationTokens += tokenDelta(generationCounter, lastGeneration)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO model_token_usage(recipe_id,prompt_tokens,generation_tokens,last_prompt_counter,last_generation_counter,first_counted_at,updated_at) VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(recipe_id) DO UPDATE SET prompt_tokens=excluded.prompt_tokens,generation_tokens=excluded.generation_tokens,last_prompt_counter=excluded.last_prompt_counter,last_generation_counter=excluded.last_generation_counter,updated_at=excluded.updated_at`,
+		usage.RecipeID, usage.PromptTokens, usage.GenerationTokens, promptCounter, generationCounter, usage.FirstCountedAt, usage.UpdatedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// tokenDelta is the usage one reading adds: the rise since the last reading,
+// or the whole reading when the counter went backwards, which only happens
+// when the runtime that publishes it restarted.
+func tokenDelta(current, last float64) int64 {
+	if current < last {
+		return int64(current)
+	}
+	return int64(current - last)
+}
+
+func (s *Store) TokenUsage(ctx context.Context) ([]ModelTokenUsage, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT recipe_id,prompt_tokens,generation_tokens,first_counted_at,updated_at FROM model_token_usage ORDER BY prompt_tokens+generation_tokens DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []ModelTokenUsage{}
+	for rows.Next() {
+		var usage ModelTokenUsage
+		if err := rows.Scan(&usage.RecipeID, &usage.PromptTokens, &usage.GenerationTokens, &usage.FirstCountedAt, &usage.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, usage)
+	}
+	return result, rows.Err()
 }
 
 // CreateAPIKey returns the stored record and the plaintext secret, which is
