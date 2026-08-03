@@ -109,6 +109,12 @@ func TestDistributedArgumentsFollowTheCommunityRecipe(t *testing.T) {
 }
 
 func TestDistributedContainerGetsTheFabricAndItsEnvironment(t *testing.T) {
+	// Detection reads the machine the test runs on (CI runners can hold a
+	// real RDMA device); force the recipe-fallback path so the assertions
+	// are about the recipe, not the host.
+	previous := fabricLink
+	t.Cleanup(func() { fabricLink = previous })
+	fabricLink = func() (FabricLink, error) { return FabricLink{}, errors.New("no fabric in this test") }
 	r := twoSparkRecipe(t)
 	var body map[string]any
 	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
