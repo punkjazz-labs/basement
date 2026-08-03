@@ -84,7 +84,8 @@ emits:
    server on a Mac gets.
 4. start: wait for the new manager to answer on its own console.
 5. pair: use the pairing token the install produced to pair with the new
-   console and create one API key on it, named `fleet-<head hostname>`.
+   console and create one API key on it, named
+   `fleet-<head hostname>-<random>`.
 6. peer: prove the URL and that key reach a Spark together, then record
    the peer, through the same `addPeer` path the manual add-by-address
    form uses.
@@ -145,25 +146,61 @@ whose error contains the password verbatim, and a second test drives a
 machine that returns the password as its hostname; neither may appear in
 any byte of any progress, status, result or stored row.
 
-Scrubbing is the last thing that happens to remote text, and that is a
-rule about ordering rather than a detail of it. The same text is also
-transformed: control characters and invalid UTF-8 are stripped out of it
-and its length is capped to what the store accepts. A scrub that runs
-before either of those is not a scrub. A machine that answers `hostname`
-with the password split by an escape byte defeats the match, and the
-strip that runs afterwards puts the password back together and hands it
-to the store. A cap that runs after the scrub is safe; a cap that runs
-before it cuts the password into a fragment the scrub no longer
-recognises and stores that fragment instead. So remote text goes through
-one door, `adoptionRun.safeRemoteText`, which strips, scrubs, caps and
-scrubs again: the middle scrub is what makes the cap safe, and the last
-one is what everything persisted or displayed is held to. The reported
+Scrubbing is not a step in the handling of remote text, it is a fence
+around every other step. The rule is: scrub before any transformation,
+and scrub again after every transformation. The same text this manager
+scrubs it also rewrites, because control characters and invalid UTF-8
+are stripped out of it and its length is capped to what the store
+accepts, and each of those rewrites breaks the scrub in a different
+direction.
+
+A scrub that runs only before a rewrite is not a scrub, because the
+rewrite can assemble the secret out of pieces the scrub did not match. A
+machine that answers `hostname` with the password split by an escape
+byte defeats the comparison, and the strip that runs afterwards puts the
+password back together and hands it to the store. A cap that runs after
+a scrub is safe; a cap that runs before it cuts the password into a
+fragment the scrub no longer recognises and stores that fragment.
+
+A scrub that runs only after a rewrite is not a scrub either, because
+the rewrite can turn text that did not match into the secret. A password
+typed as ` correct-horse `, reported back as the hostname
+` correct-horse `, is trimmed to `correct-horse`, and every comparison
+against the typed bytes afterwards sees a string it was never told
+about. The same holds for a password carrying any character the strip
+removes.
+
+So remote text goes through one door, `adoptionRun.safeRemoteText`,
+which scrubs, strips, scrubs, caps and scrubs again. The reported
 console URLs are scrubbed after they are parsed for the same reason,
-because parsing unescapes what it is given. Tests drive a hostname
-carrying the password split by a control character, split by an invalid
-byte, and padded so it straddles the length cap; none of them may leave
-the password, or any eight-character run of it, in the peers table, the
-peers endpoint, the status payload or the result.
+because parsing unescapes what it is given.
+
+Ordering alone would still be a fence with one plank missing, because it
+only protects the rewrites this code performs today. So the scrubber is
+also told what the password looks like after those rewrites. When a run
+starts, three forms are derived once from the password the owner typed:
+the password itself, the password with surrounding whitespace trimmed,
+and the password with control characters and invalid UTF-8 removed. All
+three are matched case-insensitively, which costs nothing and closes the
+cheapest rewrite there is. That list is closed deliberately: it is the
+set of rewrites this code actually performs, not a guess at every
+normalization that exists, and an open-ended list would be reassurance
+rather than a defence. The derived forms are the password in different
+clothes, so they live in the scrubbing closure and are never stored,
+logged or returned. There is no minimum match length either: a
+four-character password is as much the owner's password as a
+forty-character one, and the cap that shortens remote text always ends
+on a character boundary rather than a byte one, so it can never leave
+half a character behind for a later scrub to miss.
+
+Tests drive a hostname carrying the password split by a control
+character, split by an invalid byte, padded so it straddles the length
+cap, reported in the trimmed form of a password typed with whitespace
+around it, reported without a control character the password carries,
+differing only in case, and a password of five characters; none of them
+may leave the password, any of its derived forms, or any eight-character
+run of one, in the peers table, the peers endpoint, the status payload,
+the result or the stored peer name.
 
 Server-supplied text is never printed on this path either. A
 keyboard-interactive SSH server chooses the instruction it sends with a
@@ -256,8 +293,9 @@ both paths are fixed strings rather than anything a caller can steer.
   peer row use.
 - Everything the other machine says about itself is untrusted text. Its
   hostname becomes the peer name, which is stored and rendered, so it is
-  stripped of control characters, capped to what the store accepts and
-  scrubbed of the typed password last, in that order. The same holds for names that come
+  scrubbed of the typed password, stripped of control characters,
+  scrubbed again, capped to what the store accepts and scrubbed once
+  more. The same holds for names that come
   off an mDNS sweep. An mDNS answer only contributes the address it
   actually came from, and only when that address is on a local range: an
   advertised A record naming anything else is dropped, because a machine
@@ -279,7 +317,9 @@ both paths are fixed strings rather than anything a caller can steer.
   revokes it with the bootstrap session this manager still holds. When
   the revocation cannot be made, the failure sentence names the key so
   the owner can delete it under Connect on that machine, rather than
-  leaving a credential nobody knows about on hardware they own.
+  leaving a credential nobody knows about on hardware they own. Which key
+  gets deleted is a question with its own answer below, because deleting
+  the wrong one is worse than deleting none.
 - The point of no return is the moment the mint request is sent, not the
   moment a key comes back. The other machine writes the key and then
   answers, so a dropped connection, a timeout or an answer this manager
@@ -287,14 +327,39 @@ both paths are fixed strings rather than anything a caller can steer.
   that its id will never be learned. Treating those as ordinary failures
   left a working credential on the owner's other Spark with nothing
   naming it. So every failure from that request onward runs the same
-  cleanup, and the cleanup does not need the id: the key's name is
-  `fleet-<head hostname>`, decided before the request was sent and the
-  same on both ends, so the keys on the new machine are listed with the
-  bootstrap session and the one carrying that name is deleted. A key
-  already named that is a leftover from an earlier attempt by this same
-  head, and removing it is the point. If the listing, the match or the
-  delete fails, the sentence the owner reads names the key and says to
-  delete it under Connect on that Spark's own console.
+  cleanup, and the cleanup does not need the id.
+- The cleanup deletes a key only when it can prove that key is this run's
+  own, and deletes nothing at all otherwise. Proof, not resemblance: the
+  other machine allows duplicate key names and lists keys oldest first,
+  so "the first key named after this head" is not an identification. An
+  owner who already had a key of that name, from an earlier adoption or
+  made by hand, would have had that older key deleted while the key this
+  run just minted stayed behind and orphaned, and the sentence they read
+  would have called it a successful cleanup. That is the opposite of what
+  a cleanup is for.
+- So two things carry the proof. The key's name is
+  `fleet-<head hostname>-<random>`, minted per run, so a name match
+  cannot be a coincidence: nothing an earlier run left and nothing the
+  owner typed by hand can be carrying this run's suffix. The head's name
+  is still the first thing in it, because that name is read in the other
+  Spark's Connect tab, which is the owner's UI, and
+  `fleet-spark-head-4b7d1e02` still says whose key it is. Separately, the
+  ids already on that machine are listed and kept before the mint request
+  is sent, and no id in that snapshot is ever deleted, whatever it is
+  called. An id the machine hands back in its answer is held to the same
+  snapshot, because a machine that answers a mint with the id of a key it
+  already had is not evidence of anything. When the snapshot could not be
+  taken, the unguessable name still carries the proof on its own; when
+  two keys are indistinguishable, there is no proof and nothing is
+  deleted.
+- The cleanup therefore has three honest endings rather than two. The key
+  was found and removed. The listing was read and holds no key this run
+  created, which is what a mint request that never reached the machine
+  looks like from here, and the owner is told that nothing was left
+  behind. Or the delete failed, or authorship could not be established,
+  and the sentence names the key to look for and says to look under
+  Connect on that Spark's own console. None of those claims a cleanup
+  that did not happen.
 - One adoption at a time. A second POST while one runs gets a 409 with a
   plain sentence. Two runs would race for the single peer row, and each
   one holds an SSH session installing a systemd service.

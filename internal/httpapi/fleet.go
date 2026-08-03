@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -298,9 +301,9 @@ func probeCandidates(ctx context.Context, candidates []discoveredCandidate, prob
 // in a field that ends up in the peers table and on screen, so it is treated
 // as untrusted text rather than as a hostname.
 //
-// It is deliberately split in two. Every transformation that can rewrite the
-// bytes of a secret has to run before the scrubbing does, and stripping and
-// capping are two such transformations that need the scrub between them; see
+// It is deliberately split into its two transformations, so that a caller
+// holding a secret can scrub between them and around them. Every transformation
+// that rewrites the bytes of a secret needs a scrub on both sides of it; see
 // adoptionRun.safeRemoteText, which is the only way remote text reaches
 // anything this manager stores or shows.
 func sanitizeMachineName(raw string) string {
@@ -321,13 +324,22 @@ func stripUnsafeRunes(raw string) string {
 	return strings.TrimSpace(builder.String())
 }
 
-// capMachineName holds text to the length the store accepts, on a rune
-// boundary. Cutting text can leave a fragment of a secret that no later scrub
-// recognises, so nothing may rely on a scrub that ran before this either.
+// capMachineName holds text to the length the store accepts. Cutting text can
+// leave a fragment of a secret that no later scrub recognises, so nothing may
+// rely on a scrub that ran before this either.
 func capMachineName(value string) string {
+	return capText(value, maxMachineNameLength)
+}
+
+// capText holds text to a byte budget, always on a rune boundary: a cap that
+// counted bytes alone would cut a multi-byte character in half and leave a
+// broken fragment behind, which is both unrenderable and, when the text came
+// from a machine trying to hand a secret back, a piece of that secret in a
+// shape nothing recognises.
+func capText(value string, limit int) string {
 	var builder strings.Builder
 	for _, symbol := range value {
-		if builder.Len()+utf8.RuneLen(symbol) > maxMachineNameLength {
+		if builder.Len()+utf8.RuneLen(symbol) > limit {
 			break
 		}
 		builder.WriteRune(symbol)
@@ -516,32 +528,154 @@ func newAdoptionRun(state *adoptionState, password string) *adoptionRun {
 
 // passwordScrubber removes one typed password from any text, then applies
 // the manager's ordinary secret redaction on top.
+//
+// It removes more than the exact bytes the owner typed, because an exact match
+// is only a match while the text is still exactly what it was. This path
+// transforms remote text as well as scrubbing it, and every transformation
+// leaves the secret in a shape a literal comparison walks straight past. So the
+// scrubber matches the password and the normalized forms the transformations on
+// this path can produce:
+//
+//   - the password with its surrounding whitespace gone. Both transformations
+//     here trim, so a password typed as " correct-horse " that a machine reports
+//     back as its hostname arrives at the store as "correct-horse".
+//   - the password with control characters and invalid UTF-8 gone, which is
+//     what stripUnsafeRunes leaves of a password that contains any.
+//   - either of those in any mix of case, because case folding is the cheapest
+//     rewrite there is and hostnames are compared and lowercased all over this
+//     file.
+//
+// That list is closed on purpose. It is the set of rewrites this code actually
+// performs, not a guess at every normalization that exists; an open-ended list
+// would be reassurance rather than a defence. Anything else is handled by the
+// other half of the rule, which is that scrubbing runs before a transformation
+// and again after it (see adoptionRun.safeRemoteText).
+//
+// There is no minimum match length: a four-character password is as much the
+// owner's password as a forty-character one.
+//
+// The derived forms live in this closure and nowhere else. They are the
+// password wearing slightly different clothes, so they are never stored,
+// logged or returned.
 func passwordScrubber(password string) func(string) string {
+	forms := passwordForms(password)
 	return func(value string) string {
-		if password != "" {
-			value = strings.ReplaceAll(value, password, "[redacted]")
+		for _, form := range forms {
+			value = replaceFold(value, form, "[redacted]")
 		}
 		return redact.String(value)
 	}
 }
 
+// passwordForms derives, once, every shape of the typed password this manager's
+// own transformations can produce. Longest first, so the fullest form of the
+// secret is the one that gets matched when several of them would.
+func passwordForms(password string) []string {
+	forms := make([]string, 0, 3)
+	seen := make(map[string]bool, 3)
+	// In descending length by construction: trimming and stripping only ever
+	// remove characters.
+	for _, form := range []string{password, strings.TrimSpace(password), stripUnsafeRunes(password)} {
+		if form == "" || seen[form] {
+			continue
+		}
+		seen[form] = true
+		forms = append(forms, form)
+	}
+	return forms
+}
+
+// replaceFold replaces every case-insensitive occurrence of secret in value.
+// It walks value rune by rune rather than lowercasing both sides and comparing
+// byte offsets, because lowercasing can change a string's length and the
+// offsets would stop meaning what they said. Bytes that are not valid UTF-8 are
+// copied through one at a time, so text this manager has not stripped yet
+// survives the pass unchanged.
+func replaceFold(value, secret, replacement string) string {
+	if secret == "" {
+		return value
+	}
+	var builder strings.Builder
+	for index := 0; index < len(value); {
+		if length := foldPrefixLength(value[index:], secret); length > 0 {
+			builder.WriteString(replacement)
+			index += length
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(value[index:])
+		builder.WriteString(value[index : index+size])
+		index += size
+	}
+	return builder.String()
+}
+
+// foldPrefixLength reports how many bytes of value are a case-insensitive match
+// for the whole of secret, or -1 when value does not start with it.
+func foldPrefixLength(value, secret string) int {
+	consumed := 0
+	for len(secret) > 0 {
+		wanted, size := utf8.DecodeRuneInString(secret)
+		secret = secret[size:]
+		if consumed >= len(value) {
+			return -1
+		}
+		found, foundSize := utf8.DecodeRuneInString(value[consumed:])
+		if !equalFoldRune(found, wanted) {
+			return -1
+		}
+		consumed += foundSize
+	}
+	return consumed
+}
+
+// equalFoldRune compares two runes under Unicode simple folding, which is the
+// same rule strings.EqualFold applies.
+func equalFoldRune(first, second rune) bool {
+	if first == second {
+		return true
+	}
+	if first > second {
+		first, second = second, first
+	}
+	for folded := unicode.SimpleFold(first); folded != first; folded = unicode.SimpleFold(folded) {
+		if folded == second {
+			return true
+		}
+	}
+	return false
+}
+
 // safeRemoteText is the only way text another machine chose becomes text this
-// manager stores, shows or puts in a sentence. Scrubbing is the last step, and
-// it is also a step between the two transformations, because a scrub that runs
-// before a transformation is not a scrub at all:
+// manager stores, shows or puts in a sentence. The rule is one line long: scrub
+// before any transformation, and scrub again after every transformation. Both
+// halves are load bearing, and each covers what the other cannot.
 //
-//   - stripping control characters puts a secret back together. A machine that
+// A scrub that runs only before a transformation is not a scrub, because the
+// transformation can put the secret back together:
+//
+//   - stripping control characters joins what they separated. A machine that
 //     answers `hostname` with "sec<esc>ret" when the password is "secret"
 //     defeats a scrub that ran first, and the strip that ran after it hands the
 //     password to whatever stores the result.
-//   - capping the length cuts a secret into a fragment that no later scrub
-//     recognises. A name padded past the cap so that the password straddles it
-//     would otherwise leave a prefix of the password in the peers table.
+//   - capping the length cuts a secret into a fragment no later scrub
+//     recognises. A name padded past the cap so the password straddles it would
+//     otherwise leave a prefix of the password in the peers table.
 //
-// So: strip, scrub, cap, scrub. The last scrub is the one that matters for
-// anything persisted, and the middle one makes the cap safe.
+// A scrub that runs only after a transformation is not a scrub either, because
+// the transformation can turn text that did not match into text that is the
+// secret in all but the bytes that were removed. A password typed as
+// " correct-horse ", reported back as the hostname " correct-horse ", is
+// trimmed to "correct-horse", and every exact-match scrub afterwards sees a
+// string it has never been told about. The same holds for any password holding
+// characters the strip deletes.
+//
+// So: scrub, strip, scrub, cap, scrub. The first scrub sees the remote text as
+// it arrived, the middle one makes the cap safe, and the last one is what
+// everything persisted or displayed is held to. The scrubber itself also knows
+// the normalized forms of the password (see passwordScrubber), so neither half
+// of the rule is carrying this alone.
 func (r *adoptionRun) safeRemoteText(raw string) string {
-	return r.scrub(capMachineName(r.scrub(stripUnsafeRunes(raw))))
+	return r.scrub(capMachineName(r.scrub(stripUnsafeRunes(r.scrub(raw)))))
 }
 
 func (r *adoptionRun) begin(key string) {
@@ -998,7 +1132,14 @@ func (s *Server) mintFleetKey(ctx context.Context, baseURL, token string) (fleet
 	if session == "" {
 		return fleetKey{}, errors.New("it did not open a session for this Spark")
 	}
-	body, err = json.Marshal(map[string]string{"name": fleetKeyName()})
+	// The name this run's key will carry, unique to this run, and the ids that
+	// were on that machine before this run minted anything. Both are decided
+	// here, before the request is sent, because both are what a later cleanup
+	// proves authorship with. The snapshot is best effort: a machine that will
+	// not list its keys is not a reason to refuse to adopt it.
+	name := newFleetKeyName()
+	existing := s.snapshotKeyIDs(ctx, baseURL, session)
+	body, err = json.Marshal(map[string]string{"name": name})
 	if err != nil {
 		return fleetKey{}, err
 	}
@@ -1006,8 +1147,9 @@ func (s *Server) mintFleetKey(ctx context.Context, baseURL, token string) (fleet
 	// the key and then answers, so a transport error or an answer this manager
 	// cannot read tells us nothing about whether the key exists: only that we
 	// will not be told its id. Every failure from here carries the bootstrap
-	// session back so the caller can go and look for the key by name.
-	pending := fleetKey{session: session, csrf: paired.CSRF}
+	// session, the name and the snapshot back, so the caller can go and find out
+	// what actually happened rather than guess.
+	pending := fleetKey{name: name, session: session, csrf: paired.CSRF, existing: existing}
 	response, err = s.callNewSpark(ctx, http.MethodPost, baseURL, "/api/v1/keys", body, map[string]string{
 		"Cookie":       session,
 		"X-CSRF-Token": paired.CSRF,
@@ -1027,19 +1169,70 @@ func (s *Server) mintFleetKey(ctx context.Context, baseURL, token string) (fleet
 		pending.id = created.Key.ID
 		return pending, errors.New("it accepted the request for a fleet key and did not return one")
 	}
-	return fleetKey{secret: created.Secret, id: created.Key.ID, session: session, csrf: paired.CSRF}, nil
+	minted := pending
+	minted.secret = created.Secret
+	minted.id = created.Key.ID
+	return minted, nil
+}
+
+// snapshotKeyIDs records which keys the other machine already held, so a
+// cleanup can tell a key this run created from a key that was already there.
+// A nil answer means the question could not be asked, which is different from
+// an answer of none.
+func (s *Server) snapshotKeyIDs(ctx context.Context, baseURL, session string) map[string]bool {
+	listed, ok := s.listKeys(ctx, baseURL, session)
+	if !ok {
+		return nil
+	}
+	ids := make(map[string]bool, len(listed))
+	for _, entry := range listed {
+		ids[entry.ID] = true
+	}
+	return ids
+}
+
+// listedKey is one entry of the other machine's key listing.
+type listedKey struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// listKeys reads the other machine's keys with the bootstrap session. The
+// second return says whether the listing was read at all: an empty list and a
+// failed request are opposite answers and must never be confused, because one
+// of them is proof that nothing was left behind and the other is proof of
+// nothing.
+func (s *Server) listKeys(ctx context.Context, baseURL, session string) ([]listedKey, bool) {
+	response, err := s.callNewSpark(ctx, http.MethodGet, baseURL, "/api/v1/keys", nil, map[string]string{
+		"Cookie": session,
+	})
+	if err != nil {
+		return nil, false
+	}
+	var listed []listedKey
+	if json.Unmarshal(response.body, &listed) != nil {
+		return nil, false
+	}
+	return listed, true
 }
 
 // fleetKey is the API key this manager created on the machine it is adopting,
-// together with the bootstrap session it was created with. The session is
-// held for one reason: if the run fails after this point, the key can be
-// handed straight back instead of living on that machine forever, unseen by
-// the owner and unremovable without a second bootstrap.
+// together with everything it takes to prove later that the key is this run's
+// own. The session is held so that a run failing after this point can hand the
+// key straight back instead of leaving it on that machine forever, unseen by
+// the owner and unremovable without a second bootstrap. The name and the
+// snapshot are held because handing back a key means naming one, and naming
+// the wrong one deletes a credential this run never created.
 type fleetKey struct {
 	secret  string
 	id      string
+	name    string
 	session string
 	csrf    string
+	// existing is every key id that was on that machine before this run minted
+	// anything. A nil map means the listing could not be read, which is not the
+	// same as a machine with no keys on it.
+	existing map[string]bool
 }
 
 // pending reports that the request to mint the key was sent, so a key may
@@ -1048,31 +1241,59 @@ type fleetKey struct {
 // there is something on the other side worth cleaning up.
 func (k fleetKey) pending() bool { return k.session != "" }
 
+// predates reports that id was already on the other machine before this run
+// minted anything, so this run cannot have created it. Unknown when the
+// snapshot could not be taken, in which case the name carries the proof alone.
+func (k fleetKey) predates(id string) bool { return k.existing != nil && k.existing[id] }
+
 // revokeFleetKey deletes the key this manager minted on the other machine and
 // returns the sentence that says what happened, for the failure the owner is
-// about to read. Best effort by nature: the machine may already be gone. When
-// it cannot be done, the sentence names the key so the owner can remove it
-// themselves rather than being left with a credential they never knew about.
+// about to read. Best effort by nature: the machine may already be gone.
 //
-// The id is not always known. A run that lost the connection while the key was
-// being minted, or that could not read the answer, still has to clean up, so
-// the key is found by the deterministic name this adoption used.
+// It deletes a key only when it can prove that key is this run's own, and it
+// deletes nothing at all otherwise. That is not caution for its own sake. The
+// other machine allows duplicate key names and lists them oldest first, so a
+// cleanup that deleted the first key carrying this head's name would, whenever
+// the owner already had one, delete the older legitimate key, report success,
+// and leave the key this run just minted behind and orphaned: the exact
+// opposite of what a cleanup is for. Two things have to agree instead. The name
+// is unique to this run (newFleetKeyName), so nothing the owner made by hand
+// and nothing an earlier adoption left can carry it; and the id must be absent
+// from the snapshot taken before this run minted anything, so a key that was
+// already there is never a candidate however it is named.
+//
+// When neither the delete nor the proof can be had, the sentence says so
+// plainly and names what to look for and where, rather than claiming a cleanup
+// that did not happen.
 func (s *Server) revokeFleetKey(ctx context.Context, baseURL string, key fleetKey) string {
-	name := fleetKeyName()
-	orphaned := "A fleet key named " + name + " was left on that machine and could not be removed, so delete it under Connect on its own console"
+	unproven := "This Spark could not tell which fleet key it created on that machine, so look for a key named " + key.name + " under Connect on that Spark's own console and delete it if it is there"
+	orphaned := "A fleet key named " + key.name + " was left on that machine and could not be removed, so delete it under Connect on that Spark's own console"
 	if key.session == "" {
-		return orphaned
+		return unproven
 	}
 	// Detached from the run's context: an adoption that failed because it ran
 	// out of budget should still get its key back.
 	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	id := key.id
-	if id == "" {
-		id = s.findFleetKeyID(revokeCtx, baseURL, key, name)
+	// An id the other machine handed back is still checked against the
+	// snapshot. A machine that answers the mint with the id of a key it already
+	// had is either confused or lying, and either way that id is not proof.
+	if id != "" && key.predates(id) {
+		id = ""
 	}
 	if id == "" {
-		return orphaned
+		found, known := s.findMintedKeyID(revokeCtx, baseURL, key)
+		switch {
+		case !known:
+			return unproven
+		case found == "":
+			// The listing was read and holds no key this run created, which is
+			// what a mint request that never arrived looks like from here.
+			return "No fleet key was left on that machine"
+		default:
+			id = found
+		}
 	}
 	_, err := s.callNewSpark(revokeCtx, http.MethodDelete, baseURL, "/api/v1/keys/"+url.PathEscape(id), nil, map[string]string{
 		"Cookie":       key.session,
@@ -1084,47 +1305,78 @@ func (s *Server) revokeFleetKey(ctx context.Context, baseURL string, key fleetKe
 	return "The fleet key this Spark had created on that machine has been removed"
 }
 
-// findFleetKeyID asks the other machine to list its keys and picks out the one
-// this adoption created. The name is this manager's own hostname, decided
-// before the request was sent and the same on both ends, which is what makes
-// a key whose id was never returned findable at all. A key already carrying
-// that name is a leftover from an earlier attempt by this same head, and
-// removing it is the point.
-func (s *Server) findFleetKeyID(ctx context.Context, baseURL string, key fleetKey, name string) string {
-	response, err := s.callNewSpark(ctx, http.MethodGet, baseURL, "/api/v1/keys", nil, map[string]string{
-		"Cookie": key.session,
-	})
-	if err != nil {
-		return ""
+// findMintedKeyID asks the other machine to list its keys and picks out the one
+// this run created, which is the only one it may ever delete: a key carrying
+// this run's own name and absent from the snapshot taken before the mint.
+//
+// The second return says whether the listing was read. An empty id with a true
+// beside it is a real answer, the machine holds nothing this run created, and
+// the pre-mint failure path depends on it: a mint request that never arrived
+// left nothing behind and nothing may be deleted in its name. A false means the
+// question could not be answered, and nothing may be deleted then either.
+// Ambiguity counts as unanswered: two keys this run cannot tell apart are two
+// keys it cannot claim, and picking one is a guess with a credential at stake.
+func (s *Server) findMintedKeyID(ctx context.Context, baseURL string, key fleetKey) (string, bool) {
+	if key.name == "" {
+		return "", false
 	}
-	var listed []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+	listed, ok := s.listKeys(ctx, baseURL, key.session)
+	if !ok {
+		return "", false
 	}
-	if json.Unmarshal(response.body, &listed) != nil {
-		return ""
-	}
+	found := ""
 	for _, entry := range listed {
-		if entry.Name == name {
-			return entry.ID
+		if entry.ID == "" || entry.Name != key.name || key.predates(entry.ID) {
+			continue
 		}
+		if found != "" && found != entry.ID {
+			return "", false
+		}
+		found = entry.ID
 	}
-	return ""
+	return found, true
 }
 
-// fleetKeyName names the key after this machine, so the owner reading the
-// other console's Connect tab can tell what it is for.
-func fleetKeyName() string {
+// maxFleetKeyNameLength is what the other machine's key store accepts.
+const maxFleetKeyNameLength = 64
+
+// fleetKeySuffix is what makes one run's key name that run's own. It is
+// random rather than derived from anything, so a name match on the other
+// machine is proof of authorship: no earlier adoption, no key the owner typed
+// in by hand and no second head can be carrying it. A seam so tests can know
+// the name a run will use.
+var fleetKeySuffix = func() string {
+	var raw [4]byte
+	// crypto/rand.Read does not return an error on any supported platform; it
+	// fails the process instead. The branch is here so a future where it can
+	// still produces a name rather than an empty suffix, and the clock is
+	// unpredictable enough for that never-taken case.
+	if _, err := rand.Read(raw[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano()&0xffffffff, 16)
+	}
+	return hex.EncodeToString(raw[:])
+}
+
+// fleetKeyBaseName names the key after this machine, so the owner reading the
+// other console's Connect tab can tell whose key it is and what it is for.
+func fleetKeyBaseName() string {
 	host, err := os.Hostname()
 	if err != nil || strings.TrimSpace(host) == "" {
 		host = "basement"
 	}
 	short, _, _ := strings.Cut(host, ".")
-	name := "fleet-" + short
-	if len(name) > 64 {
-		name = name[:64]
-	}
-	return name
+	return capText("fleet-"+short, maxFleetKeyNameLength)
+}
+
+// newFleetKeyName is the name one adoption gives the key it mints:
+// "fleet-<head hostname>-<random>". The head's name is still the first thing
+// the owner reads in the other Spark's Connect tab, because that tab is their
+// UI and "fleet-spark-head-4b7d1e02" tells them whose key it is; the suffix is
+// what lets this manager prove, later, that a key on that machine is the one
+// this run created and not one that happened to be named the same.
+func newFleetKeyName() string {
+	suffix := fleetKeySuffix()
+	return capText(fleetKeyBaseName(), maxFleetKeyNameLength-len(suffix)-1) + "-" + suffix
 }
 
 type newSparkResponse struct {

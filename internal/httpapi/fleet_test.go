@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,11 +142,13 @@ func holdSeams(t *testing.T) {
 	dialBefore, sourceBefore := adoptDial, adoptBinarySource
 	urlBefore, selfBefore := consoleBaseURL, selfAddresses
 	resolveBefore, localBefore := resolveHost, localIPs
+	suffixBefore := fleetKeySuffix
 	t.Cleanup(func() {
 		discoverCandidates, adoptProbe, adoptInstall = discoverBefore, probeBefore, installBefore
 		adoptDial, adoptBinarySource = dialBefore, sourceBefore
 		consoleBaseURL, selfAddresses = urlBefore, selfBefore
 		resolveHost, localIPs = resolveBefore, localBefore
+		fleetKeySuffix = suffixBefore
 	})
 	localIPs = func() []net.IP { return []net.IP{net.ParseIP("192.168.99.134")} }
 }
@@ -173,14 +176,42 @@ type fakeSpark struct {
 	// refuseHandshake makes the reachability check at the end of adoption
 	// fail, which is how a test injects a failure after the fleet key exists.
 	refuseHandshake bool
-	// mintFailure breaks the answer to a key creation that has already been
-	// committed: "transport" drops the connection without answering at all,
-	// and "garbage" answers 201 with a body nothing can parse. Either way the
-	// key exists on this machine and the caller never learns its id.
+	// mintFailure breaks a key creation: "transport" drops the connection after
+	// the key is committed and "garbage" answers 201 with a body nothing can
+	// parse, so in both the key exists here and the caller never learns its id.
+	// "unreachable" drops the connection before the key is written, which is
+	// the request that never arrived: nothing was created and nothing may be
+	// deleted in its name.
 	mintFailure string
+	// mintDecoy makes a key creation commit a second key under the same name,
+	// so the caller cannot tell which of the two it asked for.
+	mintDecoy bool
+	// refuseListsBefore is how many key listings fail before the rest answer.
+	// One of them is what a run whose pre-mint snapshot never happened looks
+	// like from the manager's side.
+	refuseListsBefore int
 	// refuseDelete makes key removal fail, which is how a test reaches the
 	// sentence the owner is left to act on themselves.
 	refuseDelete bool
+}
+
+// seed puts a key on this machine before an adoption starts: a key from an
+// earlier adoption, or one the owner made by hand.
+func (s *fakeSpark) seed(id, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.minted = append(s.minted, map[string]string{"id": id, "name": name})
+}
+
+// keyNames is every key still on this machine, in listing order.
+func (s *fakeSpark) keyNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, 0, len(s.minted))
+	for _, entry := range s.minted {
+		names = append(names, entry["id"]+"="+entry["name"])
+	}
+	return names
 }
 
 func newFakeSpark(t *testing.T, token string) *fakeSpark {
@@ -220,9 +251,15 @@ func newFakeSpark(t *testing.T, token string) *fakeSpark {
 			return
 		}
 		// Listing, the same shape this manager serves it in: a bare array of
-		// keys, and no CSRF, because it changes nothing.
+		// keys, oldest first, and no CSRF, because it changes nothing.
 		if r.Method == http.MethodGet {
 			spark.mu.Lock()
+			if spark.refuseListsBefore > 0 {
+				spark.refuseListsBefore--
+				spark.mu.Unlock()
+				writeError(w, http.StatusInternalServerError, errors.New("the keys could not be listed"))
+				return
+			}
 			listed := append([]map[string]string(nil), spark.minted...)
 			spark.mu.Unlock()
 			writeJSON(w, http.StatusOK, listed)
@@ -239,12 +276,29 @@ func newFakeSpark(t *testing.T, token string) *fakeSpark {
 			writeError(w, http.StatusBadRequest, errors.New("a key name is required"))
 			return
 		}
+		// The request that never arrived: the connection drops before anything
+		// is written, so this machine holds no key from it.
+		spark.mu.Lock()
+		if spark.mintFailure == "unreachable" {
+			spark.mu.Unlock()
+			if hijacker, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hijacker.Hijack(); err == nil {
+					conn.Close()
+				}
+			}
+			return
+		}
 		// The key is committed before anything is said about it, which is the
 		// order a real manager writes in and the reason a failed answer does
 		// not mean a failed creation.
-		spark.mu.Lock()
 		id := fmt.Sprintf("key_%d", len(spark.minted)+1)
 		spark.minted = append(spark.minted, map[string]string{"id": id, "name": request.Name})
+		if spark.mintDecoy {
+			spark.minted = append(spark.minted, map[string]string{
+				"id":   fmt.Sprintf("key_%d", len(spark.minted)+1),
+				"name": request.Name,
+			})
+		}
 		failure := spark.mintFailure
 		spark.mu.Unlock()
 		switch failure {
@@ -275,6 +329,13 @@ func newFakeSpark(t *testing.T, token string) *fakeSpark {
 		refused := spark.refuseDelete
 		if !refused {
 			spark.revoked = append(spark.revoked, id)
+			kept := spark.minted[:0]
+			for _, entry := range spark.minted {
+				if entry["id"] != id {
+					kept = append(kept, entry)
+				}
+			}
+			spark.minted = kept
 		}
 		spark.mu.Unlock()
 		if refused {
@@ -1101,13 +1162,134 @@ func TestFleetAdoptRevokesTheFleetKeyWhenTheRunFailsAfterMintingIt(t *testing.T)
 	}
 }
 
-// And when the key cannot be handed back, the owner is told what to delete
+// And when the key cannot be handed back, the owner is told what to look for
 // rather than left with a credential nobody knows about.
 func TestFleetAdoptSaysSoWhenTheFleetKeyCannotBeRevoked(t *testing.T) {
-	// No key id and no session: nothing to revoke with.
-	message := (&Server{}).revokeFleetKey(context.Background(), "http://192.168.99.137:7070", fleetKey{secret: "rosk_x"})
-	if !strings.Contains(message, "could not be removed") || !strings.Contains(message, fleetKeyName()) {
-		t.Errorf("the honest message does not name the key to delete: %q", message)
+	// No key id and no session: nothing to revoke with, and nothing to prove
+	// anything with either.
+	key := fleetKey{secret: "rosk_x", name: "fleet-spark-head-4b7d1e02"}
+	message := (&Server{}).revokeFleetKey(context.Background(), "http://192.168.99.137:7070", key)
+	if !strings.Contains(message, key.name) || !strings.Contains(message, "Connect") {
+		t.Errorf("the honest message does not say what to look for and where: %q", message)
+	}
+}
+
+// pinFleetKeyName fixes the random half of the name this run's fleet key will
+// carry, so a test can know it in advance, and returns that name.
+func pinFleetKeyName(t *testing.T, suffix string) string {
+	t.Helper()
+	before := fleetKeySuffix
+	t.Cleanup(func() { fleetKeySuffix = before })
+	fleetKeySuffix = func() string { return suffix }
+	return newFleetKeyName()
+}
+
+// Cleanup deletes the key this run created and nothing else. The other machine
+// allows duplicate key names and lists them oldest first, so a cleanup that
+// went by name alone would, whenever the owner already had a key named after
+// this head, delete that older key, report success, and leave the key this run
+// just minted behind: the opposite of the intent. The name a run mints under is
+// its own, and the ids that were already there are snapshotted before the mint;
+// a key is deleted only when both say it is ours.
+func TestFleetAdoptRevokesOnlyTheKeyItCreated(t *testing.T) {
+	// The name every run below mints under, known here so the machines can be
+	// seeded with a key that collides with it.
+	keyName := pinFleetKeyName(t, "4b7d1e02")
+	cases := []struct {
+		name string
+		// setUp seeds the other machine and chooses how the mint fails. It is
+		// given the name this run's key will carry.
+		setUp func(spark *fakeSpark, keyName string)
+		// deleted is what the run may remove, and kept is what must survive.
+		deleted []string
+		kept    []string
+		// says is what the failure sentence has to tell the owner.
+		says []string
+	}{
+		{
+			// The reported bypass: a key already carrying the name this run
+			// would use, and a mint whose answer is lost. The snapshot is what
+			// says the old key is not this run's to delete.
+			name: "a key of the same name was already there",
+			setUp: func(spark *fakeSpark, keyName string) {
+				spark.seed("key_pre", keyName)
+				spark.mintFailure = "transport"
+			},
+			deleted: []string{"key_2"},
+			kept:    []string{"key_pre=" + keyName},
+			says:    []string{"has been removed"},
+		},
+		{
+			// The same collision with no snapshot to compare against, because
+			// the machine would not list its keys before the mint. The name is
+			// then the only proof there is, and it is enough: a key from an
+			// earlier adoption by this same head carries the old plain name.
+			name: "with no snapshot to compare against",
+			setUp: func(spark *fakeSpark, _ string) {
+				spark.seed("key_pre", fleetKeyBaseName())
+				spark.refuseListsBefore = 1
+				spark.mintFailure = "transport"
+			},
+			deleted: []string{"key_2"},
+			kept:    []string{"key_pre=" + fleetKeyBaseName()},
+			says:    []string{"has been removed"},
+		},
+		{
+			// The mint never reached the machine, so there is nothing of this
+			// run's to delete and the colliding key is not a consolation prize.
+			name: "the mint never reached the machine",
+			setUp: func(spark *fakeSpark, _ string) {
+				spark.seed("key_pre", fleetKeyBaseName())
+				spark.mintFailure = "unreachable"
+			},
+			deleted: nil,
+			kept:    []string{"key_pre=" + fleetKeyBaseName()},
+			says:    []string{"No fleet key was left"},
+		},
+		{
+			// Two keys of this run's own name, so which one it created is not
+			// knowable. Deleting either is a guess, so it deletes neither and
+			// says what to look for and where.
+			name: "authorship cannot be told apart",
+			setUp: func(spark *fakeSpark, _ string) {
+				spark.mintDecoy = true
+				spark.mintFailure = "transport"
+			},
+			deleted: nil,
+			kept:    []string{"key_1=" + keyName, "key_2=" + keyName},
+			says:    []string{keyName, "Connect", "could not tell"},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			holdSeams(t)
+			fixture := newFleetFixture(t)
+			spark := newFakeSpark(t, "pairing-token-value")
+			test.setUp(spark, keyName)
+			adoptionSeams(spark)
+
+			if code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
+				`{"address":"192.168.99.137","username":"nvidia","password":"typed-by-the-owner"}`); code != http.StatusAccepted {
+				t.Fatalf("adopt code = %d, body = %s", code, payload)
+			}
+			view := fixture.waitAdoption(t)
+			if view.State != adoptionFailed {
+				t.Fatalf("state = %s", view.State)
+			}
+			if got := spark.deleteAttempts(); !slices.Equal(got, test.deleted) {
+				t.Errorf("delete attempts = %v, want %v", got, test.deleted)
+			}
+			for _, wanted := range test.kept {
+				if !slices.Contains(spark.keyNames(), wanted) {
+					t.Errorf("key %q is gone: the machine holds %v", wanted, spark.keyNames())
+				}
+			}
+			for _, sentence := range test.says {
+				if !strings.Contains(view.Error, sentence) {
+					t.Errorf("the failure does not say %q: %q", sentence, view.Error)
+				}
+			}
+		})
 	}
 }
 
@@ -1135,13 +1317,14 @@ func adoptionSeams(spark *fakeSpark) {
 }
 
 // leakedFragment reports the longest run of secret, of minLength characters or
-// more, that survived into text. A whole password is the obvious leak; a
-// fragment of one is still a fragment of the owner's password, and it is what
-// a length cap applied to unscrubbed text leaves behind.
+// more, that survived into text, ignoring case. A whole password is the obvious
+// leak; a fragment of one is still a fragment of the owner's password, and it
+// is what a length cap applied to unscrubbed text leaves behind.
 func leakedFragment(text, secret string, minLength int) string {
+	folded := strings.ToLower(text)
 	for length := len(secret); length >= minLength; length-- {
 		for start := 0; start+length <= len(secret); start++ {
-			if piece := secret[start : start+length]; strings.Contains(text, piece) {
+			if piece := secret[start : start+length]; strings.Contains(folded, strings.ToLower(piece)) {
 				return piece
 			}
 		}
@@ -1160,7 +1343,11 @@ func leakedFragment(text, secret string, minLength int) string {
 func TestFleetAdoptCannotBeTrickedIntoStoringThePassword(t *testing.T) {
 	const password = "correct-horse-battery-staple"
 	cases := []struct {
-		name     string
+		name string
+		// typed is what the owner typed into the console, and hostname is what
+		// the machine on the other end answers `hostname` with. An empty typed
+		// means the ordinary password above.
+		typed    string
 		hostname string
 	}{
 		{
@@ -1183,6 +1370,45 @@ func TestFleetAdoptCannotBeTrickedIntoStoringThePassword(t *testing.T) {
 			name:     "padded past the length cap",
 			hostname: strings.Repeat("a", maxMachineNameLength-12) + password,
 		},
+		{
+			// The trick the other way round, and the stronger form of it: the
+			// password was typed with whitespace around it, and the machine
+			// reports what this manager's own trimming would have produced. No
+			// scrub that compares against the typed bytes ever sees a match, at
+			// any point in the order, so the ordering rule cannot save this one
+			// and the scrubber has to know the trimmed form itself.
+			name:     "typed with whitespace, reported without it",
+			typed:    "  " + password + "\t",
+			hostname: password,
+		},
+		{
+			// The same password reported whole, which is what the ordering rule
+			// catches: the first scrub sees it before the trimming does.
+			name:     "typed with whitespace, reported whole",
+			typed:    "  " + password + "\t",
+			hostname: "  " + password + "\t",
+		},
+		{
+			// A password holding a character the strip removes, reported as
+			// what the strip would leave of it.
+			name:     "typed with a control character, reported without it",
+			typed:    "correct-horse\x07-battery-staple",
+			hostname: "correct-horse-battery-staple",
+		},
+		{
+			// Case is the cheapest rewrite of all, and hostnames are lowercased
+			// and compared all over this file.
+			name:     "differing only in case",
+			hostname: strings.ToUpper(password),
+		},
+		{
+			// A short password is as much the owner's password as a long one,
+			// and nothing here may have a minimum length below which it stops
+			// being scrubbed.
+			name:     "short enough to look like noise",
+			typed:    "s3cr3",
+			hostname: " s3cr3 ",
+		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -1197,9 +1423,21 @@ func TestFleetAdoptCannotBeTrickedIntoStoringThePassword(t *testing.T) {
 					DeviceModel: "NVIDIA DGX Spark",
 				}
 			}
+			typed := test.typed
+			if typed == "" {
+				typed = password
+			}
+			// Marshalled rather than pasted into a literal: some of these
+			// passwords hold bytes a JSON string cannot carry raw, and the
+			// request has to be the one the owner's browser would send.
+			body, err := json.Marshal(map[string]string{
+				"address": "192.168.99.137", "username": "nvidia", "password": typed,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
 
-			if code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt",
-				`{"address":"192.168.99.137","username":"nvidia","password":"`+password+`"}`); code != http.StatusAccepted {
+			if code, payload := fixture.call(t, http.MethodPost, "/api/v1/fleet/adopt", string(body)); code != http.StatusAccepted {
 				t.Fatalf("adopt code = %d, body = %s", code, payload)
 			}
 			view := fixture.waitAdoption(t)
@@ -1229,12 +1467,23 @@ func TestFleetAdoptCannotBeTrickedIntoStoringThePassword(t *testing.T) {
 				{"the peers endpoint", string(listed)},
 				{"the status payload", string(raw)},
 				{"the adoption result", string(result)},
+				// The stored name as the store holds it, not as JSON spells
+				// it: a password carrying a control character comes back from
+				// json.Marshal escaped, and an escaped secret is still the
+				// secret.
+				{"the stored peer name", peers[0].Name},
 			} {
-				if strings.Contains(place.text, password) {
-					t.Fatalf("%s holds the SSH password: %s", place.what, place.text)
-				}
-				if piece := leakedFragment(place.text, password, 8); piece != "" {
-					t.Fatalf("%s holds %q, a piece of the SSH password: %s", place.what, piece, place.text)
+				// Every shape of the password, not just the bytes the owner
+				// typed. Whitespace and control characters are exactly what
+				// this manager's own transformations remove, so the trimmed and
+				// stripped forms are the ones a bypass would leave behind.
+				for _, form := range passwordForms(typed) {
+					if strings.Contains(strings.ToLower(place.text), strings.ToLower(form)) {
+						t.Fatalf("%s holds %q, the SSH password: %s", place.what, form, place.text)
+					}
+					if piece := leakedFragment(place.text, form, min(8, len(form))); piece != "" {
+						t.Fatalf("%s holds %q, a piece of the SSH password: %s", place.what, piece, place.text)
+					}
 				}
 			}
 			if name := peers[0].Name; len(name) > maxMachineNameLength || strings.ContainsAny(name, "\x1b\x00\n\r") {
@@ -1354,6 +1603,7 @@ func TestFleetAdoptHandsBackAKeyItNeverSawTheIdOf(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			holdSeams(t)
 			fixture := newFleetFixture(t)
+			keyName := pinFleetKeyName(t, "4b7d1e02")
 			spark := newFakeSpark(t, "pairing-token-value")
 			spark.mintFailure = test.failure
 			spark.refuseDelete = test.refuseDelete
@@ -1372,7 +1622,7 @@ func TestFleetAdoptHandsBackAKeyItNeverSawTheIdOf(t *testing.T) {
 				t.Fatalf("the minted key was not handed back: delete attempts = %v", attempted)
 			}
 			if test.refuseDelete {
-				if !strings.Contains(view.Error, fleetKeyName()) || !strings.Contains(view.Error, "could not be removed") {
+				if !strings.Contains(view.Error, keyName) || !strings.Contains(view.Error, "could not be removed") {
 					t.Errorf("the failure did not name the key the owner has to delete: %q", view.Error)
 				}
 				if !strings.Contains(view.Error, "Connect") {
