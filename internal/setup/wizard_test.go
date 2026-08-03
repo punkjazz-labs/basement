@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/discovery"
+	"github.com/punkjazz-labs/basement/internal/discovery"
 )
 
 // stubUI is a scripted WizardUI for exercising the flow functions without a

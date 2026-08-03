@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/recipe"
 )
 
 type Execution struct {

@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/discovery"
+	"github.com/punkjazz-labs/basement/internal/discovery"
 )
 
 // WizardUI drives one interactive setup run: discover-or-fixed-target,

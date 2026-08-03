@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/recipe"
 )
 
 func TestSignIndexProducesASignatureVerifySignatureAccepts(t *testing.T) {

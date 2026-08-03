@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/setup"
+	"github.com/punkjazz-labs/basement/internal/setup"
 )
 
 //go:embed assets/index.html

@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/recipe"
 )
 
 // IndexURL is the single HTTPS location the manager fetches the signed

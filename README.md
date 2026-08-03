@@ -14,13 +14,13 @@ From any macOS or Linux machine on the same network as your Spark, or on
 the Spark itself:
 
 ```bash
-curl -fsSL https://github.com/punkjazz-labs/runonspark-manager/releases/latest/download/setup.sh | sh
+curl -fsSL https://github.com/punkjazz-labs/basement/releases/latest/download/setup.sh | sh
 ```
 
 On Windows (PowerShell):
 
 ```powershell
-irm https://github.com/punkjazz-labs/runonspark-manager/releases/latest/download/setup.ps1 | iex
+irm https://github.com/punkjazz-labs/basement/releases/latest/download/setup.ps1 | iex
 ```
 
 The installer discovers GB10 machines on your network, lets you pick one,

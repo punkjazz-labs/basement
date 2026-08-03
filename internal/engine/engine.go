@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/operations"
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
-	"github.com/punkjazz-labs/runonspark-manager/internal/redact"
-	"github.com/punkjazz-labs/runonspark-manager/internal/store"
+	"github.com/punkjazz-labs/basement/internal/operations"
+	"github.com/punkjazz-labs/basement/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/redact"
+	"github.com/punkjazz-labs/basement/internal/store"
 )
 
 type Engine struct {

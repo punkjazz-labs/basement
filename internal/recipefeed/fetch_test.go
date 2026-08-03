@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/recipe"
 )
 
 // testKeypair generates an ephemeral ed25519 keypair inside the test

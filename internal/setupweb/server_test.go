@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/discovery"
-	"github.com/punkjazz-labs/runonspark-manager/internal/setup"
+	"github.com/punkjazz-labs/basement/internal/discovery"
+	"github.com/punkjazz-labs/basement/internal/setup"
 )
 
 // newTestServer starts a real loopback server (no flow goroutine — tests

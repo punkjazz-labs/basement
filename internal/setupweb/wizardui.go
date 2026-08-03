@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/discovery"
-	"github.com/punkjazz-labs/runonspark-manager/internal/setup"
+	"github.com/punkjazz-labs/basement/internal/discovery"
+	"github.com/punkjazz-labs/basement/internal/setup"
 )
 
 // Server implements setup.WizardUI: each blocking method publishes its

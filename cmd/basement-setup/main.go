@@ -16,7 +16,7 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/setupweb"
+	"github.com/punkjazz-labs/basement/internal/setupweb"
 )
 
 func main() {

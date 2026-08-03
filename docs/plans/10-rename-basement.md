@@ -29,7 +29,7 @@ already `basement.punkjazz.ai`.
 | console sidebar wordmark (currently the R logo + "RunOnSpark") | the word `basement`, lowercase, using the console's existing type — remove the R logo image from the sidebar (leave the file on disk; recipe logos are untouched) |
 
 **Unchanged, deliberately — do NOT rename these:**
-- The Go module path `github.com/punkjazz-labs/runonspark-manager` and every
+- The Go module path `github.com/punkjazz-labs/basement` and every
   import path. It renames together with the GitHub repository, which is
   the owner's action, not this branch's.
 - `releaseURL` in `internal/setup/install.go` (points at the real repo; moves

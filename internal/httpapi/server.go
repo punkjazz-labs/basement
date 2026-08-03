@@ -20,14 +20,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/auth"
-	"github.com/punkjazz-labs/runonspark-manager/internal/engine"
-	"github.com/punkjazz-labs/runonspark-manager/internal/inventory"
-	"github.com/punkjazz-labs/runonspark-manager/internal/operations"
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
-	"github.com/punkjazz-labs/runonspark-manager/internal/redact"
-	"github.com/punkjazz-labs/runonspark-manager/internal/store"
-	"github.com/punkjazz-labs/runonspark-manager/internal/webui"
+	"github.com/punkjazz-labs/basement/internal/auth"
+	"github.com/punkjazz-labs/basement/internal/engine"
+	"github.com/punkjazz-labs/basement/internal/inventory"
+	"github.com/punkjazz-labs/basement/internal/operations"
+	"github.com/punkjazz-labs/basement/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/redact"
+	"github.com/punkjazz-labs/basement/internal/store"
+	"github.com/punkjazz-labs/basement/internal/webui"
 )
 
 type Server struct {
@@ -1408,7 +1408,7 @@ func dirBytes(root string) int64 {
 	return total
 }
 
-const updateRepository = "punkjazz-labs/runonspark-manager"
+const updateRepository = "punkjazz-labs/basement"
 
 func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

@@ -1,12 +1,12 @@
 #!/bin/sh
 # basement one-line installer bootstrap:
-#   curl -fsSL https://github.com/punkjazz-labs/runonspark-manager/releases/latest/download/setup.sh | sh
+#   curl -fsSL https://github.com/punkjazz-labs/basement/releases/latest/download/setup.sh | sh
 # Downloads the manager binary for THIS machine, verifies its checksum, and
 # runs `basement setup` — which discovers GB10 machines on the network (or
 # installs locally when run on one).
 set -eu
 
-repo="punkjazz-labs/runonspark-manager"
+repo="punkjazz-labs/basement"
 base="https://github.com/${repo}/releases/latest/download"
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')

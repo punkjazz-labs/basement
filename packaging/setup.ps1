@@ -1,11 +1,11 @@
 # basement one-line installer bootstrap for Windows:
-#   irm https://github.com/punkjazz-labs/runonspark-manager/releases/latest/download/setup.ps1 | iex
+#   irm https://github.com/punkjazz-labs/basement/releases/latest/download/setup.ps1 | iex
 # Downloads the manager binary for this machine, verifies its checksum, and
 # runs `basement setup` — which discovers GB10 machines on the network and
 # installs over SSH.
 $ErrorActionPreference = "Stop"
 
-$repo = "punkjazz-labs/runonspark-manager"
+$repo = "punkjazz-labs/basement"
 $base = "https://github.com/$repo/releases/latest/download"
 
 $arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) { "arm64" } else { "amd64" }

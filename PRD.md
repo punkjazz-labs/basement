@@ -1,7 +1,7 @@
 # RunOnSpark Manager — Product Requirements and Technical Specification
 
 Status: approved planning baseline  
-Repository: `punkjazz-labs/runonspark-manager`  
+Repository: `punkjazz-labs/basement`  
 Companion catalogue: `punkjazz-labs/onspark` / [runonspark.ai](https://runonspark.ai)  
 Initial scope: one NVIDIA DGX Spark, three curated models, vLLM  
 

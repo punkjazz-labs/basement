@@ -15,8 +15,8 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/discovery"
-	"github.com/punkjazz-labs/runonspark-manager/internal/setup"
+	"github.com/punkjazz-labs/basement/internal/discovery"
+	"github.com/punkjazz-labs/basement/internal/setup"
 )
 
 // runSetup implements `basement setup`: install on this machine if it is a

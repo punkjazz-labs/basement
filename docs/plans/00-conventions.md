@@ -11,7 +11,7 @@ The product promise is trust: pinned versions, verified installs, honest copy, r
 for everything. Users include non-experts; the console must read like a considered
 appliance, not a devops tool.
 
-The module path and repository are still `github.com/punkjazz-labs/runonspark-manager`
+The module path and repository are still `github.com/punkjazz-labs/basement`
 — they rename together with the GitHub repository itself (the owner's action, not an
 executor's); only the product name, binaries, and everything users see are `basement`
 (see docs/plans/10-rename-basement.md).

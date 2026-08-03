@@ -1,4 +1,4 @@
-module github.com/punkjazz-labs/runonspark-manager
+module github.com/punkjazz-labs/basement
 
 go 1.25.0
 

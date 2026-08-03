@@ -31,7 +31,7 @@ const (
 	// (ADR 0010; asset naming is part of the release contract). It still
 	// points at the runonspark-manager repository: the repo itself renames
 	// separately from this branch (docs/plans/10-rename-basement.md).
-	releaseURL = "https://github.com/punkjazz-labs/runonspark-manager/releases/latest/download"
+	releaseURL = "https://github.com/punkjazz-labs/basement/releases/latest/download"
 
 	// Pre-rename (spec 10) names and paths. A machine set up before the
 	// rename still runs under these; Install adopts it in place (see

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/recipe"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/inventory"
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/inventory"
+	"github.com/punkjazz-labs/basement/internal/recipe"
 )
 
 type resourceInventory struct{ system inventory.System }

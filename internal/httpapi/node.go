@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/operations"
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
-	"github.com/punkjazz-labs/runonspark-manager/internal/redact"
+	"github.com/punkjazz-labs/basement/internal/operations"
+	"github.com/punkjazz-labs/basement/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/redact"
 )
 
 // workerOperations is the entire surface a head Spark may drive on this one.

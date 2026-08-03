@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/punkjazz-labs/runonspark-manager/internal/inventory"
-	"github.com/punkjazz-labs/runonspark-manager/internal/recipe"
-	"github.com/punkjazz-labs/runonspark-manager/internal/resourceguard"
+	"github.com/punkjazz-labs/basement/internal/inventory"
+	"github.com/punkjazz-labs/basement/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/resourceguard"
 )
 
 type HostExecutor struct {
