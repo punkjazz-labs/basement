@@ -477,7 +477,9 @@ func TestWorkerStepProgressReachesTheConsole(t *testing.T) {
 			return nil
 		}
 		seen = append(seen, values)
-		if len(seen) >= 2 {
+		// Exactly two, not at-least: a third poll can land before the
+		// follower notices the release, and this channel closes once.
+		if len(seen) == 2 {
 			close(release)
 		}
 		return nil
