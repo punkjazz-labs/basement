@@ -30,6 +30,9 @@ const (
 	labelManaged       = "ai.basement.managed"
 	labelRecipeID      = "ai.basement.recipe-id"
 	labelRecipeVersion = "ai.basement.recipe-version"
+	// labelNodeRole is set only on distributed containers, so a two-Spark
+	// worker container is distinguishable from a single-node one on sight.
+	labelNodeRole = "ai.basement.node-role"
 
 	// Pre-rename (spec 10) label namespace. Containers created before the
 	// rename still carry it — live containers are never relabeled — so
@@ -213,7 +216,7 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels}, nil
 }
 
-func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, r recipe.Recipe) (string, error) {
+func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, r recipe.Recipe, placement Placement) (string, error) {
 	if len(artifactPaths) != len(r.Artifacts) || cachePath == "" {
 		return "", errors.New("container artifact and cache paths are incomplete")
 	}
@@ -225,6 +228,9 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 	binds = append(binds, cachePath+":/root/.cache:rw")
 	environment := make([]string, 0, len(r.Runtime.Environment)+1)
 	for name, value := range r.Runtime.Environment {
+		environment = append(environment, name+"="+value)
+	}
+	for name, value := range interconnectEnvironment(r, placement) {
 		environment = append(environment, name+"="+value)
 	}
 	// The root filesystem is read-only and /root/.cache is the one writable
@@ -252,12 +258,28 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 	if r.Runtime.IPCLock {
 		hostConfig["CapAdd"] = []string{"IPC_LOCK"}
 	}
+	if placement.Distributed() {
+		// Ranks reach each other over the cabled fabric, which means the host
+		// network namespace and the RDMA devices. Published ports mean nothing
+		// under host networking, so the API server is told to bind loopback
+		// itself (see vllmArgs) rather than relying on a port mapping.
+		delete(hostConfig, "PortBindings")
+		hostConfig["NetworkMode"] = "host"
+		hostConfig["IpcMode"] = "host"
+		hostConfig["Devices"] = []map[string]any{{"PathOnHost": "/dev/infiniband", "PathInContainer": "/dev/infiniband", "CgroupPermissions": "rwm"}}
+		hostConfig["CapAdd"] = []string{"IPC_LOCK"}
+		hostConfig["Ulimits"] = []map[string]any{{"Name": "memlock", "Soft": -1, "Hard": -1}}
+	}
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: fmt.Sprint(r.Version)}
+	if placement.Distributed() {
+		labels[labelNodeRole] = placement.Role
+	}
 	body := map[string]any{
 		"Image":        image,
 		"Entrypoint":   []string{"vllm"},
-		"Cmd":          vllmArgs(r),
+		"Cmd":          vllmArgs(r, placement),
 		"Env":          environment,
-		"Labels":       map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: fmt.Sprint(r.Version)},
+		"Labels":       labels,
 		"ExposedPorts": map[string]any{port: map[string]any{}},
 		"HostConfig":   hostConfig,
 	}
@@ -443,7 +465,29 @@ func dockerError(resp *http.Response) error {
 	return fmt.Errorf("docker returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
 }
 
-func vllmArgs(r recipe.Recipe) []string {
+// interconnectEnvironment merges the recipe's fabric environment for this
+// node: what every rank needs, then this rank's own additions. A single-node
+// placement gets nothing, so existing recipes are untouched.
+func interconnectEnvironment(r recipe.Recipe, placement Placement) map[string]string {
+	if !placement.Distributed() || r.Topology.Interconnect == nil {
+		return nil
+	}
+	link := r.Topology.Interconnect
+	merged := map[string]string{}
+	for name, value := range link.SharedEnvironment {
+		merged[name] = value
+	}
+	perRole := link.HeadEnvironment
+	if placement.Role == RoleWorker {
+		perRole = link.WorkerEnvironment
+	}
+	for name, value := range perRole {
+		merged[name] = value
+	}
+	return merged
+}
+
+func vllmArgs(r recipe.Recipe, placement Placement) []string {
 	v := r.Service.VLLM
 	specConfig := map[string]any{"method": v.SpeculativeMethod, "num_speculative_tokens": v.SpeculativeTokens}
 	if v.SpeculativeMoE != "" {
@@ -453,7 +497,8 @@ func vllmArgs(r recipe.Recipe) []string {
 		specConfig["model"] = artifactMountPath(v.SpeculativeModelRole)
 	}
 	spec, _ := json.Marshal(specConfig)
-	args := []string{"serve", "/model", "--host", "0.0.0.0", "--port", fmt.Sprint(r.Service.InternalPort), "--served-model-name", r.Service.ServedModelID,
+	serveHost, servePort := serveEndpointArgs(r, placement)
+	args := []string{"serve", "/model", "--host", serveHost, "--port", fmt.Sprint(servePort), "--served-model-name", r.Service.ServedModelID,
 		"--tensor-parallel-size", fmt.Sprint(v.TensorParallelSize), "--gpu-memory-utilization", v.GPUMemoryUtil, "--max-model-len", fmt.Sprint(v.MaxModelLen),
 		"--max-num-seqs", fmt.Sprint(v.MaxNumSeqs), "--speculative-config", string(spec),
 		"--reasoning-parser", v.ReasoningParser, "--tool-call-parser", v.ToolCallParser}
@@ -495,7 +540,39 @@ func vllmArgs(r recipe.Recipe) []string {
 	if v.AutoToolChoice {
 		args = append(args, "--enable-auto-tool-choice")
 	}
+	return append(args, distributedArgs(r, placement)...)
+}
+
+// distributedArgs are the two-node launch flags the community DGX Spark
+// recipe uses: plain vllm serve with --nnodes/--node-rank/--master-addr/
+// --master-port, the multiprocessing executor, and --headless on the rank
+// that serves no HTTP. There is no ray and no torchrun.
+func distributedArgs(r recipe.Recipe, placement Placement) []string {
+	if !placement.Distributed() {
+		return nil
+	}
+	args := []string{
+		"--distributed-executor-backend", "mp",
+		"--nnodes", fmt.Sprint(placement.NodeCount),
+		"--node-rank", fmt.Sprint(placement.Rank()),
+		"--master-addr", placement.MasterAddress,
+		"--master-port", fmt.Sprint(placement.MasterPort),
+	}
+	if placement.Role == RoleWorker {
+		return append(args, "--headless")
+	}
 	return args
+}
+
+// serveEndpointArgs are the host and port the API server binds. Under host
+// networking there is no port publishing, so the head binds the recipe's
+// host port directly, and it binds loopback so the manager's authenticated
+// /v1 proxy stays the only network path to the model (ADR 0007).
+func serveEndpointArgs(r recipe.Recipe, placement Placement) (string, int) {
+	if placement.Distributed() {
+		return "127.0.0.1", r.Service.DefaultHostPort
+	}
+	return "0.0.0.0", r.Service.InternalPort
 }
 
 func appendOptional(args []string, flag, value string) []string {

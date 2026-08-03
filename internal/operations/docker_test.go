@@ -51,7 +51,7 @@ func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"container-id"}`))}, nil
 	})}}
-	id, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", r)
+	id, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", r, Placement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestLagunaUsesSeparateReadOnlyDrafterMount(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"container-id"}`))}, nil
 	})}}
-	_, err = client.Create(context.Background(), "laguna", r.Runtime.Reference(), []string{"/owned/target", "/owned/draft"}, "/owned/cache", r)
+	_, err = client.Create(context.Background(), "laguna", r.Runtime.Reference(), []string{"/owned/target", "/owned/draft"}, "/owned/cache", r, Placement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestChatTemplateKwargsAlwaysReachVLLM(t *testing.T) {
 	if r.Service.VLLM.ChatTemplate.EnableThinking || r.Service.VLLM.ChatTemplate.PreserveThinking {
 		t.Fatalf("this test assumes Laguna disables thinking; recipe says %+v", r.Service.VLLM.ChatTemplate)
 	}
-	joined := strings.Join(vllmArgs(r), " ")
+	joined := strings.Join(vllmArgs(r, Placement{}), " ")
 	want := `--default-chat-template-kwargs {"enable_thinking":false,"preserve_thinking":false}`
 	if !strings.Contains(joined, want) {
 		t.Fatalf("explicit false kwargs missing from vLLM args: %s", joined)

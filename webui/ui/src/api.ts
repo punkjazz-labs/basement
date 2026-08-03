@@ -305,4 +305,15 @@ export const operationCopy: Record<string, string> = {
   measure_throughput: 'Measure real speed',
   remove_container: 'Remove model service',
   remove_artifact_if_unshared: 'Remove model files',
+  teardown_stop_container: 'Stop model service',
+}
+
+// A two-Spark job runs the same operation once per node and records each as
+// "operation:role". Nothing is invented here: the role shown is the one the
+// step was stored under.
+export function stepCopy(operation: string): string {
+  const [name, role] = operation.split(':')
+  const label = operationCopy[name] ?? name
+  if (!role) return label
+  return role === 'worker' ? `${label} (second Spark)` : `${label} (this Spark)`
 }

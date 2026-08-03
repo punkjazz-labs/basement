@@ -162,7 +162,7 @@ func TestVLLMArgumentsAreStructuredAndPinned(t *testing.T) {
 	if !ok {
 		t.Fatal("Qwen 35 recipe missing")
 	}
-	args := vllmArgs(r)
+	args := vllmArgs(r, Placement{})
 	joined := strings.Join(args, " ")
 	for _, required := range []string{"serve /model", "--reasoning-parser qwen3", "--tool-call-parser qwen3_coder", "--linear-backend flashinfer_b12x", "--speculative-config", "--served-model-name unsloth/Qwen3.6-35B-A3B-NVFP4"} {
 		if !strings.Contains(joined, required) {

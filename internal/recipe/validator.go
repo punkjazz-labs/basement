@@ -73,9 +73,7 @@ func Validate(r Recipe) error {
 	if sourceErr != nil || sourceURL.Scheme != "https" || (sourceURL.Host != "github.com" && sourceURL.Host != "huggingface.co") || !revisionPattern.MatchString(r.Source.Revision) {
 		problems = append(problems, "source must use an approved HTTPS URL and immutable revision")
 	}
-	if r.Topology.SparkCount != 1 {
-		problems = append(problems, "only one Spark is supported")
-	}
+	problems = append(problems, topologyProblems(r.Topology)...)
 	if r.Runtime.Kind != "vllm" {
 		problems = append(problems, "runtime kind must be vllm")
 	}
@@ -161,7 +159,7 @@ func Validate(r Recipe) error {
 	if primaryIndex, ok := r.ArtifactIndex("primary"); ok && r.Service.ServedModelID != r.Artifacts[primaryIndex].Repository {
 		problems = append(problems, "served_model_id must identify the pinned primary artifact")
 	}
-	if err := validateVLLM(r.Service.VLLM, roles); err != nil {
+	if err := validateVLLM(r.Service.VLLM, roles, r.Topology.SparkCount); err != nil {
 		problems = append(problems, err.Error())
 	}
 	if util, err := strconv.ParseFloat(r.Service.VLLM.GPUMemoryUtil, 64); err == nil && r.Requirements.MinimumMemoryBytes > 0 {
@@ -207,8 +205,61 @@ func operationSequenceEqual(operations []Operation, expected []string) bool {
 	return true
 }
 
-func validateVLLM(v VLLMConfig, roles map[string]bool) error {
-	if v.TensorParallelSize != 1 || v.MaxModelLen <= 0 || v.MaxNumSeqs <= 0 || v.MaxBatchedTokens < 0 || v.MultimodalImageLimit < 0 || v.MultimodalImageLimit > 8 {
+// interconnectEnvironment is the entire environment a topology block may
+// set. Every name is an NCCL, Gloo or PyTorch distributed control, so a
+// recipe cannot smuggle arbitrary process environment into a container
+// through the topology block.
+var interconnectEnvironment = map[string]bool{
+	"NCCL_IB_DISABLE": true, "NCCL_IB_HCA": true, "NCCL_IB_GID_INDEX": true,
+	"NCCL_SOCKET_IFNAME": true, "GLOO_SOCKET_IFNAME": true, "TP_SOCKET_IFNAME": true,
+	"NCCL_IGNORE_CPU_AFFINITY": true, "NCCL_DEBUG": true, "NCCL_P2P_DISABLE": true,
+	"NCCL_NET_GDR_LEVEL": true, "NCCL_CROSS_NIC": true,
+}
+
+var interconnectValuePattern = regexp.MustCompile(`^[A-Za-z0-9_.:,/-]{1,64}$`)
+
+// topologyProblems admits a two-Spark recipe only when it carries a complete
+// interconnect description. A single-Spark recipe stays valid exactly as it
+// was and must not carry one, so nothing can quietly half-declare a fabric.
+func topologyProblems(t Topology) []string {
+	var problems []string
+	if t.SparkCount != 1 && t.SparkCount != 2 {
+		return append(problems, "spark_count must be 1 or 2")
+	}
+	if t.SparkCount == 1 {
+		if t.Interconnect != nil {
+			problems = append(problems, "a single-Spark recipe must not declare topology.interconnect")
+		}
+		return problems
+	}
+	if t.Interconnect == nil {
+		return append(problems, "a two-Spark recipe must declare topology.interconnect")
+	}
+	link := *t.Interconnect
+	if link.Kind != "connectx7" {
+		problems = append(problems, "topology.interconnect.kind must be connectx7")
+	}
+	if link.MasterPort < 1024 || link.MasterPort > 65535 {
+		problems = append(problems, "topology.interconnect.master_port must be a non-privileged port")
+	}
+	for _, environment := range []map[string]string{link.SharedEnvironment, link.HeadEnvironment, link.WorkerEnvironment} {
+		for name, value := range environment {
+			if !interconnectEnvironment[name] || !interconnectValuePattern.MatchString(value) {
+				problems = append(problems, "topology.interconnect environment is outside the allowlist")
+			}
+		}
+	}
+	// The head resolves --master-addr from this interface, and both ranks
+	// pin their transports to it; without it there is no two-node launch.
+	if t.SocketInterface() == "" {
+		problems = append(problems, "topology.interconnect.shared_environment must set NCCL_SOCKET_IFNAME")
+	}
+	return problems
+}
+
+func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
+	// Tensor parallelism spans the whole topology: one rank per Spark.
+	if v.TensorParallelSize != sparkCount || v.MaxModelLen <= 0 || v.MaxNumSeqs <= 0 || v.MaxBatchedTokens < 0 || v.MultimodalImageLimit < 0 || v.MultimodalImageLimit > 8 {
 		return errors.New("vllm numeric settings are invalid")
 	}
 	allowed := map[string]map[string]bool{

@@ -219,7 +219,7 @@ func TestPlanForDownloadOnlyInstallExcludesContainerAndSwitchOperations(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, _, err := runner.plan(ctx, job, recipes[0])
+	plans, _, err := runner.plan(ctx, job, recipes[0], operations.Placement{}, operations.Placement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +359,7 @@ func TestPlanForStartingADownloadOnlyModelWhileAnotherServesComposesWithSwitch(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, previous, err := runner.plan(ctx, job, target)
+	plans, previous, err := runner.plan(ctx, job, target, operations.Placement{}, operations.Placement{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -51,6 +51,35 @@ type Source struct {
 
 type Topology struct {
 	SparkCount int `yaml:"spark_count" json:"spark_count"`
+	// Interconnect is required when SparkCount is above 1 and forbidden
+	// otherwise. Device names and GID indices are facts of a particular
+	// cabling, so they are declared by the recipe and never inferred.
+	Interconnect *Interconnect `yaml:"interconnect,omitempty" json:"interconnect,omitempty"`
+}
+
+// Interconnect describes the fabric two Sparks are cabled with and the
+// environment each rank needs to use it. SharedEnvironment applies to every
+// node; HeadEnvironment and WorkerEnvironment are the per-rank additions.
+type Interconnect struct {
+	Kind              string            `yaml:"kind" json:"kind"`
+	MasterPort        int               `yaml:"master_port" json:"master_port"`
+	SharedEnvironment map[string]string `yaml:"shared_environment" json:"shared_environment"`
+	HeadEnvironment   map[string]string `yaml:"head_environment" json:"head_environment"`
+	WorkerEnvironment map[string]string `yaml:"worker_environment" json:"worker_environment"`
+}
+
+// Distributed reports whether this recipe serves one model across more than
+// one Spark. Everything shipped today is single-node, so this is false.
+func (r Recipe) Distributed() bool { return r.Topology.SparkCount > 1 }
+
+// SocketInterface is the network interface NCCL and Gloo are pinned to. It
+// is also the interface whose local address becomes --master-addr on the
+// head, so a recipe without it cannot describe a two-node launch.
+func (t Topology) SocketInterface() string {
+	if t.Interconnect == nil {
+		return ""
+	}
+	return t.Interconnect.SharedEnvironment["NCCL_SOCKET_IFNAME"]
 }
 
 type Runtime struct {

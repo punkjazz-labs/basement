@@ -71,7 +71,27 @@ func main() {
 		exit(1)
 	}
 	provider := inventory.Host{DataDir: cfg.DataDir, DockerSocket: "/var/run/docker.sock"}
-	executor := operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider)
+	// A two-Spark recipe needs exactly one configured peer to act as the
+	// worker node. Refusing to choose is deliberate: placement across a
+	// larger fleet is ADR 0005 work that does not exist yet.
+	worker := func(ctx context.Context) (operations.PeerTarget, error) {
+		peers, err := db.Peers(ctx)
+		if err != nil {
+			return operations.PeerTarget{}, err
+		}
+		if len(peers) == 0 {
+			return operations.PeerTarget{}, errors.New("this model needs two Sparks, so add the other Spark under Fleet first")
+		}
+		if len(peers) > 1 {
+			return operations.PeerTarget{}, errors.New("this model needs exactly two Sparks, and more than one other Spark is configured")
+		}
+		peer, apiKey, err := db.PeerCredentials(ctx, peers[0].ID)
+		if err != nil {
+			return operations.PeerTarget{}, err
+		}
+		return operations.PeerTarget{ID: peer.ID, Name: peer.Name, BaseURL: peer.BaseURL, APIKey: apiKey}, nil
+	}
+	executor := operations.NewFleetExecutor(operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider), operations.NewPeerClient(worker))
 	jobEngine := engine.New(db, executor, recipes)
 
 	// The recipe feed seeds from the embedded set plus whatever verified
