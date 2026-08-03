@@ -20,6 +20,37 @@ type Execution struct {
 	// subtracts it from free space so two concurrent installs cannot both
 	// pass preflight and jointly overflow the disk.
 	ReservedBytes int64
+	// Placement names this step's node in a two-Spark serve. Its zero value
+	// means single-node serving, which is what every shipped recipe uses.
+	Placement Placement
+}
+
+// Node roles in a distributed serve. The head runs the job, serves HTTP and
+// is rank 0; the worker is rank 1 and serves nothing.
+const (
+	RoleHead   = "head"
+	RoleWorker = "worker"
+)
+
+// Placement is a node's part in a distributed serve: which rank it is, what
+// it is called in receipts, and where rank 0 listens for the other rank.
+type Placement struct {
+	Role          string `json:"role"`
+	NodeName      string `json:"node"`
+	NodeCount     int    `json:"node_count"`
+	MasterAddress string `json:"master_address,omitempty"`
+	MasterPort    int    `json:"master_port,omitempty"`
+}
+
+func (p Placement) Distributed() bool { return p.Role == RoleHead || p.Role == RoleWorker }
+
+// Rank is the --node-rank this placement launches with. The community
+// two-Spark recipe fixes the head at 0 and the single worker at 1.
+func (p Placement) Rank() int {
+	if p.Role == RoleWorker {
+		return 1
+	}
+	return 0
 }
 
 type Progress func(receipt any) error
