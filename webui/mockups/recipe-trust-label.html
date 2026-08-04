@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>basement recipe trust label mockup</title>
+  <style>
+    /* Reuses the console palette, type scale, shell, and Models table roles. */
+    :root {
+      --bg: #131519;
+      --surface: #181a1f;
+      --surface-2: #22242b;
+      --panel: #16181d;
+      --hover: #1d1f25;
+      --line: #2c2f37;
+      --line-strong: #40444f;
+      --ink: #efe8d2;
+      --muted: #a9ab93;
+      --faint: #75795f;
+      --accent: #dd3c10;
+      --accent-ink: #fff4e8;
+      --accent-deep: #f2703c;
+      --live: #76b900;
+      --chip: #1d4733;
+      --chip-line: #2f5f47;
+      --warn: #d9a12f;
+      --fail: #e0644e;
+      --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", Roboto, sans-serif;
+      --radius: 8px;
+      --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+      color-scheme: dark;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font: 13.5px/1.55 var(--sans);
+      -webkit-font-smoothing: antialiased;
+    }
+    button { font: inherit; cursor: pointer; }
+    code, .mono { font-family: var(--mono); font-size: 0.92em; }
+    h1, h2, h3, p { margin-top: 0; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+    .shell { display: grid; grid-template-columns: 192px minmax(0, 1fr); min-height: 100vh; }
+    .side {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 22px 12px 16px;
+      border-right: 1px solid var(--line);
+      background: var(--bg);
+    }
+    .side-mark { padding: 2px 10px 16px; color: var(--accent); font-weight: 650; }
+    .side nav { display: grid; gap: 1px; }
+    .side nav span {
+      padding: 7px 10px;
+      border-radius: 6px;
+      color: var(--muted);
+    }
+    .side nav .current { color: var(--ink); background: var(--surface-2); font-weight: 550; }
+    .side-foot { margin-top: auto; padding: 0 10px; color: var(--faint); font-size: 11px; line-height: 1.65; }
+    .foot-live { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+    .led { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+
+    .content { min-width: 0; }
+    .content-head { max-width: 1160px; padding: 26px 36px 0; }
+    .content-head h1 { margin-bottom: 3px; font-size: 16px; }
+    .content-head .desc { color: var(--muted); font-size: 12.5px; }
+    main { max-width: 1160px; padding: 18px 36px 80px; }
+    .stack { display: grid; gap: 28px; }
+
+    .review-note {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: center;
+      padding: 13px 16px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 12.5px;
+    }
+    .review-note strong { color: var(--ink); font-weight: 650; }
+    .review-note .state {
+      color: var(--warn);
+      font-size: 11px;
+      font-weight: 650;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .treatment { display: grid; gap: 12px; }
+    .treatment-head { display: grid; gap: 2px; }
+    .kicker {
+      margin: 0 0 2px;
+      color: var(--faint);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .treatment h2 { margin: 0; font-size: 15px; letter-spacing: -0.01em; }
+    .optimises { margin: 0; color: var(--muted); font-size: 12px; }
+
+    .mtable {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .mthead, .mrow {
+      display: grid;
+      grid-template-columns: minmax(240px, 1.5fr) 108px 84px 118px minmax(134px, auto) 18px;
+      align-items: center;
+      column-gap: 8px;
+      padding: 0 16px;
+    }
+    .mthead {
+      height: 32px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--faint);
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .mthead .r { text-align: right; }
+    .mrow {
+      min-height: 62px;
+      padding-block: 10px;
+      border-bottom: 1px solid var(--line);
+      cursor: pointer;
+    }
+    .mrow:hover, .mrow.open { background: var(--hover); }
+    .m-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .model-logo {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      flex: none;
+      place-items: center;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .m-id .nm {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 7px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .m-id .use { margin-top: 1px; color: var(--muted); font-size: 12px; }
+    .tag {
+      padding: 1px 5px;
+      border: 1px solid var(--chip-line);
+      border-radius: 4px;
+      background: var(--chip);
+      color: var(--ink);
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .m-num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    .m-num .n { font-size: 13px; font-weight: 550; }
+    .m-num .n small { margin-left: 2px; color: var(--faint); font: 400 10.5px var(--sans); }
+    .m-num .sub { display: block; color: var(--faint); font: 10.5px var(--sans); white-space: nowrap; }
+    .m-status { display: flex; align-items: center; gap: 7px; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+    .sdot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--line-strong); }
+    .m-actions { display: flex; justify-content: flex-end; }
+    .primary {
+      padding: 5px 16px;
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-size: 12.5px;
+      font-weight: 650;
+    }
+    .primary:hover { filter: brightness(1.05); }
+    .m-caret { display: flex; justify-content: flex-end; color: var(--faint); transition: transform 0.15s ease; }
+    .m-caret svg { display: block; }
+    .mrow.open .m-caret { transform: rotate(90deg); }
+
+    .trust-stamp {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      width: fit-content;
+      padding: 1px 6px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: var(--surface-2);
+      color: var(--ink);
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: 0.05em;
+      line-height: 1.5;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .trust-stamp::before {
+      content: "";
+      width: 5px;
+      height: 5px;
+      flex: none;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .trust-stamp.candidate {
+      border-color: color-mix(in srgb, var(--warn) 48%, var(--line));
+      background: color-mix(in srgb, var(--warn) 7%, var(--surface-2));
+      color: var(--warn);
+    }
+    .trust-stamp.verified {
+      border-color: color-mix(in srgb, var(--ink) 34%, var(--line));
+      background: color-mix(in srgb, var(--ink) 7%, var(--surface-2));
+      color: var(--ink);
+    }
+
+    .mdetail {
+      padding: 18px 20px 20px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    .mdetail:last-child { border-bottom: 0; }
+    .board {
+      display: flex;
+      gap: 0;
+      margin-bottom: 14px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .board .cell { flex: 1; padding: 0 16px; border-right: 1px solid var(--line); }
+    .board .cell:first-child { padding-left: 0; }
+    .board .cell:last-child { border-right: 0; }
+    .board .l {
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .board .v { margin-top: 2px; font: 600 16px var(--mono); font-variant-numeric: tabular-nums; }
+    .board .v small { color: var(--muted); font: 400 11px var(--sans); }
+    .board .q { margin-top: 1px; color: var(--faint); font-size: 11px; }
+    .facts {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      row-gap: 7px;
+      column-gap: 12px;
+      margin: 0;
+      font-size: 12.5px;
+    }
+    .facts dt { color: var(--muted); }
+    .facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+    .facts code { padding: 1px 6px; border-radius: 5px; background: var(--surface-2); font-size: 11.5px; }
+    .facts .trust-stamp { vertical-align: middle; }
+
+    /* Treatment B adds one explicit column and a plain-language detail line. */
+    .treatment-b .mthead, .treatment-b .mrow {
+      grid-template-columns: minmax(220px, 1.4fr) 92px 76px 132px 112px minmax(124px, auto) 18px;
+      column-gap: 10px;
+    }
+    .trust-cell { display: grid; gap: 1px; align-content: center; }
+    .trust-word {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--ink);
+      font-size: 11.5px;
+      font-weight: 650;
+    }
+    .trust-word::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      flex: none;
+      border: 1px solid currentColor;
+      border-radius: 50%;
+    }
+    .trust-cell.candidate .trust-word { color: var(--warn); }
+    .trust-cell.candidate .trust-word::before { background: color-mix(in srgb, var(--warn) 24%, transparent); }
+    .trust-cell.verified .trust-word::before { background: var(--ink); }
+    .trust-cell small { padding-left: 13px; color: var(--faint); font-size: 10.5px; white-space: nowrap; }
+
+    .trust-summary {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 14px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .trust-summary.candidate { border-color: color-mix(in srgb, var(--warn) 38%, var(--line)); }
+    .trust-summary strong { font-size: 12.5px; font-weight: 650; }
+    .trust-summary.candidate strong { color: var(--warn); }
+    .trust-summary p { margin: 0; color: var(--muted); font-size: 12px; }
+
+    .table-note { margin: 2px 4px 0; color: var(--faint); font-size: 11.5px; }
+
+    @media (max-width: 1040px) {
+      .shell { grid-template-columns: 1fr; }
+      .side { position: static; height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .side nav { display: flex; }
+      .side-foot { display: none; }
+      .content-head, main { padding-inline: 18px; }
+      .mtable { overflow-x: auto; }
+      .mthead, .mrow { min-width: 920px; }
+      .treatment-b .mthead, .treatment-b .mrow { min-width: 1020px; }
+    }
+
+    @media (max-width: 640px) {
+      .review-note { grid-template-columns: 1fr; }
+      .review-note .state { white-space: normal; }
+      .board { flex-wrap: wrap; gap: 12px; }
+      .board .cell { flex: 1 1 40%; padding: 0; border: 0; }
+      .facts { grid-template-columns: 1fr; }
+      .trust-summary { grid-template-columns: 1fr; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .m-caret { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="side" aria-label="Console sections">
+      <div class="side-mark">basement</div>
+      <nav>
+        <span class="current">Models</span>
+        <span>Roles</span>
+        <span>Playground</span>
+        <span>Connect</span>
+        <span>Monitor</span>
+        <span>Fleet</span>
+        <span>Storage</span>
+        <span>Activity</span>
+      </nav>
+      <div class="side-foot">
+        <div class="foot-live"><i class="led" aria-hidden="true"></i><span>Idle</span></div>
+        <div>spark-head</div>
+        <div>manager mockup</div>
+      </div>
+    </aside>
+
+    <div class="content">
+      <header class="content-head">
+        <h1>Models</h1>
+        <p class="desc">The best open models, tuned for your Spark. Pick one and click Install.</p>
+      </header>
+
+      <main>
+        <div class="stack">
+          <div class="review-note">
+            <div>
+              <strong>Trust label review.</strong>
+              Every label uses a plain word in the row and a one-sentence meaning in the expansion. No legend or tooltip is needed.
+            </div>
+            <div class="state">Current pack: 8 candidate, 0 verified</div>
+          </div>
+
+          <section class="treatment" aria-labelledby="treatment-a-title">
+            <div class="treatment-head">
+              <p class="kicker">Treatment A</p>
+              <h2 id="treatment-a-title">Inline trust stamp</h2>
+              <p class="optimises">Optimises for the fastest scan without adding another table column.</p>
+            </div>
+
+            <div class="mtable">
+              <div class="mthead" aria-hidden="true">
+                <span>Model</span><span class="r">Speed</span><span class="r">Disk</span><span>Status</span><span></span><span></span>
+              </div>
+
+              <div class="mrow open" role="button" tabindex="0" aria-expanded="true">
+                <div class="m-id">
+                  <span class="model-logo" aria-hidden="true">Q</span>
+                  <div>
+                    <div class="nm">Qwen 3.6 35B-A3B (Unsloth) <span class="tag">Recommended</span> <span class="trust-stamp candidate">Candidate</span></div>
+                    <div class="use">Fast enough to become your default. Best all-rounder.</div>
+                  </div>
+                </div>
+                <div class="m-num"><span class="n">~80<small>tok/s</small></span><span class="sub">typical</span></div>
+                <div class="m-num"><span class="n">26.5 GB</span></div>
+                <div class="m-status"><span class="sdot" aria-hidden="true"></span><span>Not installed</span></div>
+                <div class="m-actions"><button class="primary" type="button">Install</button></div>
+                <span class="m-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"></path></svg></span>
+              </div>
+              <div class="mdetail">
+                <div class="board">
+                  <div class="cell"><div class="l">Speed</div><div class="v">~80 <small>tok/s</small></div><div class="q">typical on a Spark</div></div>
+                  <div class="cell"><div class="l">First token</div><div class="v">n/a</div></div>
+                  <div class="cell"><div class="l">Tokens served</div><div class="v">n/a</div><div class="q">no usage counted yet</div></div>
+                  <div class="cell"><div class="l">Download</div><div class="v">26.5 GB</div></div>
+                  <div class="cell"><div class="l">Space needed</div><div class="v">n/a</div></div>
+                </div>
+                <dl class="facts">
+                  <dt>Recipe trust</dt><dd><span class="trust-stamp candidate">Candidate</span></dd>
+                  <dt>What it means</dt><dd>The recipe is pinned, but this exact version has not earned verified status through the full hardware qualification and curation process.</dd>
+                  <dt>Recipe version</dt><dd>v4</dd>
+                  <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
+                  <dt>Verification</dt><dd><code>candidate</code></dd>
+                </dl>
+              </div>
+
+              <div class="mrow open" role="button" tabindex="0" aria-expanded="true">
+                <div class="m-id">
+                  <span class="model-logo" aria-hidden="true">V</span>
+                  <div>
+                    <div class="nm">Verified state preview <span class="trust-stamp verified">Verified</span></div>
+                    <div class="use">Mockup-only state. No current recipe has this label.</div>
+                  </div>
+                </div>
+                <div class="m-num"><span class="n">n/a</span><span class="sub">measured evidence</span></div>
+                <div class="m-num"><span class="n">n/a</span></div>
+                <div class="m-status"><span class="sdot" aria-hidden="true"></span><span>Not installed</span></div>
+                <div class="m-actions"><button class="primary" type="button">Install</button></div>
+                <span class="m-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"></path></svg></span>
+              </div>
+              <div class="mdetail">
+                <div class="board">
+                  <div class="cell"><div class="l">Speed</div><div class="v">n/a</div><div class="q">recorded per recipe</div></div>
+                  <div class="cell"><div class="l">First token</div><div class="v">n/a</div></div>
+                  <div class="cell"><div class="l">Tokens served</div><div class="v">n/a</div><div class="q">no usage counted yet</div></div>
+                  <div class="cell"><div class="l">Download</div><div class="v">n/a</div></div>
+                  <div class="cell"><div class="l">Space needed</div><div class="v">n/a</div></div>
+                </div>
+                <dl class="facts">
+                  <dt>Recipe trust</dt><dd><span class="trust-stamp verified">Verified</span></dd>
+                  <dt>What it means</dt><dd>This exact recipe version passed the hardware qualification protocol and the evidence was approved through curation.</dd>
+                  <dt>Recipe version</dt><dd>n/a</dd>
+                  <dt>Runtime</dt><dd><code>n/a · pinned digest required</code></dd>
+                  <dt>Verification</dt><dd><code>dgx-spark-verified</code></dd>
+                </dl>
+              </div>
+            </div>
+            <p class="table-note">The word sits beside the model name, where people already look first. Amber marks unfinished qualification; verified stays neutral so NVIDIA green remains reserved for a serving model.</p>
+          </section>
+
+          <section class="treatment treatment-b" aria-labelledby="treatment-b-title">
+            <div class="treatment-head">
+              <p class="kicker">Treatment B</p>
+              <h2 id="treatment-b-title">Dedicated trust column</h2>
+              <p class="optimises">Optimises for comparing trust down a long catalog, at the cost of one more column.</p>
+            </div>
+
+            <div class="mtable">
+              <div class="mthead" aria-hidden="true">
+                <span>Model</span><span class="r">Speed</span><span class="r">Disk</span><span>Trust</span><span>Status</span><span></span><span></span>
+              </div>
+
+              <div class="mrow open" role="button" tabindex="0" aria-expanded="true">
+                <div class="m-id">
+                  <span class="model-logo" aria-hidden="true">Q</span>
+                  <div>
+                    <div class="nm">Qwen 3.6 35B-A3B (Unsloth) <span class="tag">Recommended</span></div>
+                    <div class="use">Fast enough to become your default. Best all-rounder.</div>
+                  </div>
+                </div>
+                <div class="m-num"><span class="n">~80<small>tok/s</small></span><span class="sub">typical</span></div>
+                <div class="m-num"><span class="n">26.5 GB</span></div>
+                <div class="trust-cell candidate"><span class="trust-word">Candidate</span><small>Not fully qualified</small></div>
+                <div class="m-status"><span class="sdot" aria-hidden="true"></span><span>Not installed</span></div>
+                <div class="m-actions"><button class="primary" type="button">Install</button></div>
+                <span class="m-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"></path></svg></span>
+              </div>
+              <div class="mdetail">
+                <div class="trust-summary candidate">
+                  <strong>Candidate recipe</strong>
+                  <p>Pins are enforced. Full hardware qualification and the curation decision are not complete.</p>
+                </div>
+                <dl class="facts">
+                  <dt>Trust</dt><dd>Candidate</dd>
+                  <dt>Verification</dt><dd><code>candidate</code></dd>
+                  <dt>Recipe version</dt><dd>v4</dd>
+                  <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
+                  <dt>Evidence</dt><dd>No verified evidence decision is recorded for this recipe version.</dd>
+                </dl>
+              </div>
+
+              <div class="mrow open" role="button" tabindex="0" aria-expanded="true">
+                <div class="m-id">
+                  <span class="model-logo" aria-hidden="true">V</span>
+                  <div>
+                    <div class="nm">Verified state preview</div>
+                    <div class="use">Mockup-only state. No current recipe has this label.</div>
+                  </div>
+                </div>
+                <div class="m-num"><span class="n">n/a</span><span class="sub">measured evidence</span></div>
+                <div class="m-num"><span class="n">n/a</span></div>
+                <div class="trust-cell verified"><span class="trust-word">Verified</span><small>Hardware qualified</small></div>
+                <div class="m-status"><span class="sdot" aria-hidden="true"></span><span>Not installed</span></div>
+                <div class="m-actions"><button class="primary" type="button">Install</button></div>
+                <span class="m-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"></path></svg></span>
+              </div>
+              <div class="mdetail">
+                <div class="trust-summary verified">
+                  <strong>Verified recipe</strong>
+                  <p>This exact recipe version passed the hardware qualification protocol and its evidence was approved.</p>
+                </div>
+                <dl class="facts">
+                  <dt>Trust</dt><dd>Verified</dd>
+                  <dt>Verification</dt><dd><code>dgx-spark-verified</code></dd>
+                  <dt>Recipe version</dt><dd>n/a</dd>
+                  <dt>Runtime</dt><dd><code>n/a · pinned digest required</code></dd>
+                  <dt>Evidence</dt><dd>A verified label would require a recorded qualification decision for the exact version.</dd>
+                </dl>
+              </div>
+            </div>
+            <p class="table-note">The column keeps candidate and verified in a fixed vertical lane. The expansion repeats the word and explains the state in one sentence.</p>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    document.querySelectorAll('.mrow').forEach((row) => {
+      const toggle = () => {
+        const detail = row.nextElementSibling;
+        if (!detail || !detail.classList.contains('mdetail')) return;
+        const isOpen = row.classList.toggle('open');
+        row.setAttribute('aria-expanded', String(isOpen));
+        detail.hidden = !isOpen;
+      };
+
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('button')) return;
+        toggle();
+      });
+      row.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        toggle();
+      });
+    });
+  </script>
+</body>
+</html>
