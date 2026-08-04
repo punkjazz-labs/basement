@@ -121,3 +121,12 @@ enforces it, and this document's own rule is that evidence never promotes a
 label by itself), so the recipe labels are unchanged until the curation
 process promotes them. Trust would in any case stay basement-candidate on
 the image-provenance grounds documented in the recipe.
+
+Addendum, same day: the throughput numbers above were measured with
+non-streaming requests. Direct probes against the same serving stack show
+streaming responses decode at a steady 12 to 15.5 tok/s while identical
+non-streaming requests reach 29 to 38 tok/s, a roughly 2x server-side gap in
+the fork runtime that is not explained by include_usage handling. The console
+benchmark measures a 30-second streaming window, so the model card's measured
+number reflects what streaming clients actually get. Tracked for
+investigation; the fork upstream may want a report.
