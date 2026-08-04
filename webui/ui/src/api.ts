@@ -524,6 +524,18 @@ export function territoryEligibilityLabel(recipe: Recipe): string | undefined {
   return `I confirm I am not located in ${joinedTerritories(territories)}`
 }
 
+// What the recommendation may claim about itself. The recipe carries its own
+// verification state, so this reads it rather than asserting one: a candidate
+// that has not finished its lifecycle on our hardware must not be introduced
+// to a new user with the word verified, which is the one claim the project
+// makes about every recipe it ships.
+export function trustLine(recipe: Recipe): string {
+  if (recipe.verification === 'verified') {
+    return 'Verified on our own Spark and pinned for a single Spark.'
+  }
+  return 'Pinned for a single Spark. Still a candidate: it has not finished its full lifecycle on our own hardware.'
+}
+
 export function installConfirmationsComplete(
   recipe: Recipe,
   acceptLicence: boolean,
