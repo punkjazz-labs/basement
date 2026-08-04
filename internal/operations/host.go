@@ -889,6 +889,9 @@ func truncateForError(raw []byte, limit int) string {
 // instead keeps the sample window comparable across models of very
 // different speeds: a slow model just produces fewer tokens in the same
 // thirty seconds, rather than the measurement ending before it has settled.
+// Servers with continuous usage stats report the cumulative token count on
+// the last chunk seen before cancellation; other servers use the existing
+// streamed-chunk approximation.
 const measureMinDecodeDuration = 30 * time.Second
 
 // measureMaxTokens is a safety ceiling only, not the thing being targeted.
@@ -900,8 +903,10 @@ const measureMaxTokens = 4096
 
 // measureThroughput streams a generation and reports device-measured decode
 // speed and time to first token, so the catalog shows numbers observed on
-// this Spark rather than editorial estimates. See measureMinDecodeDuration
-// for why the sample runs to a duration rather than a fixed token count.
+// this Spark rather than editorial estimates. It requests cumulative usage
+// on each chunk so a duration-limited stream retains an accurate token count
+// where the server supports it. See measureMinDecodeDuration for why the
+// sample runs to a duration rather than a fixed token count.
 func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (map[string]any, error) {
 	body, _ := json.Marshal(map[string]any{
 		"model": r.Service.ServedModelID,
@@ -909,11 +914,14 @@ func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (
 		// measurement window instead of finishing early on a short answer;
 		// measureMaxTokens is the real stopping point, this is just the
 		// instruction that gets it there.
-		"messages":       []map[string]string{{"role": "user", "content": "Write a long, detailed essay of at least 2000 words on why local inference on personal hardware matters. Cover privacy, cost at scale, latency, offline reliability, and customization, with concrete examples throughout, and keep expanding on each point rather than summarizing early."}},
-		"max_tokens":     measureMaxTokens,
-		"temperature":    0,
-		"stream":         true,
-		"stream_options": map[string]bool{"include_usage": true},
+		"messages":    []map[string]string{{"role": "user", "content": "Write a long, detailed essay of at least 2000 words on why local inference on personal hardware matters. Cover privacy, cost at scale, latency, offline reliability, and customization, with concrete examples throughout, and keep expanding on each point rather than summarizing early."}},
+		"max_tokens":  measureMaxTokens,
+		"temperature": 0,
+		"stream":      true,
+		"stream_options": map[string]any{
+			"include_usage":          true,
+			"continuous_usage_stats": true,
+		},
 	})
 	// Cancelling once the duration target is hit (below) is what actually
 	// stops the request; without a request-scoped context there would be no
@@ -986,9 +994,10 @@ func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (
 		// The duration target, not measureMaxTokens, is what normally ends
 		// the sample: once thirty seconds of decode have been observed,
 		// cancelling the request stops the model generating further tokens
-		// no one is going to count. completionTokens falls back to
-		// chunkCount below, exactly as it already does for a server that
-		// never sends a final usage frame.
+		// no one is going to count. The usage update above deliberately
+		// happens before this check so continuous usage retains the newest
+		// cumulative count. completionTokens falls back to chunkCount below
+		// for a server that does not send continuous usage.
 		if !firstToken.IsZero() && time.Since(firstToken) >= measureMinDecodeDuration {
 			cancel()
 			break
@@ -1011,11 +1020,14 @@ func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (
 	if completionTokens == 0 {
 		completionTokens = chunkCount
 	}
-	// The decode window starts at firstToken, not at started: time to first
-	// token is prefill and queueing, not decode, so it is already excluded
-	// from the tok/s window below rather than counted as free generation
-	// time. The started-based fallback only covers the pathological case
-	// where firstToken and finished land on the same clock tick.
+	// Servers that support continuous usage provide the cumulative token count
+	// from the last streamed chunk. For servers that do not support the
+	// extension, completionTokens is the chunk count fallback above. The decode
+	// window starts at firstToken, not at started: time to first token is prefill
+	// and queueing, not decode, so it is already excluded from the tok/s window
+	// below rather than counted as free generation time. The started-based
+	// fallback only covers the pathological case where firstToken and finished
+	// land on the same clock tick.
 	generation := finished.Sub(firstToken).Seconds()
 	if generation <= 0 {
 		generation = finished.Sub(started).Seconds()

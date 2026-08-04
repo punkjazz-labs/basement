@@ -290,27 +290,83 @@ func TestVerifyInferenceRequestsGenerousTokenBudget(t *testing.T) {
 	}
 }
 
-func fakeVLLMStream(t *testing.T, lines []string) (*HostExecutor, recipe.Recipe) {
+func fakeVLLMStream(t *testing.T, lines []string, interval ...time.Duration) (*HostExecutor, recipe.Recipe) {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		for _, line := range lines {
-			_, _ = w.Write([]byte("data: " + line + "\n\n"))
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var request struct {
+			StreamOptions map[string]bool `json:"stream_options"`
 		}
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
-	}))
-	t.Cleanup(server.Close)
-	port, err := strconv.Atoi(server.URL[strings.LastIndex(server.URL, ":")+1:])
-	if err != nil {
-		t.Fatal(err)
-	}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return nil, fmt.Errorf("decode benchmark request: %w", err)
+		}
+		if !request.StreamOptions["include_usage"] || !request.StreamOptions["continuous_usage_stats"] {
+			t.Errorf("stream_options = %v, want include_usage and continuous_usage_stats", request.StreamOptions)
+		}
+		reader, writer := io.Pipe()
+		go func() {
+			defer writer.Close()
+			for i, line := range lines {
+				if _, err := writer.Write([]byte("data: " + line + "\n\n")); err != nil {
+					return
+				}
+				if len(interval) > 0 && i < len(lines)-1 {
+					time.Sleep(interval[0])
+				}
+			}
+			_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+		}()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       reader,
+			Request:    r,
+		}, nil
+	})}
 	recipes, err := recipe.Builtin()
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := recipes[0]
-	r.Service.DefaultHostPort = port
-	return &HostExecutor{http: server.Client()}, r
+	return &HostExecutor{http: client}, r
+}
+
+func TestBenchmarkUsesContinuousUsageForMultiTokenChunks(t *testing.T) {
+	interval := 200 * time.Millisecond
+	executor, r := fakeVLLMStream(t, []string{
+		`{"choices":[{"delta":{"content":"first batch"}}],"usage":{"completion_tokens":5}}`,
+		`{"choices":[],"usage":{"completion_tokens":12}}`,
+	}, interval)
+	started := time.Now()
+	receipt, err := executor.measureThroughput(context.Background(), r)
+	elapsed := time.Since(started).Seconds()
+	if err != nil {
+		t.Fatalf("continuous usage stream rejected: %v", err)
+	}
+	if receipt["completion_tokens"] != int64(12) {
+		t.Fatalf("continuous usage tokens not used: %v", receipt)
+	}
+	// Multiplying the reported rate by the slightly longer wall-clock window
+	// should recover about 12 tokens. A chunk-based rate would recover only 1.
+	tokensFromRate := receipt["tokens_per_second"].(float64) * elapsed
+	if tokensFromRate < 10 {
+		t.Fatalf("tokens_per_second used stream chunks instead of usage: receipt=%v elapsed=%v", receipt, elapsed)
+	}
+}
+
+func TestBenchmarkFallsBackToChunkCountWithoutUsage(t *testing.T) {
+	executor, r := fakeVLLMStream(t, []string{
+		`{"choices":[{"delta":{"content":"one"}}]}`,
+		`{"choices":[{"delta":{"content":"two"}}]}`,
+		`{"choices":[{"delta":{"content":"three"}}]}`,
+	})
+	receipt, err := executor.measureThroughput(context.Background(), r)
+	if err != nil {
+		t.Fatalf("stream without usage rejected: %v", err)
+	}
+	if receipt["completion_tokens"] != int64(3) {
+		t.Fatalf("chunk-count fallback not used: %v", receipt)
+	}
 }
 
 func TestBenchmarkCountsReasoningDeltas(t *testing.T) {
