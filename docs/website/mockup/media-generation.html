@@ -120,6 +120,10 @@ a { color: var(--ink); }
 }
 
 main { flex: 1; width: 100%; max-width: 1032px; padding: 18px 36px 80px; }
+/* Generate widens main only, per the owner's revision request: the right-hand
+   Results column needs more room than the rest of the console's tabs do.
+   Every other tab in the real console keeps the narrower 1032px main. */
+main.wide-generate { max-width: 1220px; }
 
 .card {
   background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
@@ -315,6 +319,23 @@ dialog, .dialog-surface {
 .preview-body .prompt-text { font-size: 12.5px; color: var(--ink); margin: 0; overflow-wrap: anywhere; }
 .preview-actions { display: flex; gap: 10px; }
 
+/* Two-column layout: composer + queue on the left, Results on the right,
+   where there is horizontal room for it. Below the 1100px threshold this
+   collapses to a single column and reverts to the original stacked order
+   (composer, queue, results) with the original strip/preview proportions. */
+.gen-layout { display: grid; gap: 14px 20px; grid-template-columns: 1fr; align-items: start; }
+
+@media (min-width: 1100px) {
+  .gen-layout { grid-template-columns: 1fr 380px; }
+  /* Four thumbnails read better as a 2x2 grid than a horizontal scroll strip
+     once they are confined to a 380px column, and the selected-result frame
+     sits above its facts instead of beside them, sized to that column. */
+  .gen-right .results-strip { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; overflow: visible; padding: 2px 2px 4px; }
+  .gen-right .result-thumb { flex: none; width: 100%; height: 84px; }
+  .gen-right .result-preview { grid-template-columns: 1fr; margin-top: 14px; }
+  .gen-right .preview-frame { aspect-ratio: 16 / 9; }
+}
+
 .mockup-ribbon {
   background: var(--panel); border-bottom: 1px solid var(--line); color: var(--faint);
   font-family: var(--mono); font-size: 11px; text-align: center; padding: 6px 10px;
@@ -368,8 +389,9 @@ dialog, .dialog-surface {
       <p class="desc">Create a video from a prompt on the model that is running.</p>
     </header>
 
-    <main id="main">
-      <div class="stack">
+    <main id="main" class="wide-generate">
+      <div class="gen-layout">
+      <div class="gen-left stack">
 
         <!-- Model context -->
         <div class="section-head gen-context">
@@ -484,6 +506,9 @@ dialog, .dialog-surface {
           </p>
         </section>
 
+      </div>
+
+      <div class="gen-right stack">
         <!-- Results -->
         <section class="card">
           <div class="section-head" style="margin-bottom:2px;">
@@ -542,19 +567,22 @@ dialog, .dialog-surface {
             </div>
           </div>
         </section>
-
-        <!-- Reference: empty state, shown for completeness of the mockup -->
-        <section>
-          <p class="kicker" style="margin-bottom:8px;">Reference — empty state, no media model installed</p>
-          <div class="empty">
-            <p><strong>No media model is installed.</strong></p>
-            <div class="empty-actions">
-              <button class="ghost">Go to Models</button>
-            </div>
-          </div>
-        </section>
+      </div>
 
       </div>
+
+      <!-- Reference: empty state, shown for completeness of the mockup.
+           Full width below both columns, same treatment as the licence
+           fragment further down. -->
+      <section style="margin-top:14px;">
+        <p class="kicker" style="margin-bottom:8px;">Reference — empty state, no media model installed</p>
+        <div class="empty">
+          <p><strong>No media model is installed.</strong></p>
+          <div class="empty-actions">
+            <button class="ghost">Go to Models</button>
+          </div>
+        </div>
+      </section>
 
       <div style="margin-top:40px; border-top:1px solid var(--line); padding-top:28px;">
         <h2 style="font-size:15px; margin-bottom:6px;">Install flow: territory licence screen</h2>
