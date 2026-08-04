@@ -229,7 +229,7 @@ func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
 		}, "runtime kind sglang requires service.sglang, but the recipe declares service.vllm"},
 		{"both blocks", func(r *Recipe) { r.Service.VLLM = vllmBlock() }, "keep only the block that matches runtime.kind"},
 		{"neither block", func(r *Recipe) { r.Service.SGLang = nil }, "service must declare exactly one runtime block"},
-		{"unknown kind", func(r *Recipe) { r.Runtime.Kind = "tensorrt" }, "runtime kind must be one of: llamacpp, sglang, vllm"},
+		{"unknown kind", func(r *Recipe) { r.Runtime.Kind = "tensorrt" }, "runtime kind must be one of: comfyui, llamacpp, sglang, vllm"},
 		{"draft tokens without an algorithm", func(r *Recipe) { r.Service.SGLang.SpeculativeNumDraftTokens = 4 }, "require speculative_algorithm"},
 		{"draft model that is not a declared role", func(r *Recipe) {
 			r.Service.SGLang.SpeculativeAlgorithm = "EAGLE3"

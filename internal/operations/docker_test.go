@@ -52,7 +52,7 @@ func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"container-id"}`))}, nil
 	})}}
-	id, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", r, Placement{})
+	id, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", nil, r, Placement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestLagunaUsesSeparateReadOnlyDrafterMount(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"container-id"}`))}, nil
 	})}}
-	_, err = client.Create(context.Background(), "laguna", r.Runtime.Reference(), []string{"/owned/target", "/owned/draft"}, "/owned/cache", r, Placement{})
+	_, err = client.Create(context.Background(), "laguna", r.Runtime.Reference(), []string{"/owned/target", "/owned/draft"}, "/owned/cache", nil, r, Placement{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +638,7 @@ func createHostConfig(t *testing.T, r recipe.Recipe) map[string]any {
 	for index := range r.Artifacts {
 		paths[index] = fmt.Sprintf("/managed/artifact-%d", index)
 	}
-	if _, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), paths, "/managed/cache", r, Placement{}); err != nil {
+	if _, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), paths, "/managed/cache", nil, r, Placement{}); err != nil {
 		t.Fatal(err)
 	}
 	host, ok := body["HostConfig"].(map[string]any)

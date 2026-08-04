@@ -202,7 +202,8 @@ The schema is `internal/recipe/types.go`; the rules are
 - **topology** — `spark_count` 1 or 2. Two Sparks must declare an
   `interconnect` (kind `connectx7`, a master port, and NCCL/Gloo/TP environment
   from a fixed allowlist); one Spark must not.
-- **runtime** — `kind` (`vllm` or `sglang`), `image` without a tag, `digest`
+- **runtime** — `kind` (`vllm`, `sglang`, `llamacpp` or `comfyui`), `image`
+  without a tag, `digest`
   pinned to `sha256:<64 hex>`, `image_bytes`, `image_disk_bytes`, `shm_bytes`,
   and an environment restricted to an allowlist of name/value pairs. Optional
   `writable_paths` names absolute container paths a runtime must be able to
@@ -219,17 +220,30 @@ The schema is `internal/recipe/types.go`; the rules are
   flags, `per_node_minimum_memory_bytes`, `per_node_memory_reserve_bytes`,
   `safety_margin_bytes`, `secrets` (only `HF_TOKEN` is allowlisted),
   `required_licence_acceptance`.
-- **service** — `internal_port` (must be 8000), `served_model_id` (must
-  identify the pinned primary artifact), and exactly one of a `vllm` or
-  `sglang` block matching `runtime.kind`.
-- **operations** and **uninstall** — the step lists, from a closed set of 19
+- **service** — `internal_port` (8000 for the text kinds, 8188 for `comfyui`,
+  which is ComfyUI's own documented port), `served_model_id` (must identify the
+  pinned primary artifact), and exactly one of a `vllm`, `sglang`, `llamacpp` or
+  `comfyui` block matching `runtime.kind`. A `comfyui` block pins the model's
+  canvas, its frame grid and the workflow graphs it generates through; those
+  graphs are files under `internal/recipe/graphs/`, embedded with the recipes,
+  named by a recipe and never supplied by one. The validator checks at load
+  time that every named graph exists, parses, and carries exactly the
+  substitution tokens its mode needs, so a graph can never silently ignore the
+  user's prompt.
+- **operations** and **uninstall** — the step lists, from a closed set of 20
   names. There is no per-step payload: an operation is just a `type`. The order
   is pinned; the validator requires the complete install lifecycle and the
-  complete uninstall lifecycle, in sequence. `run_shell` is rejected by name in
+  complete uninstall lifecycle, in sequence, ending in the verification that
+  fits the kind: `verify_openai_inference` for a text model,
+  `verify_media_generation` for `comfyui`, which generates the smallest clip
+  the recipe allows and requires a non-empty file on disk. `run_shell` is rejected by name in
   addition to being absent from the allowlist.
-- **memory_model** — optional. Absent means "no estimate yet", not "no
-  footprint", and the console reports unknown. Two shipped recipes explain in a
-  comment why theirs is absent rather than guessing a number.
+- **memory_model** — optional for the kinds that claim a share of the device,
+  required for `llamacpp` and `comfyui`, which claim an absolute number of
+  bytes instead and have nothing else to bound them with. Absent means "no
+  estimate yet", not "no footprint", and the console reports unknown. Two
+  shipped recipes explain in a comment why theirs is absent rather than
+  guessing a number.
 
 Executors for those step names live in `internal/operations/host.go`
 (`HostExecutor.Execute`), with a mirror `Completed` switch that makes each step
