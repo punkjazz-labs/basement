@@ -1,0 +1,1315 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>basement H3 prompt composer mockup</title>
+  <style>
+    :root {
+      --bg: #131519;
+      --surface: #181a1f;
+      --surface-2: #22242b;
+      --panel: #16181d;
+      --hover: #1d1f25;
+      --line: #2c2f37;
+      --line-strong: #40444f;
+      --ink: #efe8d2;
+      --muted: #a9ab93;
+      --faint: #75795f;
+      --accent: #dd3c10;
+      --accent-ink: #fff4e8;
+      --accent-deep: #f2703c;
+      --live: #76b900;
+      --chip: #1d4733;
+      --chip-line: #2f5f47;
+      --warn: #d9a12f;
+      --fail: #e0644e;
+      --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", Roboto, sans-serif;
+      --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+      color-scheme: dark;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--ink);
+      font: 13.5px/1.55 var(--sans);
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1, h2, h3 { font-weight: 650; letter-spacing: -0.01em; }
+    code, .mono { font-family: var(--mono); font-size: 0.92em; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .skip-link {
+      position: absolute;
+      left: -9999px;
+      top: 0;
+      z-index: 100;
+      background: var(--ink);
+      color: var(--bg);
+      padding: 8px 14px;
+      border-radius: 0 0 8px 0;
+    }
+    .skip-link:focus { left: 0; }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 192px minmax(0, 1fr);
+      min-height: 100dvh;
+    }
+    .side {
+      position: sticky;
+      top: 0;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      padding: 16px 8px 12px;
+      background: var(--bg);
+      border-right: 1px solid var(--line);
+    }
+    .side-mark {
+      display: flex;
+      align-items: center;
+      padding: 2px 10px 16px;
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .side-mark strong { font-size: 13.5px; font-weight: 650; }
+    .side nav { display: grid; gap: 1px; }
+    .side nav button {
+      width: 100%;
+      padding: 5px 10px;
+      border: 0;
+      border-radius: 6px;
+      background: none;
+      color: var(--muted);
+      text-align: left;
+      font-size: 12.5px;
+      font-weight: 450;
+    }
+    .side nav button:hover,
+    .side nav button[aria-current="true"] {
+      background: var(--surface-2);
+      color: var(--ink);
+    }
+    .side nav button[aria-current="true"] { font-weight: 550; }
+    .side-foot {
+      display: grid;
+      gap: 3px;
+      margin-top: auto;
+      padding: 10px 10px 0;
+      color: var(--faint);
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .foot-live {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .led {
+      width: 6px;
+      height: 6px;
+      flex: none;
+      border-radius: 50%;
+      background: var(--live);
+    }
+
+    .content { min-width: 0; }
+    .content-head { max-width: 1320px; padding: 26px 36px 0; }
+    .content-head h1 { margin-bottom: 0; font-size: 16px; }
+    .content-head .desc {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12.5px;
+    }
+    main {
+      width: 100%;
+      max-width: 1320px;
+      padding: 18px 36px 80px;
+    }
+
+    .card {
+      padding: 16px 20px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .stack { display: grid; gap: 14px; }
+    .muted { color: var(--muted); }
+    .faint { color: var(--faint); }
+    .spacer { flex: 1; }
+    .kicker {
+      margin: 0 0 4px;
+      color: var(--faint);
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .section-head {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .section-head h2 { margin: 0; font-size: 14px; }
+    .tag {
+      padding: 1px 5px;
+      border: 1px solid var(--chip-line);
+      border-radius: 4px;
+      background: var(--chip);
+      color: var(--ink);
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .tag.quiet {
+      border-color: var(--line);
+      background: var(--surface-2);
+      color: var(--muted);
+    }
+
+    button.primary {
+      padding: 6px 17px;
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-size: 12.5px;
+      font-weight: 650;
+    }
+    button.primary:hover { filter: brightness(1.05); }
+    button.primary:disabled {
+      border-color: var(--line-strong);
+      background: var(--surface-2);
+      color: var(--faint);
+      cursor: default;
+      filter: none;
+    }
+    button.ghost {
+      padding: 5px 16px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--ink);
+      font-size: 12.5px;
+      font-weight: 500;
+    }
+    button.ghost:hover { border-color: var(--faint); }
+    button.quiet {
+      padding: 5px 10px;
+      border: 0;
+      border-radius: 999px;
+      background: none;
+      color: var(--muted);
+      font-size: 12.5px;
+      font-weight: 500;
+    }
+    button.quiet:hover,
+    button.quiet[aria-pressed="true"] {
+      background: var(--surface-2);
+      color: var(--ink);
+    }
+
+    input[type="text"],
+    textarea,
+    select {
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 8px 11px;
+    }
+    textarea { resize: vertical; }
+    select {
+      appearance: none;
+      padding-right: 30px;
+      background-image:
+        linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+        linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-position:
+        calc(100% - 15px) 50%,
+        calc(100% - 10px) 50%;
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
+    }
+    label.field {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 550;
+    }
+    label.field input,
+    label.field textarea,
+    label.field select {
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 400;
+    }
+    .hint {
+      color: var(--faint);
+      font-size: 11px;
+      font-weight: 400;
+    }
+
+    .pill-group { display: flex; gap: 6px; flex-wrap: wrap; }
+    .pill-group label {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 13px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .pill-group label:hover { border-color: var(--line-strong); }
+    .pill-group label:has(input:checked) {
+      border-color: var(--ink);
+      background: var(--ink);
+      color: var(--bg);
+      font-weight: 600;
+    }
+    .pill-group label:has(input:focus-visible) {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .pill-group input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .mockup-switch {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+      padding: 7px 8px 7px 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      color: var(--faint);
+      font-size: 11.5px;
+    }
+    .mockup-switch strong {
+      color: var(--muted);
+      font-size: 11.5px;
+      font-weight: 600;
+    }
+
+    .gen-context {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .gen-context .glyph {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      flex: none;
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .gen-context strong { display: block; font-size: 14px; font-weight: 600; }
+    .gen-context .faint { font-size: 12px; }
+
+    .composer-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 420px;
+      gap: 20px;
+      align-items: start;
+    }
+    .guided { min-width: 0; }
+    .prompt-panel {
+      position: sticky;
+      top: 18px;
+      min-width: 0;
+    }
+    .form-stack { display: grid; gap: 18px; }
+    .rule {
+      height: 1px;
+      border: 0;
+      background: var(--line);
+      margin: 0;
+    }
+    .step-head {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 10px;
+    }
+    .step-number {
+      display: grid;
+      width: 21px;
+      height: 21px;
+      place-items: center;
+      flex: none;
+      border: 1px solid var(--line-strong);
+      border-radius: 50%;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+    .step-head h2 { margin: 0; font-size: 13.5px; }
+    .step-head p {
+      margin: 1px 0 0;
+      color: var(--faint);
+      font-size: 11.5px;
+    }
+
+    .dropzone {
+      display: grid;
+      min-height: 126px;
+      place-items: center;
+      border: 1px dashed var(--line-strong);
+      border-radius: 10px;
+      background: var(--panel);
+      text-align: center;
+    }
+    .dropzone-inner {
+      display: grid;
+      gap: 7px;
+      justify-items: center;
+      padding: 18px;
+    }
+    .image-mark {
+      position: relative;
+      width: 34px;
+      height: 27px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+    }
+    .image-mark::before {
+      position: absolute;
+      right: 6px;
+      bottom: 5px;
+      left: 6px;
+      height: 8px;
+      border-top: 1px solid var(--muted);
+      border-right: 1px solid var(--muted);
+      content: "";
+      transform: skewY(-22deg);
+    }
+    .image-mark::after {
+      position: absolute;
+      top: 6px;
+      right: 7px;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--muted);
+      content: "";
+    }
+    .dropzone strong { font-size: 13px; font-weight: 600; }
+    .dropzone p { margin: 0; color: var(--faint); font-size: 11.5px; }
+
+    .source-row {
+      display: grid;
+      grid-template-columns: 164px minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+    .source-thumb {
+      display: block;
+      width: 164px;
+      aspect-ratio: 16 / 9;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface-2);
+      object-fit: cover;
+    }
+    .source-meta strong { display: block; font-size: 12.5px; font-weight: 600; }
+    .source-meta span { color: var(--faint); font-size: 11.5px; }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1.2fr 0.8fr;
+      gap: 18px;
+      align-items: start;
+    }
+    .setting-label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 550;
+    }
+    .settings-grid .hint { display: block; margin-top: 6px; }
+
+    .starter-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .starter {
+      min-height: 94px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel);
+      color: var(--ink);
+      text-align: left;
+    }
+    .starter:hover {
+      border-color: var(--line-strong);
+      background: var(--hover);
+    }
+    .starter strong { display: block; margin-bottom: 4px; font-size: 12.5px; }
+    .starter span { display: block; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+    .starter em {
+      display: block;
+      margin-top: 8px;
+      color: var(--faint);
+      font-size: 10.5px;
+      font-style: normal;
+    }
+    .first-use-note {
+      margin: 10px 0 0;
+      color: var(--faint);
+      font-size: 11.5px;
+    }
+
+    .shot-table {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+    .shot-head,
+    .shot-row {
+      display: grid;
+      grid-template-columns: 86px minmax(240px, 1.35fr) minmax(210px, 1fr);
+      column-gap: 12px;
+    }
+    .shot-head {
+      min-height: 32px;
+      align-items: center;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--faint);
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .shot-row {
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .shot-row:last-child { border-bottom: 0; }
+    .shot-time strong {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .shot-time code {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 10.5px;
+      font-variant-numeric: tabular-nums;
+    }
+    .shot-fields { display: grid; gap: 10px; }
+    .camera-fields {
+      display: grid;
+      grid-template-columns: 1fr 0.8fr 0.8fr;
+      gap: 8px;
+    }
+    .dialogue-row {
+      grid-column: 2 / -1;
+      display: grid;
+      grid-template-columns: 0.8fr 0.7fr minmax(180px, 1.5fr) auto;
+      gap: 8px;
+      align-items: end;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+    .timeline-foot {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .timeline-foot p { margin: 0; color: var(--faint); font-size: 11.5px; }
+
+    .sound-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+    .sound-block { min-width: 0; }
+    .sound-block > .pill-group { margin-bottom: 9px; }
+
+    .check-box {
+      margin-bottom: 14px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .check-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 7px;
+    }
+    .check-title strong { font-size: 13px; font-weight: 650; }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      flex: none;
+      border-radius: 50%;
+      background: var(--warn);
+    }
+    body[data-state="filled"] .status-dot { background: var(--accent); }
+    .check-list {
+      display: grid;
+      gap: 4px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      color: var(--muted);
+      font-size: 11.5px;
+    }
+    .check-list li {
+      display: grid;
+      grid-template-columns: 54px 1fr;
+      gap: 7px;
+    }
+    .check-list b {
+      color: var(--faint);
+      font-family: var(--mono);
+      font-size: 10.5px;
+      font-weight: 500;
+      text-transform: uppercase;
+    }
+    body[data-state="filled"] .check-list b { color: var(--muted); }
+
+    .prompt-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .prompt-head h2 { margin: 0; font-size: 14px; }
+    .prompt-output {
+      min-height: 432px;
+      resize: vertical;
+      border-color: var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+    .prompt-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .prompt-tools .edit-state { color: var(--faint); font-size: 10.5px; }
+    .manual-only { display: none; }
+    body[data-manual="true"] .manual-only { display: inline-flex; }
+    body[data-manual="true"] .guided {
+      border-color: var(--line);
+      background: color-mix(in srgb, var(--surface) 82%, var(--bg));
+    }
+    body[data-manual="true"] .guided :is(input, textarea, select, button):disabled {
+      cursor: default;
+      opacity: 0.58;
+    }
+    .run-summary {
+      margin: 14px 0 0;
+      padding: 11px 0;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11.5px;
+    }
+    .run-summary strong {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .gen-foot {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .gen-foot p {
+      margin: 0;
+      color: var(--faint);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .blank-only,
+    .filled-only { display: none; }
+    body[data-state="blank"] .blank-only { display: block; }
+    body[data-state="filled"] .filled-only { display: block; }
+    body[data-state="filled"] .source-row.filled-only { display: grid; }
+    body[data-state="filled"] .dialogue-row.filled-only { display: grid; }
+    .prompt-template { display: none; }
+
+    @media (max-width: 1160px) {
+      .composer-grid { grid-template-columns: 1fr; }
+      .prompt-panel { position: static; }
+      .prompt-output { min-height: 340px; }
+    }
+    @media (max-width: 900px) {
+      .settings-grid,
+      .sound-grid { grid-template-columns: 1fr; }
+      .shot-head { display: none; }
+      .shot-row {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+      .dialogue-row {
+        grid-column: 1;
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+    @media (max-width: 760px) {
+      .shell { grid-template-columns: 1fr; }
+      .side {
+        z-index: 20;
+        height: auto;
+        flex-direction: row;
+        align-items: center;
+        overflow-x: auto;
+        padding: 6px 10px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .side-mark { padding: 0 8px 0 4px; }
+      .side nav { display: flex; gap: 2px; }
+      .side nav button { padding: 7px 10px; white-space: nowrap; }
+      .side nav button[aria-current="true"] {
+        background: none;
+        box-shadow: inset 0 -2px 0 var(--accent);
+      }
+      .side-foot { display: none; }
+      .content-head { padding: 18px 16px 0; }
+      main { padding: 14px 16px 70px; }
+      .starter-grid { grid-template-columns: 1fr; }
+      .source-row {
+        grid-template-columns: 110px minmax(0, 1fr);
+      }
+      .source-thumb { width: 110px; }
+      .source-row button { grid-column: 1 / -1; justify-self: start; }
+      .camera-fields,
+      .dialogue-row { grid-template-columns: 1fr; }
+      .mockup-switch { align-items: flex-start; flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body data-state="blank">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="shell">
+    <aside class="side">
+      <a class="side-mark" href="#" aria-label="basement"><strong>basement</strong></a>
+      <nav aria-label="Console sections">
+        <button type="button">Models</button>
+        <button type="button">Roles</button>
+        <button type="button" aria-current="true">Generate</button>
+        <button type="button">Connect</button>
+        <button type="button">Monitor</button>
+        <button type="button">Fleet</button>
+        <button type="button">Storage</button>
+        <button type="button">Activity</button>
+      </nav>
+      <div class="side-foot">
+        <div class="foot-live"><i class="led" aria-hidden="true"></i><span>MiniMax H3</span></div>
+        <span>spark-head</span>
+        <span>manager preview</span>
+      </div>
+    </aside>
+
+    <div class="content">
+      <header class="content-head">
+        <h1>Generate</h1>
+        <p class="desc">Create a video from a prompt on the model that is running.</p>
+      </header>
+
+      <main id="main">
+        <section class="mockup-switch" aria-label="Mockup state">
+          <strong>Mockup view</strong>
+          <span>Switch between the required first-use and filled states.</span>
+          <span class="spacer"></span>
+          <button class="quiet" id="show-blank" type="button" aria-pressed="true">First use</button>
+          <button class="quiet" id="show-filled" type="button" aria-pressed="false">Filled example</button>
+        </section>
+
+        <div class="gen-context">
+          <div class="glyph" aria-hidden="true">MH</div>
+          <div>
+            <strong>MiniMax H3</strong>
+            <div class="faint">Serving on this Spark</div>
+          </div>
+          <span class="spacer"></span>
+          <span class="tag quiet">Video</span>
+        </div>
+
+        <div class="composer-grid">
+          <section class="card guided" aria-labelledby="guided-composer-title">
+            <div class="form-stack">
+              <div>
+                <div class="section-head">
+                  <h2 id="guided-composer-title">Create from an image</h2>
+                  <span class="spacer"></span>
+                  <div class="pill-group" aria-label="Generation mode">
+                    <label>
+                      <input type="radio" name="mode" checked>
+                      Image to video
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <section>
+                <div class="step-head">
+                  <span class="step-number">1</span>
+                  <div>
+                    <h2>Choose the first frame</h2>
+                    <p>The video starts from this exact image.</p>
+                  </div>
+                </div>
+
+                <div class="dropzone blank-only">
+                  <div class="dropzone-inner">
+                    <span class="image-mark" aria-hidden="true"></span>
+                    <strong>Choose a PNG or JPEG</strong>
+                    <p>The image sets the subject, composition and visual style.</p>
+                    <button class="ghost" id="choose-image" type="button">Choose image</button>
+                  </div>
+                </div>
+
+                <div class="source-row filled-only">
+                  <svg class="source-thumb" viewBox="0 0 320 180" role="img" aria-label="A cyclist holding a closed umbrella on a rainy train platform">
+                    <defs>
+                      <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0" stop-color="#30343c"/>
+                        <stop offset="1" stop-color="#181a1f"/>
+                      </linearGradient>
+                    </defs>
+                    <rect width="320" height="180" fill="url(#sky)"/>
+                    <rect y="126" width="320" height="54" fill="#202229"/>
+                    <path d="M0 146 H320 M0 157 H320" stroke="#40444f" stroke-width="2"/>
+                    <path d="M0 40 H320" stroke="#75795f" stroke-width="5"/>
+                    <path d="M28 0 V126 M286 0 V126" stroke="#40444f" stroke-width="6"/>
+                    <path d="M0 78 H320" stroke="#2c2f37" stroke-width="3"/>
+                    <circle cx="151" cy="70" r="12" fill="#efe8d2"/>
+                    <path d="M151 82 L145 119 L166 130 M148 96 L128 112 M149 94 L174 105" stroke="#efe8d2" stroke-width="7" stroke-linecap="round" fill="none"/>
+                    <circle cx="126" cy="132" r="21" fill="none" stroke="#a9ab93" stroke-width="4"/>
+                    <circle cx="181" cy="132" r="21" fill="none" stroke="#a9ab93" stroke-width="4"/>
+                    <path d="M126 132 L148 104 L181 132 L151 132 L134 111" stroke="#a9ab93" stroke-width="4" fill="none" stroke-linejoin="round"/>
+                    <path d="M175 105 L203 55" stroke="#dd3c10" stroke-width="4" stroke-linecap="round"/>
+                    <path d="M198 58 Q207 51 212 58" stroke="#dd3c10" stroke-width="4" fill="none" stroke-linecap="round"/>
+                    <g stroke="#a9ab93" stroke-width="1" opacity="0.5">
+                      <path d="M52 17 l-9 19 M83 28 l-8 18 M116 11 l-9 19 M214 20 l-8 18 M251 10 l-9 19 M279 32 l-8 18"/>
+                      <path d="M37 65 l-8 18 M72 82 l-8 18 M107 61 l-8 18 M224 73 l-8 18 M265 65 l-8 18 M300 86 l-8 18"/>
+                    </g>
+                  </svg>
+                  <div class="source-meta">
+                    <strong>rainy-platform.jpg</strong>
+                    <span>1600 x 900 · Picture 1 · first frame</span>
+                  </div>
+                  <button class="quiet" id="replace-image" type="button">Replace image</button>
+                </div>
+              </section>
+
+              <hr class="rule">
+
+              <section>
+                <div class="step-head">
+                  <span class="step-number">2</span>
+                  <div>
+                    <h2>Choose size and duration</h2>
+                    <p>Shot times stay inside the duration you choose.</p>
+                  </div>
+                </div>
+                <div class="settings-grid">
+                  <div>
+                    <span class="setting-label">Size</span>
+                    <div class="pill-group" aria-label="Video size">
+                      <label><input type="radio" name="size">768 x 768</label>
+                      <label><input type="radio" name="size" checked>1344 x 768</label>
+                    </div>
+                    <span class="hint">Landscape uses the image across the full frame.</span>
+                  </div>
+                  <div>
+                    <span class="setting-label">Duration</span>
+                    <div class="pill-group" aria-label="Video duration">
+                      <label><input type="radio" name="duration" checked>5.2 seconds</label>
+                      <label><input type="radio" name="duration">8.0 seconds</label>
+                      <label><input type="radio" name="duration">15.1 seconds</label>
+                    </div>
+                    <span class="hint">5.2 seconds is 124 frames at 24 frames per second.</span>
+                  </div>
+                  <label class="field">
+                    Seed, optional
+                    <input class="blank-only" type="text" inputmode="numeric" placeholder="Generated automatically">
+                    <input class="filled-only" type="text" inputmode="numeric" value="482731">
+                  </label>
+                </div>
+              </section>
+
+              <hr class="rule">
+
+              <section class="blank-only">
+                <div class="step-head">
+                  <span class="step-number">3</span>
+                  <div>
+                    <h2>How should the image come to life?</h2>
+                    <p>Pick the closest starting point. You can change every detail next.</p>
+                  </div>
+                </div>
+                <div class="starter-grid">
+                  <button class="starter" type="button" data-start-filled>
+                    <strong>Gentle motion</strong>
+                    <span>One smooth action with a small, slow camera move.</span>
+                    <em>One shot · no dialogue</em>
+                  </button>
+                  <button class="starter" type="button" data-start-filled>
+                    <strong>Reveal something</strong>
+                    <span>Show one new detail with a clear cut or camera move.</span>
+                    <em>Two shots · one cut</em>
+                  </button>
+                  <button class="starter" type="button" data-start-filled>
+                    <strong>One spoken moment</strong>
+                    <span>Keep the scene steady while one person says an exact line.</span>
+                    <em>One speaker · one line</em>
+                  </button>
+                </div>
+                <p class="first-use-note">No prompt syntax to learn. Basement builds and checks it beside these controls.</p>
+              </section>
+
+              <section class="filled-only">
+                <div class="step-head">
+                  <span class="step-number">3</span>
+                  <div>
+                    <h2>Describe what changes</h2>
+                    <p>The first frame comes from the image. Each later shot must show something new.</p>
+                  </div>
+                </div>
+
+                <div class="shot-table" role="table" aria-label="Shot timeline">
+                  <div class="shot-head" role="row">
+                    <span role="columnheader">Starts</span>
+                    <span role="columnheader">Motion and end state</span>
+                    <span role="columnheader">Camera</span>
+                  </div>
+
+                  <div class="shot-row" role="row">
+                    <div class="shot-time" role="cell">
+                      <strong>Shot 1</strong>
+                      <code>00:00.000</code>
+                    </div>
+                    <div class="shot-fields" role="cell">
+                      <label class="field">
+                        What happens?
+                        <textarea rows="2">The cyclist releases one hand from the bicycle handle, raises the closed umbrella and opens it.</textarea>
+                      </label>
+                      <label class="field">
+                        What is true at the end of this shot?
+                        <input type="text" value="The umbrella is fully open and water beads roll from the fabric.">
+                      </label>
+                    </div>
+                    <div class="shot-fields" role="cell">
+                      <div class="camera-fields">
+                        <label class="field">
+                          Camera move
+                          <select>
+                            <option>Zoom In</option>
+                            <option>Zoom Out</option>
+                            <option>Push In</option>
+                            <option>Pull Out</option>
+                            <option>Pan Left</option>
+                            <option>Pan Right</option>
+                            <option>Truck Left</option>
+                            <option selected>Truck Right</option>
+                            <option>Tilt Up</option>
+                            <option>Tilt Down</option>
+                            <option>Pedestal Up</option>
+                            <option>Pedestal Down</option>
+                            <option>Arc Shot</option>
+                            <option>Tracking Shot</option>
+                            <option>Static Shot</option>
+                            <option>Shake Slightly</option>
+                            <option>Shake Strongly</option>
+                            <option>POV</option>
+                            <option>Roll Clockwise</option>
+                            <option>Roll Counterclockwise</option>
+                          </select>
+                        </label>
+                        <label class="field">
+                          Range
+                          <select>
+                            <option>Normal</option>
+                            <option selected>Small</option>
+                            <option>Large</option>
+                          </select>
+                        </label>
+                        <label class="field">
+                          Speed
+                          <select>
+                            <option>Normal</option>
+                            <option selected>Slow</option>
+                            <option>Fast</option>
+                          </select>
+                        </label>
+                      </div>
+                      <button class="quiet" type="button">Add spoken words</button>
+                    </div>
+                  </div>
+
+                  <div class="shot-row" role="row">
+                    <div class="shot-time" role="cell">
+                      <strong>Shot 2</strong>
+                      <label class="field">
+                        Cut starts
+                        <select>
+                          <option>00:02.000</option>
+                          <option>00:02.500</option>
+                          <option selected>00:03.000</option>
+                          <option>00:03.500</option>
+                          <option>00:04.000</option>
+                          <option>00:04.500</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="shot-fields" role="cell">
+                      <label class="field">
+                        What new information does this shot show?
+                        <textarea rows="2">A medium close view shows the cyclist looking toward the tracks beneath the open umbrella.</textarea>
+                      </label>
+                      <label class="field">
+                        What is true at the end of this shot?
+                        <input type="text" value="The cyclist settles the umbrella over one shoulder and remains beside the bicycle.">
+                      </label>
+                    </div>
+                    <div class="shot-fields" role="cell">
+                      <div class="camera-fields">
+                        <label class="field">
+                          Camera move
+                          <select>
+                            <option>Zoom In</option>
+                            <option>Zoom Out</option>
+                            <option>Push In</option>
+                            <option>Pull Out</option>
+                            <option>Pan Left</option>
+                            <option>Pan Right</option>
+                            <option>Truck Left</option>
+                            <option>Truck Right</option>
+                            <option>Tilt Up</option>
+                            <option>Tilt Down</option>
+                            <option>Pedestal Up</option>
+                            <option>Pedestal Down</option>
+                            <option>Arc Shot</option>
+                            <option>Tracking Shot</option>
+                            <option selected>Static Shot</option>
+                            <option>Shake Slightly</option>
+                            <option>Shake Strongly</option>
+                            <option>POV</option>
+                            <option>Roll Clockwise</option>
+                            <option>Roll Counterclockwise</option>
+                          </select>
+                        </label>
+                        <label class="field">
+                          Range
+                          <select disabled><option>Not used</option></select>
+                        </label>
+                        <label class="field">
+                          Speed
+                          <select disabled><option>Not used</option></select>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div class="dialogue-row filled-only" role="cell">
+                      <label class="field">
+                        Speaker
+                        <input type="text" value="Cyclist">
+                      </label>
+                      <label class="field">
+                        Spoken language
+                        <select>
+                          <option selected>English</option>
+                          <option>French</option>
+                          <option>German</option>
+                          <option>Italian</option>
+                          <option>Japanese</option>
+                          <option>Korean</option>
+                          <option>Spanish</option>
+                        </select>
+                      </label>
+                      <label class="field">
+                        Exact words
+                        <input type="text" value="Here comes the rain.">
+                      </label>
+                      <button class="quiet" type="button">Remove spoken words</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="timeline-foot">
+                  <button class="ghost" type="button">Add a cut</button>
+                  <p>New cuts are placed inside the 5.2-second timeline and can be moved.</p>
+                </div>
+              </section>
+
+              <hr class="rule">
+
+              <section>
+                <div class="step-head">
+                  <span class="step-number">4</span>
+                  <div>
+                    <h2>Choose the sound</h2>
+                    <p>H3 creates the picture and sound together.</p>
+                  </div>
+                </div>
+
+                <div class="sound-grid">
+                  <div class="sound-block">
+                    <span class="setting-label">Sound in the scene</span>
+                    <div class="pill-group" aria-label="Sound in the scene">
+                      <label><input type="radio" name="sound" checked>Natural scene sound</label>
+                      <label><input type="radio" name="sound">Silent</label>
+                    </div>
+                    <label class="field filled-only">
+                      What should be heard?
+                      <textarea rows="2">Steady rain on the platform roof and umbrella, distant rail noise and the soft click of the umbrella opening.</textarea>
+                    </label>
+                    <p class="hint blank-only">Natural ambience and visible actions are matched automatically. Choose Silent only for complete silence.</p>
+                  </div>
+
+                  <div class="sound-block">
+                    <span class="setting-label">Background music</span>
+                    <div class="pill-group" aria-label="Background music">
+                      <label><input type="radio" name="music" checked>No music</label>
+                      <label><input type="radio" name="music">Add music</label>
+                    </div>
+                    <p class="hint">No music keeps the scene's own sound without adding an audience-only score.</p>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <aside class="card prompt-panel" aria-labelledby="assembled-prompt-title">
+            <div class="check-box" aria-live="polite">
+              <div class="check-title">
+                <span class="status-dot" aria-hidden="true"></span>
+                <strong id="check-heading">2 things to finish</strong>
+              </div>
+              <ul class="check-list blank-only" id="blank-checks">
+                <li><b>Needed</b><span>Choose the first-frame image.</span></li>
+                <li><b>Needed</b><span>Pick a starting point and describe what changes.</span></li>
+                <li><b>Ready</b><span>Size, duration, natural sound and no music are set.</span></li>
+              </ul>
+              <ul class="check-list filled-only" id="filled-checks">
+                <li><b>Ready</b><span>Picture 1 is fixed as the first frame.</span></li>
+                <li><b>Ready</b><span>2 shots fit inside 5.2 seconds.</span></li>
+                <li><b>Ready</b><span>1 speaker has a language and exact words.</span></li>
+                <li><b>Ready</b><span>Natural sound and no music are explicit.</span></li>
+              </ul>
+              <ul class="check-list manual-only" id="manual-checks">
+                <li><b>Fix</b><span>The manual prompt needs the fixed first-frame line and all three core fields in order.</span></li>
+              </ul>
+            </div>
+
+            <div class="prompt-head">
+              <h2 id="assembled-prompt-title">Assembled H3 prompt</h2>
+              <span class="spacer"></span>
+              <span class="tag quiet" id="prompt-mode">Guided</span>
+            </div>
+
+            <textarea
+              id="prompt-output"
+              class="prompt-output"
+              aria-label="Assembled H3 prompt. Edit directly to use manual prompt mode."
+              spellcheck="true"
+            ></textarea>
+
+            <div class="prompt-tools">
+              <span class="edit-state" id="edit-state">Edit this text directly for full control.</span>
+              <span class="spacer"></span>
+              <button class="quiet manual-only" id="return-guided" type="button">Return to guided composer</button>
+              <button class="quiet" id="copy-prompt" type="button">Copy prompt</button>
+            </div>
+
+            <div class="run-summary">
+              <strong class="blank-only">Request not ready</strong>
+              <span class="blank-only">1344 x 768 · 124 frames · 5.2 seconds · first-frame image missing</span>
+              <strong class="filled-only">Ready request</strong>
+              <span class="filled-only">1344 x 768 · 124 frames · 5.2 seconds · 2 shots · 1 spoken line · natural sound · no music</span>
+            </div>
+
+            <div class="gen-foot">
+              <p>Check the prompt now. Video generation can take many minutes and keeps running if you leave this view.</p>
+              <span class="spacer"></span>
+              <button class="primary" id="generate-video" type="button" disabled>Generate video</button>
+            </div>
+          </aside>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <textarea id="blank-prompt" class="prompt-template" aria-hidden="true" tabindex="-1">For the target video, at 0.00 seconds into the target video, &lt;Picture 1&gt; (from [Shot 1]) is fully referenced.
+
+integrated_multimodal_description: [Shot 1] [Describe what changes from the image.]
+
+overall_soundscape: Natural ambience and physical sounds match the visible setting and actions throughout the video.
+
+non_diegetic_music: N/A</textarea>
+
+  <textarea id="filled-prompt" class="prompt-template" aria-hidden="true" tabindex="-1">For the target video, at 0.00 seconds into the target video, &lt;Picture 1&gt; (from [Shot 1]) is fully referenced.
+
+integrated_multimodal_description: [Shot 1] Live-action, cinematic, the cyclist shown in &lt;Picture 1&gt; remains on the rain-darkened platform, preserving the subject's appearance, clothing, bicycle, umbrella, position, and the station layout. The camera trucks right with small amplitude at slow speed as the cyclist releases one hand from the bicycle handle, raises the closed umbrella, and presses the runner upward. The canopy opens and beads of water roll from its fabric. [Shot 2] At 00:03.000, the camera cuts to a medium close shot. The camera holds a static shot as the cyclist (S1), in a calm, clear voice, looks toward the tracks and says: &lt;d&gt;[English] Here comes the rain.&lt;/d&gt; The cyclist closes their lips, settles the umbrella over one shoulder, and remains beside the bicycle through the final frame.
+
+overall_soundscape: Steady rain taps on the platform roof and umbrella while distant rail noise and the soft click of the umbrella runner remain audible.
+
+non_diegetic_music: N/A</textarea>
+
+  <script>
+    (function () {
+      var body = document.body;
+      var blankButton = document.getElementById('show-blank');
+      var filledButton = document.getElementById('show-filled');
+      var output = document.getElementById('prompt-output');
+      var blankPrompt = document.getElementById('blank-prompt').value;
+      var filledPrompt = document.getElementById('filled-prompt').value;
+      var promptMode = document.getElementById('prompt-mode');
+      var editState = document.getElementById('edit-state');
+      var checkHeading = document.getElementById('check-heading');
+      var blankChecks = document.getElementById('blank-checks');
+      var filledChecks = document.getElementById('filled-checks');
+      var manualChecks = document.getElementById('manual-checks');
+      var generate = document.getElementById('generate-video');
+      var copy = document.getElementById('copy-prompt');
+      var returnGuided = document.getElementById('return-guided');
+      var guidedControls = Array.prototype.slice.call(
+        document.querySelectorAll('.guided input, .guided textarea, .guided select, .guided button')
+      );
+
+      guidedControls.forEach(function (control) {
+        control.dataset.baseDisabled = String(control.disabled);
+      });
+
+      function freezeGuided(frozen) {
+        guidedControls.forEach(function (control) {
+          control.disabled = frozen || control.dataset.baseDisabled === 'true';
+        });
+      }
+
+      function manualPromptIsValid(value) {
+        var fixedLine = 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.';
+        var description = value.indexOf('integrated_multimodal_description:');
+        var soundscape = value.indexOf('overall_soundscape:');
+        var music = value.indexOf('non_diegetic_music:');
+        return value.indexOf(fixedLine) === 0 &&
+          description > fixedLine.length &&
+          soundscape > description &&
+          music > soundscape &&
+          value.indexOf('[Shot 1]') !== -1 &&
+          value.indexOf('[Describe what changes from the image.]') === -1;
+      }
+
+      function setState(state) {
+        body.dataset.state = state;
+        body.dataset.manual = 'false';
+        blankButton.setAttribute('aria-pressed', String(state === 'blank'));
+        filledButton.setAttribute('aria-pressed', String(state === 'filled'));
+        output.value = state === 'filled' ? filledPrompt : blankPrompt;
+        promptMode.textContent = 'Guided';
+        editState.textContent = 'Edit this text directly for full control.';
+        checkHeading.textContent = state === 'filled' ? 'Prompt ready' : '2 things to finish';
+        blankChecks.style.display = '';
+        filledChecks.style.display = '';
+        manualChecks.style.display = 'none';
+        freezeGuided(false);
+        generate.disabled = state !== 'filled';
+      }
+
+      blankButton.addEventListener('click', function () { setState('blank'); });
+      filledButton.addEventListener('click', function () { setState('filled'); });
+      document.getElementById('choose-image').addEventListener('click', function () { setState('filled'); });
+      document.getElementById('replace-image').addEventListener('click', function () { setState('blank'); });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-start-filled]'), function (button) {
+        button.addEventListener('click', function () { setState('filled'); });
+      });
+
+      output.addEventListener('input', function () {
+        var valid = body.dataset.state === 'filled' && manualPromptIsValid(output.value);
+        body.dataset.manual = 'true';
+        promptMode.textContent = 'Manual prompt';
+        editState.textContent = 'Guided controls are paused so they cannot overwrite this text.';
+        checkHeading.textContent = valid ? 'Prompt ready' : 'Prompt needs attention';
+        blankChecks.style.display = 'none';
+        filledChecks.style.display = valid ? 'grid' : 'none';
+        manualChecks.style.display = valid ? 'none' : 'grid';
+        freezeGuided(true);
+        generate.disabled = !valid;
+      });
+
+      returnGuided.addEventListener('click', function () {
+        setState(body.dataset.state);
+      });
+
+      copy.addEventListener('click', function () {
+        if (!navigator.clipboard) {
+          output.select();
+          copy.textContent = 'Prompt selected';
+          return;
+        }
+        navigator.clipboard.writeText(output.value).then(function () {
+          copy.textContent = 'Copied';
+          window.setTimeout(function () { copy.textContent = 'Copy prompt'; }, 1400);
+        });
+      });
+
+      var requestedState = new URLSearchParams(window.location.search).get('state');
+      setState(requestedState === 'filled' ? 'filled' : 'blank');
+    }());
+  </script>
+</body>
+</html>
