@@ -144,12 +144,14 @@ func ArtifactMountPath(role string) string {
 func (r Runtime) Reference() string { return r.Image + "@" + r.Digest }
 
 type Artifact struct {
-	Role          string `yaml:"role" json:"role"`
-	Repository    string `yaml:"repository" json:"repository"`
-	Revision      string `yaml:"revision" json:"revision"`
-	ExpectedBytes int64  `yaml:"expected_bytes" json:"expected_bytes"`
-	Licence       string `yaml:"licence" json:"licence"`
-	LicenceURL    string `yaml:"licence_url" json:"licence_url"`
+	Role              string `yaml:"role" json:"role"`
+	Repository        string `yaml:"repository" json:"repository"`
+	Revision          string `yaml:"revision" json:"revision"`
+	ExpectedBytes     int64  `yaml:"expected_bytes" json:"expected_bytes"`
+	Licence           string `yaml:"licence" json:"licence"`
+	LicenceURL        string `yaml:"licence_url" json:"licence_url"`
+	LicenceRepository string `yaml:"licence_repository,omitempty" json:"licence_repository,omitempty"`
+	LicenceRevision   string `yaml:"licence_revision,omitempty" json:"licence_revision,omitempty"`
 	// LicenceTerritoryExclusions names the territories this artifact's
 	// licence excludes, in the licence's own words, copied rather than
 	// composed, the same rule already enforced for Licence and LicenceURL.

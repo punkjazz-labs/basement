@@ -187,8 +187,21 @@ func Validate(r Recipe) error {
 		licenceURL, err := url.Parse(artifact.LicenceURL)
 		if err != nil || licenceURL.Scheme != "https" || licenceURL.Host != "huggingface.co" {
 			problems = append(problems, prefix+" licence_url must be an HTTPS Hugging Face URL")
-		} else if licenceURL.Path != "/"+artifact.Repository && !strings.HasPrefix(licenceURL.Path, "/"+artifact.Repository+"/") {
-			problems = append(problems, prefix+" licence_url must reference the artifact's own repository")
+		} else if artifact.LicenceRepository == "" {
+			if licenceURL.Path != "/"+artifact.Repository && !strings.HasPrefix(licenceURL.Path, "/"+artifact.Repository+"/") {
+				problems = append(problems, prefix+" licence_url must reference the artifact's own repository")
+			}
+		} else if artifact.LicenceRevision != "" && !licenceURLReferencesRevision(licenceURL.Path, artifact.LicenceRepository, artifact.LicenceRevision) {
+			problems = append(problems, prefix+" licence_url must reference licence_repository at licence_revision")
+		}
+		if (artifact.LicenceRepository == "") != (artifact.LicenceRevision == "") {
+			problems = append(problems, prefix+" licence_repository and licence_revision must be set together")
+		}
+		if artifact.LicenceRepository != "" && !repositoryPattern.MatchString(artifact.LicenceRepository) {
+			problems = append(problems, prefix+" licence_repository is invalid")
+		}
+		if artifact.LicenceRevision != "" && !revisionPattern.MatchString(artifact.LicenceRevision) {
+			problems = append(problems, prefix+" licence_revision must be a 40-character immutable commit")
 		}
 		if artifact.LicenceTerritoryExclusions != nil {
 			blank := false
@@ -265,6 +278,16 @@ func Validate(r Recipe) error {
 		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func licenceURLReferencesRevision(urlPath, repository, revision string) bool {
+	for _, form := range []string{"blob", "resolve", "raw"} {
+		prefix := "/" + repository + "/" + form + "/" + revision + "/"
+		if strings.HasPrefix(urlPath, prefix) && len(urlPath) > len(prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // artifactFileProblems validates per-file pinning. An artifact that declares
