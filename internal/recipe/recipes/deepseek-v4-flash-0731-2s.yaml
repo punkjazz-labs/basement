@@ -1,49 +1,96 @@
 schema_version: 1
 id: deepseek-v4-flash-0731-2s
 # The first two-Spark recipe: DeepSeek's official V4 Flash 0731 release
-# (166.9 GB, natively FP8 attention + FP4 experts, does not fit one 128 GB
-# Spark), served with vLLM TP=2 across two GB10 machines cabled back to
-# back with ConnectX-7. The NVIDIA NVFP4 repo was rejected on provenance:
-# it quantizes the April preview (last modified 2026-06-15), not 0731.
+# (166.9 GB, FP8 attention weights with natively FP4 experts, does not fit one
+# 128 GB Spark), served across two GB10 machines cabled back to back with
+# ConnectX-7. The NVIDIA NVFP4 repo was rejected on provenance: it quantizes
+# the April preview (last modified 2026-06-15), not 0731.
 #
-# Launch topology follows the community recipe that runs this exact
-# workload (tonyd2wild/Deepseek-v4-Flash-TP2-DGX-Spark-500k-CTX): plain
-# vllm serve with --nnodes 2, worker rank first, weights pre-downloaded on
-# both nodes, NCCL pinned to the RoCE fabric. Each node detects its own
-# cabled ConnectX port at deploy time and pins NCCL to that; the interface
-# names below are the community recipe's, kept as the fallback for when the
-# kernel's answer is missing or ambiguous (no link yet, or both ports
-# cabled).
+# This version replaces the stock vLLM runtime the recipe shipped with. The
+# official vllm/vllm-openai image ran this model but reached the driver's own
+# out-of-memory error part way through long generations on real GB10 hardware,
+# twice, at two different memory fractions. The serve flags below are not a
+# tuning pass over that image: they are the configuration of a two-Spark
+# deployment of this exact model that has been observed serving, and most of
+# them only exist in the runtime that deployment uses.
 #
-# Qualification flags, in honesty order:
-# - runtime image is vLLM v0.26.0, not the v0.25.1 the rest of the pack
-#   pins. This model's sparse-MLA decode passes swa_topk_lens to
-#   flashinfer, and only flashinfer 0.6.14 accepts that argument; v0.25.1
-#   bundles the release three days older and dies on real GB10 hardware
-#   (vllm-project/vllm issue 48054, fixed by PR 47669). v0.26.0 is the
-#   earliest release that carries the fix, so this recipe must not be
-#   moved back below it. DeepSeek V4 MoE support in this digest is still
-#   unverified until the two-node install runs.
-# - reasoning_parser/tool_call_parser: DeepSeek V4 Flash emits the same
-#   literal think-tag convention the qwen3 parser splits on, so qwen3 is
-#   the closest allowlisted functional match; both are unverified against
-#   real output and qualification decides whether they hold.
-# - max_model_len starts at 131072, far below the 500k the community
-#   recipe reaches, so first qualification measures a conservative
-#   configuration before context is raised.
-# - memory_model omitted: TP=2 shards weights across nodes and the flat
-#   single-node formula would be wrong by construction.
-version: 1
+# Runtime provenance, stated plainly because it is a community build and not a
+# vendor release. What is checkable: the image is public, this recipe pins it
+# by digest so the bytes cannot change under it, and its own OCI labels name
+# its source (github.com/Anemll/dspark-vllm-gx10, revision
+# 47503f8e38dadd4dededca798150db2619594fce, version 0.1.1) and its licences
+# (MIT AND Apache-2.0). That source repository pins what it builds on: vLLM
+# v0.25.1 at commit 752a3a504485790a2e8491cacbb35c137339ad34, plus FlashInfer
+# and b12x at named commits. What is not checkable: nobody here has rebuilt
+# that image from that source and compared it, so the digest proves the bytes
+# are stable, not that they are what the published Dockerfile produces. There
+# is no upstream release process behind it the way there is behind
+# vllm/vllm-openai. ADR 0012 asks for a primary source, immutable pinning, a
+# read licence, and hardware qualification before the label moves; the first
+# three hold here and the fourth has not run, which is exactly why trust stays
+# basement-candidate.
+#
+# The tokenizer question, and what this recipe does not reproduce. The working
+# deployment does not run the pinned image directly: it rebuilds it locally to
+# copy two files over the image's vLLM tokenizer package,
+# deepseek_v4_encoding.py and deepseek_v4.py under
+# /usr/local/lib/python3.12/dist-packages/vllm/tokenizers/. basement never
+# builds an image and every container it starts has a read-only root, so that
+# layer cannot be reproduced here and no artifact can stand in for it: a file
+# mounted anywhere else is a file nothing reads. What does carry over is that
+# the runtime's pinned vLLM revision already ships vllm/tokenizers/
+# deepseek_v4.py and its encoder, so tokenizer_mode deepseek_v4 and the
+# deepseek_v4 parsers resolve on the image as pulled, and the checkpoint's own
+# encoder travels inside the pinned snapshot at encoding/encoding_dsv4.py,
+# mounted read only with the weights. What stays unverified is the difference
+# between the two encoders: the working deployment replaces the image's copy
+# with the checkpoint's and corrects one reasoning-effort mapping, so until
+# qualification measures it, this recipe's reasoning-effort and tool-argument
+# behaviour is the runtime's rather than the 0731 checkpoint's.
+#
+# Deliberate differences from the observed command, each with its reason:
+# - max_model_len is 131072, not the 1048576 that deployment serves. It
+#   reaches 1M by setting VLLM_ALLOW_LONG_MAX_MODEL_LEN, which tells vLLM to
+#   accept a context its KV cache cannot hold in full. This recipe does not
+#   send that, so the pinned context has to be one the cache actually covers,
+#   and qualification measures 128K before anything is raised.
+# - disable_quant_fusions stays on although that deployment sends no
+#   compilation config at all. The previous version of this recipe committed to
+#   removing it only on a measurement from our own hardware, and no such
+#   measurement has happened yet.
+# - chat template kwargs differ: that deployment starts with thinking off,
+#   this recipe keeps thinking on, which is a product choice and not a
+#   stability one.
+# - three of its flags have no field here and are not sent:
+#   --enable-prompt-tokens-details (usage telemetry), --reasoning-config
+#   (restates the reasoning parser this recipe already names, plus the think
+#   tags, which this schema has no field for), and --generation-config vllm
+#   (this recipe pins sampling with --override-generation-config instead).
+# - --distributed-executor-backend mp needs no field: the manager already
+#   sends it for every two-node vLLM launch.
+#
+# Launch topology stays ours. Each node detects its own cabled ConnectX port at
+# deploy time and pins NCCL to that; the interface names below are the
+# community recipe's, kept as the fallback for when the kernel's answer is
+# missing or ambiguous (no link yet, or both ports cabled).
+#
+# memory_model is omitted: TP=2 shards weights across nodes and the flat
+# single-node formula would be wrong by construction.
+version: 2
 display_name: DeepSeek V4 Flash 0731
 publisher: DeepSeek
 model_by: DeepSeek
-recipe_by: tonyd2wild (community launch topology)
+# The runtime image is Anemll's GB10 vLLM build; the two-Spark serving
+# configuration is MiaAI Lab's. That build's own credits file names the
+# lineage behind it: Rafael Caricio's original DSpark vLLM integration, the
+# concurrency patch by drowzeys (Keys), and TonyD2Wild's launcher work.
+recipe_by: MiaAI Lab and Anemll
 model_released: July 2026
 trust: basement-candidate
 verification: candidate
 source:
-  url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731
-  revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+  url: https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark
+  revision: 914c35bd7d5607560048e4467c3fdd42e892e297
 topology:
   spark_count: 2
   interconnect:
@@ -62,41 +109,55 @@ topology:
     worker_environment: {}
 runtime:
   kind: vllm
-  image: vllm/vllm-openai
-  digest: sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52
-  image_bytes: 10349296324
-  image_disk_bytes: 31047888972
+  image: ghcr.io/anemll/dspark-vllm-gx10
+  digest: sha256:a83948492cf13df455170fb42885f5ef4db54fefe0feff0f841ecbff464ac9d8
+  image_bytes: 9787494235
+  image_disk_bytes: 29362482705
   environment:
+    # The image's own default targets the previous Blackwell generation, so
+    # every kernel it compiles at run time would be built for that instead of
+    # the GB10 it is running on. All three names are the same decision.
     CUTE_DSL_ARCH: sm_121a
-    MAX_JOBS: "4"
-    # vLLM auto-enables breakable CUDA graphs on this hardware and their
+    TORCH_CUDA_ARCH_LIST: "12.1a"
+    FLASHINFER_CUDA_ARCH_LIST: "12.1a"
+    # The fused MoE path this runtime is built around, and the one the serve
+    # command below names with --moe-backend.
+    VLLM_USE_B12X_MOE: "1"
+    # vLLM auto-enables breakable CUDA graphs for this model and their
     # allocations grow across a long generation until the driver reports out
     # of memory (observed twice on real GB10s, at 0.85 and 0.80 utilization;
-    # the community deployment of this exact model sets the same opt-out).
+    # the deployment this recipe follows sets the same opt-out).
     VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
-    # tilelang also exports each compiled kernel into a tempfile directory and
+    # tilelang exports each compiled kernel into a tempfile directory and then
     # loads the shared object from there, so the process temp dir must allow
-    # exec too; /tmp stays noexec, TMPDIR moves to its own writable mount.
+    # exec; /tmp stays noexec, TMPDIR moves to its own writable mount.
     TMPDIR: /root/tmp
-  # vLLM builds this model's "mhc" kernels with tilelang, which writes its JIT
-  # kernel cache to /root/.tilelang while the module is being imported. On the
-  # read-only root filesystem every container gets, that import raises OSError
-  # and the worker dies reporting tilelang as missing, after the 74 GiB of
+  # This runtime compiles kernels while modules are being imported and writes
+  # the JIT cache to /root/.tilelang. On the read-only root filesystem every
+  # container gets, that import raises OSError and the worker dies after the
   # weights have loaded. The cache cannot live on the scratch tmpfs either:
-  # tilelang loads the shared objects it compiles, and /tmp is noexec.
+  # the compiler loads the shared objects it writes, and /tmp is noexec.
   writable_paths:
     - /root/.tilelang
     - /root/tmp
-  shm_bytes: 34359738368
+  # 64 GiB, matching the deployment this recipe follows. Two ranks exchanging
+  # tensors through host IPC spend this, and the previous 32 GiB was our own
+  # number rather than a measured one.
+  shm_bytes: 68719476736
   memory_lock: true
   ipc_lock: true
 artifacts:
   - role: primary
     repository: deepseek-ai/DeepSeek-V4-Flash-0731
-    revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
-    expected_bytes: 166898661074
+    # The snapshot the working two-Spark deployment serves and the one its
+    # documentation names as tested. Its config.json is byte-identical to the
+    # revision this recipe pinned before, dspark fields and FP4 experts
+    # included, so this is not a different model: it is the exact point in the
+    # repository's history that deployment measured.
+    revision: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+    expected_bytes: 166898660330
     licence: MIT
-    licence_url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/e3cd60e7de98e9867116860d522499a728de1cf9/LICENSE
+    licence_url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/9e165c30e2704aec5d9d593cce3eebd58bbef1cb/LICENSE
 requirements:
   architecture: aarch64
   dgx_spark: true
@@ -113,25 +174,41 @@ service:
   served_model_id: deepseek-ai/DeepSeek-V4-Flash-0731
   vllm:
     tensor_parallel_size: 2
-    kv_cache_dtype: fp8
+    # NVFP4 with this model's multi-head latent attention. It is not a vLLM
+    # stock option: the KV cache path exists in the pinned runtime and nowhere
+    # else, and it is paired with the 256-token block size below because a
+    # cache dtype and its block size are one decision.
+    kv_cache_dtype: nvfp4_ds_mla
+    block_size: 256
     attention_backend: ""
-    moe_backend: auto
+    moe_backend: flashinfer_b12x
     linear_backend: ""
-    # 0.80, not the pack's usual 0.85: on unified memory the manager, Docker
-    # and the OS live inside the same pool vLLM budgets from, and at 0.85 the
-    # first long generation pushed the driver out of memory on real hardware
-    # (NVRM NV_ERR_NO_MEMORY mid-decode with this model serving alone).
-    gpu_memory_utilization: "0.80"
+    # 0.78. On unified memory the manager, Docker and the OS live inside the
+    # same pool vLLM budgets from, and this is the fraction the working
+    # deployment runs at with the capture size below.
+    gpu_memory_utilization: "0.78"
     max_model_len: 131072
-    max_num_seqs: 8
-    max_num_batched_tokens: 0
+    max_num_seqs: 6
+    max_num_batched_tokens: 8192
+    # max_num_seqs x (speculative_tokens + 1): with five drafted tokens per
+    # step, six concurrent sequences produce batches of at most 36 tokens, so
+    # capturing beyond that spends unified memory on graphs nothing runs.
+    max_cudagraph_capture_size: 36
     multimodal_image_limit: 0
-    speculative_method: ""
-    speculative_tokens: 0
+    # The checkpoint carries its own draft heads (config.json states
+    # dspark_block_size 5 and the target layers), so there is no second model
+    # here and speculative_model_role stays empty.
+    speculative_method: dspark
+    speculative_tokens: 5
     speculative_moe_backend: ""
     speculative_model_role: ""
-    reasoning_parser: qwen3
-    tool_call_parser: qwen3_xml
+    speculative_draft_sample_method: probabilistic
+    # Native to this checkpoint and to the pinned runtime. The previous
+    # version of this recipe reused the qwen3 parsers as the closest
+    # allowlisted match and said so; that workaround is gone.
+    tokenizer_mode: deepseek_v4
+    reasoning_parser: deepseek_v4
+    tool_call_parser: deepseek_v4
     load_format: ""
     chat_template_file: ""
     chat_template:
@@ -145,17 +222,19 @@ service:
       presence_penalty: 0
       repetition_penalty: 1
     # vLLM's fuse_norm_quant and fuse_act_quant compilation passes are on by
-    # default and garble this model's output on SM121 even at temperature 0
-    # (vllm-project/vllm issue 50773, still open). This sends the documented
-    # workaround and nothing else. It costs whatever those fusions were
-    # worth, so it stays on until qualification on our own hardware shows the
-    # passes are safe here; nothing but that measurement takes it back off.
+    # default and garbled this model's output on SM121 under the stock image
+    # (vllm-project/vllm issue 50773, still open). The deployment this recipe
+    # follows sends no compilation config at all, so this is the one flag here
+    # that is ours rather than theirs. It stays until qualification on our own
+    # hardware shows the passes are safe on this runtime; nothing but that
+    # measurement takes it back off.
     disable_quant_fusions: true
     trust_remote_code: true
     chunked_prefill: true
-    async_scheduling: false
-    prefix_caching: false
+    async_scheduling: true
+    prefix_caching: true
     auto_tool_choice: true
+    enable_flashinfer_autotune: true
 operations:
   - type: verify_architecture
   - type: verify_dgx_spark
