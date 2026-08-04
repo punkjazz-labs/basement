@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, formatTokens, OfflineError } from './api'
+import { api, ApiError, formatTokens, OfflineError, runtimeLabel } from './api'
 
 const jsonResponse = (body: unknown, init: { status?: number; ok?: boolean } = {}) => ({
   ok: init.ok ?? true,
@@ -58,5 +58,21 @@ describe('formatTokens', () => {
     expect(formatTokens(1_200_000)).toBe('1.2M')
     expect(formatTokens(3_400_000_000)).toBe('3.4B')
     expect(formatTokens(250_000_000)).toBe('250M')
+  })
+})
+
+describe('runtimeLabel', () => {
+  it('spells each shipped runtime the way its own project does', () => {
+    expect(runtimeLabel('vllm')).toBe('vLLM')
+    expect(runtimeLabel('sglang')).toBe('SGLang')
+    expect(runtimeLabel('llamacpp')).toBe('llama.cpp')
+  })
+
+  // Naming an unknown runtime after one it is not would be a lie the console
+  // has no way to notice; the recipe's own word is the honest fallback.
+  it('keeps an unknown kind as itself and says nothing when there is none', () => {
+    expect(runtimeLabel('tensorrt')).toBe('tensorrt')
+    expect(runtimeLabel(undefined)).toBe('the pinned runtime')
+    expect(runtimeLabel('')).toBe('the pinned runtime')
   })
 })

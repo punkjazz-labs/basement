@@ -526,6 +526,14 @@ func runtimeCommand(r recipe.Recipe, placement Placement) ([]string, []string, e
 			return nil, nil, errors.New("recipe declares runtime kind sglang without a service.sglang block")
 		}
 		return []string{"python3", "-m", "sglang.launch_server"}, sglangArgs(r, placement), nil
+	case "llamacpp":
+		if r.Service.LlamaCpp == nil {
+			return nil, nil, errors.New("recipe declares runtime kind llamacpp without a service.llamacpp block")
+		}
+		if placement.Distributed() {
+			return nil, nil, errors.New("runtime kind llamacpp serves a model from a single Spark")
+		}
+		return []string{"/app/llama-server"}, llamaCppArgs(r, placement), nil
 	default:
 		return nil, nil, fmt.Errorf("runtime kind %q is not supported", r.Runtime.Kind)
 	}
@@ -752,6 +760,55 @@ func sglangDistributedArgs(placement Placement) []string {
 	}
 }
 
+// llamaCppArgs builds the llama-server command line. It differs from the
+// other two builders in one structural way: llama-server is pointed at a
+// single GGUF file rather than at a repository snapshot directory, so the
+// model argument joins the recipe's pinned file name to the primary mount.
+// A split quantization names its first shard and llama-server opens the rest
+// beside it, which is why only one name is ever passed.
+//
+// There are no distributed arguments here and no headless mode. llama.cpp can
+// spread a model across machines through its RPC backend, but that is a
+// separate server process on every node and a different launch shape
+// entirely; until that is built and qualified, the validator refuses a
+// multi-Spark llama.cpp recipe and this builder never sees one.
+func llamaCppArgs(r recipe.Recipe, placement Placement) []string {
+	if r.Service.LlamaCpp == nil {
+		return nil
+	}
+	l := *r.Service.LlamaCpp
+	serveHost, servePort := serveEndpointArgs(r, placement)
+	// --metrics is not a recipe choice, for the same reason SGLang's
+	// --enable-metrics is not: llama-server mounts /metrics only behind this
+	// flag, and the console's telemetry tiles read that endpoint. --alias is
+	// the name llama-server reports to /v1/models, so it is what the proxy
+	// and the inference test address the model by.
+	args := []string{
+		"--model", artifactMountPath("primary") + "/" + l.ModelFile,
+		"--host", serveHost,
+		"--port", fmt.Sprint(servePort),
+		"--alias", r.Service.ServedModelID,
+		"--metrics",
+	}
+	if l.ContextSize > 0 {
+		args = append(args, "--ctx-size", fmt.Sprint(l.ContextSize))
+	}
+	if l.GPULayers > 0 {
+		args = append(args, "--n-gpu-layers", fmt.Sprint(l.GPULayers))
+	}
+	if l.Parallel > 0 {
+		args = append(args, "--parallel", fmt.Sprint(l.Parallel))
+	}
+	args = appendOptional(args, "--flash-attn", l.FlashAttention)
+	if l.Jinja {
+		args = append(args, "--jinja")
+	}
+	if l.ChatTemplateFile != "" {
+		args = append(args, "--chat-template-file", artifactMountPath("primary")+"/"+l.ChatTemplateFile)
+	}
+	return args
+}
+
 func appendOptional(args []string, flag, value string) []string {
 	if value == "" {
 		return args
@@ -936,6 +993,17 @@ func runtimeFileReferences(r recipe.Recipe) []runtimeFileReference {
 	case "sglang":
 		if r.Service.SGLang != nil && r.Service.SGLang.ChatTemplateFile != "" {
 			refs = append(refs, runtimeFileReference{Role: "primary", Name: r.Service.SGLang.ChatTemplateFile})
+		}
+	case "llamacpp":
+		if r.Service.LlamaCpp == nil {
+			break
+		}
+		// The weights themselves are a named file here, not a directory the
+		// runtime scans, so a missing or misnamed shard is exactly the kind
+		// of mistake this check exists to catch before the container runs.
+		refs = append(refs, runtimeFileReference{Role: "primary", Name: r.Service.LlamaCpp.ModelFile})
+		if r.Service.LlamaCpp.ChatTemplateFile != "" {
+			refs = append(refs, runtimeFileReference{Role: "primary", Name: r.Service.LlamaCpp.ChatTemplateFile})
 		}
 	}
 	return refs

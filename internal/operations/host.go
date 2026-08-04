@@ -397,7 +397,7 @@ func (h *HostExecutor) verifyMemory(ctx context.Context, r recipe.Recipe, requir
 	// checked by this step running on each node in turn, never by pooling.
 	results, err := resourceguard.CheckMemory([]resourceguard.Node{node}, 1, resourceguard.MemoryPolicy{
 		MinimumTotalBytes: r.Requirements.MinimumMemoryBytes, HostReserveBytes: r.Requirements.MemoryReserveBytes,
-		GPUUtilization: plan.utilization, RequireLiveCapacity: requireLive,
+		GPUUtilization: plan.utilization, RuntimeBudgetBytes: plan.budgetBytes, RequireLiveCapacity: requireLive,
 	})
 	receipt := map[string]any{
 		"per_node": results, "live_capacity": requireLive, "runtime_kind": r.Runtime.Kind,
@@ -410,20 +410,40 @@ func (h *HostExecutor) verifyMemory(ctx context.Context, r recipe.Recipe, requir
 }
 
 // memoryPlan is the runtime-neutral view of a recipe's planned device memory:
-// the fraction of device memory the engine claims up front, the context
-// length it plans for, and how many requests it will run at once. Each kind
-// spells these differently (vLLM gpu_memory_utilization / max_model_len /
+// how much of the device the engine claims up front, the context length it
+// plans for, and how many requests it will run at once. Each kind spells
+// these differently (vLLM gpu_memory_utilization / max_model_len /
 // max_num_seqs, SGLang mem_fraction_static / context_length /
-// max_running_requests) but the guardrail and its receipt read the same
-// fields for every kind.
+// max_running_requests, llama.cpp memory_model / context_size / parallel)
+// but the guardrail and its receipt read the same fields for every kind.
+//
+// The claim itself comes in two shapes, and they are not interchangeable.
+// vLLM and SGLang are handed a share of the device and grow into it, so a
+// bigger machine means a bigger claim. llama.cpp is handed nothing of the
+// sort: it maps the weights and sizes the KV cache from the context, and
+// holds the same bytes on any machine. Expressing that as a share would
+// inflate the claim on a larger node and understate it on a smaller one, so
+// it stays a byte count all the way through to the guardrail.
 type runtimeMemoryPlan struct {
 	utilization           float64
+	budgetBytes           int64
 	kvCacheDType          string
 	maxModelLen           int
 	maxConcurrentRequests int
 }
 
 func memoryPlan(r recipe.Recipe) (runtimeMemoryPlan, error) {
+	if r.Runtime.Kind == "llamacpp" {
+		planned, ok := r.PlannedMemoryBytes()
+		if !ok {
+			return runtimeMemoryPlan{}, fmt.Errorf("recipe declares runtime kind %q without its service block and memory model", r.Runtime.Kind)
+		}
+		l := r.Service.LlamaCpp
+		// llama.cpp does not quantize the KV cache unless it is told to, and
+		// this schema does not let a recipe tell it to, so the dtype the
+		// receipt reports is the one llama.cpp uses.
+		return runtimeMemoryPlan{budgetBytes: planned, kvCacheDType: "f16", maxModelLen: l.ContextSize, maxConcurrentRequests: l.Parallel}, nil
+	}
 	fraction, ok := r.Service.MemoryFraction(r.Runtime.Kind)
 	if !ok {
 		return runtimeMemoryPlan{}, fmt.Errorf("recipe declares runtime kind %q without its service block", r.Runtime.Kind)

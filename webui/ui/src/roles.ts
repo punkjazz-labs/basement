@@ -61,7 +61,10 @@ export function distinctModelsAfter(assigned: Role[], roleName: string, recipeID
 // sized for. 0 when the recipe pins none, which leaves fitBytes counting
 // weights and overhead only.
 export const pinnedContext = (recipe: Recipe): number =>
-  recipe.service.vllm?.max_model_len ?? recipe.service.sglang?.context_length ?? 0
+  recipe.service.vllm?.max_model_len ??
+  recipe.service.sglang?.context_length ??
+  recipe.service.llamacpp?.context_size ??
+  0
 
 // One entry per distinct model: two roles pointing at the same model load it
 // once, so counting it twice would invent memory pressure that does not exist.

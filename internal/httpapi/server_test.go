@@ -1180,9 +1180,10 @@ func TestFetchPeerJSONRefusesRedirects(t *testing.T) {
 	}
 }
 
-// The sampler reads each runtime's own series names. SGLang publishes no
-// equivalent of vLLM's KV cache usage gauge, so that field stays absent
-// rather than defaulting to zero, and label sets must not defeat the match.
+// The sampler reads each runtime's own series names. Neither SGLang nor
+// llama-server publishes an equivalent of vLLM's KV cache usage gauge, so
+// that field stays absent for them rather than defaulting to zero, and label
+// sets must not defeat the match.
 func TestRuntimeMetricsSamplerIsKindAware(t *testing.T) {
 	exposition := map[string]string{
 		"vllm": "# HELP vllm:num_requests_running Running.\n" +
@@ -1196,6 +1197,14 @@ func TestRuntimeMetricsSamplerIsKindAware(t *testing.T) {
 			"sglang:cache_hit_rate{model_name=\"m\",tp_rank=\"0\"} 0.9\n" +
 			"sglang:prompt_tokens_total{model_name=\"m\",tp_rank=\"0\"} 40\n" +
 			"sglang:generation_tokens_total{model_name=\"m\",tp_rank=\"0\"} 120\n",
+		// llama-server names the same quantities differently: a request in
+		// flight is "processing", a queued one is "deferred", and generated
+		// tokens are "predicted".
+		"llamacpp": "# HELP llamacpp:requests_processing Number of requests processing.\n" +
+			"llamacpp:requests_processing 3\n" +
+			"llamacpp:requests_deferred 1\n" +
+			"llamacpp:prompt_tokens_total 40\n" +
+			"llamacpp:tokens_predicted_total 120\n",
 	}
 	for kind, body := range exposition {
 		t.Run(kind, func(t *testing.T) {
@@ -1218,8 +1227,15 @@ func TestRuntimeMetricsSamplerIsKindAware(t *testing.T) {
 			}
 		})
 	}
+	// A kind with no series mapping is not scraped at all. This must be a
+	// kind the manager genuinely has no mapping for; using a mapped one here
+	// would pass only because the fixture recipe has no port, and would go on
+	// passing after the mapping was added.
 	server := &Server{metrics: &http.Client{}}
-	if sample := server.runtimeMetrics(context.Background(), recipe.Recipe{Runtime: recipe.Runtime{Kind: "llamacpp"}}); sample != nil {
+	if names := runtimeMetricNames("tensorrt"); names != nil {
+		t.Fatalf("this test needs an unmapped kind; tensorrt now maps to %#v", names)
+	}
+	if sample := server.runtimeMetrics(context.Background(), recipe.Recipe{Runtime: recipe.Runtime{Kind: "tensorrt"}}); sample != nil {
 		t.Fatalf("unmapped kind sampled=%#v", sample)
 	}
 }
@@ -1257,16 +1273,84 @@ func TestTokenUsageAccumulatesAcrossARuntimeRestart(t *testing.T) {
 		t.Fatalf("usage=%+v", usage)
 	}
 
-	// A runtime that publishes no token series at all leaves the model with
-	// no row, rather than one claiming it served nothing.
+	// A runtime the manager has no series mapping for leaves the model with
+	// no row, rather than one claiming it served nothing. The kind here must
+	// really be unmapped, or the assertion would hold for the wrong reason.
+	if names := runtimeMetricNames("tensorrt"); names != nil {
+		t.Fatalf("this test needs an unmapped kind; tensorrt now maps to %#v", names)
+	}
 	quiet := &Server{metrics: &http.Client{}, store: database}
-	quiet.CaptureTokenUsage(ctx, recipe.Recipe{ID: "llamacpp-model", Runtime: recipe.Runtime{Kind: "llamacpp"}})
+	quiet.CaptureTokenUsage(ctx, recipe.Recipe{ID: "unmapped-model", Runtime: recipe.Runtime{Kind: "tensorrt"}})
 	usage, err = database.TokenUsage(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(usage) != 1 {
 		t.Fatalf("an unmapped runtime was counted: %+v", usage)
+	}
+}
+
+// llama-server publishes its token counters under its own names, and they
+// restart with the container the same way vLLM's do. This drives the whole
+// token-usage path against a fake llama-server so the mapping is exercised
+// rather than merely declared.
+func TestTokenUsageAccumulatesFromLlamaServerCounters(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	// llama-server exposes these without a model label, unlike the other two.
+	counters := "# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.\n" +
+		"# TYPE llamacpp:prompt_tokens_total counter\n" +
+		"llamacpp:prompt_tokens_total 500\n" +
+		"llamacpp:tokens_predicted_total 200\n"
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, counters)
+	}))
+	defer metrics.Close()
+	port, err := strconv.Atoi(metrics.URL[strings.LastIndex(metrics.URL, ":")+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{metrics: metrics.Client(), store: database}
+	r := recipe.Recipe{
+		ID:      "deepseek-v4-flash-0731-ud-iq3-xxs-1s",
+		Runtime: recipe.Runtime{Kind: "llamacpp"},
+		Service: recipe.Service{DefaultHostPort: port, ServedModelID: "unsloth/DeepSeek-V4-Flash-0731-GGUF"},
+	}
+	server.CaptureTokenUsage(ctx, r)
+	usage, err := database.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].PromptTokens != 500 || usage[0].GenerationTokens != 200 {
+		t.Fatalf("first llama-server reading=%+v", usage)
+	}
+	// The container restarts and the counters begin again from zero; the
+	// model's running total must grow by the new reading, not reset to it.
+	counters = "llamacpp:prompt_tokens_total 60\nllamacpp:tokens_predicted_total 20\n"
+	server.CaptureTokenUsage(ctx, r)
+	usage, err = database.TokenUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].PromptTokens != 560 || usage[0].GenerationTokens != 220 {
+		t.Fatalf("usage after a llama-server restart=%+v", usage)
+	}
+	// And the same scrape feeds the console's live tiles, where the counters
+	// llama-server does not publish stay absent instead of reading as zero.
+	sample := server.runtimeMetrics(ctx, r)
+	if sample["prompt_tokens_total"] != float64(60) || sample["generation_tokens_total"] != float64(20) {
+		t.Fatalf("llama-server sample=%#v", sample)
+	}
+	if _, hasKV := sample["kv_cache_usage"]; hasKV {
+		t.Fatalf("llama-server published a KV cache figure it does not have: %#v", sample)
 	}
 }
 

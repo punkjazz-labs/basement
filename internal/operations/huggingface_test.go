@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -112,6 +113,156 @@ func TestHuggingFaceCompleteFallsBackToPreRenameMarker(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(target, completionMarkerName)); err == nil {
 		t.Fatal("Complete must never write the current-name marker; it only reads and falls back")
+	}
+}
+
+// pinnedFileRepository serves a revision holding three files, of which a
+// recipe wants two. It records which files were actually fetched, which is
+// the whole point of per-file pinning: the third must never be requested.
+func pinnedFileRepository(t *testing.T, revision string, contents map[string][]byte) (*httptest.Server, *[]string) {
+	t.Helper()
+	fetched := &[]string{}
+	siblings := make([]map[string]any, 0, len(contents))
+	names := make([]string, 0, len(contents))
+	for name := range contents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sum := sha256.Sum256(contents[name])
+		siblings = append(siblings, map[string]any{
+			"rfilename": name, "size": len(contents[name]),
+			"lfs": map[string]any{"sha256": hex.EncodeToString(sum[:]), "size": len(contents[name])},
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/models/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": siblings})
+		case strings.Contains(r.URL.Path, "/resolve/"):
+			_, name, _ := strings.Cut(r.URL.Path, "/resolve/"+revision+"/")
+			body, ok := contents[name]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			*fetched = append(*fetched, name)
+			_, _ = w.Write(body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, fetched
+}
+
+// A GGUF repository publishes every quantization of a model side by side, so
+// a recipe that pins files must fetch exactly those and leave the rest of the
+// repository alone. Everything else about the download is unchanged: the same
+// per-file hash check, the same completion marker.
+func TestHuggingFaceDownloadsOnlyThePinnedFiles(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	contents := map[string][]byte{
+		"IQ3/model-00001-of-00002.gguf": []byte("first shard of the quant we want"),
+		"IQ3/model-00002-of-00002.gguf": []byte("second shard"),
+		"IQ4/model-00001-of-00001.gguf": []byte("a quantization nobody asked for"),
+	}
+	server, fetched := pinnedFileRepository(t, revision, contents)
+	client := &HFClient{client: server.Client(), baseURL: server.URL}
+	artifact := recipe.Artifact{
+		Role: "primary", Repository: "owner/model", Revision: revision,
+		ExpectedBytes: int64(len(contents["IQ3/model-00001-of-00002.gguf"]) + len(contents["IQ3/model-00002-of-00002.gguf"])),
+		Files: []recipe.ArtifactFile{
+			{Name: "IQ3/model-00001-of-00002.gguf", ExpectedBytes: int64(len(contents["IQ3/model-00001-of-00002.gguf"]))},
+			{Name: "IQ3/model-00002-of-00002.gguf", ExpectedBytes: int64(len(contents["IQ3/model-00002-of-00002.gguf"]))},
+		},
+	}
+	target := filepath.Join(t.TempDir(), "artifact")
+	receipt, err := client.Download(context.Background(), artifact, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt["bytes_verified"] != artifact.ExpectedBytes {
+		t.Fatalf("receipt=%#v", receipt)
+	}
+	want := []string{"IQ3/model-00001-of-00002.gguf", "IQ3/model-00002-of-00002.gguf"}
+	if strings.Join(*fetched, " ") != strings.Join(want, " ") {
+		t.Fatalf("fetched %v, want exactly %v", *fetched, want)
+	}
+	if _, err := os.Stat(filepath.Join(target, "IQ4/model-00001-of-00001.gguf")); !os.IsNotExist(err) {
+		t.Fatal("an unpinned file was written to disk")
+	}
+	if !client.Complete(artifact, target) {
+		t.Fatal("verified completion marker missing")
+	}
+	// Repointing the recipe at another quantization of the same repository and
+	// revision must not reuse what is already on disk, even when the totals
+	// happen to agree.
+	swapped := artifact
+	swapped.Files = []recipe.ArtifactFile{{Name: "IQ4/model-00001-of-00001.gguf", ExpectedBytes: artifact.ExpectedBytes}}
+	if client.Complete(swapped, target) {
+		t.Fatal("a marker covering different files was accepted")
+	}
+	if err := os.WriteFile(filepath.Join(target, "IQ3/model-00002-of-00002.gguf"), []byte("second shar!"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if client.Complete(artifact, target) {
+		t.Fatal("a corrupted pinned file was reused")
+	}
+}
+
+// The access check runs before anything is downloaded, so it is where a
+// republished or mis-sized file has to be caught.
+func TestHuggingFacePinnedFilesAreCheckedAgainstTheRevision(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	contents := map[string][]byte{"IQ3/model.gguf": []byte("the quantization we pinned")}
+	server, fetched := pinnedFileRepository(t, revision, contents)
+	client := &HFClient{client: server.Client(), baseURL: server.URL}
+	base := recipe.Artifact{
+		Role: "primary", Repository: "owner/model", Revision: revision,
+		ExpectedBytes: int64(len(contents["IQ3/model.gguf"])),
+		Files:         []recipe.ArtifactFile{{Name: "IQ3/model.gguf", ExpectedBytes: int64(len(contents["IQ3/model.gguf"]))}},
+	}
+	if _, err := client.CheckAccess(context.Background(), base); err != nil {
+		t.Fatalf("CheckAccess()=%v, want nil", err)
+	}
+	missing := base
+	missing.Files = []recipe.ArtifactFile{{Name: "IQ3/absent.gguf", ExpectedBytes: base.ExpectedBytes}}
+	if _, err := client.CheckAccess(context.Background(), missing); err == nil || !strings.Contains(err.Error(), "is not in revision") {
+		t.Fatalf("CheckAccess()=%v, want a missing-file error", err)
+	}
+	resized := base
+	resized.ExpectedBytes = base.ExpectedBytes + 1
+	resized.Files = []recipe.ArtifactFile{{Name: "IQ3/model.gguf", ExpectedBytes: base.ExpectedBytes + 1}}
+	if _, err := client.CheckAccess(context.Background(), resized); err == nil || !strings.Contains(err.Error(), "expected") {
+		t.Fatalf("CheckAccess()=%v, want a size mismatch", err)
+	}
+	if _, err := client.Download(context.Background(), resized, filepath.Join(t.TempDir(), "artifact"), nil); err == nil {
+		t.Fatal("Download() accepted a file whose size disagreed with the revision")
+	}
+	if len(*fetched) != 0 {
+		t.Fatalf("bytes were transferred despite a failed check: %v", *fetched)
+	}
+}
+
+// An artifact that pins no files still means the whole snapshot, verified
+// against the snapshot total, with the same error text as before.
+func TestHuggingFaceWholeSnapshotBehaviourIsUnchanged(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	contents := map[string][]byte{"a.bin": []byte("one"), "b.bin": []byte("two")}
+	server, fetched := pinnedFileRepository(t, revision, contents)
+	client := &HFClient{client: server.Client(), baseURL: server.URL}
+	artifact := recipe.Artifact{Role: "primary", Repository: "owner/model", Revision: revision, ExpectedBytes: 6}
+	target := filepath.Join(t.TempDir(), "artifact")
+	if _, err := client.Download(context.Background(), artifact, target, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*fetched) != 2 {
+		t.Fatalf("fetched %v, want the whole snapshot", *fetched)
+	}
+	artifact.ExpectedBytes = 7
+	if _, err := client.CheckAccess(context.Background(), artifact); err == nil || !strings.Contains(err.Error(), "snapshot size 6 does not match pinned 7") {
+		t.Fatalf("CheckAccess()=%v, want the unchanged snapshot-total error", err)
 	}
 }
 

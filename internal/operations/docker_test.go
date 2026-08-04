@@ -360,6 +360,104 @@ func TestStaleLaunchComparesEachRuntimesRendezvousFlag(t *testing.T) {
 	}
 }
 
+// llamaCppRecipe is the shipped DeepSeek V4 Flash 3-bit recipe, taken from
+// the catalog rather than hand-built so these assertions are about the model
+// the manager really installs.
+func llamaCppRecipe(t *testing.T) recipe.Recipe {
+	t.Helper()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := recipe.Find(recipes, "deepseek-v4-flash-0731-ud-iq3-xxs-1s")
+	if !ok {
+		t.Fatal("DeepSeek 3-bit recipe missing")
+	}
+	if r.Runtime.Kind != "llamacpp" || r.Distributed() {
+		t.Fatalf("fixture is not a single-Spark llama.cpp recipe: kind=%s spark_count=%d", r.Runtime.Kind, r.Topology.SparkCount)
+	}
+	return r
+}
+
+// llama-server is pointed at one GGUF file rather than at a snapshot
+// directory, which is the structural difference between this kind and the
+// other two: the model argument is a path built from the recipe's own pinned
+// file name, joined to the primary mount.
+func TestLlamaCppCommandIsPinnedAndComplete(t *testing.T) {
+	r := llamaCppRecipe(t)
+	entrypoint, args, err := runtimeCommand(r, Placement{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(entrypoint, " ") != "/app/llama-server" {
+		t.Fatalf("entrypoint=%q", entrypoint)
+	}
+	want := []string{
+		"--model", "/model/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+		"--host", "0.0.0.0",
+		"--port", "8000",
+		"--alias", "unsloth/DeepSeek-V4-Flash-0731-GGUF",
+		"--metrics",
+		"--ctx-size", "32768",
+		"--n-gpu-layers", "999",
+		"--parallel", "1",
+		"--jinja",
+	}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Fatalf("llamacpp arguments\n got: %s\nwant: %s", strings.Join(args, " "), strings.Join(want, " "))
+	}
+}
+
+// An unset field must leave the flag off the command line entirely, so the
+// runtime's own default applies instead of a value the manager invented. This
+// matters more than usual for --flash-attn: llama-server requires a value for
+// it, so a manager that emitted the bare flag would consume the next argument
+// as its value and the server would refuse to start.
+func TestLlamaCppCommandOmitsUnsetFields(t *testing.T) {
+	r := llamaCppRecipe(t)
+	r.Service.LlamaCpp = &recipe.LlamaCppConfig{ModelFile: "weights.gguf", ContextSize: 8192, Parallel: 1}
+	joined := strings.Join(llamaCppArgs(r, Placement{}), " ")
+	want := "--model /model/weights.gguf --host 0.0.0.0 --port 8000 " +
+		"--alias unsloth/DeepSeek-V4-Flash-0731-GGUF --metrics --ctx-size 8192 --parallel 1"
+	if joined != want {
+		t.Fatalf("llamacpp arguments\n got: %s\nwant: %s", joined, want)
+	}
+	r.Service.LlamaCpp.FlashAttention = "on"
+	r.Service.LlamaCpp.ChatTemplateFile = "template.jinja"
+	joined = strings.Join(llamaCppArgs(r, Placement{}), " ")
+	for _, want := range []string{"--flash-attn on", "--chat-template-file /model/template.jinja"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("llamacpp arguments missing %q: %s", want, joined)
+		}
+	}
+}
+
+// The weights are a named file for this kind, so the pre-start file check has
+// to cover them: a missing shard is caught before the container runs instead
+// of as a loader crash inside it.
+func TestLlamaCppChecksItsWeightsFileBeforeStarting(t *testing.T) {
+	r := llamaCppRecipe(t)
+	refs := runtimeFileReferences(r)
+	if len(refs) != 1 || refs[0].Role != "primary" || refs[0].Name != r.Service.LlamaCpp.ModelFile {
+		t.Fatalf("runtimeFileReferences()=%#v, want the pinned GGUF", refs)
+	}
+	r.Service.LlamaCpp.ChatTemplateFile = "template.jinja"
+	if refs := runtimeFileReferences(r); len(refs) != 2 || refs[1].Name != "template.jinja" {
+		t.Fatalf("runtimeFileReferences()=%#v, want the GGUF and the template", refs)
+	}
+}
+
+// Nothing here builds llama.cpp RPC ranks. The validator refuses a multi-Spark
+// llama.cpp recipe, and if one reached the command builder anyway it must
+// refuse rather than quietly launch a single-node server on each machine.
+func TestLlamaCppRefusesADistributedPlacement(t *testing.T) {
+	r := llamaCppRecipe(t)
+	placement := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501}
+	if _, _, err := runtimeCommand(r, placement); err == nil || !strings.Contains(err.Error(), "single Spark") {
+		t.Fatalf("runtimeCommand()=%v, want a single-Spark refusal", err)
+	}
+}
+
 func TestRuntimeCommandRejectsAMismatchedRecipe(t *testing.T) {
 	r := sglangRecipe()
 	r.Runtime.Kind = "vllm"
@@ -367,6 +465,10 @@ func TestRuntimeCommandRejectsAMismatchedRecipe(t *testing.T) {
 		t.Fatalf("runtimeCommand()=%v, want a missing-block error", err)
 	}
 	r.Runtime.Kind = "llamacpp"
+	if _, _, err := runtimeCommand(r, Placement{}); err == nil || !strings.Contains(err.Error(), "service.llamacpp") {
+		t.Fatalf("runtimeCommand()=%v, want a missing-block error", err)
+	}
+	r.Runtime.Kind = "tensorrt"
 	if _, _, err := runtimeCommand(r, Placement{}); err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Fatalf("runtimeCommand()=%v, want an unsupported-kind error", err)
 	}

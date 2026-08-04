@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, formatBytes, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepOperation, type Job, type Recipe, type Step } from '../api'
+import { api, formatBytes, runtimeLabel, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepOperation, type Job, type Recipe, type Step } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
 
 // verify_fabric is the two Sparks meeting over the cable and verify_peer_node
@@ -30,7 +30,7 @@ function phasePlan(job: Job, recipe?: Recipe): Phase[] {
     const firstStart = firstStartNote(recipe)
     return [
       { title: 'Check system', note: 'Hardware, memory, disk and access', states: ['queued', 'preflighting'], operations: CHECKS },
-      { title: 'Prepare runtime', note: 'Pinned vLLM image', states: ['downloading_runtime'], operations: ['pull_image'] },
+      { title: 'Prepare runtime', note: `Pinned ${runtimeLabel(recipe?.runtime.kind)} image`, states: ['downloading_runtime'], operations: ['pull_image'] },
       { title: 'Download model', note: 'Resumable model files', states: ['downloading_models'], operations: ['download_artifact'] },
       { title: 'Configure service', note: 'Owned configuration and container', states: ['configuring'], operations: ['write_generated_config', 'create_container'] },
       { title: 'Start model', note: 'Safe memory reservation', activeNote: firstStart, states: ['checking_memory', 'starting', 'stopping'], operations: ['stop_container', 'verify_memory', 'start_container'] },

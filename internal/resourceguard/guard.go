@@ -20,10 +20,20 @@ type Node struct {
 	SharedDataRuntimeDisk bool   `json:"shared_data_runtime_disk"`
 }
 
+// MemoryPolicy states how much of a node the model will claim, in whichever
+// of the two forms its runtime actually offers. Engines that are told a share
+// of the device and then fill it (vLLM, SGLang) set GPUUtilization. Engines
+// that simply allocate what the model needs (llama.cpp) set the byte budget
+// instead, because their footprint is a number of bytes and scaling it by a
+// node's capacity would invent a claim the engine never makes. Exactly one of
+// the two is required.
 type MemoryPolicy struct {
-	MinimumTotalBytes   int64
-	HostReserveBytes    int64
-	GPUUtilization      float64
+	MinimumTotalBytes int64
+	HostReserveBytes  int64
+	GPUUtilization    float64
+	// RuntimeBudgetBytes is the absolute device memory the model holds. When
+	// set it is the budget, and GPUUtilization is not consulted.
+	RuntimeBudgetBytes  int64
 	RequireLiveCapacity bool
 }
 
@@ -55,14 +65,25 @@ func CheckMemory(nodes []Node, expectedNodes int, policy MemoryPolicy) ([]Memory
 	if expectedNodes < 1 || len(nodes) != expectedNodes {
 		return nil, fmt.Errorf("resource inventory contains %d nodes, recipe requires %d", len(nodes), expectedNodes)
 	}
-	if policy.MinimumTotalBytes <= 0 || policy.HostReserveBytes <= 0 || policy.GPUUtilization <= 0 || policy.GPUUtilization >= 1 {
+	// "Supplied" is any non-zero value, not any usable one: a caller that set
+	// both must be told so, rather than have the absolute budget quietly win
+	// while the share it also wrote is ignored.
+	suppliedShare, suppliedBudget := policy.GPUUtilization != 0, policy.RuntimeBudgetBytes != 0
+	if suppliedShare == suppliedBudget {
+		return nil, errors.New("memory policy must state exactly one of a device memory share and an absolute byte budget")
+	}
+	usable := (suppliedShare && policy.GPUUtilization > 0 && policy.GPUUtilization < 1) || (suppliedBudget && policy.RuntimeBudgetBytes > 0)
+	if policy.MinimumTotalBytes <= 0 || policy.HostReserveBytes <= 0 || !usable {
 		return nil, errors.New("memory policy is incomplete")
 	}
 	results := make([]MemoryResult, 0, len(nodes))
 	var problems []string
 	for index, node := range nodes {
 		name := nodeName(node, index)
-		runtimeBudget := int64(math.Ceil(float64(node.GPUMemoryTotal) * policy.GPUUtilization))
+		runtimeBudget := policy.RuntimeBudgetBytes
+		if !suppliedBudget {
+			runtimeBudget = int64(math.Ceil(float64(node.GPUMemoryTotal) * policy.GPUUtilization))
+		}
 		result := MemoryResult{
 			Node: node, RuntimeBudgetBytes: runtimeBudget, HostReserveBytes: policy.HostReserveBytes,
 			RequiredAvailableBytes:   runtimeBudget + policy.HostReserveBytes,
@@ -77,7 +98,7 @@ func CheckMemory(nodes []Node, expectedNodes int, policy MemoryPolicy) ([]Memory
 			problems = append(problems, fmt.Sprintf("%s has %s of unified GPU memory; this model needs %s", name, humanBytes(node.GPUMemoryTotal), humanBytes(policy.MinimumTotalBytes)))
 		}
 		if result.NominalGPUHeadroomBytes < policy.HostReserveBytes {
-			problems = append(problems, fmt.Sprintf("%s: the vLLM budget leaves %s outside the GPU allocation; %s must stay reserved for the system", name, humanBytes(result.NominalGPUHeadroomBytes), humanBytes(policy.HostReserveBytes)))
+			problems = append(problems, fmt.Sprintf("%s: the model's memory budget leaves %s outside the GPU allocation; %s must stay reserved for the system", name, humanBytes(result.NominalGPUHeadroomBytes), humanBytes(policy.HostReserveBytes)))
 		}
 		if !policy.RequireLiveCapacity {
 			continue

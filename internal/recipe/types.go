@@ -108,6 +108,23 @@ type Artifact struct {
 	ExpectedBytes int64  `yaml:"expected_bytes" json:"expected_bytes"`
 	Licence       string `yaml:"licence" json:"licence"`
 	LicenceURL    string `yaml:"licence_url" json:"licence_url"`
+	// Files narrows the artifact to named files inside the pinned revision.
+	// Absent means the whole repository snapshot, exactly as before; present
+	// means these files and only these, each verified against its own pinned
+	// size and the repository's own hash. This strengthens pinning rather
+	// than relaxing it: a snapshot total is one number for a whole tree,
+	// while a file list is one number per file. It exists because a GGUF
+	// repository publishes every quantization of a model side by side, so the
+	// one a recipe serves is a small part of a tree nothing should download.
+	Files []ArtifactFile `yaml:"files,omitempty" json:"files,omitempty"`
+}
+
+// ArtifactFile pins one file inside an artifact's repository revision. Name
+// is the repository-relative path exactly as the revision lists it, and
+// ExpectedBytes is that file's own size, not a share of a total.
+type ArtifactFile struct {
+	Name          string `yaml:"name" json:"name"`
+	ExpectedBytes int64  `yaml:"expected_bytes" json:"expected_bytes"`
 }
 
 type Requirements struct {
@@ -127,11 +144,12 @@ type Requirements struct {
 // the command, memory model, health path and metric prefixes all follow from
 // the kind, so an ambiguous recipe has no single meaning.
 type Service struct {
-	InternalPort    int           `yaml:"internal_port" json:"internal_port"`
-	DefaultHostPort int           `yaml:"default_host_port" json:"default_host_port"`
-	ServedModelID   string        `yaml:"served_model_id" json:"served_model_id"`
-	VLLM            *VLLMConfig   `yaml:"vllm,omitempty" json:"vllm,omitempty"`
-	SGLang          *SGLangConfig `yaml:"sglang,omitempty" json:"sglang,omitempty"`
+	InternalPort    int             `yaml:"internal_port" json:"internal_port"`
+	DefaultHostPort int             `yaml:"default_host_port" json:"default_host_port"`
+	ServedModelID   string          `yaml:"served_model_id" json:"served_model_id"`
+	VLLM            *VLLMConfig     `yaml:"vllm,omitempty" json:"vllm,omitempty"`
+	SGLang          *SGLangConfig   `yaml:"sglang,omitempty" json:"sglang,omitempty"`
+	LlamaCpp        *LlamaCppConfig `yaml:"llamacpp,omitempty" json:"llamacpp,omitempty"`
 }
 
 type VLLMConfig struct {
@@ -187,9 +205,46 @@ type SGLangConfig struct {
 	AttentionBackend     string `yaml:"attention_backend" json:"attention_backend"`
 }
 
+// LlamaCppConfig mirrors the subset of llama-server arguments a recipe is
+// allowed to pin. Zero and empty fields are omitted from the command line,
+// leaving the runtime's own default in place. Draft-model flags are
+// deliberately absent: speculative decoding is not part of this kind's first
+// phase, and a flag the manager cannot qualify is a flag it must not accept.
+type LlamaCppConfig struct {
+	// ModelFile names the GGUF inside the primary artifact mount. Unlike vLLM
+	// and SGLang, which are handed a repository snapshot directory, llama.cpp
+	// is handed one file; a split quantization names its first shard and
+	// llama.cpp opens the rest itself. The name must be one of the files the
+	// primary artifact pins, so the server is never pointed at a path the
+	// download never fetched.
+	ModelFile string `yaml:"model_file" json:"model_file"`
+	// ContextSize is --ctx-size, the total context llama-server allocates KV
+	// cache for. llama-server divides it among the parallel slots, so this is
+	// the whole server's budget rather than a per-request limit.
+	ContextSize int `yaml:"context_size" json:"context_size"`
+	// GPULayers is --n-gpu-layers. A GB10 has one unified memory pool, so a
+	// recipe that means "all of them" says so with a count above the model's
+	// layer count; 0 leaves the flag off and llama.cpp decides.
+	GPULayers int `yaml:"gpu_layers" json:"gpu_layers"`
+	// Parallel is --parallel, the number of request slots served at once.
+	Parallel int `yaml:"parallel" json:"parallel"`
+	// FlashAttention is --flash-attn, pinned as the runtime's own tri-state
+	// (on, off, auto) rather than as a boolean, because "the recipe did not
+	// pin it" and "the recipe pinned off" are different decisions and only
+	// the second belongs on the command line.
+	FlashAttention string `yaml:"flash_attention" json:"flash_attention"`
+	// Jinja turns on --jinja, which makes llama-server render the chat
+	// template carried in the GGUF metadata instead of its built-in default.
+	Jinja bool `yaml:"jinja" json:"jinja"`
+	// ChatTemplateFile overrides that template with a file inside the primary
+	// artifact mount, the same way the other kinds do.
+	ChatTemplateFile string `yaml:"chat_template_file" json:"chat_template_file"`
+}
+
 // MemoryFraction reports the device memory fraction the active runtime block
 // pins, as written in the recipe. The second result is false when the recipe
-// carries no block for the given kind.
+// carries no block for the given kind — including llama.cpp, which has no
+// such knob at all; see PlannedMemoryBytes.
 func (s Service) MemoryFraction(kind string) (string, bool) {
 	switch {
 	case kind == "vllm" && s.VLLM != nil:
@@ -198,6 +253,63 @@ func (s Service) MemoryFraction(kind string) (string, bool) {
 		return s.SGLang.MemFractionStatic, true
 	}
 	return "", false
+}
+
+// PlannedMemoryBytes reports the device memory a llama.cpp recipe holds, as
+// an absolute number: the mapped weights, the KV cache for the whole pinned
+// context, and the runtime overhead measured at qualification.
+//
+// vLLM and SGLang are told what share of the device to claim and then fill
+// it; llama.cpp is told nothing of the sort. It maps the GGUF and sizes the
+// cache from --ctx-size, so its footprint follows from the recipe's own
+// figures and is knowable only when the recipe states a memory_model. The
+// second result is false for every other kind, and for a llama.cpp recipe
+// with no memory model — which the validator refuses.
+// The figures come from a recipe file, which is data this process did not
+// write, so the arithmetic is checked rather than assumed. An overflowing
+// product wraps to a small positive number, and a small positive number is
+// exactly what an OOM guardrail waves through, so overflow reports "no
+// footprint" instead of a footprint that flatters the recipe.
+func (r Recipe) PlannedMemoryBytes() (int64, bool) {
+	if r.Runtime.Kind != "llamacpp" || r.Service.LlamaCpp == nil || r.MemoryModel == nil {
+		return 0, false
+	}
+	m := *r.MemoryModel
+	context := int64(r.Service.LlamaCpp.ContextSize)
+	if m.WeightsBytes < 0 || m.KVBytesPerToken < 0 || m.RuntimeOverheadBytes < 0 || context < 0 {
+		return 0, false
+	}
+	kv, ok := multiplyWithoutOverflow(m.KVBytesPerToken, context)
+	if !ok {
+		return 0, false
+	}
+	total, ok := addWithoutOverflow(m.WeightsBytes, kv)
+	if !ok {
+		return 0, false
+	}
+	return addWithoutOverflow(total, m.RuntimeOverheadBytes)
+}
+
+// multiplyWithoutOverflow and addWithoutOverflow report false rather than
+// wrapping. Both take non-negative operands only, which is what every caller
+// here has already established.
+func multiplyWithoutOverflow(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	product := a * b
+	if product/b != a {
+		return 0, false
+	}
+	return product, true
+}
+
+func addWithoutOverflow(a, b int64) (int64, bool) {
+	sum := a + b
+	if sum < a {
+		return 0, false
+	}
+	return sum, true
 }
 
 type ChatTemplateOptions struct {

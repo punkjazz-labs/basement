@@ -123,6 +123,7 @@ func Validate(r Recipe) error {
 		if artifact.ExpectedBytes <= 0 {
 			problems = append(problems, prefix+" expected_bytes must be positive")
 		}
+		problems = append(problems, artifactFileProblems(artifact, prefix)...)
 		if artifact.Licence == "" || artifact.LicenceURL == "" {
 			problems = append(problems, prefix+" licence metadata is required")
 		}
@@ -198,6 +199,41 @@ func Validate(r Recipe) error {
 	return nil
 }
 
+// artifactFileProblems validates per-file pinning. An artifact that declares
+// no files keeps today's whole-snapshot behaviour and is not checked here at
+// all, so no existing recipe changes meaning. An artifact that declares files
+// must account for every byte it claims: the declared sizes sum to
+// expected_bytes exactly, so the disk guardrail and the download verify the
+// same number and neither is left rounding.
+func artifactFileProblems(artifact Artifact, prefix string) []string {
+	if len(artifact.Files) == 0 {
+		return nil
+	}
+	var problems []string
+	seen := make(map[string]bool, len(artifact.Files))
+	var total int64
+	for _, file := range artifact.Files {
+		if err := validateArtifactFileName(file.Name); err != nil {
+			problems = append(problems, prefix+" file name is unsafe")
+			continue
+		}
+		if seen[file.Name] {
+			problems = append(problems, prefix+" declares "+file.Name+" more than once")
+			continue
+		}
+		seen[file.Name] = true
+		if file.ExpectedBytes <= 0 {
+			problems = append(problems, prefix+" file "+file.Name+" must declare positive expected_bytes")
+			continue
+		}
+		total += file.ExpectedBytes
+	}
+	if len(problems) == 0 && total != artifact.ExpectedBytes {
+		problems = append(problems, fmt.Sprintf("%s files total %d bytes but expected_bytes is %d", prefix, total, artifact.ExpectedBytes))
+	}
+	return problems
+}
+
 func operationSequenceEqual(operations []Operation, expected []string) bool {
 	if len(operations) != len(expected) {
 		return false
@@ -212,7 +248,7 @@ func operationSequenceEqual(operations []Operation, expected []string) bool {
 
 // allowedRuntimeKinds grows one kind at a time, and only once the manager can
 // build that runtime's command, memory model, health wait and metric mapping.
-var allowedRuntimeKinds = map[string]bool{"vllm": true, "sglang": true}
+var allowedRuntimeKinds = map[string]bool{"vllm": true, "sglang": true, "llamacpp": true}
 
 func runtimeKindNames() []string {
 	names := make([]string, 0, len(allowedRuntimeKinds))
@@ -228,16 +264,19 @@ func runtimeKindNames() []string {
 // content errors instead of hiding behind the kind mismatch.
 func validateRuntimeBlocks(r Recipe, roles map[string]bool, sparkCount int) []string {
 	var problems []string
-	declared := make([]string, 0, 2)
+	declared := make([]string, 0, 3)
 	if r.Service.VLLM != nil {
 		declared = append(declared, "service.vllm")
 	}
 	if r.Service.SGLang != nil {
 		declared = append(declared, "service.sglang")
 	}
+	if r.Service.LlamaCpp != nil {
+		declared = append(declared, "service.llamacpp")
+	}
 	switch {
 	case len(declared) == 0:
-		problems = append(problems, "service must declare exactly one runtime block: service.vllm or service.sglang")
+		problems = append(problems, "service must declare exactly one runtime block: service."+strings.Join(runtimeKindNames(), ", service."))
 	case len(declared) > 1:
 		problems = append(problems, "service declares "+strings.Join(declared, " and ")+"; keep only the block that matches runtime.kind")
 	case allowedRuntimeKinds[r.Runtime.Kind] && declared[0] != "service."+r.Runtime.Kind:
@@ -253,7 +292,40 @@ func validateRuntimeBlocks(r Recipe, roles map[string]bool, sparkCount int) []st
 			problems = append(problems, err.Error())
 		}
 	}
-	return problems
+	if r.Service.LlamaCpp != nil {
+		problems = append(problems, llamaCppProblems(r, sparkCount)...)
+	}
+	return append(problems, chatTemplateReachabilityProblems(r)...)
+}
+
+// chatTemplateReachabilityProblems is the other half of the chat template
+// check. Each block validates its own template for path safety; this asks
+// whether the file will be on disk at all. When the primary artifact pins
+// files, the download fetches those and nothing else, so a template outside
+// that list is a file the runtime is told to read and the manager never
+// fetches. That fails the pre-start file check on a clean install, and on a
+// machine where someone once put a file there by hand it is worse: the
+// runtime would consume unpinned, unverified bytes. An artifact pinning no
+// files downloads the whole snapshot and is not checked here, so nothing
+// that shipped before per-file pinning changes meaning.
+func chatTemplateReachabilityProblems(r Recipe) []string {
+	template := ""
+	switch {
+	case r.Service.VLLM != nil:
+		template = r.Service.VLLM.ChatTemplateFile
+	case r.Service.SGLang != nil:
+		template = r.Service.SGLang.ChatTemplateFile
+	case r.Service.LlamaCpp != nil:
+		template = r.Service.LlamaCpp.ChatTemplateFile
+	}
+	index, ok := r.ArtifactIndex("primary")
+	if template == "" || !ok || len(r.Artifacts[index].Files) == 0 {
+		return nil
+	}
+	if primaryPinsFile(r, template) {
+		return nil
+	}
+	return []string{"chat_template_file " + template + " is not one of the files the primary artifact pins, so nothing will download it"}
 }
 
 // interconnectEnvironmentAllowlist is the entire environment a topology block
@@ -391,6 +463,124 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 		return errors.New("sglang speculative_model_role must name a declared non-primary artifact role")
 	}
 	return validateChatTemplateFile(s.ChatTemplateFile)
+}
+
+// llamaCppProblems validates the llama.cpp block against the whole recipe,
+// not just against itself: the model file has to be one of the files the
+// primary artifact pins, and the footprint has to come from a memory model,
+// because llama.cpp has no memory-fraction knob to bound it with.
+func llamaCppProblems(r Recipe, sparkCount int) []string {
+	var problems []string
+	l := *r.Service.LlamaCpp
+	// llama.cpp can spread one model across machines with its RPC backend.
+	// That is not this phase, nothing here builds those ranks, and a recipe
+	// that asked for it would silently run on one node instead.
+	if sparkCount != 1 {
+		problems = append(problems, "llama.cpp recipes run on a single Spark; serving one model across two Sparks with llama.cpp is not supported yet")
+	}
+	if err := validateArtifactFileName(l.ModelFile); err != nil {
+		problems = append(problems, "llamacpp model_file is unsafe")
+	} else if !strings.HasSuffix(l.ModelFile, ".gguf") {
+		problems = append(problems, "llamacpp model_file must name a .gguf file inside the primary artifact")
+	} else if !primaryPinsFile(r, l.ModelFile) {
+		problems = append(problems, "llamacpp model_file "+l.ModelFile+" is not one of the files the primary artifact pins")
+	}
+	if l.ContextSize <= 0 {
+		problems = append(problems, "llamacpp context_size must be positive")
+	}
+	// A GB10 holds every layer in one unified pool, so a recipe either says
+	// how many layers to offload or leaves the flag off entirely. A negative
+	// count is neither.
+	if l.GPULayers < 0 {
+		problems = append(problems, "llamacpp gpu_layers must not be negative")
+	}
+	if l.Parallel <= 0 || l.Parallel > 64 {
+		problems = append(problems, "llamacpp parallel must be between 1 and 64")
+	}
+	if !allowedFlashAttention[l.FlashAttention] {
+		problems = append(problems, "llamacpp flash_attention must be one of: on, off, auto")
+	}
+	if err := validateChatTemplateFile(l.ChatTemplateFile); err != nil {
+		problems = append(problems, err.Error())
+	}
+	return append(problems, llamaCppMemoryProblems(r)...)
+}
+
+// allowedFlashAttention is llama-server's own tri-state for --flash-attn.
+// The empty value is "the recipe pinned nothing", which keeps the flag off
+// the command line so llama.cpp's own default applies.
+var allowedFlashAttention = map[string]bool{"": true, "on": true, "off": true, "auto": true}
+
+// llamaCppMemoryProblems is the llama.cpp counterpart of the device memory
+// fraction check the other kinds get. Those kinds state a share of the
+// device and the check confirms the leftover covers the host reserve. Here
+// the footprint is an absolute number the recipe computes, so the check
+// confirms that number plus the reserve fits inside the memory the recipe
+// requires a node to have. Without a memory model there is no number at all,
+// and an unbounded runtime on a machine with no discrete VRAM to fail into
+// takes the host down with it, so the model is required rather than optional.
+func llamaCppMemoryProblems(r Recipe) []string {
+	if r.MemoryModel == nil {
+		return []string{"a llamacpp recipe must declare memory_model; llama.cpp claims an absolute footprint rather than a share of the device"}
+	}
+	var problems []string
+	m := *r.MemoryModel
+	// A KV cost of zero would make a long context look free, which no
+	// attention model is, so it is refused rather than treated as unstated.
+	if m.WeightsBytes <= 0 || m.KVBytesPerToken <= 0 || m.RuntimeOverheadBytes < 0 {
+		problems = append(problems, "llamacpp memory_model must state positive weights and KV figures and a non-negative overhead")
+	}
+	if primaryIndex, ok := r.ArtifactIndex("primary"); ok && m.WeightsBytes != r.Artifacts[primaryIndex].ExpectedBytes {
+		problems = append(problems, "llamacpp memory_model weights_bytes must equal the primary artifact's expected_bytes")
+	}
+	if len(problems) > 0 {
+		return problems
+	}
+	planned, ok := r.PlannedMemoryBytes()
+	if !ok {
+		// The figures are individually sane and still do not add up, which
+		// means the total overflowed. A wrapped total reads as a tiny
+		// footprint and would sail through every check below it.
+		return append(problems, "llamacpp memory_model and context_size multiply out to a footprint too large to represent")
+	}
+	// Written as a subtraction rather than planned+reserve: the reserve is
+	// already known to be below the minimum, so the right-hand side cannot
+	// overflow the way a sum against an attacker-chosen planned total could.
+	if r.Requirements.MinimumMemoryBytes > 0 && planned > r.Requirements.MinimumMemoryBytes-r.Requirements.MemoryReserveBytes {
+		problems = append(problems, "llamacpp planned memory does not preserve the per-node memory reserve")
+	}
+	return problems
+}
+
+// primaryPinsFile reports whether the primary artifact pins the named file.
+// An artifact that pins no files at all downloads a whole snapshot, and a
+// GGUF quantization is never a whole snapshot, so that case is a mismatch
+// too rather than a free pass.
+func primaryPinsFile(r Recipe, name string) bool {
+	index, ok := r.ArtifactIndex("primary")
+	if !ok {
+		return false
+	}
+	for _, file := range r.Artifacts[index].Files {
+		if file.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// validateArtifactFileName keeps a pinned file inside the artifact it belongs
+// to. The name is joined to the download target and to the container mount,
+// so an absolute or climbing path would write and then read outside both.
+func validateArtifactFileName(name string) error {
+	if name == "" {
+		return errors.New("artifact file name is empty")
+	}
+	clean := path.Clean(name)
+	if filepath.IsAbs(name) || strings.Contains(name, "\\") || clean != name || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return errors.New("artifact file name is unsafe")
+	}
+	return nil
 }
 
 // validateChatTemplateFile keeps the template inside the primary artifact

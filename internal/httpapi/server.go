@@ -1526,8 +1526,10 @@ func (s *Server) tokenUsage(w http.ResponseWriter, r *http.Request) {
 // runtime-neutral field names. Only series verified against each runtime's
 // own source are listed: SGLang publishes no equivalent of vLLM's KV cache
 // usage gauge (sglang:cache_hit_rate is prefix cache hit rate, a different
-// quantity), so that field stays absent for SGLang rather than borrowing a
-// number that does not mean the same thing.
+// quantity), and llama-server no longer publishes one either
+// (llamacpp:kv_cache_usage_ratio was removed upstream; nothing in its current
+// /metrics measures the same thing), so that field stays absent for both
+// rather than borrowing a number that does not mean the same thing.
 func runtimeMetricNames(kind string) map[string]string {
 	switch kind {
 	case "vllm":
@@ -1544,6 +1546,16 @@ func runtimeMetricNames(kind string) map[string]string {
 			"sglang:num_queue_reqs":          "requests_waiting",
 			"sglang:prompt_tokens_total":     "prompt_tokens_total",
 			"sglang:generation_tokens_total": "generation_tokens_total",
+		}
+	case "llamacpp":
+		// llama-server calls a request in flight "processing" and a queued one
+		// "deferred", and counts generated tokens as "predicted". The names
+		// differ; the quantities are the ones the console already shows.
+		return map[string]string{
+			"llamacpp:requests_processing":    "requests_running",
+			"llamacpp:requests_deferred":      "requests_waiting",
+			"llamacpp:prompt_tokens_total":    "prompt_tokens_total",
+			"llamacpp:tokens_predicted_total": "generation_tokens_total",
 		}
 	default:
 		return nil

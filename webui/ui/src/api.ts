@@ -39,15 +39,16 @@ export interface Recipe {
     secrets: string[]
     required_licence_acceptance: boolean
   }
-  // Exactly one of vllm/sglang is present, named by runtime.kind. Only the
-  // settings a person would feel are declared here; the wire object carries
-  // the recipe's whole serving block.
+  // Exactly one of vllm/sglang/llamacpp is present, named by runtime.kind.
+  // Only the settings a person would feel are declared here; the wire object
+  // carries the recipe's whole serving block.
   service: {
     internal_port: number
     default_host_port: number
     served_model_id: string
     vllm?: { max_model_len?: number; tensor_parallel_size?: number }
     sglang?: { context_length?: number; tensor_parallel_size?: number; quantization?: string }
+    llamacpp?: { context_size?: number; parallel?: number }
   }
   // image and digest together are the pinned runtime reference, the same
   // string /api/v1/storage reports for an image already pulled here.
@@ -414,6 +415,22 @@ export function formatBytes(value?: number): string {
   return `${amount.toFixed(amount >= 100 || unit <= 1 ? 0 : 1)} ${units[unit]}`
 }
 
+// The name each runtime is known by, spelled the way its own project spells
+// it. Every place the console names a runtime reads this, so a new kind is
+// named once rather than in each view. A kind with no entry is shown as
+// itself: the recipe's own word for it is closer to the truth than the name
+// of some other runtime it is not.
+const RUNTIME_LABELS: Record<string, string> = {
+  vllm: 'vLLM',
+  sglang: 'SGLang',
+  llamacpp: 'llama.cpp',
+}
+
+export function runtimeLabel(kind?: string): string {
+  if (!kind) return 'the pinned runtime'
+  return RUNTIME_LABELS[kind] ?? kind
+}
+
 // Token counts reach the billions, so they are shown short. The exact
 // number always travels with them in a title attribute, so the rounding
 // never hides the real figure.
@@ -516,7 +533,10 @@ export function updatePlan(installedVersion: number, target: Recipe, storage: St
     weightsPresent: null,
     bytesToFetch: 0,
     imagePresent: null,
-    contextLength: target.service.vllm?.max_model_len ?? target.service.sglang?.context_length,
+    contextLength:
+      target.service.vllm?.max_model_len ??
+      target.service.sglang?.context_length ??
+      target.service.llamacpp?.context_size,
     sparkCount: target.topology.spark_count,
     runtimeKind: target.runtime.kind,
     quantization: target.service.sglang?.quantization,
@@ -577,7 +597,9 @@ export const operationCopy: Record<string, string> = {
   // adds which Spark each was recorded against.
   verify_fabric: 'Check the cable between Sparks',
   verify_peer_node: 'Check hardware and memory',
-  pull_image: 'Prepare vLLM runtime',
+  // Named neutrally: this map is static, so it has no recipe to ask which
+  // runtime is being pulled. Deployment's phase note says the actual name.
+  pull_image: 'Prepare model runtime',
   download_artifact: 'Download model files',
   write_generated_config: 'Write runtime configuration',
   create_container: 'Create model service',

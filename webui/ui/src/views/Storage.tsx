@@ -4,6 +4,15 @@ import type { AppState } from '../App'
 import { logoFor, readableWeights } from '../catalog'
 import { confirmBox, noticeBox } from '../confirm'
 
+// Which runtime an image reference belongs to, matched on the substring each
+// project actually publishes under. Longest-lived facts first; the list is
+// searched in order, so a reference matching nothing keeps its own name.
+const RUNTIME_IMAGES: Array<[string, string]> = [
+  ['vllm', 'vLLM'],
+  ['sglang', 'SGLang'],
+  ['llama.cpp', 'llama.cpp'],
+]
+
 type Artifact = StorageInfo['artifacts'][number]
 interface ModelGroup {
   recipeID: string
@@ -189,7 +198,12 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
           </div>
           {info.images.map(image => {
             const shortRef = image.reference.split('@')[0]
-            const title = shortRef.includes('vllm') ? 'vLLM runtime' : shortRef
+            // Named from the image reference, which is the only thing a
+            // storage row knows: this list is images on disk, and an image
+            // outlives the recipe that pulled it. An unrecognized reference
+            // keeps showing itself rather than being renamed to a guess.
+            const runtime = RUNTIME_IMAGES.find(([needle]) => shortRef.includes(needle))
+            const title = runtime ? `${runtime[1]} runtime` : shortRef
             const usedBy = image.recipe_ids.map(recipeName).join(', ')
             return (
               <div className="storage-row" key={image.reference}>

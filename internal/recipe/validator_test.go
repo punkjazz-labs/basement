@@ -1,6 +1,7 @@
 package recipe
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -10,8 +11,8 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recipes) != 7 {
-		t.Fatalf("got %d recipes, want 7", len(recipes))
+	if len(recipes) != 8 {
+		t.Fatalf("got %d recipes, want 8", len(recipes))
 	}
 	for _, r := range recipes {
 		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
@@ -51,6 +52,31 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	}
 	if inkling.MemoryModel != nil {
 		t.Fatalf("a TP=2 recipe must not carry the flat single-node memory model: %#v", inkling.MemoryModel)
+	}
+	// The pack's first llama.cpp recipe, and the first artifact that pins
+	// individual files instead of a whole snapshot: one quantization out of a
+	// repository that publishes fourteen of them.
+	flash3bit, ok := Find(recipes, "deepseek-v4-flash-0731-ud-iq3-xxs-1s")
+	if !ok || flash3bit.Runtime.Kind != "llamacpp" || flash3bit.Distributed() {
+		t.Fatalf("unexpected DeepSeek 3-bit recipe: %#v", flash3bit)
+	}
+	if flash3bit.Runtime.Reference() != "ghcr.io/ggml-org/llama.cpp@sha256:866ad568474de9e835e487ae841ad6ace1a494b5eab4f292cbd45adb6180f711" {
+		t.Fatalf("DeepSeek 3-bit runtime is not pinned: %#v", flash3bit.Runtime)
+	}
+	if len(flash3bit.Artifacts) != 1 || flash3bit.TotalArtifactBytes() != 104207848032 || flash3bit.Artifacts[0].Revision != "57326b941c4603e24d1a5e71c22520c66e086eb8" {
+		t.Fatalf("DeepSeek 3-bit weights are not pinned: %#v", flash3bit.Artifacts)
+	}
+	if len(flash3bit.Artifacts[0].Files) != 4 {
+		t.Fatalf("DeepSeek 3-bit must pin its four shards, not a whole snapshot: %#v", flash3bit.Artifacts[0].Files)
+	}
+	// The recipe serves the first shard by name, and that name has to be one
+	// of the files the download actually fetches.
+	if flash3bit.Service.LlamaCpp.ModelFile != flash3bit.Artifacts[0].Files[0].Name {
+		t.Fatalf("DeepSeek 3-bit serves %q, which is not its first pinned shard", flash3bit.Service.LlamaCpp.ModelFile)
+	}
+	planned, ok := flash3bit.PlannedMemoryBytes()
+	if !ok || planned+flash3bit.Requirements.MemoryReserveBytes > flash3bit.Requirements.MinimumMemoryBytes {
+		t.Fatalf("DeepSeek 3-bit plans %d bytes, which does not leave its own reserve", planned)
 	}
 }
 
@@ -160,7 +186,7 @@ func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
 		}, "runtime kind sglang requires service.sglang, but the recipe declares service.vllm"},
 		{"both blocks", func(r *Recipe) { r.Service.VLLM = vllmBlock() }, "keep only the block that matches runtime.kind"},
 		{"neither block", func(r *Recipe) { r.Service.SGLang = nil }, "service must declare exactly one runtime block"},
-		{"unknown kind", func(r *Recipe) { r.Runtime.Kind = "tensorrt" }, "runtime kind must be one of: sglang, vllm"},
+		{"unknown kind", func(r *Recipe) { r.Runtime.Kind = "tensorrt" }, "runtime kind must be one of: llamacpp, sglang, vllm"},
 		{"draft tokens without an algorithm", func(r *Recipe) { r.Service.SGLang.SpeculativeNumDraftTokens = 4 }, "require speculative_algorithm"},
 		{"draft model that is not a declared role", func(r *Recipe) {
 			r.Service.SGLang.SpeculativeAlgorithm = "EAGLE3"
@@ -182,6 +208,191 @@ func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
 				t.Fatalf("Validate()=%v, want error containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+// llamaCppCandidate is the shipped llama.cpp recipe with its runtime block
+// and artifact copied, so a subtest can mutate either without the mutation
+// leaking into the next one.
+func llamaCppCandidate(t *testing.T) Recipe {
+	t.Helper()
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := Find(recipes, "deepseek-v4-flash-0731-ud-iq3-xxs-1s")
+	if !ok {
+		t.Fatal("DeepSeek 3-bit recipe missing")
+	}
+	block := *base.Service.LlamaCpp
+	base.Service.LlamaCpp = &block
+	model := *base.MemoryModel
+	base.MemoryModel = &model
+	base.Artifacts = append([]Artifact(nil), base.Artifacts...)
+	base.Artifacts[0].Files = append([]ArtifactFile(nil), base.Artifacts[0].Files...)
+	return base
+}
+
+func TestValidateRejectsUnsafeLlamaCppVariants(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Recipe)
+		want   string
+	}{
+		// llama.cpp can spread a model across machines with its RPC backend,
+		// but nothing here builds those ranks. A recipe that asked for two
+		// Sparks would run on one and silently be a different model.
+		{"two Sparks", func(r *Recipe) {
+			r.Topology.SparkCount = 2
+			r.Topology.Interconnect = &Interconnect{
+				Kind: "connectx7", MasterPort: 29501,
+				SharedEnvironment: map[string]string{"NCCL_SOCKET_IFNAME": "enp1s0f0np0"},
+			}
+		}, "llama.cpp recipes run on a single Spark"},
+		{"model file the artifact does not pin", func(r *Recipe) {
+			r.Service.LlamaCpp.ModelFile = "UD-IQ4_XS/DeepSeek-V4-Flash-0731-UD-IQ4_XS-00001-of-00004.gguf"
+		}, "is not one of the files the primary artifact pins"},
+		{"artifact pins no files at all", func(r *Recipe) { r.Artifacts[0].Files = nil }, "is not one of the files the primary artifact pins"},
+		{"model file climbing out of the mount", func(r *Recipe) { r.Service.LlamaCpp.ModelFile = "../../etc/passwd" }, "model_file is unsafe"},
+		{"model file that is not a GGUF", func(r *Recipe) { r.Service.LlamaCpp.ModelFile = "README.md" }, "must name a .gguf file"},
+		{"no context", func(r *Recipe) { r.Service.LlamaCpp.ContextSize = 0 }, "context_size must be positive"},
+		{"no slots", func(r *Recipe) { r.Service.LlamaCpp.Parallel = 0 }, "parallel must be between 1 and 64"},
+		{"invented flash attention value", func(r *Recipe) { r.Service.LlamaCpp.FlashAttention = "yes" }, "flash_attention must be one of"},
+		{"unsafe chat template", func(r *Recipe) { r.Service.LlamaCpp.ChatTemplateFile = "../../etc/passwd" }, "chat template file is unsafe"},
+		// A safe path is not the same as a path that will exist. When the
+		// artifact pins files, an unpinned template is never downloaded, and
+		// a file left there by hand would be read without ever being
+		// verified against anything.
+		{"chat template nothing downloads", func(r *Recipe) { r.Service.LlamaCpp.ChatTemplateFile = "chat_template.jinja" }, "nothing will download it"},
+		// llama.cpp claims an absolute footprint, so without a memory model
+		// there is no number to check the guardrail against at all.
+		{"no memory model", func(r *Recipe) { r.MemoryModel = nil }, "must declare memory_model"},
+		{"weights that are not the pinned weights", func(r *Recipe) { r.MemoryModel.WeightsBytes = 1 }, "must equal the primary artifact's expected_bytes"},
+		{"context the machine cannot hold", func(r *Recipe) { r.Service.LlamaCpp.ContextSize = 1 << 20 }, "does not preserve the per-node memory reserve"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := llamaCppCandidate(t)
+			test.mutate(&candidate)
+			err := Validate(candidate)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate()=%v, want error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+// The reachability rule follows the artifact, not the runtime kind: any
+// recipe whose primary artifact pins files must pin its chat template too,
+// and a recipe pinning no files keeps meaning the whole snapshot.
+func TestChatTemplateMustBeReachableWhateverTheRuntime(t *testing.T) {
+	pinned := llamaCppCandidate(t)
+	pinned.Artifacts[0].Files = append(pinned.Artifacts[0].Files, ArtifactFile{Name: "chat_template.jinja", ExpectedBytes: 1024})
+	pinned.Artifacts[0].ExpectedBytes += 1024
+	// weights_bytes tracks the artifact's own total, template included.
+	pinned.MemoryModel.WeightsBytes = pinned.Artifacts[0].ExpectedBytes
+	pinned.Service.LlamaCpp.ChatTemplateFile = "chat_template.jinja"
+	if err := Validate(pinned); err != nil {
+		t.Fatalf("Validate() on a pinned template=%v, want nil", err)
+	}
+	// The same template name on an SGLang recipe whose artifact pins nothing
+	// is still fine: that artifact downloads the whole repository.
+	snapshot := sglangCandidate(t)
+	block := *snapshot.Service.SGLang
+	block.ChatTemplateFile = "chat_template.jinja"
+	snapshot.Service.SGLang = &block
+	if len(snapshot.Artifacts[0].Files) != 0 {
+		t.Fatal("this test needs a whole-snapshot artifact")
+	}
+	if err := Validate(snapshot); err != nil {
+		t.Fatalf("Validate() on a whole-snapshot template=%v, want nil", err)
+	}
+	// Give that same recipe a pinned file list that omits the template, and
+	// it must be refused.
+	snapshot.Artifacts = append([]Artifact(nil), snapshot.Artifacts...)
+	snapshot.Artifacts[0].Files = []ArtifactFile{{Name: "weights.safetensors", ExpectedBytes: snapshot.Artifacts[0].ExpectedBytes}}
+	if err := Validate(snapshot); err == nil || !strings.Contains(err.Error(), "nothing will download it") {
+		t.Fatalf("Validate()=%v, want an unreachable-template error", err)
+	}
+}
+
+// A recipe is data this process did not write. Multiplying an enormous
+// kv_bytes_per_token by an enormous context wraps int64 to a small positive
+// number, and a small positive number is what an OOM guardrail waves
+// through, so the wrap has to be caught rather than trusted.
+func TestLlamaCppMemoryArithmeticRefusesToOverflow(t *testing.T) {
+	candidate := llamaCppCandidate(t)
+	candidate.MemoryModel.KVBytesPerToken = 1 << 40
+	candidate.Service.LlamaCpp.ContextSize = 1 << 30
+	if planned, ok := candidate.PlannedMemoryBytes(); ok {
+		t.Fatalf("PlannedMemoryBytes()=%d, true; want the overflow reported", planned)
+	}
+	err := Validate(candidate)
+	if err == nil || !strings.Contains(err.Error(), "too large to represent") {
+		t.Fatalf("Validate()=%v, want an overflow refusal", err)
+	}
+	// The wrapped product is exactly zero here, which a guardrail would have
+	// read as a model that needs no memory at all.
+	kv, context := candidate.MemoryModel.KVBytesPerToken, int64(candidate.Service.LlamaCpp.ContextSize)
+	if wrapped := kv * context; wrapped >= candidate.Requirements.MinimumMemoryBytes {
+		t.Fatalf("this test no longer demonstrates a wrap: product=%d", wrapped)
+	}
+	// Overflow on the final addition is caught the same way.
+	overshoot := llamaCppCandidate(t)
+	overshoot.MemoryModel.RuntimeOverheadBytes = math.MaxInt64
+	if _, ok := overshoot.PlannedMemoryBytes(); ok {
+		t.Fatal("an overflowing overhead was accepted")
+	}
+}
+
+// Per-file pinning has to account for every byte the artifact claims, or the
+// disk guardrail and the download would be measuring different things.
+func TestValidateRejectsIncoherentArtifactFilePinning(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Recipe)
+		want   string
+	}{
+		{"sizes that do not add up", func(r *Recipe) { r.Artifacts[0].Files[0].ExpectedBytes++ }, "but expected_bytes is"},
+		{"a file listed twice", func(r *Recipe) {
+			r.Artifacts[0].Files[1] = r.Artifacts[0].Files[0]
+		}, "more than once"},
+		{"a file with no size", func(r *Recipe) { r.Artifacts[0].Files[0].ExpectedBytes = 0 }, "must declare positive expected_bytes"},
+		{"a file escaping the artifact", func(r *Recipe) { r.Artifacts[0].Files[0].Name = "../../etc/passwd" }, "file name is unsafe"},
+		{"an absolute file name", func(r *Recipe) { r.Artifacts[0].Files[0].Name = "/etc/passwd" }, "file name is unsafe"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := llamaCppCandidate(t)
+			test.mutate(&candidate)
+			err := Validate(candidate)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate()=%v, want error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+// An artifact that pins no files keeps meaning the whole snapshot, so every
+// recipe that shipped before per-file pinning existed still validates
+// untouched.
+func TestWholeSnapshotArtifactsStayValidWithoutFilePinning(t *testing.T) {
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range recipes {
+		for _, artifact := range r.Artifacts {
+			if r.Runtime.Kind == "llamacpp" {
+				continue
+			}
+			if len(artifact.Files) != 0 {
+				t.Fatalf("%s pins files on a whole-snapshot runtime: %#v", r.ID, artifact.Files)
+			}
+		}
+		if err := Validate(r); err != nil {
+			t.Fatalf("Validate(%s)=%v", r.ID, err)
+		}
 	}
 }
 

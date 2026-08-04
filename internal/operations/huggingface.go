@@ -61,18 +61,15 @@ func (h *HFClient) Download(ctx context.Context, artifact recipe.Artifact, targe
 	if manifest.SHA != artifact.Revision {
 		return nil, fmt.Errorf("repository resolved to %s, expected %s", manifest.SHA, artifact.Revision)
 	}
-	var total int64
-	for _, file := range manifest.Siblings {
-		total += file.Size
-	}
-	if total != artifact.ExpectedBytes {
-		return nil, fmt.Errorf("snapshot size %d does not match pinned %d", total, artifact.ExpectedBytes)
+	files, total, err := selectFiles(artifact, manifest)
+	if err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(target, 0o750); err != nil {
 		return nil, fmt.Errorf("create artifact directory: %w", err)
 	}
 	var completed int64
-	for _, file := range manifest.Siblings {
+	for _, file := range files {
 		path, err := safeJoin(target, file.Name)
 		if err != nil {
 			return nil, err
@@ -104,7 +101,7 @@ func (h *HFClient) Download(ctx context.Context, artifact recipe.Artifact, targe
 		}
 		completed += file.Size
 	}
-	marker := completionMarker{Repository: artifact.Repository, Revision: artifact.Revision, Bytes: total, Files: manifest.Siblings, VerifiedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	marker := completionMarker{Repository: artifact.Repository, Revision: artifact.Revision, Bytes: total, Files: files, VerifiedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if err := atomicJSON(filepath.Join(target, completionMarkerName), marker, 0o640); err != nil {
 		return nil, err
 	}
@@ -133,6 +130,22 @@ func (h *HFClient) Complete(artifact recipe.Artifact, target string) bool {
 	if json.Unmarshal(data, &marker) != nil || marker.Repository != artifact.Repository || marker.Revision != artifact.Revision || marker.Bytes != artifact.ExpectedBytes || len(marker.Files) == 0 {
 		return false
 	}
+	// A marker left by an earlier version of the same recipe can carry the
+	// right repository, revision and total while covering a different set of
+	// files: swap one pinned quantization for another of equal size and the
+	// totals still agree. The pinned list is compared name by name, so what
+	// is verified on disk is what this recipe asks for and not what some
+	// previous one happened to leave there.
+	if len(artifact.Files) > 0 {
+		if len(marker.Files) != len(artifact.Files) {
+			return false
+		}
+		for index, pinned := range artifact.Files {
+			if marker.Files[index].Name != pinned.Name || marker.Files[index].Size != pinned.ExpectedBytes {
+				return false
+			}
+		}
+	}
 	var total int64
 	for _, file := range marker.Files {
 		path, err := safeJoin(target, file.Name)
@@ -152,14 +165,19 @@ func (h *HFClient) CheckAccess(ctx context.Context, artifact recipe.Artifact) (m
 	if manifest.SHA != artifact.Revision {
 		return nil, fmt.Errorf("repository resolved to %s, expected %s", manifest.SHA, artifact.Revision)
 	}
-	var total int64
-	for _, file := range manifest.Siblings {
-		total += file.Size
+	files, total, err := selectFiles(artifact, manifest)
+	if err != nil {
+		return nil, err
 	}
-	if total != artifact.ExpectedBytes {
-		return nil, fmt.Errorf("snapshot size %d does not match pinned %d", total, artifact.ExpectedBytes)
+	receipt := map[string]any{"repository": artifact.Repository, "revision": manifest.SHA, "expected_bytes": total, "accessible": true}
+	if len(artifact.Files) > 0 {
+		names := make([]string, 0, len(files))
+		for _, file := range files {
+			names = append(names, file.Name)
+		}
+		receipt["pinned_files"] = names
 	}
-	return map[string]any{"repository": artifact.Repository, "revision": manifest.SHA, "expected_bytes": total, "accessible": true}, nil
+	return receipt, nil
 }
 
 func (h *HFClient) manifest(ctx context.Context, artifact recipe.Artifact) (hfManifest, error) {
@@ -186,6 +204,50 @@ func (h *HFClient) manifest(ctx context.Context, artifact recipe.Artifact) (hfMa
 		}
 	}
 	return manifest, nil
+}
+
+// selectFiles narrows a repository revision to what the artifact pins, and
+// reports the byte total that everything downstream measures against.
+//
+// An artifact that pins no files means the whole snapshot, exactly as before:
+// same files, same order, same total, same error when the total disagrees.
+// An artifact that pins files means those files and only those, in the order
+// the recipe declares, and each one is checked twice over — the revision must
+// carry a file by that name, and that file must be the exact size the recipe
+// pinned. A repository that quietly republished a different quantization
+// under the same name fails here, before a byte is fetched. Per-file content
+// hashing is unchanged and still runs afterwards on whatever is selected.
+func selectFiles(artifact recipe.Artifact, manifest hfManifest) ([]hfFile, int64, error) {
+	var total int64
+	if len(artifact.Files) == 0 {
+		for _, file := range manifest.Siblings {
+			total += file.Size
+		}
+		if total != artifact.ExpectedBytes {
+			return nil, 0, fmt.Errorf("snapshot size %d does not match pinned %d", total, artifact.ExpectedBytes)
+		}
+		return manifest.Siblings, total, nil
+	}
+	available := make(map[string]hfFile, len(manifest.Siblings))
+	for _, file := range manifest.Siblings {
+		available[file.Name] = file
+	}
+	selected := make([]hfFile, 0, len(artifact.Files))
+	for _, pinned := range artifact.Files {
+		file, ok := available[pinned.Name]
+		if !ok {
+			return nil, 0, fmt.Errorf("pinned file %s is not in revision %s", pinned.Name, artifact.Revision)
+		}
+		if file.Size != pinned.ExpectedBytes {
+			return nil, 0, fmt.Errorf("pinned file %s is %d bytes, expected %d", pinned.Name, file.Size, pinned.ExpectedBytes)
+		}
+		selected = append(selected, file)
+		total += file.Size
+	}
+	if total != artifact.ExpectedBytes {
+		return nil, 0, fmt.Errorf("pinned files total %d bytes, expected %d", total, artifact.ExpectedBytes)
+	}
+	return selected, total, nil
 }
 
 // pageCacheWindow is how much freshly touched file data may stay in the

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  api, idempotency, terminal, formatBytes, formatTokens, startTimeoutMinutes, modelStateWord, peerModelList, updatePlan,
+  api, idempotency, terminal, formatBytes, formatTokens, runtimeLabel, startTimeoutMinutes, modelStateWord, peerModelList,
+  updatePlan,
   type InstalledModel, type Job, type Peer, type Preflight, type Recipe, type StorageInfo, type PeerSummary,
   type TokenUsage,
 } from '../api'
@@ -27,10 +28,6 @@ const REFERENCE_TPS: Record<string, number> = {
   'qwen35-122b-a10b-nvfp4-1s': 28, // 28.3 corroborated baseline, ice-ice-bear bench + NVIDIA forum 365639
   'deepseek-v4-flash-0731-2s': 68, // 67.58 measured on 2x Spark vLLM NVFP4; inside the forum's 42-76 range
 }
-// How each runtime kind is written in a sentence. An unknown kind keeps the
-// recipe's own word rather than being renamed to something friendlier.
-const RUNTIME_NAME: Record<string, string> = { vllm: 'vLLM', sglang: 'SGLang' }
-
 interface ConfirmState {
   recipe: Recipe
   preflight: Preflight
@@ -534,7 +531,7 @@ export default function Models({
                 </>
               )}
               <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
-              <dt>Runtime</dt><dd><code>vLLM · pinned digest</code></dd>
+              <dt>Runtime</dt><dd><code>{runtimeLabel(recipe.runtime.kind)} · pinned digest</code></dd>
               <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
               {recipe.artifacts.map(artifact => (
                 <Fragment key={artifact.role}>
@@ -614,7 +611,7 @@ export default function Models({
             <div className="cell"><div className="l">Speed</div><div className="v">~{REFERENCE_TPS[featured.id]}</div><div className="u">tok/s · typical</div></div>
             <div className="cell"><div className="l">Download</div><div className="v">{formatBytes(featured.artifact_bytes)}</div><div className="u">one time</div></div>
             <div className="cell"><div className="l">Licence</div><div className="v">{featured.artifacts[0]?.licence ?? 'n/a'}</div><div className="u">open weights</div></div>
-            <div className="cell"><div className="l">Runtime</div><div className="v">vLLM</div><div className="u">pinned digest</div></div>
+            <div className="cell"><div className="l">Runtime</div><div className="v">{runtimeLabel(featured.runtime.kind)}</div><div className="u">pinned digest</div></div>
           </div>
         </section>
       )}
@@ -683,7 +680,10 @@ export default function Models({
             : installed.get(recipe.id)?.recipe_version
           const isUpdate = verb === 'Update' && installedVersion !== undefined
           const plan = isUpdate && !onPeer ? updatePlan(installedVersion, recipe, storage) : null
-          const runtimeWord = plan?.runtimeKind ? RUNTIME_NAME[plan.runtimeKind] ?? plan.runtimeKind : 'container'
+          // "container" only when the plan names no kind at all; with a kind,
+          // runtimeLabel spells it the way its own project does and falls
+          // back to the recipe's own word rather than renaming it.
+          const runtimeWord = plan?.runtimeKind ? runtimeLabel(plan.runtimeKind) : 'container'
           // Nothing is fetched only when this Spark already has both the
           // weights and the runtime image this version pins. Anything less
           // than both, and the install does download something.

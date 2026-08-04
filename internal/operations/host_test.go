@@ -17,6 +17,7 @@ import (
 
 	"github.com/punkjazz-labs/basement/internal/inventory"
 	"github.com/punkjazz-labs/basement/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/resourceguard"
 )
 
 type resourceInventory struct{ system inventory.System }
@@ -72,6 +73,51 @@ func TestHostMemoryGuardIsKindAware(t *testing.T) {
 	r.Service.SGLang = nil
 	if _, err := executor.verifyMemory(context.Background(), r, false); err == nil || !strings.Contains(err.Error(), "without its service block") {
 		t.Fatalf("verifyMemory()=%v, want a missing-block error", err)
+	}
+}
+
+// llama.cpp claims a fixed number of bytes rather than a share of the
+// device, so the guardrail is handed the recipe's own planned total and not a
+// fraction scaled by whatever machine it lands on. A bigger machine must not
+// inflate the claim, and a machine with less free memory than the plan must
+// still be refused.
+func TestHostMemoryGuardUsesLlamaCppAbsoluteFootprint(t *testing.T) {
+	r := llamaCppRecipe(t)
+	planned, ok := r.PlannedMemoryBytes()
+	if !ok {
+		t.Fatal("the llama.cpp recipe states no planned memory")
+	}
+	roomy := resourceInventory{system: inventory.System{
+		Hostname: "spark-roomy", MemoryTotal: 128_000_000_000, MemoryAvailable: 126_000_000_000,
+		GPUMemoryTotal: 128_000_000_000, GPUMemoryFree: 126_000_000_000,
+	}}
+	executor := &HostExecutor{inventory: roomy}
+	receipt, err := executor.verifyMemory(context.Background(), r, true)
+	if err != nil {
+		t.Fatalf("a machine with room to spare was refused: %v", err)
+	}
+	if receipt["runtime_kind"] != "llamacpp" || receipt["max_model_len"] != 32768 || receipt["max_num_seqs"] != 1 {
+		t.Fatalf("llamacpp memory receipt=%#v", receipt)
+	}
+	// The budget is the recipe's own number, not a share of this machine.
+	results := receipt["per_node"].([]resourceguard.MemoryResult)
+	if len(results) != 1 || results[0].RuntimeBudgetBytes != planned {
+		t.Fatalf("runtime budget=%#v, want the planned %d bytes", results, planned)
+	}
+	tight := resourceInventory{system: inventory.System{
+		Hostname: "spark-busy", MemoryTotal: 128_000_000_000, MemoryAvailable: 126_000_000_000,
+		GPUMemoryTotal: 128_000_000_000, GPUMemoryFree: planned - 1,
+	}}
+	executor = &HostExecutor{inventory: tight}
+	if _, err := executor.verifyMemory(context.Background(), r, true); err == nil || !strings.Contains(err.Error(), "KV cache") {
+		t.Fatalf("verifyMemory()=%v, want a live capacity refusal", err)
+	}
+	// Without a memory model there is no footprint to check at all, and that
+	// is a build error rather than a plan of zero bytes.
+	r.MemoryModel = nil
+	executor = &HostExecutor{inventory: roomy}
+	if _, err := executor.verifyMemory(context.Background(), r, false); err == nil || !strings.Contains(err.Error(), "memory model") {
+		t.Fatalf("verifyMemory()=%v, want a missing memory-model error", err)
 	}
 }
 

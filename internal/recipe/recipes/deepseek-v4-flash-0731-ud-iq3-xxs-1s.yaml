@@ -1,0 +1,166 @@
+schema_version: 1
+id: deepseek-v4-flash-0731-ud-iq3-xxs-1s
+# The pack's first llama.cpp recipe, and the first one whose weights are a
+# community requantization rather than a lab's own release: unsloth's
+# UD-IQ3_XXS 3-bit GGUF of DeepSeek's V4 Flash 0731, 104.2 GB, which fits one
+# 128 GB Spark with no cable and no second machine. The two-Spark recipe
+# (deepseek-v4-flash-0731-2s) serves DeepSeek's own 166.9 GB release, natively
+# FP8 attention and FP4 experts, and stays the unrequantized option; this one
+# trades precision for a single machine.
+#
+# What is verified, and what is not:
+# - Artifact: verified live against the Hugging Face API on 2026-08-04. Four
+#   shards, 104207848032 bytes in total, revision as pinned below. The recipe
+#   pins each shard by name and size (artifact.files), because the repository
+#   also holds thirteen other quantizations of the same model and a
+#   whole-snapshot download would fetch about 1.5 TB to serve 104 GB of it.
+# - Licence: MIT on both sides. The base model repo carries a verbatim MIT
+#   LICENSE, and unsloth's card and repo metadata both declare mit with no
+#   additional terms. unsloth's repo ships no LICENSE file of its own at this
+#   revision (checked live against the file listing), so licence_url links its
+#   own pinned tree, the same pattern the Qwen 3.5 recipe uses (ADR 0006).
+# - Image: verified live against ghcr.io on 2026-08-04. ADR 0011 phase 2
+#   assumed basement would have to build and pin its own aarch64 CUDA image
+#   because NVIDIA's llama.cpp playbook is native-compile only. That is no
+#   longer true: ggml-org publishes multi-arch indexes with a genuine
+#   linux/arm64 SBSA CUDA build of llama-server, so the recipe pins upstream's
+#   own bytes instead of a build only this project could reproduce.
+#   server-cuda13 is chosen over server-cuda deliberately: GB10 is compute
+#   capability 12.1, and ggml's default CUDA architecture list only adds
+#   121a-real from CUDA 12.9 onward. The cuda13 images are built with CUDA
+#   13.3.0 and carry a native sm_121 cubin; the cuda12 images (CUDA 12.8.1)
+#   would fall back to JIT from PTX. Upstream states its GPU images are built
+#   but not otherwise tested in CI, which is exactly what qualification is for.
+# - Speed: community reports around 15 to 18 tokens per second for this
+#   quantization on one Spark. Reports, not a basement measurement; the
+#   console shows measured speed only after a benchmark runs here.
+# - Quality against the two-Spark original: unmeasured. Three-bit
+#   quantization changes model output, nobody here has compared them yet, and
+#   this recipe claims nothing about that until qualification says otherwise.
+#
+# Configuration notes:
+# - context_size 32768 is what the arithmetic honestly leaves. Weights are
+#   104.2 GB of a 128 GB pool; after the KV cache, the runtime allowance and
+#   the host reserve there is room for roughly 46000 tokens, so the recipe
+#   starts well under that. Qualification decides whether it rises.
+# - parallel 1 for the same reason: given an explicit slot count llama-server
+#   divides --ctx-size among the slots, so a second slot would halve the
+#   window a single request can use. It is also stated rather than left to
+#   llama-server's own "auto", which would take four slots and share one
+#   unified cache between them.
+# - flash_attention is left unpinned. DeepSeek V4's MLA plus sparse indexer
+#   attention under llama.cpp has not been measured here, so llama.cpp's own
+#   default applies rather than a value this recipe invented.
+# - jinja is on so llama-server renders the chat template carried in the GGUF
+#   metadata instead of its built-in default.
+# - memory_model is required for a llama.cpp recipe, because llama.cpp claims
+#   an absolute footprint rather than a share of the device. kv_bytes_per_token
+#   is computed from this GGUF's own metadata as an upper bound: 43 blocks x
+#   (attention.key_length 512 + rope.dimension_count 64 MLA latent, plus
+#   indexer.key_length 128) x 2 bytes at f16 = 60544. It is an upper bound
+#   because the model also carries per-layer attention.compress_ratios that
+#   reduce most layers' cache and are not modelled here. runtime_overhead_bytes
+#   is a conservative allowance for the CUDA context and compute buffers, not a
+#   measurement; both figures are replaced by what qualification measures.
+version: 1
+display_name: DeepSeek V4 Flash 0731 3-bit
+publisher: DeepSeek + unsloth
+model_by: DeepSeek
+recipe_by: basement
+model_released: July 2026
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF
+  revision: 57326b941c4603e24d1a5e71c22520c66e086eb8
+topology:
+  spark_count: 1
+runtime:
+  kind: llamacpp
+  # ghcr.io/ggml-org/llama.cpp:server-cuda13-b10257, multi-arch index digest.
+  # The linux/arm64 manifest inside it is
+  # sha256:a8e4e3da97c80c6a2ff89dd1962ad39678c476f9d967316932a97500d82e1512,
+  # NVARCH=sbsa, CUDA_VERSION=13.3.0, entrypoint /app/llama-server, and its
+  # config plus layers total the image_bytes below. image_disk_bytes allows
+  # the usual threefold expansion on disk.
+  image: ghcr.io/ggml-org/llama.cpp
+  digest: sha256:866ad568474de9e835e487ae841ad6ace1a494b5eab4f292cbd45adb6180f711
+  image_bytes: 2181978652
+  image_disk_bytes: 6545935956
+  environment: {}
+  # llama-server is a single process and uses no shared-memory transport, so
+  # it needs none of the /dev/shm the Python engines are given.
+  shm_bytes: 0
+  memory_lock: false
+  ipc_lock: false
+artifacts:
+  - role: primary
+    repository: unsloth/DeepSeek-V4-Flash-0731-GGUF
+    revision: 57326b941c4603e24d1a5e71c22520c66e086eb8
+    expected_bytes: 104207848032
+    files:
+      - name: UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf
+        expected_bytes: 5257696
+      - name: UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00002-of-00004.gguf
+        expected_bytes: 49910532416
+      - name: UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00003-of-00004.gguf
+        expected_bytes: 49257859456
+      - name: UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf
+        expected_bytes: 5034198464
+    licence: MIT
+    licence_url: https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF/tree/57326b941c4603e24d1a5e71c22520c66e086eb8
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  # 10 GB rather than the 12 GB the vLLM recipes reserve. The weights alone
+  # are 104.2 GB, so the reserve and the context are spending the same few
+  # gigabytes; this is the deliberate split, stated rather than hidden.
+  per_node_memory_reserve_bytes: 10000000000
+  safety_margin_bytes: 20000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: unsloth/DeepSeek-V4-Flash-0731-GGUF
+  llamacpp:
+    # The first shard only. llama.cpp reads split.count from its header and
+    # opens the other three beside it.
+    model_file: UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf
+    context_size: 32768
+    # Above the model's 43 blocks, so every layer stays on the device.
+    # Current llama.cpp also accepts the keyword "all" for this, but an
+    # explicit count means the same thing on every build that ever shipped.
+    gpu_layers: 999
+    parallel: 1
+    flash_attention: ""
+    jinja: true
+    chat_template_file: ""
+memory_model:
+  weights_bytes: 104207848032
+  kv_bytes_per_token: 60544
+  runtime_overhead_bytes: 3000000000
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_memory_capacity
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: verify_memory
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared
