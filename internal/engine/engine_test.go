@@ -988,6 +988,136 @@ func TestConcurrentInstallsOfDifferentRecipesProceedInParallel(t *testing.T) {
 	waitJob(t, s, first.ID, "ready")
 }
 
+func TestConcurrentInstallsReplanTheLateActivatorAsASwitch(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, other := twoSingleSparks(recipes)
+	if blocked.Service.DefaultHostPort != other.Service.DefaultHostPort {
+		t.Fatalf("test recipes must share a host port: %d and %d", blocked.Service.DefaultHostPort, other.Service.DefaultHostPort)
+	}
+	executor := &gateExecutor{
+		switchExecutor: switchExecutor{running: map[string]bool{}},
+		gateOp:         "download_artifact", gateRecipe: blocked.ID,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	runner := New(s, executor, recipes)
+	first, _, err := s.CreateJob(ctx, "install", blocked.ID, "late-activator-first", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	select {
+	case <-executor.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first install never reached the download gate")
+	}
+	second, _, err := s.CreateJob(ctx, "install", other.ID, "late-activator-second", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	waitJob(t, s, second.ID, "ready")
+	close(executor.release)
+	finished := waitJob(t, s, first.ID, "ready")
+
+	executor.mu.Lock()
+	events := append([]string(nil), executor.events...)
+	running := make(map[string]bool, len(executor.running))
+	for id, value := range executor.running {
+		running[id] = value
+	}
+	executor.mu.Unlock()
+	stop := indexOfEvent(events, "stop_container:"+other.ID)
+	start := indexOfEvent(events, "start_container:"+blocked.ID)
+	if stop < 0 || start < 0 || stop > start {
+		t.Fatalf("the late activator did not switch away from the model that finished first: %v", events)
+	}
+	assertExactlyOneRunningRecipe(t, running, blocked.ID)
+	assertActiveModel(t, s, blocked.ID, other.ID, "stopped")
+
+	var portReceipt map[string]any
+	for _, step := range finished.Steps {
+		if step.Operation == "verify_port" {
+			if err := json.Unmarshal(step.Receipt, &portReceipt); err != nil {
+				t.Fatalf("decode verify_port receipt: %v", err)
+			}
+		}
+	}
+	if portReceipt["occupied_by_managed_recipe"] != other.ID || portReceipt["available_after_switch"] != true {
+		t.Fatalf("verify_port receipt does not name the model actually switched away from: %#v", portReceipt)
+	}
+}
+
+func TestConcurrentInstallsOnDifferentHostPortsStillSwitch(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, other := twoSingleSparks(recipes)
+	other.Service.DefaultHostPort = blocked.Service.DefaultHostPort + 1
+	for index := range recipes {
+		if recipes[index].ID == other.ID {
+			recipes[index] = other
+		}
+	}
+	if blocked.Service.DefaultHostPort == other.Service.DefaultHostPort {
+		t.Fatal("test recipes unexpectedly share a host port")
+	}
+	executor := &gateExecutor{
+		switchExecutor: switchExecutor{running: map[string]bool{}},
+		gateOp:         "download_artifact", gateRecipe: blocked.ID,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	runner := New(s, executor, recipes)
+	first, _, err := s.CreateJob(ctx, "install", blocked.ID, "different-port-first", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	select {
+	case <-executor.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first install never reached the download gate")
+	}
+	second, _, err := s.CreateJob(ctx, "install", other.ID, "different-port-second", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	waitJob(t, s, second.ID, "ready")
+	close(executor.release)
+	waitJob(t, s, first.ID, "ready")
+
+	executor.mu.Lock()
+	events := append([]string(nil), executor.events...)
+	running := make(map[string]bool, len(executor.running))
+	for id, value := range executor.running {
+		running[id] = value
+	}
+	executor.mu.Unlock()
+	stop := indexOfEvent(events, "stop_container:"+other.ID)
+	start := indexOfEvent(events, "start_container:"+blocked.ID)
+	if stop < 0 || start < 0 || stop > start {
+		t.Fatalf("different ports allowed two models to start alongside each other: %v", events)
+	}
+	assertExactlyOneRunningRecipe(t, running, blocked.ID)
+	assertActiveModel(t, s, blocked.ID, other.ID, "stopped")
+}
+
 // TestSecondInstallVerifyDiskSeesFirstJobsReservationExcludingItsOwn covers
 // both disk-reservation acceptance criteria at once: the sum a second job's
 // verify_disk step is handed equals exactly the first job's reservation (not
@@ -1179,6 +1309,28 @@ func waitReservationReleased(t *testing.T, runner *Engine, jobID string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("reservation for job %s was never released", jobID)
+}
+
+func indexOfEvent(events []string, want string) int {
+	for index, event := range events {
+		if event == want {
+			return index
+		}
+	}
+	return -1
+}
+
+func assertExactlyOneRunningRecipe(t *testing.T, running map[string]bool, want string) {
+	t.Helper()
+	count := 0
+	for _, value := range running {
+		if value {
+			count++
+		}
+	}
+	if count != 1 || !running[want] {
+		t.Fatalf("running recipes=%v, want only %s", running, want)
+	}
 }
 
 // singleSpark returns the first shipped single-Spark recipe. The pack now

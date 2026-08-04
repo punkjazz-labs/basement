@@ -588,14 +588,13 @@ ON CONFLICT(recipe_id) DO UPDATE SET recipe_version=excluded.recipe_version,stat
 	return tx.Commit()
 }
 
-// ErrSwitchTargetChanged is what BeginSwitch gives when a third model has
-// taken the serving slot since this job planned its switch. A job decides
-// what to stop when it is planned, and a long install can be planned an hour
-// before it switches, by which time an owner's Start or a request that named
-// a role may have put something else there. Stopping the model the plan names
-// would then stop nothing and leave the real one running, so the switch is
-// refused instead. A previous model that has simply stopped is not this case:
-// the room the switch wanted is free, so it proceeds.
+// ErrSwitchTargetChanged is what BeginSwitch gives when the serving slot no
+// longer belongs to the predecessor named by its caller. The engine re-plans
+// under its runtime lock immediately before this transaction, but this check
+// remains the durable last guard for another process or a future caller that
+// does not share that lock. Stopping the stale predecessor would stop nothing
+// and leave the real one running. A predecessor that simply stopped is not
+// this case: the room the switch wanted is free, so it proceeds.
 var ErrSwitchTargetChanged = errors.New("another model took over serving while this job was running")
 
 func (s *Store) BeginSwitch(ctx context.Context, previousRecipeID, targetRecipeID string) error {

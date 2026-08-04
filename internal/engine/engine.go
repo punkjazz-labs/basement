@@ -247,36 +247,83 @@ func (e *Engine) holdSwitch(ctx context.Context, recipeID string) func() {
 	return func() {}
 }
 
-// premiseHolds re-reads the model this job planned to switch away from and
-// reports whether that plan still describes this machine. A previous model
-// that has simply stopped leaves the room this job wanted free, so that is
-// not a failure; another model holding the serving slot is, because stopping
-// the one the plan names would stop nothing and leave the real one running.
-//
-// A plan with nothing to stop is not held to this. Two installs that both
-// began with nothing serving are allowed to finish and each activate, which
-// is how concurrent installs have always worked here; what this guards is a
-// plan that names a model to stop and would stop the wrong one.
-func (e *Engine) premiseHolds(ctx context.Context, target recipe.Recipe, previous *recipe.Recipe) error {
-	if previous == nil {
-		return nil
-	}
-	models, err := e.store.Models(ctx)
+func sameRecipeVersion(left, right *recipe.Recipe) bool {
+	return left != nil && right != nil && left.ID == right.ID && left.Version == right.Version
+}
+
+func samePlannedStep(left, right plannedOperation) bool {
+	return left.Operation.Type == right.Operation.Type &&
+		left.Recipe.ID == right.Recipe.ID && left.Recipe.Version == right.Recipe.Version &&
+		left.Placement == right.Placement
+}
+
+// adaptActivationPlan re-reads what serves only after this job owns the
+// runtime lock and the switch hold. An install can spend an hour outside
+// those locks, but no engine job can change the serving model after this
+// reading until the adapted switch finishes. Reusing plan is important: it
+// resolves the serving model's installed recipe version and its own
+// deployment, then sends both single-node and distributed predecessors
+// through the same stop, peer, BeginSwitch, and rollback machinery used by
+// a plan made immediately before activation.
+func (e *Engine) adaptActivationPlan(ctx context.Context, job store.Job, target recipe.Recipe, deployment operations.Deployment, current jobPlan, completed int) (jobPlan, bool, error) {
+	actual, err := e.activeRecipe(ctx, target)
 	if err != nil {
-		return err
+		return jobPlan{}, false, fmt.Errorf("re-read the serving model before activating %s: %w; fix the reported manager or catalog error, then run this job again", target.DisplayName, err)
 	}
-	for _, model := range models {
-		if !model.Active || model.RecipeID == target.ID {
+	if actual == nil || sameRecipeVersion(actual, current.previous) {
+		return current, false, nil
+	}
+	refreshed, err := e.plan(ctx, job, target, deployment)
+	if err != nil {
+		return jobPlan{}, false, fmt.Errorf("%s took over serving while %s was preparing, but its switch plan could not be resolved: %w; fix that model's fleet or recipe configuration, then run this job again", actual.DisplayName, target.DisplayName, err)
+	}
+	if !sameRecipeVersion(actual, refreshed.previous) {
+		return jobPlan{}, false, fmt.Errorf("%s took over serving while %s was preparing, but the serving model changed again before a safe switch plan could be recorded; run this job again", actual.DisplayName, target.DisplayName)
+	}
+	// completed is the index of the step about to run, so both plans must have
+	// a step at that index for the caller to resume into. Allowing equality
+	// here would let the caller index one past the end of the refreshed plan
+	// and panic the engine goroutine, which takes the whole manager down.
+	if completed >= len(current.plans) || completed >= len(refreshed.plans) {
+		return jobPlan{}, false, fmt.Errorf("%s took over serving while %s was preparing, but the completed steps no longer fit a safe switch plan; run this job again", actual.DisplayName, target.DisplayName)
+	}
+	for index := 0; index < completed; index++ {
+		// Completed steps keep their existing indices and receipts. If a
+		// refreshed plan changed any operation, recipe version, or node in
+		// that prefix, inserting a switch would make the durable timeline
+		// claim those old receipts proved different work. That case cannot be
+		// adapted without rewriting job history, so it fails with a retry
+		// instruction instead.
+		if !samePlannedStep(current.plans[index], refreshed.plans[index]) {
+			return jobPlan{}, false, fmt.Errorf("%s took over serving while %s was preparing, but completed step %d no longer matches a safe switch plan; run this job again", actual.DisplayName, target.DisplayName, index)
+		}
+	}
+	if err := e.refreshCompletedPortReceipt(ctx, job.ID, target, current.plans, refreshed.plans, completed); err != nil {
+		return jobPlan{}, false, fmt.Errorf("record the activation-time port check for %s: %w", target.DisplayName, err)
+	}
+	return refreshed, true, nil
+}
+
+// refreshCompletedPortReceipt keeps preflight history honest when the model
+// to stop changed after verify_port completed. A refreshed synthetic receipt
+// names the managed model that now occupies the target port. When only the
+// old predecessor shared that port, its successful switch to the newly active
+// model already stopped it under the same runtime lock, so the target port is
+// available and the obsolete occupant claim must be removed.
+func (e *Engine) refreshCompletedPortReceipt(ctx context.Context, jobID string, target recipe.Recipe, oldPlans, newPlans []plannedOperation, completed int) error {
+	for index := 0; index < completed; index++ {
+		if newPlans[index].Operation.Type != "verify_port" {
 			continue
 		}
-		if model.RecipeID == previous.ID {
-			continue
+		receipt := newPlans[index].Receipt
+		if receipt == nil && oldPlans[index].Receipt != nil {
+			receipt = map[string]any{"host_port": target.Service.DefaultHostPort, "available": true}
 		}
-		name := model.RecipeID
-		if active, ok := e.pinnedOrEffective(model.RecipeID, model.RecipeVersion); ok {
-			name = active.DisplayName
+		if receipt != nil {
+			if err := e.store.UpdateStepReceipt(ctx, jobID, index, redact.JSON(receipt)); err != nil {
+				return err
+			}
 		}
-		return fmt.Errorf("%s took over serving while this job was preparing, so %s was not started; start it again from the console", name, target.DisplayName)
 	}
 	return nil
 }
@@ -459,17 +506,17 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 			if switchesServing[job.Kind] {
 				switchHeld = e.holdSwitch(ctx, r.ID)
 			}
-			// Everything this plan does from here follows from one reading of
-			// the live active model, taken when the plan was made. That
-			// reading can be an hour old on an install, and a start that
-			// queued behind another switch is working from a reading taken
-			// before it. Re-taking it here is enough on its own: containers
-			// are only ever started and stopped under the runtime lock this
-			// job now holds, so what serves cannot change again until this
-			// job is done with it.
-			if err := e.premiseHolds(ctx, r, previous); err != nil {
-				abort(index, err)
-				return
+			if job.Kind == "install" || job.Kind == "start" {
+				refreshed, changed, err := e.adaptActivationPlan(ctx, job, r, deployment, planned, index)
+				if err != nil {
+					abort(index, err)
+					return
+				}
+				if changed {
+					planned = refreshed
+					plans, previous = planned.plans, planned.previous
+					plan = plans[index]
+				}
 			}
 		}
 		if plan.BeginSwitch {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
@@ -24,6 +25,40 @@ type versionedExecutor struct {
 	running          map[string]bool
 	failStartVersion int // 0 means never fail
 	events           []string
+}
+
+type gatedVersionedExecutor struct {
+	*versionedExecutor
+	gateKey     string
+	entered     chan struct{}
+	release     chan struct{}
+	enterOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func newGatedVersionedExecutor(gate recipe.Recipe) *gatedVersionedExecutor {
+	return &gatedVersionedExecutor{
+		versionedExecutor: &versionedExecutor{running: map[string]bool{}},
+		gateKey:           versionKey(gate),
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+}
+
+func (e *gatedVersionedExecutor) Execute(ctx context.Context, execution operations.Execution, op recipe.Operation, r recipe.Recipe, progress operations.Progress) (map[string]any, error) {
+	if op.Type == "download_artifact" && versionKey(r) == e.gateKey {
+		e.enterOnce.Do(func() { close(e.entered) })
+		select {
+		case <-e.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return e.versionedExecutor.Execute(ctx, execution, op, r, progress)
+}
+
+func (e *gatedVersionedExecutor) unblock() {
+	e.releaseOnce.Do(func() { close(e.release) })
 }
 
 func versionKey(r recipe.Recipe) string { return fmt.Sprintf("%s@%d", r.ID, r.Version) }
@@ -114,6 +149,64 @@ func TestRecipeUpdateDoesNotChangeAlreadyInstalledModelResolution(t *testing.T) 
 	if executor.running[versionKey(v1)] {
 		t.Fatalf("the actually-installed v1 container was not stopped: %#v", executor.running)
 	}
+}
+
+func TestActivationTimeReplanStopsTheInstalledRecipeVersion(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	embedded, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, servingV1 := twoSingleSparks(embedded)
+	servingV2 := bumpedVersion(servingV1)
+	executor := newGatedVersionedExecutor(target)
+	t.Cleanup(executor.unblock)
+	runner := New(s, executor, []recipe.Recipe{target, servingV1})
+
+	first, _, err := s.CreateJob(ctx, "install", target.ID, "versioned-target-planned-first", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	select {
+	case <-executor.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("target install never reached the download gate")
+	}
+	second, _, err := s.CreateJob(ctx, "install", servingV1.ID, "installed-version-finishes-first", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	waitJob(t, s, second.ID, "ready")
+	// The effective catalog advances only after v1 is installed and serving.
+	// The active row still identifies v1, so activation-time replanning must
+	// resolve it from history rather than operate on v2's container name.
+	runner.SetRecipes([]recipe.Recipe{target, servingV1, servingV2}, []recipe.Recipe{target, servingV2})
+	executor.unblock()
+	waitJob(t, s, first.ID, "ready")
+
+	executor.mu.Lock()
+	events := append([]string(nil), executor.events...)
+	running := make(map[string]bool, len(executor.running))
+	for key, value := range executor.running {
+		running[key] = value
+	}
+	executor.mu.Unlock()
+	stopV1 := "stop_container:" + versionKey(servingV1)
+	stopV2 := "stop_container:" + versionKey(servingV2)
+	if indexOfEvent(events, stopV1) < 0 {
+		t.Fatalf("activation-time replan did not stop the installed recipe version: %v", events)
+	}
+	if indexOfEvent(events, stopV2) >= 0 {
+		t.Fatalf("activation-time replan stopped the newer catalog version instead of the installed one: %v", events)
+	}
+	assertExactlyOneRunningRecipe(t, running, versionKey(target))
 }
 
 func TestSelfUpdateWhileServingSwitchesToNewVersion(t *testing.T) {
