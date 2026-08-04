@@ -25,7 +25,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TORCHINDUCTOR_CACHE_DIR=/root/comfyui-temp/torchinductor \
     TRITON_CACHE_DIR=/root/comfyui-temp/triton
 
-RUN apt-get update \
+# The cache/temp ENV paths above are exported before any layer runs, so the
+# directories must exist before the first package script calls mktemp under
+# TMPDIR (ca-certificates' postinst does, and fails the whole install if the
+# directory is missing).
+RUN mkdir -p \
+        /root/comfyui-input \
+        /root/comfyui-output \
+        /root/comfyui-temp/cache \
+        /root/comfyui-user/config \
+        /root/comfyui-user/data \
+    && apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
         ffmpeg \
