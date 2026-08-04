@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, formatBytes, runtimeLabel, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepOperation, type Job, type Recipe, type Step } from '../api'
+import { api, formatBytes, runtimeLabel, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepElapsedSeconds, stepOperation, type Job, type Recipe, type Step } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
 
 // verify_fabric is the two Sparks meeting over the cable and verify_peer_node
@@ -213,18 +213,22 @@ function formatETA(seconds: number): string {
   return `${hours} h ${minutes} min left`
 }
 
-// Elapsed ticks up from when this step was first observed running, so even
-// receipt-less steps (model start, health wait) visibly make progress.
-function Elapsed({ stepKey }: { stepKey: string }) {
-  const startRef = useRef<{ key: string; at: number }>({ key: stepKey, at: Date.now() })
+// Elapsed ticks up from the step's own started_at (the server's clock), so
+// even receipt-less steps (model start, health wait) visibly make progress
+// — and so closing and reopening the deployment dialog mid-step keeps
+// counting from the real beginning instead of restarting at zero. A step
+// that has already finished reports its fixed final duration and stops
+// ticking.
+function Elapsed({ step }: { step: Step }) {
   const [, setTick] = useState(0)
-  if (startRef.current.key !== stepKey) startRef.current = { key: stepKey, at: Date.now() }
+  const running = !step.completed_at
   useEffect(() => {
+    if (!running) return
     const timer = setInterval(() => setTick(value => value + 1), 1000)
     return () => clearInterval(timer)
-  }, [])
-  const seconds = (Date.now() - startRef.current.at) / 1000
-  if (seconds < 3) return null
+  }, [running])
+  const seconds = stepElapsedSeconds(step, Date.now())
+  if (seconds === null || seconds < 3) return null
   return <>{' · '}{formatDuration(seconds)}</>
 }
 
@@ -323,7 +327,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
                 </div>
                 <b>
                   {label}
-                  {showsElapsed && <Elapsed stepKey={`${job.id}:${current.index}:${current.operation}`} />}
+                  {showsElapsed && <Elapsed step={current} />}
                 </b>
               </li>
             )

@@ -91,6 +91,8 @@ export interface Step {
   state: string
   receipt?: Record<string, unknown>
   error?: string
+  started_at?: string
+  completed_at?: string
 }
 
 export interface Job {
@@ -619,6 +621,25 @@ export const operationCopy: Record<string, string> = {
 // carries — wants the bare operation, or a two-Spark job matches nothing.
 export const stepOperation = (operation: string): string =>
   operation.replace(/^rollback_/, '').split(':')[0]
+
+// How long a step has been running, from the server's own started_at rather
+// than from whenever the UI happened to render it — closing and reopening
+// the deployment dialog must not reset the clock. A completed step reports
+// its final, fixed duration instead of still counting up. Returns null when
+// the server has not recorded a start yet, and never a negative number: a
+// client clock running behind the server must read as "just started", not
+// as a countdown.
+export function stepElapsedSeconds(step: Step, nowMs: number): number | null {
+  if (!step.started_at) return null
+  const started = Date.parse(step.started_at)
+  if (Number.isNaN(started)) return null
+  if (step.completed_at) {
+    const completed = Date.parse(step.completed_at)
+    if (Number.isNaN(completed)) return null
+    return Math.max((completed - started) / 1000, 0)
+  }
+  return Math.max((nowMs - started) / 1000, 0)
+}
 
 // A two-Spark job runs the same operation once per node and records each as
 // "operation:role". Nothing is invented here: the role shown is the one the
