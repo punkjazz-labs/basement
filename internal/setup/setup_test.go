@@ -125,13 +125,15 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 
 	joined := strings.Join(runner.privileged, "\n")
 	for _, required := range []string{
-		"install -m 0755 /tmp/binary " + binaryPath,
+		"sh -s -- '/tmp/binary' '" + updaterStagingPath + "'",
 		"groupadd --system basement",
 		"usermod -a -G docker basement",
 		"install -d -o basement -g basement -m 0750 " + dataDir,
 		"tee " + unitPath,
+		"tee " + updaterUnitPath,
+		"tee " + updaterPathUnitPath,
 		"tee " + dropInPath,
-		"systemctl daemon-reload && systemctl enable --now basement.service && systemctl restart basement.service",
+		"systemctl daemon-reload && systemctl enable basement.service basement-updater.service basement-updater.path && systemctl restart basement.service && systemctl start basement-updater.service && systemctl start basement-updater.path && systemctl is-active --quiet basement.service && systemctl is-active --quiet basement-updater.path && test -x /usr/lib/basement/updater/basement-updater",
 		"tee " + dataDir + "/fleet.json",
 	} {
 		if !strings.Contains(joined, required) {
@@ -356,15 +358,24 @@ func TestInstallLeavesNewInstallAloneWhenLegacyRemnantsExist(t *testing.T) {
 	}
 }
 
-// The embedded unit must stay identical to the packaged one so the script
-// install path and the setup command produce the same service.
+// The embedded units must stay identical to the packaged units so both
+// install paths produce the same services.
 func TestEmbeddedUnitMatchesPackaging(t *testing.T) {
-	packaged, err := os.ReadFile("../../packaging/systemd/basement.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(packaged) != systemdUnit {
-		t.Fatal("internal/setup/assets/basement.service differs from packaging/systemd/basement.service — keep them identical")
+	for _, fixture := range []struct {
+		name     string
+		embedded string
+	}{
+		{name: "basement.service", embedded: systemdUnit},
+		{name: "basement-updater.service", embedded: updaterSystemdUnit},
+		{name: "basement-updater.path", embedded: updaterPathUnit},
+	} {
+		packaged, err := os.ReadFile("../../packaging/systemd/" + fixture.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(packaged) != fixture.embedded {
+			t.Fatalf("internal setup asset %s differs from its packaged systemd unit", fixture.name)
+		}
 	}
 }
 

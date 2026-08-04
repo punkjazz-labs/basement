@@ -221,6 +221,11 @@ func (s *Server) generateHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
+	s.updateAdmissionMu.Lock()
+	defer s.updateAdmissionMu.Unlock()
+	if s.refuseMutationDuringUpdate(w) {
+		return
+	}
 	var request struct {
 		ModelID string `json:"model_id"`
 		Mode    string `json:"mode"`

@@ -5,7 +5,7 @@
 # Run on the Mac that holds both (the profile is created with:
 # xcrun notarytool store-credentials).
 #
-#   packaging/sign-macos-release.sh v0.9.3
+#   packaging/sign-macos-release.sh v0.9.3 v0.9.2
 #
 # Two things happen, in this order:
 #
@@ -17,9 +17,16 @@
 #      installer: the two darwin slices of cmd/basement-setup lipo'd into one
 #      universal binary inside Basement Setup.app, wrapped in a signed,
 #      notarized and stapled basement-setup-macos.dmg.
+#   3. packaging/sign-linux-update.sh signs the exact Linux manager manifest
+#      with the dedicated Ed25519 key from macOS Keychain.
 set -eu
 
-TAG="${1:?usage: sign-macos-release.sh <tag>}"
+if [ "$#" -lt 2 ]; then
+  echo "usage: sign-macos-release.sh <tag> <rollback-from> [rollback-from ...]" >&2
+  exit 2
+fi
+TAG=$1
+shift
 IDENTITY="${SIGN_IDENTITY:?SIGN_IDENTITY must be set to the Developer ID Application identity, e.g. \"Developer ID Application: Your Name (TEAMID)\"}"
 PROFILE="${NOTARY_PROFILE:-basement}"
 
@@ -51,6 +58,8 @@ echo "==> done: signed and notarized darwin binaries replaced on $TAG"
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 SIGN_IDENTITY="$IDENTITY" NOTARY_PROFILE="$PROFILE" \
   "$HERE/build-macos-installer.sh" "$TAG"
+
+"$HERE/sign-linux-update.sh" "$TAG" "$@"
 
 # The release is created as a draft by CI, because everything it uploads for
 # macOS is unsigned until the steps above replace it. Publishing here, last,

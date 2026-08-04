@@ -1,0 +1,339 @@
+package update
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+type AttemptStatus struct {
+	SchemaVersion  int    `json:"schema_version"`
+	AttemptID      string `json:"attempt_id"`
+	State          string `json:"state"`
+	RunningVersion string `json:"running_version"`
+	TargetVersion  string `json:"target_version"`
+	Failure        string `json:"failure,omitempty"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+type Stager struct {
+	DataDir            string
+	Keys               KeyRing
+	Client             *http.Client
+	RootStatusPath     string
+	UpdaterBinaryPath  string
+	UpdaterUnitPath    string
+	UpdaterPathUnit    string
+	UpdaterServiceLink string
+	UpdaterPathLink    string
+	BootstrapCheck     func() error
+	Now                func() time.Time
+}
+
+func NewStager(dataDir string, keys KeyRing) *Stager {
+	return &Stager{
+		DataDir: dataDir, Keys: keys, Client: NewHTTPReleaseSource().Client,
+		RootStatusPath:     "/var/lib/basement-updater/status.json",
+		UpdaterBinaryPath:  "/usr/lib/basement/updater/basement-updater",
+		UpdaterUnitPath:    "/etc/systemd/system/basement-updater.service",
+		UpdaterPathUnit:    "/etc/systemd/system/basement-updater.path",
+		UpdaterServiceLink: "/etc/systemd/system/multi-user.target.wants/basement-updater.service",
+		UpdaterPathLink:    "/etc/systemd/system/multi-user.target.wants/basement-updater.path",
+		Now:                time.Now,
+	}
+}
+
+func (stager *Stager) Stage(ctx context.Context, candidate Candidate, runningVersion string) (AttemptStatus, error) {
+	status, err := stager.Prepare(candidate, runningVersion)
+	if err != nil {
+		return AttemptStatus{}, err
+	}
+	return stager.StagePrepared(ctx, candidate, status)
+}
+
+// Prepare validates the server-selected candidate and persists the update
+// intent before the API starts asynchronous network work.
+func (stager *Stager) Prepare(candidate Candidate, runningVersion string) (AttemptStatus, error) {
+	if stager == nil {
+		return AttemptStatus{}, errors.New("manager update stager is unavailable")
+	}
+	if err := stager.checkBootstrap(); err != nil {
+		return AttemptStatus{}, err
+	}
+	manifest, err := VerifySignedManifest(candidate.ManifestBytes, candidate.Signature, stager.Keys)
+	if err != nil {
+		return AttemptStatus{}, err
+	}
+	if err := ValidateCandidate(manifest, candidate.Release.TagName, runningVersion); err != nil {
+		return AttemptStatus{}, err
+	}
+	attemptID, err := newAttemptID()
+	if err != nil {
+		return AttemptStatus{}, err
+	}
+	status := AttemptStatus{
+		SchemaVersion: 1, AttemptID: attemptID, State: "checking_signature",
+		RunningVersion: runningVersion, TargetVersion: manifest.ReleaseVersion, UpdatedAt: journalNow(stager.Now),
+	}
+	if err := stager.writeStatus(status); err != nil {
+		return AttemptStatus{}, err
+	}
+	return status, nil
+}
+
+// StagePrepared downloads and hands off an update whose intent was already
+// persisted by Prepare.
+func (stager *Stager) StagePrepared(ctx context.Context, candidate Candidate, status AttemptStatus) (AttemptStatus, error) {
+	if stager == nil || status.SchemaVersion != 1 || !attemptIDPattern.MatchString(status.AttemptID) {
+		return AttemptStatus{}, errors.New("manager update attempt is invalid")
+	}
+	manifest, err := VerifySignedManifest(candidate.ManifestBytes, candidate.Signature, stager.Keys)
+	if err != nil {
+		return AttemptStatus{}, err
+	}
+	if status.TargetVersion != manifest.ReleaseVersion || status.RunningVersion == "" {
+		return AttemptStatus{}, errors.New("manager update attempt does not match the verified release")
+	}
+	if err := ValidateCandidate(manifest, candidate.Release.TagName, status.RunningVersion); err != nil {
+		return AttemptStatus{}, err
+	}
+	fail := func(cause error) (AttemptStatus, error) {
+		status.State = "failed_before_handoff"
+		status.Failure = cleanFailure(cause)
+		status.UpdatedAt = journalNow(stager.Now)
+		_ = stager.writeStatus(status)
+		return status, cause
+	}
+	stagingRoot := filepath.Join(stager.DataDir, "updates", "staging")
+	pendingDir := filepath.Join(stagingRoot, "pending")
+	partialDir := filepath.Join(stagingRoot, "partial")
+	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
+		return fail(err)
+	}
+	if err := os.MkdirAll(partialDir, 0o750); err != nil {
+		return fail(err)
+	}
+	requestPath := filepath.Join(pendingDir, requestFileName)
+	if _, err := os.Stat(requestPath); err == nil {
+		return fail(errors.New("another manager update is waiting for the root updater"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fail(err)
+	}
+	status.State = "downloading"
+	status.UpdatedAt = journalNow(stager.Now)
+	if err := stager.writeStatus(status); err != nil {
+		return status, err
+	}
+	partialAsset := filepath.Join(partialDir, status.AttemptID+".basement")
+	if err := stager.download(ctx, candidate.AssetURL, partialAsset, manifest.AssetSize); err != nil {
+		return fail(err)
+	}
+	defer os.Remove(partialAsset)
+	status.State = "verifying"
+	status.UpdatedAt = journalNow(stager.Now)
+	if err := stager.writeStatus(status); err != nil {
+		return status, err
+	}
+	if err := verifyAssetPath(partialAsset, manifest); err != nil {
+		return fail(err)
+	}
+	for name, payload := range map[string][]byte{
+		ManifestAssetName:  candidate.ManifestBytes,
+		SignatureAssetName: candidate.Signature,
+	} {
+		if err := writeBytesAtomic(filepath.Join(pendingDir, name), payload, 0o600); err != nil {
+			return fail(err)
+		}
+	}
+	if err := renameFileAtomic(partialAsset, filepath.Join(pendingDir, managerFileName), 0o700); err != nil {
+		return fail(err)
+	}
+	if err := verifyAssetPath(filepath.Join(pendingDir, managerFileName), manifest); err != nil {
+		return fail(err)
+	}
+	request := ApplyRequest{
+		SchemaVersion: 1, AttemptID: status.AttemptID, RunningVersion: status.RunningVersion,
+		TargetVersion: manifest.ReleaseVersion, ManifestSHA256: ManifestDigest(candidate.ManifestBytes),
+	}
+	if err := writeJSONFile(requestPath, request, 0o600); err != nil {
+		return fail(err)
+	}
+	status.State = "waiting_for_root"
+	status.UpdatedAt = journalNow(stager.Now)
+	if err := stager.writeStatus(status); err != nil {
+		return status, err
+	}
+	return status, nil
+}
+
+func (stager *Stager) Status() (AttemptStatus, bool, error) {
+	var manager AttemptStatus
+	managerErr := readJSONFile(stager.statusPath(), 64<<10, &manager)
+	if managerErr != nil && !errors.Is(managerErr, os.ErrNotExist) {
+		return AttemptStatus{}, false, managerErr
+	}
+	var root Receipt
+	rootErr := readJSONFile(stager.RootStatusPath, 64<<10, &root)
+	if rootErr == nil && root.AttemptID != "" && (managerErr != nil || root.AttemptID == manager.AttemptID) {
+		return AttemptStatus{
+			SchemaVersion: 1, AttemptID: root.AttemptID, State: root.State,
+			RunningVersion: root.RunningVersion, TargetVersion: root.TargetVersion,
+			Failure: root.Failure, UpdatedAt: root.UpdatedAt,
+		}, true, nil
+	}
+	if rootErr != nil && !errors.Is(rootErr, os.ErrNotExist) {
+		return AttemptStatus{}, false, rootErr
+	}
+	if managerErr != nil {
+		return AttemptStatus{}, false, nil
+	}
+	return manager, true, nil
+}
+
+func (stager *Stager) BootstrapReady() error {
+	return stager.checkBootstrap()
+}
+
+func (stager *Stager) checkBootstrap() error {
+	if stager.BootstrapCheck != nil {
+		return stager.BootstrapCheck()
+	}
+	if filepath.Clean(stager.DataDir) != "/var/lib/basement" {
+		return errors.New("run the installer once to enable console updates for this data directory")
+	}
+	for _, path := range []string{
+		stager.UpdaterBinaryPath, stager.UpdaterUnitPath, stager.UpdaterPathUnit,
+		stager.UpdaterServiceLink, stager.UpdaterPathLink,
+	} {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			return errors.New("run the installer once to enable console updates")
+		}
+	}
+	return nil
+}
+
+func (stager *Stager) download(ctx context.Context, location, destination string, expectedSize int64) error {
+	parsed, err := url.Parse(location)
+	if err != nil || parsed.Scheme != "https" || !releaseHostAllowed(parsed.Hostname()) {
+		return errors.New("manager update asset URL is not allowed")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("User-Agent", "basement-manager-update")
+	response, err := stager.client().Do(request)
+	if err != nil {
+		return fmt.Errorf("download manager update: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("download manager update: HTTP %d", response.StatusCode)
+	}
+	if response.ContentLength > expectedSize {
+		return errors.New("manager update download is larger than its signed size")
+	}
+	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	remove := true
+	defer func() {
+		if remove {
+			_ = os.Remove(destination)
+		}
+	}()
+	written, copyErr := io.Copy(file, io.LimitReader(response.Body, expectedSize+1))
+	if copyErr == nil && written != expectedSize {
+		copyErr = errors.New("manager update download size does not match its signed manifest")
+	}
+	if copyErr == nil {
+		copyErr = file.Sync()
+	}
+	if closeErr := file.Close(); copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		return copyErr
+	}
+	remove = false
+	return syncDirectory(filepath.Dir(destination))
+}
+
+func (stager *Stager) client() *http.Client {
+	if stager.Client != nil {
+		return stager.Client
+	}
+	return NewHTTPReleaseSource().Client
+}
+
+func (stager *Stager) writeStatus(status AttemptStatus) error {
+	return writeJSONFile(stager.statusPath(), status, 0o600)
+}
+
+func (stager *Stager) statusPath() string {
+	return filepath.Join(stager.DataDir, "updates", "status.json")
+}
+
+func newAttemptID() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	const alphabet = "0123456789abcdef"
+	encoded := make([]byte, len(random)*2)
+	for index, value := range random {
+		encoded[index*2] = alphabet[value>>4]
+		encoded[index*2+1] = alphabet[value&15]
+	}
+	return "update-" + string(encoded), nil
+}
+
+func writeBytesAtomic(path string, payload []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".stage-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(mode); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(payload); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
+}
+
+func renameFileAtomic(source, destination string, mode os.FileMode) error {
+	if err := os.Chmod(source, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(source, destination); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(destination))
+}

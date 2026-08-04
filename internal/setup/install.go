@@ -19,15 +19,24 @@ import (
 //go:embed assets/basement.service
 var systemdUnit string
 
+//go:embed assets/basement-updater.service
+var updaterSystemdUnit string
+
+//go:embed assets/basement-updater.path
+var updaterPathUnit string
+
 const (
-	installDir  = "/usr/lib/basement"
-	binaryPath  = installDir + "/basement"
-	dataDir     = "/var/lib/basement"
-	unitPath    = "/etc/systemd/system/basement.service"
-	dropInDir   = "/etc/systemd/system/basement.service.d"
-	dropInPath  = dropInDir + "/listen.conf"
-	stagingPath = "/tmp/basement.staged"
-	serviceUser = "basement"
+	installDir          = "/usr/lib/basement"
+	binaryPath          = installDir + "/basement"
+	dataDir             = "/var/lib/basement"
+	unitPath            = "/etc/systemd/system/basement.service"
+	updaterUnitPath     = "/etc/systemd/system/basement-updater.service"
+	updaterPathUnitPath = "/etc/systemd/system/basement-updater.path"
+	dropInDir           = "/etc/systemd/system/basement.service.d"
+	dropInPath          = dropInDir + "/listen.conf"
+	stagingPath         = "/tmp/basement.staged"
+	updaterStagingPath  = "/tmp/basement-updater.staged"
+	serviceUser         = "basement"
 	// releaseURL is where tagged releases publish the linux/arm64 binary
 	// (ADR 0010; asset naming is part of the release contract). It still
 	// points at the runonspark-manager repository: the repo itself renames
@@ -141,6 +150,85 @@ func (ReleaseSource) Stage(ctx context.Context, runner Runner, logf func(string,
 	return stagingPath, nil
 }
 
+func stageUpdater(ctx context.Context, runner Runner, logf func(string, ...any)) (string, error) {
+	logf("downloading the fixed root updater helper")
+	script := fmt.Sprintf(
+		"curl -fsSL %[1]s/basement-updater-linux-arm64 -o %[2]s && "+
+			"curl -fsSL %[1]s/basement-updater-linux-arm64.sha256 -o %[2]s.sha256 && "+
+			"cd /tmp && awk '{print $1\"  basement-updater.staged\"}' basement-updater.staged.sha256 | sha256sum -c -",
+		releaseURL, updaterStagingPath)
+	if _, err := runner.Run(ctx, script, nil); err != nil {
+		return "", fmt.Errorf("download root updater helper: %w", err)
+	}
+	return updaterStagingPath, nil
+}
+
+const slotInstallScript = `set -eu
+manager=$1
+updater=$2
+install_root=/usr/lib/basement
+versions=$install_root/versions
+flat=$install_root/basement
+
+install -d -m 0755 "$install_root" "$versions" "$install_root/updater"
+
+if [ -f "$flat" ] && [ ! -L "$flat" ]; then
+  old_digest=$(sha256sum "$flat" | awk '{print $1}')
+  old_version=$("$flat" version 2>/dev/null || true)
+  if printf '%s\n' "$old_version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+    old_slot=$old_version
+  else
+    old_slot=bootstrap-$old_digest
+  fi
+  if [ ! -e "$versions/$old_slot/basement" ]; then
+    install -d -m 0755 "$versions/$old_slot"
+    install -m 0755 "$flat" "$versions/$old_slot/basement"
+  fi
+fi
+
+manager_version=$("$manager" version 2>/dev/null || true)
+if printf '%s\n' "$manager_version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+  slot=$manager_version
+else
+  manager_digest=$(sha256sum "$manager" | awk '{print $1}')
+  slot=bootstrap-$manager_digest
+fi
+
+target=$versions/$slot
+temporary=$versions/.$slot.install.$$
+rm -rf "$temporary"
+install -d -m 0755 "$temporary"
+install -m 0755 "$manager" "$temporary/basement"
+if [ -d "$target" ] && [ ! -f "$target/basement" ]; then
+  echo "manager version slot is incomplete" >&2
+  rm -rf "$temporary"
+  exit 1
+elif [ -f "$target/basement" ]; then
+  old_digest=$(sha256sum "$target/basement" | awk '{print $1}')
+  new_digest=$(sha256sum "$temporary/basement" | awk '{print $1}')
+  if [ "$old_digest" != "$new_digest" ]; then
+    echo "manager version slot already contains different bytes" >&2
+    rm -rf "$temporary"
+    exit 1
+  fi
+  rm -rf "$temporary"
+elif [ ! -e "$target" ]; then
+  mv "$temporary" "$target"
+else
+  echo "manager version slot is not a directory" >&2
+  rm -rf "$temporary"
+  exit 1
+fi
+
+current_tmp=$install_root/.current.$$
+rm -f "$current_tmp"
+ln -s "versions/$slot" "$current_tmp"
+mv -Tf "$current_tmp" "$install_root/current"
+rm -f "$flat"
+ln -s current/basement "$flat"
+install -m 0755 "$updater" "$install_root/updater/basement-updater"
+`
+
 // validateARM64ELF rejects binaries that cannot run on a GB10 machine before
 // any bytes travel: ELF magic plus the aarch64 machine type.
 func validateARM64ELF(payload []byte) error {
@@ -186,6 +274,10 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	if err != nil {
 		return InstallResult{}, err
 	}
+	updaterStaged, err := stageUpdater(ctx, runner, logf)
+	if err != nil {
+		return InstallResult{}, err
+	}
 
 	if err := adoptLegacyInstall(ctx, runner, logf); err != nil {
 		return InstallResult{}, err
@@ -193,20 +285,32 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 
 	logf("installing binary and service user")
 	steps := []string{
-		"install -d -m 0755 " + installDir,
-		fmt.Sprintf("install -m 0755 %s %s", staged, binaryPath),
 		"getent group " + serviceUser + " >/dev/null || groupadd --system " + serviceUser,
 		"getent passwd " + serviceUser + " >/dev/null || useradd --system --gid " + serviceUser + " --home-dir " + dataDir + " --shell /usr/sbin/nologin " + serviceUser,
 		"usermod -a -G docker " + serviceUser,
 		"install -d -o " + serviceUser + " -g " + serviceUser + " -m 0750 " + dataDir,
+		"install -d -o " + serviceUser + " -g " + serviceUser + " -m 0750 " + dataDir + "/updates " + dataDir + "/updates/staging " + dataDir + "/updates/staging/pending " + dataDir + "/updates/staging/partial",
+		"install -d -o root -g root -m 0755 /var/lib/basement-updater",
 	}
 	for _, step := range steps {
 		if _, err := runner.RunPrivileged(ctx, step, nil); err != nil {
 			return InstallResult{}, fmt.Errorf("%s: %w", step, err)
 		}
 	}
+	if _, err := runner.RunPrivileged(ctx, "systemctl disable --now basement-updater.path >/dev/null 2>&1 || true; systemctl stop basement-updater.service >/dev/null 2>&1 || true", nil); err != nil {
+		return InstallResult{}, fmt.Errorf("stop updater trigger: %w", err)
+	}
+	if _, err := runner.RunPrivileged(ctx, "sh -s -- "+shellQuote(staged)+" "+shellQuote(updaterStaged), strings.NewReader(slotInstallScript)); err != nil {
+		return InstallResult{}, fmt.Errorf("install manager version slot: %w", err)
+	}
 	if _, err := runner.RunPrivileged(ctx, "tee "+unitPath+" >/dev/null", strings.NewReader(systemdUnit)); err != nil {
 		return InstallResult{}, fmt.Errorf("write systemd unit: %w", err)
+	}
+	if _, err := runner.RunPrivileged(ctx, "tee "+updaterUnitPath+" >/dev/null", strings.NewReader(updaterSystemdUnit)); err != nil {
+		return InstallResult{}, fmt.Errorf("write updater systemd unit: %w", err)
+	}
+	if _, err := runner.RunPrivileged(ctx, "tee "+updaterPathUnitPath+" >/dev/null", strings.NewReader(updaterPathUnit)); err != nil {
+		return InstallResult{}, fmt.Errorf("write updater path unit: %w", err)
 	}
 
 	listen, err := resolveListen(ctx, runner, opts.Listen)
@@ -227,7 +331,7 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	}
 
 	logf("starting basement.service")
-	if _, err := runner.RunPrivileged(ctx, "systemctl daemon-reload && systemctl enable --now basement.service && systemctl restart basement.service", nil); err != nil {
+	if _, err := runner.RunPrivileged(ctx, "systemctl daemon-reload && systemctl enable basement.service basement-updater.service basement-updater.path && systemctl restart basement.service && systemctl start basement-updater.service && systemctl start basement-updater.path && systemctl is-active --quiet basement.service && systemctl is-active --quiet basement-updater.path && test -x /usr/lib/basement/updater/basement-updater", nil); err != nil {
 		return InstallResult{}, fmt.Errorf("start service: %w", err)
 	}
 

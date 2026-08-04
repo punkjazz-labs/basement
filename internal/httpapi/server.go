@@ -29,6 +29,7 @@ import (
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/redact"
 	"github.com/punkjazz-labs/basement/internal/store"
+	managerupdate "github.com/punkjazz-labs/basement/internal/update"
 	"github.com/punkjazz-labs/basement/internal/webui"
 )
 
@@ -84,9 +85,14 @@ type Server struct {
 	// from this console is configured to listen.
 	listenAddress atomic.Pointer[string]
 
-	updateMu      sync.Mutex
-	updateResult  map[string]any
-	updateFetched time.Time
+	updateMu          sync.Mutex
+	updateResult      map[string]any
+	updateFetched     time.Time
+	updateCandidate   *managerupdate.Candidate
+	updateResolver    *managerupdate.Resolver
+	updateStager      *managerupdate.Stager
+	updateAdmissionMu sync.Mutex
+	updateApplying    bool
 
 	// gate keeps model switches apart from the requests they would cut off
 	// (see servingGate in roles.go). One Spark serves one model, so a switch
@@ -135,7 +141,8 @@ type preflightResponse struct {
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState(), generations: newGenerationQueue()}
+	updateKeys, _ := managerupdate.ProductionKeyRing()
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState(), generations: newGenerationQueue(), updateResolver: &managerupdate.Resolver{Source: managerupdate.NewHTTPReleaseSource(), Keys: updateKeys}, updateStager: managerupdate.NewStager(dataDir, updateKeys)}
 	server.SetRecipes(recipes, recipes)
 	// Every job that changes which model serves announces itself to the
 	// serving gate through this hook, whoever asked for it (see roles.go).
@@ -183,7 +190,9 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/generations/", server.withReadAuth(server.generationAction))
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
 	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
-	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateCheck))
+	mux.HandleFunc("/api/v1/update/status", server.withReadAuth(server.updateStatus))
+	mux.HandleFunc("/api/v1/update/apply", server.withReadAuth(server.updateApplyAPI))
+	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateAPI))
 	mux.HandleFunc("/api/v1/peers", server.peersCollection)
 	mux.HandleFunc("/api/v1/peers/", server.withReadAuth(server.peerAction))
 	// Adopting a second Spark from the console (ADR 0014). Console session
@@ -618,6 +627,11 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if err := s.auth.AuthorizeMutation(r); err != nil {
 		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	s.updateAdmissionMu.Lock()
+	defer s.updateAdmissionMu.Unlock()
+	if s.refuseMutationDuringUpdate(w) {
 		return
 	}
 	if r.Method == http.MethodDelete && len(parts) == 1 {
@@ -1881,50 +1895,6 @@ func dirBytes(root string) int64 {
 		return nil
 	})
 	return total
-}
-
-const updateRepository = "punkjazz-labs/basement"
-
-func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
-		return
-	}
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	if s.updateResult != nil && time.Since(s.updateFetched) < time.Hour {
-		writeJSON(w, http.StatusOK, s.updateResult)
-		return
-	}
-	result := map[string]any{"current_version": s.version, "checked": false, "update_available": false}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+updateRepository+"/releases/latest", nil)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
-	if err == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			var release struct {
-				TagName string `json:"tag_name"`
-				HTMLURL string `json:"html_url"`
-			}
-			if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&release) == nil && release.TagName != "" {
-				latest := strings.TrimPrefix(release.TagName, "v")
-				result["checked"] = true
-				result["latest_version"] = latest
-				result["release_url"] = release.HTMLURL
-				result["update_available"] = latest != strings.TrimPrefix(s.version, "v") && s.version != "dev"
-			}
-		} else if resp.StatusCode == http.StatusNotFound {
-			result["checked"] = true
-			result["note"] = "no published releases yet"
-		}
-	}
-	result["checked_at"] = time.Now().UTC().Format(time.RFC3339)
-	s.updateResult = result
-	s.updateFetched = time.Now()
-	writeJSON(w, http.StatusOK, result)
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, kind, message string) {

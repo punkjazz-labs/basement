@@ -21,7 +21,13 @@ jobs:
       # (packaging/setup.sh, setup.ps1) and `basement setup --binary` download.
       # These names and this asset set must not change.
       - name: Build manager binaries
+        env:
+          UPDATE_PUBLIC_KEYS: ${{ vars.BASEMENT_UPDATE_PUBLIC_KEYS }}
         run: |
+          test -n "${UPDATE_PUBLIC_KEYS}" || {
+            echo "BASEMENT_UPDATE_PUBLIC_KEYS must be configured before a release" >&2
+            exit 1
+          }
           mkdir -p dist
           for os in linux darwin windows; do
             for arch in arm64 amd64; do
@@ -29,11 +35,21 @@ jobs:
               [ "$os" = windows ] && ext=".exe"
               out="dist/basement-${os}-${arch}${ext}"
               GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
-                -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+                -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X github.com/punkjazz-labs/basement/internal/update.releasePublicKeys=${UPDATE_PUBLIC_KEYS}" \
                 -o "$out" ./cmd/basement
               (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
             done
           done
+
+      - name: Build root updater helper
+        env:
+          UPDATE_PUBLIC_KEYS: ${{ vars.BASEMENT_UPDATE_PUBLIC_KEYS }}
+        run: |
+          test -n "${UPDATE_PUBLIC_KEYS}" || exit 1
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X github.com/punkjazz-labs/basement/internal/update.releasePublicKeys=${UPDATE_PUBLIC_KEYS}" \
+            -o dist/basement-updater-linux-arm64 ./cmd/basement-updater
+          (cd dist && sha256sum basement-updater-linux-arm64 > basement-updater-linux-arm64.sha256)
 
       # The installer: what a person downloads onto their own laptop and
       # double-clicks. It only ever installs a GB10 over SSH, so it is built

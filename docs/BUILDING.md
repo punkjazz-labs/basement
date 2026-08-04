@@ -310,9 +310,44 @@ built for macOS and Windows only.
    `notarytool` keychain profile.** They exist on one laptop and nowhere else,
    so this step cannot move into CI.
 
+   The update release key is a dedicated Ed25519 private key stored as one
+   base64 value in a macOS Keychain generic-password item. Configure the
+   public half in the repository variable `BASEMENT_UPDATE_PUBLIC_KEYS` as
+   `key-id=base64-public-key`. Release builds fail when that variable is
+   absent, so both the manager and fixed root helper always embed the same
+   key ring. Never put the private value in a repository variable, command
+   argument, environment value, log, or release asset.
+
+   Choose `UPDATE_KEY_ID` and `UPDATE_KEYCHAIN_SERVICE`, then generate the
+   pair and send the private half straight to Keychain. The signer writes the
+   matching public ring entry to `/tmp/basement-update-public-key.txt`; it has
+   no option that writes the private half to a file. Keep `-w` last so
+   `security` reads the generated value from standard input:
+
    ```sh
-   packaging/sign-macos-release.sh vX.Y.Z
+   go run ./cmd/sign-update-manifest -mode keygen \
+     -key-id "$UPDATE_KEY_ID" \
+     -public-key-out /tmp/basement-update-public-key.txt |
+     security add-generic-password -U -a "$(id -un)" \
+       -s "$UPDATE_KEYCHAIN_SERVICE" -w
+   gh variable set BASEMENT_UPDATE_PUBLIC_KEYS < /tmp/basement-update-public-key.txt
    ```
+
+   Set `UPDATE_KEY_ID` to the matching key id and
+   `UPDATE_KEYCHAIN_SERVICE` to the chosen Keychain service name. Set
+   `UPDATE_KEYCHAIN_ACCOUNT` only when the Keychain item uses a different
+   account from the current macOS user. Then name every release that the new
+   manager can safely roll back to:
+
+   ```sh
+   packaging/sign-macos-release.sh vX.Y.Z vW.Y.Z
+   ```
+
+   The Mac step signs the exact Linux update manifest before publication,
+   verifies it against the public key embedded by the release build, uploads
+   it, downloads it again, and verifies the published bytes. A release is
+   left as a draft if any check fails. Rotating this key or the root updater
+   requires a manual installer upgrade in updater protocol 1.
 
    It reads the identity from `SIGN_IDENTITY` (required, no default — the
    script fails with a clear message if it is unset) and the keychain profile
@@ -357,13 +392,15 @@ The manager runs as a systemd service defined by
 writable path. Its `ExecStart` is
 
 ```
-/usr/lib/basement/basement --data-dir /var/lib/basement --listen 127.0.0.1:7070
+/usr/lib/basement/current/basement --data-dir /var/lib/basement --listen 127.0.0.1:7070
 ```
 
-`packaging/install.sh` installs the binary to `/usr/lib/basement/basement`,
-creates `/var/lib/basement` (mode 0750, owned by the service user), installs the
-unit, and — only if the operator chose a network interface, or `BASEMENT_LISTEN`
-was pre-seeded — writes a **drop-in** at
+`packaging/install.sh` installs the binary in a version slot below
+`/usr/lib/basement/versions`, selects it through `/usr/lib/basement/current`,
+and keeps `/usr/lib/basement/basement` as a compatibility symlink. It creates
+`/var/lib/basement` (mode 0750, owned by the service user), installs the manager
+and updater units, and only if the operator chose a network interface, or
+`BASEMENT_LISTEN` was pre-seeded, writes a **drop-in** at
 `/etc/systemd/system/basement.service.d/listen.conf` that clears `ExecStart` and
 sets it again with the chosen address. Loopback is the default; exposure is
 always a deliberate choice. That drop-in is the reason you must never assume the
@@ -372,21 +409,24 @@ committed unit describes a running machine.
 `/var/lib/basement` holds `manager.db` (SQLite: jobs, models, API keys, peers,
 token counters), `pairing-token` (the console pairing credential, read by
 `basement pairing-url`), `auth-signing-key`, downloaded model artifacts, and
-generated container configuration. An upgrade replaces the binary and the unit
-and restarts the service; everything in the data directory stays.
+generated container configuration. A console update adds one signed manager
+slot, changes the `current` symlink, and restarts only the manager service. The
+fixed root updater, its units, and its embedded public key change only when the
+installer is run manually. Everything else in the data directory stays.
 
 **Model containers survive a manager restart.** They are Docker containers
 owned by the daemon, not children of the manager process, so a restarted manager
 finds them still serving. On startup the manager resumes jobs that were
 interrupted and reconciles any model recorded as active but `recovering` by
 issuing a fresh start job for it. A start job also rebuilds a container whose
-baked-in configuration no longer matches the current one — a moved data
-directory, or a fabric master address that changed across a reboot — but only
+baked-in configuration no longer matches the current one, such as a moved data
+directory or a fabric master address that changed across a reboot, but only
 when a value positively disagrees.
 
-So a release changes: one binary, one unit file, and nothing else. If a change
-would alter the data directory layout, the unit, or the container contract, it
-needs a migration path and it belongs in an ADR before it belongs in code.
+The manager update payload changes one manager slot and the selected symlink.
+The manual release package may also change the fixed updater helper and systemd
+units. A data layout or container contract change still needs a migration path
+and an ADR before it belongs in code.
 
 ## Where the rest lives
 

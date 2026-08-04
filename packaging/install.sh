@@ -5,8 +5,8 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "run as root" >&2
   exit 1
 fi
-if [ "$#" -ne 2 ] || [ ! -f "$1" ] || [ ! -f "$2" ]; then
-  echo "usage: $0 /path/to/basement /path/to/basement.sha256" >&2
+if [ "$#" -ne 4 ] || [ ! -f "$1" ] || [ ! -f "$2" ] || [ ! -f "$3" ] || [ ! -f "$4" ]; then
+  echo "usage: $0 /path/to/basement /path/to/basement.sha256 /path/to/basement-updater /path/to/basement-updater.sha256" >&2
   exit 2
 fi
 
@@ -14,17 +14,33 @@ if ! getent group docker >/dev/null 2>&1; then
   echo "Docker group is missing; install Docker before basement" >&2
   exit 1
 fi
-expected=$(awk 'NR == 1 { print $1 }' "$2")
-actual=$(sha256sum "$1" | awk '{ print $1 }')
-if ! printf '%s\n' "$expected" | grep -Eq '^[0-9a-fA-F]{64}$' || [ "$actual" != "$expected" ]; then
-  echo "binary checksum verification failed" >&2
+verify_checksum() {
+  checksum_file=$1
+  payload_file=$2
+  expected=$(awk 'NR == 1 { print $1 }' "$checksum_file")
+  actual=$(sha256sum "$payload_file" | awk '{ print $1 }')
+  if ! printf '%s\n' "$expected" | grep -Eq '^[0-9a-fA-F]{64}$' || [ "$actual" != "$expected" ]; then
+    echo "binary checksum verification failed for $payload_file" >&2
+    exit 1
+  fi
+}
+
+verify_checksum "$2" "$1"
+verify_checksum "$4" "$3"
+
+manager_version=$("$1" version 2>/dev/null || true)
+if ! printf '%s\n' "$manager_version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+  echo "manager binary does not report a stable vMAJOR.MINOR.PATCH version" >&2
   exit 1
 fi
-unit_source="$(dirname "$0")/systemd/basement.service"
-if [ ! -f "$unit_source" ]; then
-  echo "systemd unit not found at $unit_source; keep install.sh next to its systemd/ directory from the release package" >&2
-  exit 1
-fi
+
+unit_dir="$(dirname "$0")/systemd"
+for unit_name in basement.service basement-updater.service basement-updater.path; do
+  if [ ! -f "$unit_dir/$unit_name" ]; then
+    echo "systemd unit not found at $unit_dir/$unit_name; keep install.sh next to its systemd/ directory from the release package" >&2
+    exit 1
+  fi
+done
 
 if ! getent group basement >/dev/null 2>&1; then groupadd --system basement; fi
 if ! getent passwd basement >/dev/null 2>&1; then
@@ -32,13 +48,77 @@ if ! getent passwd basement >/dev/null 2>&1; then
 fi
 usermod -a -G docker basement
 install -d -m 0755 /usr/lib/basement
-install -m 0755 "$1" /usr/lib/basement/basement
+install -d -m 0755 /usr/lib/basement/versions /usr/lib/basement/updater
 install -d -o basement -g basement -m 0750 /var/lib/basement
-install -m 0644 "$unit_source" /etc/systemd/system/basement.service
+install -d -o basement -g basement -m 0750 /var/lib/basement/updates
+install -d -o basement -g basement -m 0750 /var/lib/basement/updates/staging
+install -d -o basement -g basement -m 0750 /var/lib/basement/updates/staging/pending
+install -d -o basement -g basement -m 0750 /var/lib/basement/updates/staging/partial
+install -d -o root -g root -m 0755 /var/lib/basement-updater
+
+# Stop only the privileged update trigger while its fixed helper and units are
+# refreshed. The unprivileged manager keeps running until the new slot is ready.
+systemctl disable --now basement-updater.path >/dev/null 2>&1 || true
+systemctl stop basement-updater.service >/dev/null 2>&1 || true
+
+flat_binary=/usr/lib/basement/basement
+if [ -f "$flat_binary" ] && [ ! -L "$flat_binary" ]; then
+  old_digest=$(sha256sum "$flat_binary" | awk '{ print $1 }')
+  old_version=$("$flat_binary" version 2>/dev/null || true)
+  if printf '%s\n' "$old_version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+    old_slot=$old_version
+  else
+    old_slot=bootstrap-$old_digest
+  fi
+  if [ ! -e "/usr/lib/basement/versions/$old_slot/basement" ]; then
+    install -d -m 0755 "/usr/lib/basement/versions/$old_slot"
+    install -m 0755 "$flat_binary" "/usr/lib/basement/versions/$old_slot/basement"
+  fi
+fi
+
+target_slot="/usr/lib/basement/versions/$manager_version"
+slot_tmp="/usr/lib/basement/versions/.$manager_version.install.$$"
+rm -rf "$slot_tmp"
+install -d -m 0755 "$slot_tmp"
+install -m 0755 "$1" "$slot_tmp/basement"
+if [ -d "$target_slot" ] && [ ! -f "$target_slot/basement" ]; then
+  echo "version slot $manager_version is incomplete" >&2
+  rm -rf "$slot_tmp"
+  exit 1
+elif [ -e "$target_slot/basement" ]; then
+  target_digest=$(sha256sum "$target_slot/basement" | awk '{ print $1 }')
+  incoming_digest=$(sha256sum "$slot_tmp/basement" | awk '{ print $1 }')
+  if [ "$target_digest" != "$incoming_digest" ]; then
+    echo "version slot $manager_version already exists with different bytes" >&2
+    rm -rf "$slot_tmp"
+    exit 1
+  fi
+  rm -rf "$slot_tmp"
+elif [ ! -e "$target_slot" ]; then
+  mv "$slot_tmp" "$target_slot"
+else
+  echo "version slot $manager_version is not a directory" >&2
+  rm -rf "$slot_tmp"
+  exit 1
+fi
+
+current_tmp="/usr/lib/basement/.current.$$"
+rm -f "$current_tmp"
+ln -s "versions/$manager_version" "$current_tmp"
+mv -Tf "$current_tmp" /usr/lib/basement/current
+rm -f "$flat_binary"
+ln -s current/basement "$flat_binary"
+
+install -m 0755 "$3" /usr/lib/basement/updater/basement-updater
+install -m 0644 "$unit_dir/basement.service" /etc/systemd/system/basement.service
+install -m 0644 "$unit_dir/basement-updater.service" /etc/systemd/system/basement-updater.service
+install -m 0644 "$unit_dir/basement-updater.path" /etc/systemd/system/basement-updater.path
 
 # The console binds loopback unless the operator deliberately chooses an
 # interface here (or pre-seeds BASEMENT_LISTEN for unattended installs).
 listen="${BASEMENT_LISTEN:-}"
+tailscale_ip=""
+lan_ip=""
 if [ -z "$listen" ] && [ -t 0 ]; then
   tailscale_ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
   # The default route's source address, not the first `hostname -I` field: a
@@ -67,7 +147,7 @@ if [ -n "$listen" ]; then
 fi
 
 systemctl daemon-reload
-systemctl enable basement.service
+systemctl enable basement.service basement-updater.service basement-updater.path
 # Restart rather than `enable --now`. That form starts a stopped service but
 # does nothing to one already running, so rerunning this installer to upgrade
 # put the new binary on disk, left the old one running, and still printed
@@ -75,6 +155,21 @@ systemctl enable basement.service
 # rerun an actual upgrade. Model containers are detached from this service and
 # keep serving across the restart.
 systemctl restart basement.service
+systemctl start basement-updater.service
+systemctl start basement-updater.path
+
+if ! systemctl is-active --quiet basement.service; then
+  echo "basement.service did not start" >&2
+  exit 1
+fi
+if ! systemctl is-active --quiet basement-updater.path; then
+  echo "basement-updater.path did not start" >&2
+  exit 1
+fi
+if [ "$(readlink /usr/lib/basement/current)" != "versions/$manager_version" ] || [ "$(readlink "$flat_binary")" != "current/basement" ]; then
+  echo "manager version slot links were not installed correctly" >&2
+  exit 1
+fi
 
 token_file=/var/lib/basement/pairing-token
 tries=0
