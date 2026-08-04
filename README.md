@@ -98,19 +98,19 @@ the service; your models, API keys, jobs and settings stay where they are.
 
 ## The models
 
-The current candidate pack:
+The console currently highlights three candidates:
 
 - Unsloth Qwen 3.6 35B-A3B, the recommended all-rounder;
 - NVIDIA Qwen 3.6 27B, flagship-level coding in a smaller footprint;
 - poolside Laguna S 2.1 with its DFlash drafter, built for long agent runs.
 
-Candidates are recipes whose complete install, inference, restart, and
-removal lifecycles have not yet all passed on real hardware. The label is
-honest: candidate means candidate, not verified.
+All eight embedded recipes declare themselves candidates. A candidate has not
+completed the evidence and curation decision required for a verified label.
+Passing part of qualification does not promote it automatically.
 
 The pipeline behind the pack is documented in
 [`docs/MODEL-CANDIDATES-2026-08.md`](docs/MODEL-CANDIDATES-2026-08.md):
-which models the community actually runs on this hardware, verified
+which models the community actually runs on this hardware, checked
 against primary sources before anything enters the catalog.
 
 ## What we do
@@ -118,22 +118,23 @@ against primary sources before anything enters the catalog.
 Five steps, always in this order.
 
 1. **Research.** We sweep what the community actually runs on GB10
-   hardware: X, NVIDIA forums, Hugging Face. Every artifact is checked
-   against primary sources: repository, revision, bytes, licence. The
-   current sweep is
+   hardware: X, NVIDIA forums, Hugging Face. Each recipe records its source,
+   immutable revision, expected bytes, and licence. The current sweep is
    [`docs/MODEL-CANDIDATES-2026-08.md`](docs/MODEL-CANDIDATES-2026-08.md).
-2. **Validate.** We install and run each recipe on our own Sparks. Real
-   hardware, real inference, measured speeds, not a vendor claim. The
-   protocol is [`docs/DGX-QUALIFICATION.md`](docs/DGX-QUALIFICATION.md).
-3. **Promote.** A recipe that passes qualification moves from candidate
-   to verified. The label in the console always tells the truth: right
-   now every recipe in the pack is still a candidate, because none has
-   completed the full lifecycle on real hardware yet.
+2. **Validate.** Qualification installs and runs an exact recipe version on
+   owned hardware, exercises its lifecycle, and records real inference and
+   measured results. This has not been completed for every embedded recipe.
+   The protocol and recorded outcomes are
+   [`docs/DGX-QUALIFICATION.md`](docs/DGX-QUALIFICATION.md).
+3. **Promote.** Qualification evidence is reviewed before a recipe can move
+   from candidate to verified. Right now all eight embedded recipes still
+   declare candidate. The recipe data carries that state, but the Models table
+   does not display it yet.
 4. **Package.** The recipe pins everything: weights by revision and byte
    count, runtime by image digest, the licence you are accepting, and
    the resources the model needs.
-5. **Ship.** Recipes reach you through a signed feed and install with
-   one click. That is the standard we are building toward: the feed
+5. **Ship.** The target is for recipes to reach you through a signed feed and
+   install with one click. That is the standard we are building toward: the feed
    design is set but not live yet
    ([`docs/decisions/0009`](docs/decisions/0009-signed-recipe-feed-design.md)).
    Until it ships, recipes travel inside the binary itself.
