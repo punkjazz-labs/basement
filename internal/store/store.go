@@ -128,6 +128,15 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("mark active models for health reconciliation: %w", err)
 	}
+	// The generation queue lives in memory, so a generation that was queued
+	// or running when this process stopped is not coming back. Saying so is
+	// the honest answer; leaving it as "running" would be a spinner that
+	// never resolves.
+	if _, err := s.db.Exec(`UPDATE generations SET status='interrupted', error=?, finished_at=? WHERE status IN ('queued','running')`,
+		"basement restarted while this generation was in progress", now()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("recover generations: %w", err)
+	}
 	return s, nil
 }
 
@@ -217,6 +226,25 @@ CREATE TABLE IF NOT EXISTS roles (
   recipe_id TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS generations (
+  id TEXT PRIMARY KEY,
+  recipe_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  blocks INTEGER NOT NULL,
+  short_edge INTEGER NOT NULL,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  frames INTEGER NOT NULL,
+  seed INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  error TEXT NOT NULL DEFAULT '',
+  output_path TEXT NOT NULL DEFAULT '',
+  bytes INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  finished_at TEXT NOT NULL DEFAULT ''
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -944,6 +972,144 @@ func (s *Store) TerritoryEligibilityConfirmed(ctx context.Context, recipeID stri
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM territory_confirmations WHERE recipe_id=? AND recipe_version=?`, recipeID, version).Scan(&count)
 	return count == 1, err
+}
+
+// Generation is one media generation: what was asked for, what happened to
+// it, and where the result is. The seed is recorded whether the user chose it
+// or basement did, so any result in the gallery can be made again.
+//
+// Prompt is stored in full. It is the user's own text on the user's own
+// machine, and a gallery that shows a truncated prompt beside a clip is a
+// gallery you cannot reproduce anything from.
+type Generation struct {
+	ID        string `json:"id"`
+	RecipeID  string `json:"recipe_id"`
+	Mode      string `json:"mode"`
+	Prompt    string `json:"prompt"`
+	Blocks    int    `json:"blocks"`
+	ShortEdge int    `json:"short_edge"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+	Frames    int    `json:"frames"`
+	Seed      int64  `json:"seed"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+	// OutputPath is the file on this machine. It is absent until the
+	// generation finishes and is never a path outside the data directory.
+	OutputPath string `json:"output_path,omitempty"`
+	Bytes      int64  `json:"bytes,omitempty"`
+	CreatedAt  string `json:"created_at"`
+	StartedAt  string `json:"started_at,omitempty"`
+	FinishedAt string `json:"finished_at,omitempty"`
+}
+
+const generationColumns = `id,recipe_id,mode,prompt,blocks,short_edge,width,height,frames,seed,status,error,output_path,bytes,created_at,started_at,finished_at`
+
+func scanGeneration(row interface{ Scan(...any) error }) (Generation, error) {
+	var g Generation
+	err := row.Scan(&g.ID, &g.RecipeID, &g.Mode, &g.Prompt, &g.Blocks, &g.ShortEdge, &g.Width, &g.Height, &g.Frames, &g.Seed,
+		&g.Status, &g.Error, &g.OutputPath, &g.Bytes, &g.CreatedAt, &g.StartedAt, &g.FinishedAt)
+	return g, err
+}
+
+// CreateGeneration records a request before anything runs, so a generation
+// exists on disk from the moment it is accepted rather than from the moment
+// it starts. The caller supplies everything except the id and the timestamps.
+func (s *Store) CreateGeneration(ctx context.Context, g Generation) (Generation, error) {
+	id, err := randomID("gen_")
+	if err != nil {
+		return Generation{}, err
+	}
+	g.ID = id
+	g.Status = "queued"
+	g.CreatedAt = now()
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO generations(`+generationColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		g.ID, g.RecipeID, g.Mode, g.Prompt, g.Blocks, g.ShortEdge, g.Width, g.Height, g.Frames, g.Seed,
+		g.Status, "", "", 0, g.CreatedAt, "", ""); err != nil {
+		return Generation{}, err
+	}
+	return g, nil
+}
+
+func (s *Store) Generation(ctx context.Context, id string) (Generation, error) {
+	g, err := scanGeneration(s.db.QueryRowContext(ctx, `SELECT `+generationColumns+` FROM generations WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Generation{}, os.ErrNotExist
+	}
+	return g, err
+}
+
+// Generations lists results newest first, which is the order the gallery
+// reads them in.
+func (s *Store) Generations(ctx context.Context, limit int) ([]Generation, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+generationColumns+` FROM generations ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Generation{}
+	for rows.Next() {
+		g, err := scanGeneration(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, g)
+	}
+	return result, rows.Err()
+}
+
+// StartGeneration marks a queued generation as running. It refuses a
+// generation that is not queued, so a cancelled or deleted one can never be
+// picked up by a worker that was already holding its id.
+func (s *Store) StartGeneration(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE generations SET status='running', started_at=? WHERE id=? AND status='queued'`, now(), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+func (s *Store) CompleteGeneration(ctx context.Context, id, outputPath string, bytes int64) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE generations SET status='completed', output_path=?, bytes=?, error='', finished_at=? WHERE id=?`, outputPath, bytes, now(), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+// FailGeneration records why a generation did not produce anything. status is
+// the terminal state to record: "failed" for a run that went wrong and
+// "cancelled" for one the owner stopped, because those read differently in a
+// gallery and only one of them is worth retrying.
+func (s *Store) FailGeneration(ctx context.Context, id, status, message string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE generations SET status=?, error=?, finished_at=? WHERE id=? AND status NOT IN ('completed','failed','cancelled')`, status, message, now(), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+func (s *Store) DeleteGeneration(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM generations WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
 }
 
 func randomID(prefix string) (string, error) {

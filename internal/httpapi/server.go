@@ -97,6 +97,11 @@ type Server struct {
 	// not, start one" a single step; see startJobFor.
 	activationMu sync.Mutex
 
+	// generations is the queue media generation requests wait in. A Spark
+	// runs one generation at a time, so requests beyond the first are held
+	// here in submission order rather than refused (see generate.go).
+	generations *generationQueue
+
 	// tokenMu serializes every read-then-record of a model's runtime token
 	// counters (CaptureTokenUsage and CaptureFinalTokenUsage both take it for
 	// their whole call). Reading the counters is a network round trip, so two
@@ -130,7 +135,7 @@ type preflightResponse struct {
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState()}
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState(), generations: newGenerationQueue()}
 	server.SetRecipes(recipes, recipes)
 	// Every job that changes which model serves announces itself to the
 	// serving gate through this hook, whoever asked for it (see roles.go).
@@ -169,6 +174,12 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	// is inference, never a change to which model answers to a name.
 	mux.HandleFunc("/api/v1/roles", server.roles)
 	mux.HandleFunc("/api/v1/roles/", server.roleAction)
+	// Media generation. Console session only, on all of them: a bearer key
+	// reaches inference through /v1 and nothing else, and generating is work
+	// on the owner's own machine that produces files on it.
+	mux.HandleFunc("/api/v1/generate", server.withReadAuth(server.generateHandler))
+	mux.HandleFunc("/api/v1/generations", server.withReadAuth(server.listGenerations))
+	mux.HandleFunc("/api/v1/generations/", server.withReadAuth(server.generationAction))
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
 	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
 	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateCheck))
@@ -597,6 +608,14 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, errors.New("model is not installed"))
 			return
 		}
+		// Measuring speed means measuring tokens per second, and a media
+		// model produces no tokens. Refusing here is the honest answer; the
+		// benchmark would otherwise ask a diffusion runtime for a chat
+		// completion and report the failure as if the model were broken.
+		if _, media := selected.MediaGeneration(); media && parts[1] == "benchmark" {
+			writeError(w, http.StatusConflict, fmt.Errorf("%s generates video and images rather than text, so there is no tokens-per-second figure to measure", selected.DisplayName))
+			return
+		}
 		s.createJob(w, r, parts[1], selected, map[string]any{})
 	default:
 		http.NotFound(w, r)
@@ -841,6 +860,16 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request) {
 	}
 	active, hold, ok := s.inferenceTarget(w, r)
 	if !ok {
+		return
+	}
+	// A media runtime speaks nothing OpenAI-compatible, and its own API is
+	// not something this endpoint forwards to: /v1 means text here, and the
+	// runtime behind a media model is reached only through the generation
+	// endpoints basement owns (ADR 0007 and spec 11 section 5.1).
+	if _, media := active.MediaGeneration(); media {
+		hold.release()
+		writeOpenAIError(w, http.StatusServiceUnavailable, "model_not_ready",
+			active.DisplayName+" generates video and images rather than text, so it does not answer on this endpoint. Use the Generate view, or start a text model.")
 		return
 	}
 	// The hold keeps a model switch from starting underneath this request
