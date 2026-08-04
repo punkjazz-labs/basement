@@ -123,10 +123,15 @@ process promotes them. Trust would in any case stay basement-candidate on
 the image-provenance grounds documented in the recipe.
 
 Addendum, same day: the throughput numbers above were measured with
-non-streaming requests. Direct probes against the same serving stack show
-streaming responses decode at a steady 12 to 15.5 tok/s while identical
-non-streaming requests reach 29 to 38 tok/s, a roughly 2x server-side gap in
-the fork runtime that is not explained by include_usage handling. The console
-benchmark measures a 30-second streaming window, so the model card's measured
-number reflects what streaming clients actually get. Tracked for
-investigation; the fork upstream may want a report.
+non-streaming requests, and direct streaming probes initially appeared to
+show a 2x server-side slowdown (12 to 15.5 tok/s streaming versus 29 to 38
+non-streaming). Resolved the next day: the gap was a counting error, not a
+server behavior. This stack's speculative decoding packs several tokens
+into one SSE chunk, and both the probes and the console benchmark counted
+chunks whenever the final usage frame was missing, which it always is for a
+stream cancelled at the end of its 30-second sample window. With
+continuous_usage_stats requested, every chunk carries the cumulative token
+count and the same 30-second streaming benchmark measures 38 tok/s on this
+deployment, consistent with the non-streaming battery above. Streaming and
+non-streaming decode at the same speed; there is nothing to report
+upstream.
