@@ -91,6 +91,16 @@ func (f *fleetExecutor) Execute(_ context.Context, execution operations.Executio
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	node := f.node(execution.Placement)
+	// Mirrors operations.pinnedPeer: the real FleetExecutor refuses any
+	// worker-placed step (and the head's own fabric/peer checks) unless the
+	// job pinned a peer when it was planned. A fake that skipped this check
+	// would let an engine bug where execution.Peer is never set for a
+	// step outside the target's own deployment (see engine.go's switch
+	// planning) pass silently here while failing on real hardware.
+	requiresPeer := op.Type == operations.VerifyFabric || op.Type == operations.VerifyPeerNode || execution.Placement.Role == operations.RoleWorker
+	if requiresPeer && (execution.Peer == nil || execution.Peer.BaseURL == "") {
+		return nil, errors.New("the other Spark was not pinned when this job was planned, so it cannot be acted on")
+	}
 	key := op.Type + "@" + node
 	f.events = append(f.events, key)
 	f.detail = append(f.detail, op.Type+"/"+r.ID+"@"+node)
@@ -554,6 +564,108 @@ func TestRollbackRestoresADistributedPredecessorOnBothItsNodes(t *testing.T) {
 		if model.RecipeID == distributed.ID && !model.Active {
 			t.Fatalf("the distributed model was not made active again: %#v", model)
 		}
+	}
+}
+
+// TestStartingASingleNodeModelStopsBothRanksOfADistributedPredecessor is
+// task #50's exact real-hardware scenario: a two-Spark model is already
+// serving (head + worker containers running), and the operator starts an
+// already-downloaded single-Spark model instead of installing a fresh one.
+// That "start" job is a different code path through plan() than "install"
+// (see the switchStopPlanned loop), and it is the one that shipped without
+// ever pinning a peer for the predecessor's worker stop.
+func TestStartingASingleNodeModelStopsBothRanksOfADistributedPredecessor(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, distributed, single := mixedFleet(t, fake)
+
+	first, _, err := s.CreateJob(ctx, "install", distributed.ID, "install-distributed", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	waitJob(t, s, first.ID, "ready")
+
+	// Download the single-node model without activating it, exactly like an
+	// operator queuing up a model to switch to later.
+	download, _, err := s.CreateJob(ctx, "install", single.ID, "download-single", map[string]any{"confirmed": true, "activate": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(download.ID)
+	waitJob(t, s, download.ID, "ready")
+
+	fake.mu.Lock()
+	fake.events, fake.detail = nil, nil
+	fake.mu.Unlock()
+
+	start, _, err := s.CreateJob(ctx, "start", single.ID, "start-single-while-distributed-serves", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(start.ID)
+	job := waitJob(t, s, start.ID, "ready")
+	if job.Error != "" {
+		t.Fatalf("starting the single-node model reported an error despite reaching ready: %s", job.Error)
+	}
+
+	detail := fake.recordedDetail()
+	for _, want := range []string{"stop_container/" + distributed.ID + "@head", "stop_container/" + distributed.ID + "@worker"} {
+		if indexOf(detail, want) < 0 {
+			t.Fatalf("%s did not run when the single-node model started: %v", want, detail)
+		}
+	}
+	if indexOf(detail, "stop_container/"+distributed.ID+"@head") > indexOf(detail, "stop_container/"+distributed.ID+"@worker") {
+		t.Fatalf("the outgoing head must stop serving before its worker rank: %v", detail)
+	}
+
+	models, err := s.Models(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range models {
+		if model.RecipeID == distributed.ID && model.Active {
+			t.Fatalf("the distributed predecessor is still marked active: %#v", model)
+		}
+		if model.RecipeID == single.ID && !model.Active {
+			t.Fatalf("the single-node model did not become active: %#v", model)
+		}
+	}
+}
+
+// TestWorkerStopFailureDuringSwitchFailsTheJob covers the other half of task
+// #50's contract: once the worker's stop is actually reached (the peer is
+// pinned so it no longer fails with "not pinned"), a genuine failure to stop
+// that container must fail the job with a clear reason, never be swallowed.
+func TestWorkerStopFailureDuringSwitchFailsTheJob(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, distributed, single := mixedFleet(t, fake)
+
+	first, _, err := s.CreateJob(ctx, "install", distributed.ID, "install-distributed", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	waitJob(t, s, first.ID, "ready")
+
+	fake.failStepNode = "stop_container@worker"
+
+	second, _, err := s.CreateJob(ctx, "install", single.ID, "install-single-worker-stop-fails", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	failed := waitJob(t, s, second.ID, "failed")
+	if !strings.Contains(failed.Error, "stop_container failed on worker") {
+		t.Fatalf("worker stop failure was not reported plainly: %s", failed.Error)
+	}
+
+	// The distributed predecessor's worker rank never actually stopped, so
+	// this must not read as a clean switch: the job failed, and (best
+	// effort) the predecessor is restored rather than left half torn down.
+	if !strings.Contains(failed.Error, "restored and verified") {
+		t.Fatalf("failure did not report what happened to the previous model: %s", failed.Error)
 	}
 }
 

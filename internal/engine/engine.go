@@ -402,12 +402,6 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(err.Error()))
 		return
 	}
-	// Pinned once, for every step this job will ever run, including its
-	// teardown.
-	if deployment.Distributed() {
-		peer := deployment.Peer
-		execution.Peer = &peer
-	}
 	planned, err := e.plan(ctx, job, r, deployment)
 	if err != nil {
 		_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(err.Error()))
@@ -502,6 +496,7 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		}
 		op, target := plan.Operation, plan.Recipe
 		execution.Placement = plan.Placement
+		execution.Peer = peerFor(plan, deployment, previous, planned.previousDeployment)
 		previousStep, exists, err := e.store.Step(ctx, jobID, index)
 		if err != nil {
 			abort(index, err)
@@ -669,6 +664,31 @@ func previousStopPlans(previous recipe.Recipe, deployment operations.Deployment)
 		{Operation: stop, Recipe: previous, BeginSwitch: true, Placement: deployment.Head},
 		{Operation: stop, Recipe: previous, Placement: deployment.Worker},
 	}
+}
+
+// peerFor resolves the peer a single step is pinned to. A switch plan can
+// carry steps from two different deployments in the same job: stopping the
+// model being switched away from (previousStopPlans, built from
+// previousDeployment) and, when the target itself is distributed, bringing
+// the target's own worker up (built from deployment). Both peers were
+// resolved once, when the job was planned; this only ever picks between
+// those two already-resolved values by which recipe the step belongs to; it
+// never re-resolves a peer live. Matched on (ID, version) rather than ID
+// alone: an in-place update of a distributed recipe switches away from an
+// older version of the SAME ID, and ID alone would misclassify the target's
+// own steps as the predecessor's. A plan step naming neither model's
+// deployment, or one that is not part of a distributed placement at all,
+// needs no peer.
+func peerFor(plan plannedOperation, deployment operations.Deployment, previous *recipe.Recipe, previousDeployment operations.Deployment) *operations.PeerTarget {
+	if !plan.Placement.Distributed() {
+		return nil
+	}
+	if previous != nil && plan.Recipe.ID == previous.ID && plan.Recipe.Version == previous.Version {
+		peer := previousDeployment.Peer
+		return &peer
+	}
+	peer := deployment.Peer
+	return &peer
 }
 
 // placements resolves both nodes of a distributed serve before any step

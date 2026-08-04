@@ -23,10 +23,14 @@ type Execution struct {
 	// Placement names this step's node in a two-Spark serve. Its zero value
 	// means single-node serving, which is what every shipped recipe uses.
 	Placement Placement
-	// Peer is the worker Spark this job was planned against, pinned for the
-	// job's whole life so a later step (a teardown especially) can never act
-	// on a machine that was configured after the job started. It is nil for
-	// single-node work and is never serialized anywhere.
+	// Peer is the worker Spark the step this Execution describes was planned
+	// against, resolved once when the job was planned so a later step (a
+	// teardown especially) can never act on a machine that was configured
+	// after the job started. A job that switches away from a distributed
+	// model carries two resolved peers - its own, if it is itself
+	// distributed, and the model it is replacing's - and each step is pinned
+	// to whichever one it belongs to. It is nil for single-node work and is
+	// never serialized anywhere.
 	Peer *PeerTarget
 }
 
