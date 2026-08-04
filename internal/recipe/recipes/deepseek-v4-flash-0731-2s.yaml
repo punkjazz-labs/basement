@@ -16,9 +16,14 @@ id: deepseek-v4-flash-0731-2s
 # cabled).
 #
 # Qualification flags, in honesty order:
-# - runtime image is the same pinned vllm/vllm-openai the pack already
-#   uses; DeepSeek V4 MoE support in this pinned digest is unverified
-#   until the two-node install runs.
+# - runtime image is vLLM v0.26.0, not the v0.25.1 the rest of the pack
+#   pins. This model's sparse-MLA decode passes swa_topk_lens to
+#   flashinfer, and only flashinfer 0.6.14 accepts that argument; v0.25.1
+#   bundles the release three days older and dies on real GB10 hardware
+#   (vllm-project/vllm issue 48054, fixed by PR 47669). v0.26.0 is the
+#   earliest release that carries the fix, so this recipe must not be
+#   moved back below it. DeepSeek V4 MoE support in this digest is still
+#   unverified until the two-node install runs.
 # - reasoning_parser/tool_call_parser: DeepSeek V4 Flash emits the same
 #   literal think-tag convention the qwen3 parser splits on, so qwen3 is
 #   the closest allowlisted functional match; both are unverified against
@@ -58,9 +63,9 @@ topology:
 runtime:
   kind: vllm
   image: vllm/vllm-openai
-  digest: sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089
-  image_bytes: 10238912364
-  image_disk_bytes: 30716737092
+  digest: sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52
+  image_bytes: 10349296324
+  image_disk_bytes: 31047888972
   environment:
     CUTE_DSL_ARCH: sm_121a
     MAX_JOBS: "4"
@@ -130,6 +135,13 @@ service:
       min_p: 0
       presence_penalty: 0
       repetition_penalty: 1
+    # vLLM's fuse_norm_quant and fuse_act_quant compilation passes are on by
+    # default and garble this model's output on SM121 even at temperature 0
+    # (vllm-project/vllm issue 50773, still open). This sends the documented
+    # workaround and nothing else. It costs whatever those fusions were
+    # worth, so it stays on until qualification on our own hardware shows the
+    # passes are safe here; nothing but that measurement takes it back off.
+    disable_quant_fusions: true
     trust_remote_code: true
     chunked_prefill: true
     async_scheduling: false

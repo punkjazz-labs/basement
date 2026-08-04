@@ -640,8 +640,18 @@ func vllmArgs(r recipe.Recipe, placement Placement) []string {
 	if v.AutoToolChoice {
 		args = append(args, "--enable-auto-tool-choice")
 	}
+	if v.DisableQuantFusions {
+		args = append(args, "--compilation-config", disabledQuantFusionsConfig)
+	}
 	return append(args, vllmDistributedArgs(placement)...)
 }
+
+// disabledQuantFusionsConfig is the whole compilation configuration a recipe
+// can ask for, written out once as the literal document vLLM's own workaround
+// for issue 50773 uses. It is a constant rather than a marshalled value
+// because there is nothing here for a recipe to vary: the boolean either
+// turns these two passes off or the flag is not sent at all.
+const disabledQuantFusionsConfig = `{"pass_config":{"fuse_norm_quant":false,"fuse_act_quant":false}}`
 
 // vllmDistributedArgs are the two-node launch flags the community DGX Spark
 // recipe uses: plain vllm serve with --nnodes/--node-rank/--master-addr/

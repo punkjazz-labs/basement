@@ -150,6 +150,68 @@ func TestChatTemplateKwargsAlwaysReachVLLM(t *testing.T) {
 	}
 }
 
+// vLLM's fuse_norm_quant and fuse_act_quant compilation passes are on by
+// default and garble DeepSeek V4 Flash output on SM121 (vllm-project/vllm
+// issue 50773). The recipe asks for the documented workaround with a boolean,
+// and the boolean may only ever produce this one document: the string below
+// is the whole surface a recipe has over vLLM's compiler.
+func TestDisabledQuantFusionsEmitTheDocumentedCompilationConfig(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flash, ok := recipe.Find(recipes, "deepseek-v4-flash-0731-2s")
+	if !ok {
+		t.Fatal("DeepSeek V4 Flash two-Spark recipe missing")
+	}
+	if !flash.Service.VLLM.DisableQuantFusions {
+		t.Fatal("this test assumes the DeepSeek V4 Flash recipe disables the quantization fusion passes")
+	}
+	head := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501}
+	args := vllmArgs(flash, head)
+	got, ok := argumentValue(args, "--compilation-config")
+	if !ok {
+		t.Fatalf("head arguments carry no --compilation-config: %s", strings.Join(args, " "))
+	}
+	want := `{"pass_config":{"fuse_norm_quant":false,"fuse_act_quant":false}}`
+	if got != want {
+		t.Fatalf("--compilation-config %s, want %s", got, want)
+	}
+	// One flag, one value: the knob must not be able to accumulate passes.
+	count := 0
+	for _, arg := range args {
+		if arg == "--compilation-config" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("--compilation-config appeared %d times", count)
+	}
+}
+
+// Every other recipe leaves vLLM's compiler alone, and a recipe that never
+// names the field must launch byte-for-byte as it did before the field
+// existed: no --compilation-config at all, not an empty or default one.
+func TestRecipesWithoutTheKnobSendNoCompilationConfig(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, r := range recipes {
+		if r.Service.VLLM == nil || r.Service.VLLM.DisableQuantFusions {
+			continue
+		}
+		seen++
+		if hasArgument(vllmArgs(r, Placement{}), "--compilation-config") {
+			t.Fatalf("%s gained a compilation config it never asked for", r.ID)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no vLLM recipe left the knob unset, so this test proved nothing")
+	}
+}
+
 // sglangRecipe is the shape an SGLang recipe will have once one is
 // qualified: no such recipe ships yet, so the command builder is pinned
 // against a hand-built recipe rather than the catalog.

@@ -487,6 +487,11 @@ func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 		"tool":      {"qwen3_xml": true, "qwen3_coder": true, "poolside_v1": true},
 		"load":      {"": true, "fastsafetensors": true},
 	}
+	// disable_quant_fusions carries no allowlist because its type is one: the
+	// field is a boolean, so the only compilation configuration a recipe can
+	// ask for is the single fixed document the argument builder holds. The
+	// strictness that matters for it is the decoder's, which rejects any
+	// neighbouring key this schema does not name.
 	if !allowed["kv"][v.KVCacheDType] || !allowed["attention"][v.AttentionBackend] || !allowed["moe"][v.MoEBackend] ||
 		!allowed["linear"][v.LinearBackend] ||
 		!allowed["spec_method"][v.SpeculativeMethod] || !allowed["spec_moe"][v.SpeculativeMoE] ||

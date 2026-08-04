@@ -220,6 +220,16 @@ type VLLMConfig struct {
 	AsyncScheduling      bool                `yaml:"async_scheduling" json:"async_scheduling"`
 	PrefixCaching        bool                `yaml:"prefix_caching" json:"prefix_caching"`
 	AutoToolChoice       bool                `yaml:"auto_tool_choice" json:"auto_tool_choice"`
+	// DisableQuantFusions turns off exactly two of vLLM's default-on
+	// compilation passes, fuse_norm_quant and fuse_act_quant, by emitting one
+	// fixed --compilation-config document. It is a boolean rather than a
+	// compilation-config field because a recipe must not be able to hand the
+	// runtime arbitrary compiler configuration: the only expressible outcome
+	// is the documented workaround for the passes that garble DeepSeek V4
+	// Flash output on SM121 (vllm-project/vllm issue 50773). Absent, which is
+	// every recipe that shipped before this field, means no
+	// --compilation-config flag at all and vLLM's own defaults stand.
+	DisableQuantFusions bool `yaml:"disable_quant_fusions,omitempty" json:"disable_quant_fusions,omitempty"`
 }
 
 // SGLangConfig mirrors the subset of sglang.launch_server arguments a recipe
