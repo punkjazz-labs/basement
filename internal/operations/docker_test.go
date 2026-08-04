@@ -514,11 +514,14 @@ func TestWritablePathsBecomeTheirOwnLoadableTmpfs(t *testing.T) {
 		t.Fatal("DeepSeek V4 Flash two-Spark recipe missing")
 	}
 	tmpfs, _ := createHostConfig(t, flash)["Tmpfs"].(map[string]any)
-	if len(tmpfs) != 2 {
-		t.Fatalf("tmpfs=%#v, want the scratch mount and the tilelang cache", tmpfs)
+	if len(tmpfs) != 3 {
+		t.Fatalf("tmpfs=%#v, want the scratch mount, the tilelang cache and its temp dir", tmpfs)
 	}
 	if tmpfs["/tmp"] != "rw,noexec,nosuid,size=8g" {
 		t.Fatalf("the scratch mount changed: %#v", tmpfs["/tmp"])
+	}
+	if options, _ := tmpfs["/root/tmp"].(string); options != "rw,nosuid,size=4g" {
+		t.Fatalf("temp dir mounted %q, want a bounded writable mount", options)
 	}
 	options, _ := tmpfs["/root/.tilelang"].(string)
 	if options != "rw,nosuid,size=4g" {

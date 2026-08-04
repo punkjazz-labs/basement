@@ -107,7 +107,20 @@ func Validate(r Recipe) error {
 		"VLLM_TARGET_DEVICE": {"cuda": true},
 		"MAX_JOBS":           {"4": true},
 	}
+	// TMPDIR may only point at a surface the recipe itself declares writable:
+	// runtimes whose JIT caches load compiled objects need an exec-friendly
+	// temp dir, and the declared writable paths are exactly those mounts.
+	writable := map[string]bool{}
+	for _, path := range r.Runtime.WritablePaths {
+		writable[path] = true
+	}
 	for name, value := range r.Runtime.Environment {
+		if name == "TMPDIR" {
+			if !writable[value] {
+				problems = append(problems, "runtime environment TMPDIR must name one of the recipe's writable paths")
+			}
+			continue
+		}
 		if !allowedEnvironment[name][value] {
 			problems = append(problems, "runtime environment is outside the allowlist")
 		}
