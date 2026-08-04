@@ -70,6 +70,15 @@ issues 48054 (fixed by the v0.26.0 pin this recipe now carries) and 50773
 (open). A crashed engine also leaves its container in a state Docker still
 reports as running, so recovery needs a container restart, not a retry.
 
-Verdict: recipe stays candidate. Revisit when upstream ships a fix for the
-long-decode allocation growth; the recipe pin, cache mounts, fusion opt-out
-and cudagraph opt-out all stay, each documented in the recipe itself.
+Verdict at the time: recipe stays candidate, revisit when upstream ships a
+fix for the long-decode allocation growth.
+
+Superseded 2026-08-04: a working daily-use deployment of this exact model on
+another two-Spark pair was inspected read-only. It does not run stock vLLM
+at all; it runs the Anemll GB10 fork (ghcr.io/anemll/dspark-vllm-gx10) with
+an NVFP4 MLA KV cache, DSpark multi-token speculative decoding and the
+flashinfer_b12x MoE backend, on identical driver, kernel and CUDA versions
+to ours. That rules out an environment difference and confirms the failure
+above is specific to the stock vLLM stack. Recipe version 2 pins the fork
+image by digest and mirrors the observed serve configuration; it stays
+candidate until it passes this same qualification on our hardware.
