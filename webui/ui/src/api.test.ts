@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, formatTokens, OfflineError, runtimeLabel } from './api'
+import { api, apiBlob, ApiError, formatTokens, OfflineError, runtimeLabel } from './api'
 
 const jsonResponse = (body: unknown, init: { status?: number; ok?: boolean } = {}) => ({
   ok: init.ok ?? true,
@@ -48,6 +48,18 @@ describe('api', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ok: true })))
     await expect(api('/api/v1/system')).resolves.toEqual({ ok: true })
   })
+
+  it('fetches an authenticated attachment as a Blob for local playback', async () => {
+    const file = new Blob(['video bytes'], { type: 'application/octet-stream' })
+    const fetch = vi.fn().mockResolvedValue({ ...jsonResponse({}), blob: async () => file })
+    vi.stubGlobal('fetch', fetch)
+
+    await expect(apiBlob('/api/v1/generations/gen-1/file')).resolves.toBe(file)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/v1/generations/gen-1/file',
+      expect.objectContaining({ credentials: 'same-origin' }),
+    )
+  })
 })
 
 describe('formatTokens', () => {
@@ -66,6 +78,7 @@ describe('runtimeLabel', () => {
     expect(runtimeLabel('vllm')).toBe('vLLM')
     expect(runtimeLabel('sglang')).toBe('SGLang')
     expect(runtimeLabel('llamacpp')).toBe('llama.cpp')
+    expect(runtimeLabel('comfyui')).toBe('ComfyUI')
   })
 
   // Naming an unknown runtime after one it is not would be a lie the console

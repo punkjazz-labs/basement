@@ -39,7 +39,7 @@ interface ConfirmState {
 type Placement = 'local' | 'peer'
 
 export default function Models({
-  system, recipes, models, jobs, peers, refreshModelsAndJobs, openDeployment, openPlayground, openFleet,
+  system, recipes, models, jobs, peers, refreshModelsAndJobs, openDeployment, openPlayground, openGenerate, openFleet,
 }: AppState) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [licence, setLicence] = useState(false)
@@ -363,6 +363,7 @@ export default function Models({
 
   const rowFor = (recipe: Recipe) => {
     const model = installed.get(recipe.id)
+    const isMedia = Boolean(recipe.media_generation)
     // Only jobs that change what is running should lock the row. Smoke tests
     // and benchmarks run against a serving model — Open must stay available.
     const disruptive = new Set(['install', 'start', 'stop', 'remove'])
@@ -426,8 +427,13 @@ export default function Models({
             </div>
           </div>
           <div className="m-num">
-            <span className="n">{measured ? measured.toFixed(1) : reference ? `~${reference}` : 'n/a'}<small>tok/s</small></span>
-            <span className={`sub ${measured ? 'ok' : ''}`}>{measured ? 'measured here' : 'typical'}</span>
+            <span className="n">
+              {isMedia ? 'n/a' : measured ? measured.toFixed(1) : reference ? `~${reference}` : 'n/a'}
+              {!isMedia && <small>tok/s</small>}
+            </span>
+            <span className={`sub ${measured && !isMedia ? 'ok' : ''}`}>
+              {isMedia ? 'media generation' : measured ? 'measured here' : 'typical'}
+            </span>
           </div>
           <div className="m-num">
             <span className="n">{formatBytes(recipe.artifact_bytes)}</span>
@@ -462,7 +468,9 @@ export default function Models({
                 {updateAvailable && (
                   <button className="ghost" disabled={busy} onClick={act(() => startInstall(recipe))}>Update</button>
                 )}
-                <button className="primary" disabled={busy} onClick={act(openPlayground)}>Open</button>
+                <button className="primary" disabled={busy} onClick={act(isMedia ? openGenerate : openPlayground)}>
+                  {isMedia ? 'Generate' : 'Open'}
+                </button>
               </>
             )}
             {model && !isActive && model.status !== 'recovering' && (
@@ -486,8 +494,13 @@ export default function Models({
             <div className="board">
               <div className="cell">
                 <div className="l">Speed</div>
-                <div className="v">{measured ? measured.toFixed(1) : reference ? `~${reference}` : 'n/a'} <small>tok/s</small></div>
-                <div className={`q ${measured ? 'ok' : ''}`}>{measured ? 'measured on this Spark' : 'typical on a Spark'}</div>
+                <div className="v">
+                  {isMedia ? 'n/a' : measured ? measured.toFixed(1) : reference ? `~${reference}` : 'n/a'}{' '}
+                  {!isMedia && <small>tok/s</small>}
+                </div>
+                <div className={`q ${measured && !isMedia ? 'ok' : ''}`}>
+                  {isMedia ? 'not token based' : measured ? 'measured on this Spark' : 'typical on a Spark'}
+                </div>
               </div>
               <div className="cell">
                 <div className="l">First token</div>
@@ -547,7 +560,9 @@ export default function Models({
               <div className="row-tools">
                 {isActive && (
                   <>
-                    <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
+                    {!isMedia && (
+                      <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
+                    )}
                     <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'smoke-test')}>Check health</button>
                   </>
                 )}

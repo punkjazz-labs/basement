@@ -19,6 +19,25 @@ export interface MemoryModel {
   runtime_overhead_bytes: number
 }
 
+// The deliberately narrow media-generation view exposed by the recipe
+// catalog. Graph file names and container paths stay backend details; the
+// console gets only the mode names and the numeric rules needed to build
+// controls the model will accept.
+export interface MediaGenerationConfig {
+  modes: string[]
+  default_short_edge: number
+  max_short_edge: number
+  max_long_edge: number
+  canvas_multiple: number
+  frame_block: number
+  frame_offset: number
+  frames_per_second: number
+  min_blocks: number
+  max_blocks: number
+  default_blocks: number
+  concurrent_generations: number
+}
+
 export interface Recipe {
   id: string
   version: number
@@ -54,6 +73,7 @@ export interface Recipe {
   // string /api/v1/storage reports for an image already pulled here.
   runtime: { kind?: string; image?: string; digest?: string; start_timeout_minutes: number }
   memory_model?: MemoryModel
+  media_generation?: MediaGenerationConfig
   artifact_bytes: number
   required_bytes: number
 }
@@ -104,6 +124,37 @@ export interface Job {
   created_at: string
   updated_at: string
   steps: Step[]
+}
+
+export interface Generation {
+  id: string
+  model_id: string
+  mode: string
+  prompt: string
+  blocks: number
+  short_edge: number
+  width: number
+  height: number
+  frames: number
+  seed: number
+  status: string
+  error?: string
+  bytes?: number
+  created_at: string
+  started_at?: string
+  finished_at?: string
+  queue_position?: number
+  file_url?: string
+}
+
+export interface GenerateResponse {
+  generation_id: string
+  queue_position: number
+  seed: number
+  frames: number
+  width: number
+  height: number
+  seconds: number
 }
 
 export interface ManagedNode {
@@ -381,7 +432,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   }
   let response: Response
   try {
-    response = await fetch(path, { ...options, headers })
+    response = await fetch(path, { ...options, headers, credentials: 'same-origin' })
   } catch (cause) {
     if (isAbort(cause)) throw cause
     throw new OfflineError()
@@ -389,6 +440,29 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const body = await response.json().catch(() => ({ error: response.statusText }))
   if (!response.ok) throw new ApiError(response.status, (body as { error?: string }).error ?? response.statusText)
   return body as T
+}
+
+// Generation files are served with attachment disposition, so a bare video
+// src cannot play them. This keeps the same authentication, offline-error and
+// server-error behavior as api(), but returns the successful body as a Blob.
+export async function apiBlob(path: string, options: RequestInit = {}): Promise<Blob> {
+  const headers = new Headers(options.headers)
+  if (options.method && options.method !== 'GET') {
+    headers.set('X-CSRF-Token', csrf)
+    headers.set('Content-Type', 'application/json')
+  }
+  let response: Response
+  try {
+    response = await fetch(path, { ...options, headers, credentials: 'same-origin' })
+  } catch (cause) {
+    if (isAbort(cause)) throw cause
+    throw new OfflineError()
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: response.statusText }))
+    throw new ApiError(response.status, (body as { error?: string }).error ?? response.statusText)
+  }
+  return response.blob()
 }
 
 // crypto.randomUUID exists only in secure contexts (https / localhost); the
@@ -426,6 +500,7 @@ const RUNTIME_LABELS: Record<string, string> = {
   vllm: 'vLLM',
   sglang: 'SGLang',
   llamacpp: 'llama.cpp',
+  comfyui: 'ComfyUI',
 }
 
 export function runtimeLabel(kind?: string): string {
@@ -573,6 +648,7 @@ export const stateCopy: Record<string, string> = {
   stopping: 'Stopping model',
   verifying_health: 'Checking health',
   verifying_inference: 'Testing inference',
+  verifying_generation: 'Testing generation',
   benchmarking: 'Measuring speed',
   removing: 'Removing model',
   ready: 'Ready',
@@ -610,6 +686,7 @@ export const operationCopy: Record<string, string> = {
   start_container: 'Start model service',
   wait_http: 'Verify health endpoint',
   verify_openai_inference: 'Run inference test',
+  verify_media_generation: 'Run generation test',
   measure_throughput: 'Measure real speed',
   remove_container: 'Remove model service',
   remove_artifact_if_unshared: 'Remove model files',
