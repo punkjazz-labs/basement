@@ -61,6 +61,40 @@ type fleetExecutor struct {
 	peerAsked    int
 }
 
+type gatedFleetExecutor struct {
+	*fleetExecutor
+	gateRecipe  string
+	entered     chan struct{}
+	release     chan struct{}
+	enterOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func newGatedFleetExecutor(recipeID string) *gatedFleetExecutor {
+	return &gatedFleetExecutor{
+		fleetExecutor: newFleetExecutor(),
+		gateRecipe:    recipeID,
+		entered:       make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+}
+
+func (f *gatedFleetExecutor) Execute(ctx context.Context, execution operations.Execution, op recipe.Operation, r recipe.Recipe, progress operations.Progress) (map[string]any, error) {
+	if op.Type == "download_artifact" && r.ID == f.gateRecipe {
+		f.enterOnce.Do(func() { close(f.entered) })
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return f.fleetExecutor.Execute(ctx, execution, op, r, progress)
+}
+
+func (f *gatedFleetExecutor) unblock() {
+	f.releaseOnce.Do(func() { close(f.release) })
+}
+
 func newFleetExecutor() *fleetExecutor {
 	return &fleetExecutor{running: map[string]bool{}, peerReady: true}
 }
@@ -764,6 +798,132 @@ func TestSwitchingAwayFromADistributedModelStopsBothOfItsRanks(t *testing.T) {
 			t.Fatalf("a single-node install reached the other Spark: %s", event)
 		}
 	}
+}
+
+func TestConcurrentInstallReplansForDistributedPredecessor(t *testing.T) {
+	ctx := context.Background()
+	builtin, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	single := singleSpark(builtin)
+	distributed := twoSparkRecipe(t)
+	distributed.ID = "concurrent-distributed-predecessor"
+	fake := newGatedFleetExecutor(single.ID)
+	t.Cleanup(fake.unblock)
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	runner := New(s, fake, []recipe.Recipe{single, distributed})
+
+	first, _, err := s.CreateJob(ctx, "install", single.ID, "single-planned-first", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	select {
+	case <-fake.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("single-node install never reached the download gate")
+	}
+	second, _, err := s.CreateJob(ctx, "install", distributed.ID, "distributed-finishes-first", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	waitJob(t, s, second.ID, "ready")
+	fake.unblock()
+	waitJob(t, s, first.ID, "ready")
+
+	detail := fake.recordedDetail()
+	for _, want := range []string{
+		"stop_container/" + distributed.ID + "@head",
+		"stop_container/" + distributed.ID + "@worker",
+	} {
+		if indexOf(detail, want) < 0 {
+			t.Fatalf("activation-time switch did not stop %s: %v", want, detail)
+		}
+	}
+	if indexOf(detail, "stop_container/"+distributed.ID+"@head") > indexOf(detail, "stop_container/"+distributed.ID+"@worker") {
+		t.Fatalf("the outgoing head must stop before its worker: %v", detail)
+	}
+	if indexOf(detail, "stop_container/"+distributed.ID+"@worker") > indexOf(detail, "start_container/"+single.ID+"@local") {
+		t.Fatalf("the single-node target started before both predecessor ranks stopped: %v", detail)
+	}
+
+	fake.mu.Lock()
+	running := make(map[string]bool, len(fake.running))
+	for node, value := range fake.running {
+		running[node] = value
+	}
+	fake.mu.Unlock()
+	runningCount := 0
+	for _, value := range running {
+		if value {
+			runningCount++
+		}
+	}
+	if runningCount != 1 || !running["local"] {
+		t.Fatalf("running containers=%v, want only the single-node target", running)
+	}
+	assertActiveModel(t, s, single.ID, distributed.ID, "stopped")
+}
+
+func TestConcurrentDistributedTargetReplansForSinglePredecessor(t *testing.T) {
+	ctx := context.Background()
+	builtin, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	single := singleSpark(builtin)
+	distributed := twoSparkRecipe(t)
+	distributed.ID = "concurrent-distributed-target"
+	fake := newGatedFleetExecutor(distributed.ID)
+	t.Cleanup(fake.unblock)
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	runner := New(s, fake, []recipe.Recipe{single, distributed})
+
+	first, _, err := s.CreateJob(ctx, "install", distributed.ID, "distributed-planned-first", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	select {
+	case <-fake.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("distributed install never reached the download gate")
+	}
+	second, _, err := s.CreateJob(ctx, "install", single.ID, "single-finishes-first", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	waitJob(t, s, second.ID, "ready")
+	fake.unblock()
+	waitJob(t, s, first.ID, "ready")
+
+	detail := fake.recordedDetail()
+	stop := indexOf(detail, "stop_container/"+single.ID+"@local")
+	startWorker := indexOf(detail, "start_container/"+distributed.ID+"@worker")
+	if stop < 0 || startWorker < 0 || stop > startWorker {
+		t.Fatalf("the distributed target did not stop the discovered single-node predecessor before bringing up its worker: %v", detail)
+	}
+	fake.mu.Lock()
+	running := make(map[string]bool, len(fake.running))
+	for node, value := range fake.running {
+		running[node] = value
+	}
+	fake.mu.Unlock()
+	if running["local"] || !running[operations.RoleHead] || !running[operations.RoleWorker] {
+		t.Fatalf("running containers=%v, want only the distributed target's two ranks", running)
+	}
+	assertActiveModel(t, s, distributed.ID, single.ID, "stopped")
 }
 
 func TestRollbackRestoresADistributedPredecessorOnBothItsNodes(t *testing.T) {
