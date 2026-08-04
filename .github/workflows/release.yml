@@ -77,10 +77,23 @@ jobs:
           cp packaging/setup.ps1 dist/setup.ps1
           tar -C packaging -czf dist/packaging.tar.gz .
 
-      - name: Publish release
+      # Created as a draft on purpose. The macOS assets this job uploads are
+      # unsigned: they cannot be signed here, because the Developer ID and the
+      # notary credentials live on a Mac (see the comment above and
+      # packaging/sign-macos-release.sh). Publishing now would put unsigned
+      # binaries, and checksums matching those unsigned binaries, on the
+      # release page for as long as signing takes, and anyone downloading in
+      # that window would get bytes that stop matching the published
+      # checksums once the signed ones land. A draft is invisible to
+      # `latest`, so the install script and the website never point at a
+      # half-signed release. sign-macos-release.sh publishes it as its final
+      # step, which also means a release nobody signs stays a draft rather
+      # than quietly shipping unsigned.
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/* \
             --title "basement ${GITHUB_REF_NAME}" \
-            --generate-notes
+            --generate-notes \
+            --draft

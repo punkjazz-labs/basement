@@ -51,3 +51,13 @@ echo "==> done: signed and notarized darwin binaries replaced on $TAG"
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 SIGN_IDENTITY="$IDENTITY" NOTARY_PROFILE="$PROFILE" \
   "$HERE/build-macos-installer.sh" "$TAG"
+
+# The release is created as a draft by CI, because everything it uploads for
+# macOS is unsigned until the steps above replace it. Publishing here, last,
+# is what makes the release page go from nothing to fully signed in one move:
+# nobody can download an unsigned binary, or a checksum that will stop
+# matching, out of a window between the two. A release that never reaches
+# this line stays a draft, which is the right outcome for one nobody signed.
+echo "==> publishing $TAG"
+gh release edit "$TAG" --draft=false --latest
+echo "==> done: $TAG is published"
