@@ -1082,7 +1082,11 @@ func (e *Engine) benchmarkResult(ctx context.Context, jobID string) (float64, in
 		return 0, 0, false
 	}
 	for _, step := range job.Steps {
-		if step.Operation != "measure_throughput" {
+		// A distributed (multi-Spark) recipe records this step as
+		// "measure_throughput:head" (see stepName): the role suffix keeps a
+		// two-node timeline honest about which machine ran it, but it must
+		// not stop the result from ever reaching the model's stored metrics.
+		if step.Operation != "measure_throughput" && !strings.HasPrefix(step.Operation, "measure_throughput:") {
 			continue
 		}
 		var receipt struct {

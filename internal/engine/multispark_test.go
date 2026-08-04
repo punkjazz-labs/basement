@@ -105,6 +105,12 @@ func (f *fleetExecutor) Execute(_ context.Context, execution operations.Executio
 	f.events = append(f.events, key)
 	f.detail = append(f.detail, op.Type+"/"+r.ID+"@"+node)
 	receipt := map[string]any{"operation": op.Type, "node": execution.Placement.NodeName, "node_role": execution.Placement.Role}
+	if op.Type == "measure_throughput" {
+		receipt["tokens_per_second"] = 42.5
+		receipt["time_to_first_token_ms"] = 120
+		receipt["completion_tokens"] = 256
+		receipt["measured"] = true
+	}
 	if op.Type == operations.VerifyPeerNode {
 		f.peerAsked++
 		if !f.peerReady {
@@ -666,6 +672,56 @@ func TestWorkerStopFailureDuringSwitchFailsTheJob(t *testing.T) {
 	// effort) the predecessor is restored rather than left half torn down.
 	if !strings.Contains(failed.Error, "restored and verified") {
 		t.Fatalf("failure did not report what happened to the previous model: %s", failed.Error)
+	}
+}
+
+// TestTwoSparkBenchmarkPersistsMeasuredThroughput is task #53's regression:
+// a distributed recipe's measure_throughput step is recorded as
+// "measure_throughput:head" (see stepName), so a benchmarkResult that only
+// matched the bare "measure_throughput" operation name never found it. The
+// job itself still reported "ready" with a real number in the step receipt,
+// which is what made this bug invisible from the job's own state and only
+// showed up as the model's stored metrics silently staying empty.
+func TestTwoSparkBenchmarkPersistsMeasuredThroughput(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, r := newTwoSparkEngine(t, fake)
+	install, _, err := s.CreateJob(ctx, "install", r.ID, "install-before-benchmark", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(install.ID)
+	waitJob(t, s, install.ID, "ready")
+
+	job, _, err := s.CreateJob(ctx, "benchmark", r.ID, "two-spark-benchmark", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	finished := waitJob(t, s, job.ID, "ready")
+	if finished.Error != "" {
+		t.Fatalf("benchmark job reported an error despite reaching ready: %s", finished.Error)
+	}
+
+	found := false
+	for _, step := range finished.Steps {
+		if step.Operation == "measure_throughput:head" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("benchmark job did not record measure_throughput:head: %v", finished.Steps)
+	}
+
+	model, err := s.Model(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.TokensPerSecond != 42.5 {
+		t.Fatalf("measured throughput was not persisted to the model: got %v tok/s, want 42.5", model.TokensPerSecond)
+	}
+	if model.MeasuredAt == "" {
+		t.Fatal("measured_at was not set once the benchmark completed")
 	}
 }
 
