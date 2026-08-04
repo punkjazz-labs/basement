@@ -19,6 +19,13 @@ import (
 
 type Store struct{ db *sql.DB }
 
+type UpdateBlocker struct {
+	Kind     string `json:"kind"`
+	ID       string `json:"id"`
+	Activity string `json:"activity"`
+	State    string `json:"state"`
+}
+
 type Job struct {
 	ID             string          `json:"id"`
 	Kind           string          `json:"kind"`
@@ -430,6 +437,38 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
 		jobs = append(jobs, job)
 	}
 	return jobs, nil
+}
+
+// ActiveUpdateBlocker names the first engine or generation activity that a
+// manager restart would interrupt. The query is one database snapshot so the
+// API never reports an idle machine assembled from two different moments.
+func (s *Store) ActiveUpdateBlocker(ctx context.Context) (UpdateBlocker, bool, error) {
+	var blocker UpdateBlocker
+	var recipeID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT category,id,activity,recipe_id,state FROM (
+			SELECT 'job' AS category,id,kind AS activity,recipe_id,state,created_at
+			FROM jobs
+			WHERE state NOT IN ('ready','failed','cancelled','stopped','removed')
+			UNION ALL
+			SELECT 'generation' AS category,id,'generation' AS activity,recipe_id,status AS state,created_at
+			FROM generations
+			WHERE status IN ('queued','running')
+		)
+		ORDER BY created_at ASC
+		LIMIT 1`).Scan(&blocker.Kind, &blocker.ID, &blocker.Activity, &recipeID, &blocker.State)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UpdateBlocker{}, false, nil
+	}
+	if err != nil {
+		return UpdateBlocker{}, false, err
+	}
+	if blocker.Kind == "generation" {
+		blocker.Activity = fmt.Sprintf("generation %s for %s", blocker.ID, recipeID)
+	} else {
+		blocker.Activity = fmt.Sprintf("%s job %s for %s", blocker.Activity, blocker.ID, recipeID)
+	}
+	return blocker, true, nil
 }
 
 func (s *Store) UpdateJobState(ctx context.Context, id, state, message string) error {

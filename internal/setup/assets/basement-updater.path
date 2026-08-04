@@ -1,0 +1,14 @@
+[Unit]
+Description=Watch for a verified basement manager update
+After=local-fs.target
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Path]
+PathExists=/var/lib/basement/updates/staging/pending/request.json
+Unit=basement-updater.service
+TriggerLimitIntervalSec=60s
+TriggerLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+[Unit]
+Description=Verify and apply a basement manager update
+After=basement.service
+Wants=basement.service
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+SupplementaryGroups=basement
+ExecStart=/usr/lib/basement/updater/basement-updater apply
+TimeoutStartSec=3min
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/usr/lib/basement /var/lib/basement/updates /var/lib/basement-updater
+
+[Install]
+WantedBy=multi-user.target
