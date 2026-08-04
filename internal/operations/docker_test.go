@@ -520,11 +520,11 @@ func TestWritablePathsBecomeTheirOwnLoadableTmpfs(t *testing.T) {
 	if tmpfs["/tmp"] != "rw,noexec,nosuid,size=8g" {
 		t.Fatalf("the scratch mount changed: %#v", tmpfs["/tmp"])
 	}
-	if options, _ := tmpfs["/root/tmp"].(string); options != "rw,nosuid,size=4g" {
+	if options, _ := tmpfs["/root/tmp"].(string); options != "rw,exec,nosuid,size=4g" {
 		t.Fatalf("temp dir mounted %q, want a bounded writable mount", options)
 	}
 	options, _ := tmpfs["/root/.tilelang"].(string)
-	if options != "rw,nosuid,size=4g" {
+	if options != "rw,exec,nosuid,size=4g" {
 		t.Fatalf("tilelang cache mounted %q, want a bounded writable mount", options)
 	}
 	if strings.Contains(options, "noexec") {
@@ -542,7 +542,7 @@ func TestWritablePathsBecomeTheirOwnLoadableTmpfs(t *testing.T) {
 		}
 		r.Runtime.WritablePaths = []string{"/root/.tilelang"}
 		tmpfs, _ := createHostConfig(t, r)["Tmpfs"].(map[string]any)
-		if tmpfs["/root/.tilelang"] != "rw,nosuid,size=4g" || tmpfs["/tmp"] != "rw,noexec,nosuid,size=8g" {
+		if tmpfs["/root/.tilelang"] != "rw,exec,nosuid,size=4g" || tmpfs["/tmp"] != "rw,noexec,nosuid,size=8g" {
 			t.Fatalf("%s (%s) tmpfs=%#v", id, r.Runtime.Kind, tmpfs)
 		}
 	}

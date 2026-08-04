@@ -835,10 +835,13 @@ const cacheMountPath = recipe.CacheMountPath
 // Mount options for the two kinds of in-memory filesystem a container gets.
 // They differ in one deliberate way: a JIT compiler writes a shared object
 // into its cache directory and then loads it, so noexec on a writable path
-// would replace one import-time failure with another. nosuid stays on both.
+// would replace one import-time failure with another. exec must be stated,
+// not merely implied: Docker mounts a tmpfs noexec unless told otherwise,
+// which real hardware proved by refusing to map the compiled kernel from a
+// mount that only omitted the flag. nosuid stays on both.
 const (
 	tempTmpfsOptions     = "rw,noexec,nosuid,size=8g"
-	writableTmpfsOptions = "rw,nosuid,size=4g"
+	writableTmpfsOptions = "rw,exec,nosuid,size=4g"
 )
 
 // containerTmpfs is the complete set of in-memory filesystems a container for
