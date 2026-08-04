@@ -106,6 +106,10 @@ func Validate(r Recipe) error {
 		"CUTE_DSL_ARCH":      {"sm_121a": true},
 		"VLLM_TARGET_DEVICE": {"cuda": true},
 		"MAX_JOBS":           {"4": true},
+		// Opt-out only: breakable CUDA graphs accumulate allocations during
+		// long decodes on GB10 until the driver reports out of memory, so a
+		// recipe may turn them off but never force them on.
+		"VLLM_USE_BREAKABLE_CUDAGRAPH": {"0": true},
 	}
 	// TMPDIR may only point at a surface the recipe itself declares writable:
 	// runtimes whose JIT caches load compiled objects need an exec-friendly

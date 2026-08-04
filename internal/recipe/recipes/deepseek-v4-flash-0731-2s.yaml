@@ -69,6 +69,11 @@ runtime:
   environment:
     CUTE_DSL_ARCH: sm_121a
     MAX_JOBS: "4"
+    # vLLM auto-enables breakable CUDA graphs on this hardware and their
+    # allocations grow across a long generation until the driver reports out
+    # of memory (observed twice on real GB10s, at 0.85 and 0.80 utilization;
+    # the community deployment of this exact model sets the same opt-out).
+    VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
     # tilelang also exports each compiled kernel into a tempfile directory and
     # loads the shared object from there, so the process temp dir must allow
     # exec too; /tmp stays noexec, TMPDIR moves to its own writable mount.
