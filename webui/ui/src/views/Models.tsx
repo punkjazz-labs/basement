@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   api, idempotency, terminal, formatBytes, formatTokens, runtimeLabel, startTimeoutMinutes, modelStateWord, peerModelList,
-  updatePlan, installRequest, installConfirmationsComplete, licenceArtifacts, territoryEligibilityLabel,
+  updatePlan, installRequest, installConfirmationsComplete, licenceArtifacts, territoryEligibilityLabel, trustLine,
   type InstalledModel, type Job, type Peer, type Preflight, type Recipe, type StorageInfo, type PeerSummary,
   type TokenUsage,
 } from '../api'
@@ -618,7 +618,7 @@ export default function Models({
           </div>
           <p className="hero-line">
             {USE[featured.id]}{' '}
-            <span>Verified and pinned for a single Spark. Basement measures its real speed after install.</span>
+            <span>{trustLine(featured)} Basement measures its real speed after install.</span>
           </p>
           <div className="hero-score">
             <div className="cell"><div className="l">Speed</div><div className="v">~{REFERENCE_TPS[featured.id]}</div><div className="u">tok/s · typical</div></div>

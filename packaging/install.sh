@@ -67,7 +67,14 @@ if [ -n "$listen" ]; then
 fi
 
 systemctl daemon-reload
-systemctl enable --now basement.service
+systemctl enable basement.service
+# Restart rather than `enable --now`. That form starts a stopped service but
+# does nothing to one already running, so rerunning this installer to upgrade
+# put the new binary on disk, left the old one running, and still printed
+# "basement is running" below. Restarting unconditionally is what makes a
+# rerun an actual upgrade. Model containers are detached from this service and
+# keep serving across the restart.
+systemctl restart basement.service
 
 token_file=/var/lib/basement/pairing-token
 tries=0
@@ -90,7 +97,7 @@ echo "  basement is running."
 echo
 echo "  Open the console:  $console_url"
 if [ -z "$listen" ]; then
-  echo "  (loopback only — from another device use an SSH tunnel, or rerun"
+  echo "  (loopback only. From another device use an SSH tunnel, or rerun"
   echo "   install.sh and pick a network interface)"
 else
   case "$listen" in
