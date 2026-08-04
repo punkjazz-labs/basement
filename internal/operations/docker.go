@@ -73,6 +73,13 @@ type ContainerState struct {
 	// bind sources), so it is the only way to tell that a container predates
 	// its recipe declaring a writable path.
 	Tmpfs map[string]string
+	// Image is the image reference the container was created from, as Docker
+	// recorded it in the container's configuration. Every container this
+	// manager creates is created from a repo@sha256 reference, so for ours
+	// this is the exact pinned image, and it is fixed for the container's
+	// life: pulling a newer digest changes nothing about a container that
+	// already exists.
+	Image string
 }
 
 func NewDockerClient(socket string) *DockerClient {
@@ -245,6 +252,7 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 		Config struct {
 			Labels map[string]string
 			Cmd    []string
+			Image  string
 		}
 		HostConfig struct {
 			Tmpfs map[string]string
@@ -263,7 +271,7 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 			mounts[mount.Destination] = mount.Source
 		}
 	}
-	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels, Mounts: mounts, Command: body.Config.Cmd, Tmpfs: body.HostConfig.Tmpfs}, nil
+	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels, Mounts: mounts, Command: body.Config.Cmd, Tmpfs: body.HostConfig.Tmpfs, Image: body.Config.Image}, nil
 }
 
 func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, r recipe.Recipe, placement Placement) (string, error) {
@@ -944,6 +952,39 @@ func staleTmpfs(state ContainerState, expected map[string]string) []mountMismatc
 	}
 	sort.Slice(drift, func(i, j int) bool { return drift[i].MountPoint < drift[j].MountPoint })
 	return drift
+}
+
+// imageMismatch is the pinned image an existing container was built from,
+// when the recipe now pins a different one.
+type imageMismatch struct {
+	Actual   string
+	Expected string
+}
+
+// staleImage reports that an existing container is still running an image the
+// recipe has moved off. A recipe can change its digest without changing its
+// version — the two-Spark Flash recipe moved from vLLM v0.25.1 to v0.26.0 that
+// way, because bumping the version would rename the container and orphan the
+// running one — and Docker fixes a container's image at creation exactly as it
+// fixes its binds. pull_image fetches the new digest, create_container finds a
+// container of the right name and version and reuses it, and the machine goes
+// on serving the old image with nothing in the receipt to say so. Only the
+// digest the container was actually built from can tell.
+//
+// An image the container does not report is silence, not disagreement, and no
+// container is rebuilt on silence.
+func staleImage(state ContainerState, r recipe.Recipe) *imageMismatch {
+	expected := r.Runtime.Reference()
+	if state.Image == "" || expected == "" || state.Image == expected {
+		return nil
+	}
+	return &imageMismatch{Actual: state.Image, Expected: expected}
+}
+
+// imageMismatchReceipt renders an image change for a job receipt, so the log
+// names both digests rather than saying only that something was rebuilt.
+func imageMismatchReceipt(drift imageMismatch) map[string]any {
+	return map[string]any{"was": drift.Actual, "now": drift.Expected}
 }
 
 // launchMismatch is a launch flag whose value was fixed into an existing

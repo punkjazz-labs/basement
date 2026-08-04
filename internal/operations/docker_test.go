@@ -658,6 +658,46 @@ func TestStaleTmpfsNoticesADriftedWritableSurface(t *testing.T) {
 	}
 }
 
+// A recipe can pin a new image digest while its version stays put, which is
+// how the two-Spark Flash recipe moved from vLLM v0.25.1 to v0.26.0 without
+// renaming and orphaning its container. Docker fixes a container's image at
+// creation, so pulling the new digest changes nothing about the container that
+// already exists: create_container finds one with the right name, labels and
+// version, reuses it, and the machine keeps serving the old image while every
+// receipt names the new one.
+func TestStaleImageNoticesAContainerLeftOnTheOldDigest(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := recipe.Find(recipes, "deepseek-v4-flash-0731-2s")
+	if !ok {
+		t.Fatal("DeepSeek V4 Flash two-Spark recipe missing")
+	}
+	previous := r.Runtime.Image + "@sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089"
+	if previous == r.Runtime.Reference() {
+		t.Fatal("this test needs a digest the recipe has moved off")
+	}
+
+	drift := staleImage(ContainerState{Image: previous}, r)
+	if drift == nil || drift.Actual != previous || drift.Expected != r.Runtime.Reference() {
+		t.Fatalf("drift=%#v, want the old digest against the pinned one", drift)
+	}
+	if receipt := imageMismatchReceipt(*drift); receipt["was"] != previous || receipt["now"] != r.Runtime.Reference() {
+		t.Fatalf("receipt=%#v, want both digests named", receipt)
+	}
+
+	if drift := staleImage(ContainerState{Image: r.Runtime.Reference()}, r); drift != nil {
+		t.Fatalf("a container already on the pinned image was called stale: %#v", drift)
+	}
+
+	// A daemon that reports no image is silence, not disagreement, and no
+	// container is rebuilt on silence.
+	if drift := staleImage(ContainerState{}, r); drift != nil {
+		t.Fatalf("an unreported image produced drift: %#v", drift)
+	}
+}
+
 func toStrings(values []any) []string {
 	result := make([]string, len(values))
 	for index, value := range values {

@@ -255,6 +255,9 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if len(drift.Mounts) > 0 {
 			receipt["recreated_after_move"] = mountMismatchReceipt(drift.Mounts)
 		}
+		if drift.Image != nil {
+			receipt["recreated_for_image_change"] = imageMismatchReceipt(*drift.Image)
+		}
 		if len(drift.Writable) > 0 {
 			receipt["recreated_for_writable_paths"] = mountMismatchReceipt(drift.Writable)
 		}
@@ -310,6 +313,12 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		}
 		if len(drift.Mounts) > 0 {
 			receipt["recreated_after_move"] = mountMismatchReceipt(drift.Mounts)
+		}
+		// A recipe can pin a new image digest without changing its version, so
+		// the container built by an earlier deployment would otherwise keep
+		// serving the old image while every receipt reported the new one.
+		if drift.Image != nil {
+			receipt["recreated_for_image_change"] = imageMismatchReceipt(*drift.Image)
 		}
 		// A recipe that has since declared a writable path describes a
 		// container this one is not: its root filesystem is read-only and the
@@ -559,14 +568,16 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 	case "create_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		// Labels alone say the container is ours and for this recipe version;
-		// they say nothing about where it reads the model from, or about what
-		// it is allowed to write. One whose binds no longer match this
-		// machine's layout, or whose writable paths no longer match the
-		// recipe, is not "already created" — it has to be built again (see
-		// staleMounts and staleTmpfs).
+		// they say nothing about where it reads the model from, what it is
+		// allowed to write, or which image it runs. A recipe version is not a
+		// container's contents: the digest and the writable paths both change
+		// under a version that stays put. One that disagrees on any of them is
+		// not "already created" — it has to be built again (see staleMounts,
+		// staleTmpfs and staleImage).
 		return err == nil && containerLabelsMatch(state.Labels, r) &&
 			len(staleMounts(state, h.expectedMounts(r))) == 0 &&
-			len(staleTmpfs(state, containerTmpfs(r))) == 0
+			len(staleTmpfs(state, containerTmpfs(r))) == 0 &&
+			staleImage(state, r) == nil
 	case "start_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		return err == nil && state.Running
@@ -911,10 +922,11 @@ type containerDrift struct {
 	Mounts   []mountMismatch
 	Writable []mountMismatch
 	Launch   []launchMismatch
+	Image    *imageMismatch
 }
 
 func (d containerDrift) found() bool {
-	return len(d.Mounts) > 0 || len(d.Writable) > 0 || len(d.Launch) > 0
+	return len(d.Mounts) > 0 || len(d.Writable) > 0 || len(d.Launch) > 0 || d.Image != nil
 }
 
 // replaceStaleContainer removes a container of ours that no longer matches
@@ -922,7 +934,8 @@ func (d containerDrift) found() bool {
 // has moved away from (an install adopted across the rename (spec 10) is the
 // case that produced this, its container holding binds under the pre-rename
 // data directory long after the files moved), one built before its recipe
-// declared a writable path, or, on a two-Spark model, one still holding the
+// declared a writable path, one still running the image digest the recipe
+// pinned before this one, or, on a two-Spark model, one still holding the
 // fabric address the other rank had during an earlier deployment. It returns
 // what disagreed, so the caller can create the container again and the receipt
 // can say why. Nothing is touched unless something positively disagrees.
@@ -936,6 +949,7 @@ func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recip
 		Mounts:   staleMounts(state, h.expectedMounts(r)),
 		Writable: staleTmpfs(state, containerTmpfs(r)),
 		Launch:   staleLaunch(state, r, placement),
+		Image:    staleImage(state, r),
 	}
 	if !drift.found() {
 		return containerDrift{}, nil
@@ -944,6 +958,8 @@ func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recip
 	switch {
 	case len(drift.Mounts) > 0:
 		reason = drift.Mounts[0].Expected
+	case drift.Image != nil:
+		reason = drift.Image.Expected
 	case len(drift.Writable) > 0:
 		reason = "the writable paths this recipe declares"
 	}

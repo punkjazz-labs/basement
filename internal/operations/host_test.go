@@ -470,27 +470,43 @@ func writeArtifactFixture(t *testing.T, executor *HostExecutor, r recipe.Recipe)
 }
 
 func containerFixtureJSON(id string, running bool, labels, mounts map[string]string, command ...string) string {
-	return containerFixtureWithTmpfs(id, running, labels, mounts, nil, command...)
+	return containerFixture{ID: id, Running: running, Labels: labels, Mounts: mounts, Command: command}.JSON()
 }
 
 // containerFixtureWithTmpfs is containerFixtureJSON plus the in-memory mounts
 // Docker records in host configuration, which is where a recipe's writable
-// paths land. Fixtures that leave it nil describe a daemon that reports none,
-// which is silence rather than disagreement.
+// paths land.
 func containerFixtureWithTmpfs(id string, running bool, labels, mounts, tmpfs map[string]string, command ...string) string {
+	return containerFixture{ID: id, Running: running, Labels: labels, Mounts: mounts, Tmpfs: tmpfs, Command: command}.JSON()
+}
+
+// containerFixture is one inspect response. Tmpfs and Image left empty
+// describe a daemon that reports neither, which the drift checks read as
+// silence rather than disagreement.
+type containerFixture struct {
+	ID      string
+	Running bool
+	Labels  map[string]string
+	Mounts  map[string]string
+	Tmpfs   map[string]string
+	Image   string
+	Command []string
+}
+
+func (f containerFixture) JSON() string {
 	status := "exited"
-	if running {
+	if f.Running {
 		status = "running"
 	}
-	entries := make([]map[string]string, 0, len(mounts))
-	for destination, source := range mounts {
+	entries := make([]map[string]string, 0, len(f.Mounts))
+	for destination, source := range f.Mounts {
 		entries = append(entries, map[string]string{"Type": "bind", "Source": source, "Destination": destination})
 	}
 	encoded, err := json.Marshal(map[string]any{
-		"ID":         id,
-		"State":      map[string]any{"Running": running, "Status": status},
-		"Config":     map[string]any{"Labels": labels, "Cmd": command},
-		"HostConfig": map[string]any{"Tmpfs": tmpfs},
+		"ID":         f.ID,
+		"State":      map[string]any{"Running": f.Running, "Status": status},
+		"Config":     map[string]any{"Labels": f.Labels, "Cmd": f.Command, "Image": f.Image},
+		"HostConfig": map[string]any{"Tmpfs": f.Tmpfs},
 		"Mounts":     entries,
 	})
 	if err != nil {
@@ -841,6 +857,187 @@ func TestStartContainerLeavesADeclaredWritablePathAlone(t *testing.T) {
 	}
 	if _, rebuilt := receipt["recreated_for_writable_paths"]; rebuilt {
 		t.Errorf("a matching container was reported as rebuilt: %#v", receipt)
+	}
+}
+
+// A recipe can pin a new image digest with its version unchanged, because
+// bumping the version would rename the container and orphan the running one.
+// pull_image then fetches the new digest and the existing container goes on
+// running the old one, since Docker fixes a container's image at creation.
+// Nothing about the labels, the binds or the command says so, which is why the
+// digest itself has to be compared.
+func TestStartContainerRebuildsWhenTheRecipePinnedANewImage(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	name := containerName(r)
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+	supersededImage := r.Runtime.Image + "@sha256:" + strings.Repeat("a", 64)
+	created, started := false, false
+	var stopped, removed []string
+	var createBody map[string]any
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		path := request.URL.Path
+		switch {
+		case request.Method == http.MethodPost && strings.HasPrefix(path, "/containers/create"):
+			if err := json.NewDecoder(request.Body).Decode(&createBody); err != nil {
+				t.Fatal(err)
+			}
+			created = true
+			return dockerFixtureResponse(http.StatusCreated, `{"ID":"rebuilt-id"}`), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			stopped = append(stopped, containerFromPath(path))
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodDelete:
+			removed = append(removed, containerFromPath(path))
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+			started = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case containerFromPath(path) == legacyContainerName(r):
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		case created:
+			rebuilt := containerFixture{ID: "rebuilt-id", Running: started, Labels: labels, Mounts: executor.expectedMounts(r), Tmpfs: containerTmpfs(r), Image: r.Runtime.Reference()}
+			return dockerFixtureResponse(http.StatusOK, rebuilt.JSON()), nil
+		case len(removed) > 0:
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		default:
+			old := containerFixture{ID: "old-id", Labels: labels, Mounts: executor.expectedMounts(r), Tmpfs: containerTmpfs(r), Image: supersededImage}
+			return dockerFixtureResponse(http.StatusOK, old.JSON()), nil
+		}
+	})}}
+
+	// A container on the superseded digest is not "already created", or the
+	// install would report a new image it never actually ran.
+	if executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Error("a container running the superseded image was accepted as already created")
+	}
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if !created || !started {
+		t.Fatalf("created=%v started=%v, want the container rebuilt and started", created, started)
+	}
+	if len(stopped) != 1 || stopped[0] != name || len(removed) != 1 || removed[0] != name {
+		t.Fatalf("stopped=%v removed=%v, want only the superseded container %q", stopped, removed, name)
+	}
+	changed, ok := receipt["recreated_for_image_change"].(map[string]any)
+	if !ok || changed["was"] != supersededImage || changed["now"] != r.Runtime.Reference() {
+		t.Fatalf("receipt does not name both digests: %#v", receipt["recreated_for_image_change"])
+	}
+	// Nothing moved on this machine and no path changed: the image alone did.
+	if _, moved := receipt["recreated_after_move"]; moved {
+		t.Errorf("an image change was reported as a moved directory: %#v", receipt["recreated_after_move"])
+	}
+	if _, writable := receipt["recreated_for_writable_paths"]; writable {
+		t.Errorf("an image change was reported as a writable path change: %#v", receipt["recreated_for_writable_paths"])
+	}
+	if createBody["Image"] != r.Runtime.Reference() {
+		t.Fatalf("the rebuilt container was created from %#v, want the pinned reference", createBody["Image"])
+	}
+}
+
+// An install or update runs create_container rather than start_container, and
+// that step found the existing container and reused it. It has to replace one
+// on a superseded digest for the same reason a start does.
+func TestCreateContainerReplacesAContainerOnTheSupersededImage(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+	supersededImage := r.Runtime.Image + "@sha256:" + strings.Repeat("b", 64)
+	old := containerFixture{ID: "old-id", Labels: labels, Mounts: executor.expectedMounts(r), Tmpfs: containerTmpfs(r), Image: supersededImage}
+	var stopped, removed []string
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		path := request.URL.Path
+		switch {
+		case request.Method == http.MethodPost && strings.HasPrefix(path, "/containers/create"):
+			return dockerFixtureResponse(http.StatusCreated, `{"ID":"rebuilt-id"}`), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			stopped = append(stopped, containerFromPath(path))
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodDelete:
+			removed = append(removed, containerFromPath(path))
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case containerFromPath(path) == legacyContainerName(r):
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		default:
+			return dockerFixtureResponse(http.StatusOK, old.JSON()), nil
+		}
+	})}}
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("create_container: %v", err)
+	}
+	if receipt["container_id"] != "rebuilt-id" {
+		t.Fatalf("receipt=%#v, want the rebuilt container", receipt)
+	}
+	if len(stopped) != 1 || len(removed) != 1 {
+		t.Fatalf("stopped=%v removed=%v, want the superseded container replaced once", stopped, removed)
+	}
+	changed, ok := receipt["recreated_for_image_change"].(map[string]any)
+	if !ok || changed["was"] != supersededImage || changed["now"] != r.Runtime.Reference() {
+		t.Fatalf("receipt does not name both digests: %#v", receipt["recreated_for_image_change"])
+	}
+}
+
+// A container already on the pinned digest is left exactly as it is: every
+// start would otherwise throw away a loaded model to build the same container
+// again.
+func TestStartContainerLeavesAContainerOnThePinnedImageAlone(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+	live := containerFixture{ID: "live-id", Running: true, Labels: labels, Mounts: executor.expectedMounts(r), Tmpfs: containerTmpfs(r), Image: r.Runtime.Reference()}
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/start"):
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodGet && containerFromPath(request.URL.Path) == containerName(r):
+			return dockerFixtureResponse(http.StatusOK, live.JSON()), nil
+		default:
+			t.Fatalf("a matching container was disturbed: %s %s", request.Method, request.URL)
+			return nil, nil
+		}
+	})}}
+	if !executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Error("a container on the pinned image was not recognized as created")
+	}
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if _, rebuilt := receipt["recreated_for_image_change"]; rebuilt {
+		t.Errorf("a matching container was reported as rebuilt: %#v", receipt)
+	}
+}
+
+// A daemon that reports no image at all says nothing about which one the
+// container runs, and a container is never rebuilt on silence.
+func TestStartContainerLeavesAContainerWithNoReportedImageAlone(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+	silent := containerFixture{ID: "live-id", Running: true, Labels: labels, Mounts: executor.expectedMounts(r), Tmpfs: containerTmpfs(r)}
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/start"):
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodGet && containerFromPath(request.URL.Path) == containerName(r):
+			return dockerFixtureResponse(http.StatusOK, silent.JSON()), nil
+		default:
+			t.Fatalf("a container reporting no image was disturbed: %s %s", request.Method, request.URL)
+			return nil, nil
+		}
+	})}}
+	if !executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Error("a container reporting no image was not recognized as created")
+	}
+	if _, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil); err != nil {
+		t.Fatalf("start_container: %v", err)
 	}
 }
 
