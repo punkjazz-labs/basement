@@ -725,6 +725,12 @@ func distributedPlans(ops []recipe.Operation, target recipe.Recipe, deployment o
 			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: head})
 			plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: worker})
 		case "verify_port":
+			// Only the head's port is checked from here. A worker rank that
+			// binds a port of its own (every SGLang rank; a vLLM worker is
+			// headless and binds none) is checked by the worker's own
+			// preflight, on the machine that holds the port and against that
+			// machine's containers, which is ADR 0004's per-node evaluation
+			// and not something a head can answer for it.
 			if previous != nil && previous.Service.DefaultHostPort == target.Service.DefaultHostPort {
 				plans = append(plans, plannedOperation{Operation: op, Recipe: target, Placement: head, Receipt: map[string]any{"host_port": target.Service.DefaultHostPort, "occupied_by_managed_recipe": previous.ID, "available_after_switch": true}})
 				continue

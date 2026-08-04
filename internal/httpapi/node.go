@@ -198,8 +198,18 @@ func (s *Server) nodePreflight(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	// A worker rank serves no HTTP, so the head's host port is not its concern.
-	writeJSON(w, http.StatusOK, s.runPreflightSkipping(r.Context(), trusted, map[string]bool{"verify_port": true}))
+	// Whether the host port matters here is the runtime's answer, not a rule
+	// written down twice: a vLLM worker is launched --headless and binds
+	// nothing, so failing it on the head's port would be inventing a problem,
+	// while an SGLang worker binds that same port on THIS machine and a port
+	// already taken here has to be said now. Left unchecked it surfaces an hour
+	// later as a head that will not start, on the machine that is not the one
+	// holding the port.
+	skip := map[string]bool{}
+	if _, binds := operations.RankBindsHostPort(trusted, operations.Placement{Role: operations.RoleWorker, NodeCount: trusted.Topology.SparkCount}); !binds {
+		skip["verify_port"] = true
+	}
+	writeJSON(w, http.StatusOK, s.runPreflightSkipping(r.Context(), trusted, skip))
 }
 
 // nodeStep runs exactly one typed operation on this node on behalf of the

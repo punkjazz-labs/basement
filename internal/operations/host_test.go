@@ -780,6 +780,66 @@ func TestStartContainerLeavesAnUnchangedFabricAddressAlone(t *testing.T) {
 	}
 }
 
+// The same reboot, on the SGLang two-Spark recipe. SGLang bakes the
+// rendezvous into one --dist-init-addr host:port value, so a drift check that
+// only knew vLLM's --master-addr would find nothing to disagree with and the
+// ranks would come back up waiting at an address the kernel no longer hands
+// out. Detection is stubbed because CI runners can hold real RDMA hardware.
+func TestStartContainerRebuildsAnSGLangRankWhenTheFabricAddressChanged(t *testing.T) {
+	withFabric(t, FabricLink{NetDev: "enp1s0f1np1", HCA: "rocep1s0f1"}, nil, "169.254.37.9", nil)
+	r := twoSparkSGLangRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	for index := range r.Artifacts {
+		if err := os.MkdirAll(executor.artifactPath(r, index), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version), labelNodeRole: RoleWorker}
+	// What the last deployment baked in: the head's address as it was then.
+	yesterday := sglangArgs(r, Placement{Role: RoleWorker, NodeCount: 2, MasterAddress: "169.254.205.1", MasterPort: 29501})
+	// Today's address, resolved live by this job.
+	worker := Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.37.9", MasterPort: 29501}
+	created, started, stopped, removed := false, false, false, false
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		path := request.URL.Path
+		switch {
+		case request.Method == http.MethodPost && strings.HasPrefix(path, "/containers/create"):
+			created = true
+			return dockerFixtureResponse(http.StatusCreated, `{"ID":"rebuilt-id"}`), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			stopped = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodDelete:
+			removed = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+			started = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case containerFromPath(path) == legacyContainerName(r):
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		case created:
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("rebuilt-id", started, labels, executor.expectedMounts(r), sglangArgs(r, worker)...)), nil
+		default:
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("stale-id", false, labels, executor.expectedMounts(r), yesterday...)), nil
+		}
+	})}}
+
+	receipt, err := executor.Execute(context.Background(), Execution{Placement: worker}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if !stopped || !removed || !created || !started {
+		t.Fatalf("stopped=%v removed=%v created=%v started=%v, want the container rebuilt at the new address", stopped, removed, created, started)
+	}
+	drift, ok := receipt["recreated_after_address_change"].([]map[string]any)
+	if !ok || len(drift) != 1 {
+		t.Fatalf("receipt does not report the address change: %#v", receipt["recreated_after_address_change"])
+	}
+	if drift[0]["flag"] != "--dist-init-addr" || drift[0]["was"] != "169.254.205.1:29501" || drift[0]["now"] != "169.254.37.9:29501" {
+		t.Fatalf("receipt address detail = %#v", drift[0])
+	}
+}
+
 // A recipe that names a file the download does not contain must fail as a
 // plain sentence naming the file, before any container runs. Left to the
 // runtime it surfaces as a Python traceback from argument validation.

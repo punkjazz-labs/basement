@@ -72,9 +72,12 @@ func (p refusingPeer) Step(context.Context, operations.PeerTarget, operations.Ex
 type nodeFixture struct {
 	key         string
 	distributed recipe.Recipe
-	single      recipe.Recipe
-	localExec   *apiExecutor
-	post        func(t *testing.T, path, key string, body any) (int, map[string]any)
+	// sglang is the shipped two-Spark SGLang recipe. Its worker rank binds a
+	// host port of its own, which a vLLM worker never does.
+	sglang    recipe.Recipe
+	single    recipe.Recipe
+	localExec *apiExecutor
+	post      func(t *testing.T, path, key string, body any) (int, map[string]any)
 }
 
 // newNodeFixture wires the server exactly as production does: the executor
@@ -101,6 +104,10 @@ func newNodeFixture(t *testing.T) nodeFixture {
 	// recipe has to be in it, under its own id.
 	distributed.ID = "qwen36-35b-a3b-nvfp4-2s"
 	single, _ := recipe.Find(builtin, "qwen36-35b-a3b-nvfp4-1s")
+	sglang, ok := recipe.Find(builtin, "inkling-small-nvfp4-2s")
+	if !ok {
+		t.Fatal("two-Spark SGLang recipe missing")
+	}
 	catalog := append(append([]recipe.Recipe{}, builtin...), distributed)
 
 	local := &apiExecutor{done: map[string]bool{}}
@@ -137,7 +144,7 @@ func newNodeFixture(t *testing.T) nodeFixture {
 		_ = json.Unmarshal(raw, &decoded)
 		return response.StatusCode, decoded
 	}
-	return nodeFixture{key: secret, distributed: distributed, single: single, localExec: local, post: post}
+	return nodeFixture{key: secret, distributed: distributed, sglang: sglang, single: single, localExec: local, post: post}
 }
 
 // executed reports whether the local executor actually ran an operation.
@@ -314,6 +321,57 @@ func TestWorkerNodeEndpointsAreKeyOnlyAndAllowlisted(t *testing.T) {
 	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, headRole); status != http.StatusBadRequest {
 		t.Fatalf("head-role worker step status=%d", status)
 	}
+}
+
+// Whether a worker rank binds a host port is the runtime's answer. A vLLM
+// worker is launched --headless and binds nothing, so a busy port on this
+// machine is not its problem. An SGLang worker binds that same port here, so a
+// busy port has to be reported now, while the head can still say which machine
+// to clear, instead of an hour later as a head that will not start.
+func TestWorkerChecksItsHostPortOnlyWhenItsRankBindsOne(t *testing.T) {
+	fixture := newNodeFixture(t)
+	fixture.localExec.failPort = true
+
+	status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-1"})
+	if status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("a headless vLLM worker was failed on the head's host port: status=%d body=%#v", status, body)
+	}
+	if checkFor(body, "verify_port") != nil {
+		t.Fatal("worker preflight checked a port its vLLM rank never binds")
+	}
+
+	// Same machine, same busy port, a rank that does bind it.
+	status, body = fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.sglang, "job_id": "job-1"})
+	if status != http.StatusOK {
+		t.Fatalf("sglang worker preflight status=%d body=%#v", status, body)
+	}
+	if body["ready"] != false {
+		t.Fatalf("a worker whose port is taken reported itself ready: %#v", body)
+	}
+	check := checkFor(body, "verify_port")
+	if check == nil {
+		t.Fatal("the sglang worker never checked the port its rank binds")
+	}
+	if check["ok"] != false {
+		t.Fatalf("the busy port was reported as available: %#v", check)
+	}
+	message, _ := check["error"].(string)
+	if !strings.Contains(message, "8000") {
+		t.Fatalf("the failure does not name the port: %q", message)
+	}
+}
+
+// checkFor returns a named preflight check from a node response, or nil when
+// the check was not run at all.
+func checkFor(body map[string]any, operation string) map[string]any {
+	checks, _ := body["checks"].([]any)
+	for _, entry := range checks {
+		check, _ := entry.(map[string]any)
+		if check["operation"] == operation {
+			return check
+		}
+	}
+	return nil
 }
 
 func TestWorkerAdmitsOneDelegatedJobAtATime(t *testing.T) {

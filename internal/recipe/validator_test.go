@@ -10,8 +10,8 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recipes) != 6 {
-		t.Fatalf("got %d recipes, want 6", len(recipes))
+	if len(recipes) != 7 {
+		t.Fatalf("got %d recipes, want 7", len(recipes))
 	}
 	for _, r := range recipes {
 		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
@@ -32,6 +32,25 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	laguna, ok := Find(recipes, "laguna-s-2-1-nvfp4-dflash-1s")
 	if !ok || len(laguna.Artifacts) != 2 || laguna.TotalArtifactBytes() != 74168605863 || laguna.Service.VLLM.SpeculativeModelRole != "drafter" {
 		t.Fatalf("unexpected Laguna recipe: %#v", laguna)
+	}
+	// The pack's first SGLang recipe, and the first two-Spark one that is not
+	// vLLM: 170.8 GB of weights that do not fit a single Spark, sharded at
+	// TP=2, with no drafter (the DSpark artifact declares no licence).
+	inkling, ok := Find(recipes, "inkling-small-nvfp4-2s")
+	if !ok || inkling.Runtime.Kind != "sglang" || !inkling.Distributed() || inkling.Topology.SparkCount != 2 {
+		t.Fatalf("unexpected Inkling recipe: %#v", inkling)
+	}
+	if inkling.Runtime.Reference() != "lmsysorg/sglang@sha256:7d3617a95c2d09b233dc6eb654ed746eaa1f69903b1012c2bedc13732d2e3590" {
+		t.Fatalf("Inkling runtime is not pinned: %#v", inkling.Runtime)
+	}
+	if len(inkling.Artifacts) != 1 || inkling.TotalArtifactBytes() != 170764923366 || inkling.Artifacts[0].Revision != "b6a99534467840620d411e4cd4ad5819b2610d9c" {
+		t.Fatalf("Inkling weights are not pinned: %#v", inkling.Artifacts)
+	}
+	if inkling.Service.SGLang.TensorParallelSize != 2 || inkling.Service.SGLang.SpeculativeAlgorithm != "" || inkling.Service.SGLang.SpeculativeModelRole != "" {
+		t.Fatalf("unexpected Inkling serve configuration: %#v", inkling.Service.SGLang)
+	}
+	if inkling.MemoryModel != nil {
+		t.Fatalf("a TP=2 recipe must not carry the flat single-node memory model: %#v", inkling.MemoryModel)
 	}
 }
 
@@ -85,8 +104,8 @@ func TestRecipePolicyRejectsUnsafeVariants(t *testing.T) {
 	}
 }
 
-// sglangCandidate is a pinned vLLM recipe re-pointed at SGLang. No SGLang
-// recipe ships yet (hardware qualification comes first), so the schema is
+// sglangCandidate is a pinned vLLM recipe re-pointed at SGLang. The shipped
+// SGLang recipe is two-Spark, so the single-node side of the schema is
 // exercised against a recipe whose every other field is already policy-clean.
 func sglangCandidate(t *testing.T) Recipe {
 	t.Helper()

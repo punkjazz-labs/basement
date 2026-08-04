@@ -303,7 +303,7 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 		// Ranks reach each other over the cabled fabric, which means the host
 		// network namespace and the RDMA devices. Published ports mean nothing
 		// under host networking, so the API server is told to bind loopback
-		// itself (see vllmArgs) rather than relying on a port mapping.
+		// itself (see serveEndpointArgs) rather than relying on a port mapping.
 		delete(hostConfig, "PortBindings")
 		hostConfig["NetworkMode"] = "host"
 		hostConfig["IpcMode"] = "host"
@@ -525,10 +525,7 @@ func runtimeCommand(r recipe.Recipe, placement Placement) ([]string, []string, e
 		if r.Service.SGLang == nil {
 			return nil, nil, errors.New("recipe declares runtime kind sglang without a service.sglang block")
 		}
-		if placement.Distributed() {
-			return nil, nil, errors.New("distributed sglang serving is not yet supported")
-		}
-		return []string{"python3", "-m", "sglang.launch_server"}, sglangArgs(r), nil
+		return []string{"python3", "-m", "sglang.launch_server"}, sglangArgs(r, placement), nil
 	default:
 		return nil, nil, fmt.Errorf("runtime kind %q is not supported", r.Runtime.Kind)
 	}
@@ -626,14 +623,14 @@ func vllmArgs(r recipe.Recipe, placement Placement) []string {
 	if v.AutoToolChoice {
 		args = append(args, "--enable-auto-tool-choice")
 	}
-	return append(args, distributedArgs(r, placement)...)
+	return append(args, vllmDistributedArgs(placement)...)
 }
 
-// distributedArgs are the two-node launch flags the community DGX Spark
+// vllmDistributedArgs are the two-node launch flags the community DGX Spark
 // recipe uses: plain vllm serve with --nnodes/--node-rank/--master-addr/
 // --master-port, the multiprocessing executor, and --headless on the rank
 // that serves no HTTP. There is no ray and no torchrun.
-func distributedArgs(r recipe.Recipe, placement Placement) []string {
+func vllmDistributedArgs(placement Placement) []string {
 	if !placement.Distributed() {
 		return nil
 	}
@@ -661,20 +658,43 @@ func serveEndpointArgs(r recipe.Recipe, placement Placement) (string, int) {
 	return "0.0.0.0", r.Service.InternalPort
 }
 
+// RankBindsHostPort reports the host port this rank binds on the machine it
+// runs on, and whether it binds one at all. Being handed a port is not the
+// same as binding it: vLLM gives every rank --host and --port and then adds
+// --headless to the worker, which serves nothing, so the host port on the
+// worker Spark is none of that rank's business. SGLang has no headless mode,
+// so every rank binds the port it is given, each on its own machine.
+//
+// This is the port-side companion of the argument builders above and has to
+// stay in step with them. It is exported because the node endpoint that runs a
+// worker's own preflight has to ask the same question the launch does: a rank
+// that binds a port must find it free before the head stages a model for a
+// process that cannot start, and a rank that binds none must not be failed on
+// a port that never mattered. An unknown kind is treated as binding, so a
+// runtime added without its headless story gets a check it may not need rather
+// than silently skipping one it does.
+func RankBindsHostPort(r recipe.Recipe, placement Placement) (int, bool) {
+	if placement.Role == RoleWorker && r.Runtime.Kind == "vllm" {
+		return 0, false
+	}
+	return r.Service.DefaultHostPort, true
+}
+
 // sglangArgs builds the sglang.launch_server command line. Every flag beyond
 // the four positional essentials is omitted when the recipe leaves it unset,
 // so the runtime's own default applies and the manager never invents a value.
-func sglangArgs(r recipe.Recipe) []string {
+func sglangArgs(r recipe.Recipe, placement Placement) []string {
 	if r.Service.SGLang == nil {
 		return nil
 	}
 	s := *r.Service.SGLang
+	serveHost, servePort := serveEndpointArgs(r, placement)
 	// --enable-metrics is not a recipe choice: SGLang mounts /metrics only
 	// behind this flag, and the console's telemetry tiles read that endpoint.
 	args := []string{
 		"--model-path", artifactMountPath("primary"),
-		"--host", "0.0.0.0",
-		"--port", fmt.Sprint(r.Service.InternalPort),
+		"--host", serveHost,
+		"--port", fmt.Sprint(servePort),
 		"--served-model-name", r.Service.ServedModelID,
 		"--enable-metrics",
 	}
@@ -703,7 +723,33 @@ func sglangArgs(r recipe.Recipe) []string {
 	}
 	args = appendOptional(args, "--tool-call-parser", s.ToolCallParser)
 	args = appendOptional(args, "--reasoning-parser", s.ReasoningParser)
-	return args
+	return append(args, sglangDistributedArgs(placement)...)
+}
+
+// sglangDistributedArgs are SGLang's own multi-node launch flags. The shape is
+// the same idea as vLLM's and the values come from the same resolved
+// placement, but the flags are not: SGLang counts nodes with --nnodes, takes
+// this rank with --node-rank, and takes the rendezvous as a single
+// --dist-init-addr host:port rather than as a separate address and port. Every
+// rank runs sglang.launch_server with the same arguments except its rank;
+// there is no headless flag, because rank 0 is the only one that serves model
+// traffic and the job only ever health-checks and inference-tests the head.
+// That also means every rank is handed the same host and port, and under host
+// networking each one binds it on its own machine's loopback rather than on a
+// port they would have to share.
+//
+// --tp-size is not repeated here: tensor parallelism spans the whole topology,
+// so the recipe's tensor_parallel_size (validated to equal spark_count) is
+// already the global size every rank is launched with.
+func sglangDistributedArgs(placement Placement) []string {
+	if !placement.Distributed() {
+		return nil
+	}
+	return []string{
+		"--nnodes", fmt.Sprint(placement.NodeCount),
+		"--node-rank", fmt.Sprint(placement.Rank()),
+		"--dist-init-addr", net.JoinHostPort(placement.MasterAddress, fmt.Sprint(placement.MasterPort)),
+	}
 }
 
 func appendOptional(args []string, flag, value string) []string {
@@ -790,19 +836,10 @@ type launchMismatch struct {
 // exists and would simply hang. A flag the container does not carry at all is
 // not evidence of staleness and is skipped: only a value that positively
 // disagrees counts.
-func staleLaunch(state ContainerState, placement Placement) []launchMismatch {
-	if !placement.Distributed() {
+func staleLaunch(state ContainerState, r recipe.Recipe, placement Placement) []launchMismatch {
+	expected := launchFlags(r, placement)
+	if len(expected) == 0 {
 		return nil
-	}
-	expected := map[string]string{"--node-rank": fmt.Sprint(placement.Rank())}
-	// An unresolved address or port is not a disagreement to act on: it means
-	// this call knows nothing about where the ranks meet, and a container is
-	// never rebuilt on the strength of what the caller failed to say.
-	if placement.MasterAddress != "" {
-		expected["--master-addr"] = placement.MasterAddress
-	}
-	if placement.MasterPort > 0 {
-		expected["--master-port"] = fmt.Sprint(placement.MasterPort)
 	}
 	drift := make([]launchMismatch, 0, len(expected))
 	for flag, want := range expected {
@@ -814,6 +851,40 @@ func staleLaunch(state ContainerState, placement Placement) []launchMismatch {
 	}
 	sort.Slice(drift, func(i, j int) bool { return drift[i].Flag < drift[j].Flag })
 	return drift
+}
+
+// launchFlags are the distributed launch flags this job resolved, named the
+// way the recipe's runtime names them, so drift is measured against what the
+// container was actually given rather than against a shape borrowed from
+// another runtime. It is the one place the two multi-node vocabularies are
+// written down: a new runtime kind gets its case here at the same time as its
+// argument builder above, or its containers survive a reboot holding an
+// address that no longer exists.
+//
+// An unresolved address or port is not a disagreement to act on: it means this
+// call knows nothing about where the ranks meet, and a container is never
+// rebuilt on the strength of what the caller failed to say. vLLM carries the
+// two halves as separate flags and each is compared on its own; SGLang carries
+// them as one value, which is only comparable when both halves are known.
+func launchFlags(r recipe.Recipe, placement Placement) map[string]string {
+	if !placement.Distributed() {
+		return nil
+	}
+	flags := map[string]string{"--node-rank": fmt.Sprint(placement.Rank())}
+	switch r.Runtime.Kind {
+	case "vllm":
+		if placement.MasterAddress != "" {
+			flags["--master-addr"] = placement.MasterAddress
+		}
+		if placement.MasterPort > 0 {
+			flags["--master-port"] = fmt.Sprint(placement.MasterPort)
+		}
+	case "sglang":
+		if placement.MasterAddress != "" && placement.MasterPort > 0 {
+			flags["--dist-init-addr"] = net.JoinHostPort(placement.MasterAddress, fmt.Sprint(placement.MasterPort))
+		}
+	}
+	return flags
 }
 
 func commandFlag(command []string, flag string) (string, bool) {

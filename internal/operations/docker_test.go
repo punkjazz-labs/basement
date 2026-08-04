@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -209,11 +210,153 @@ func TestSGLangCommandIsPinnedAndComplete(t *testing.T) {
 func TestSGLangCommandOmitsUnsetFields(t *testing.T) {
 	r := sglangRecipe()
 	r.Service.SGLang = &recipe.SGLangConfig{TensorParallelSize: 1, MemFractionStatic: "0.7", ContextLength: 8192, MaxRunningRequests: 1}
-	joined := strings.Join(sglangArgs(r), " ")
+	joined := strings.Join(sglangArgs(r, Placement{}), " ")
 	want := "--model-path /model --host 0.0.0.0 --port 8000 --served-model-name example-lab/Example-NVFP4 " +
 		"--enable-metrics --tp-size 1 --mem-fraction-static 0.7 --context-length 8192 --max-running-requests 1"
 	if joined != want {
 		t.Fatalf("sglang arguments\n got: %s\nwant: %s", joined, want)
+	}
+}
+
+// twoSparkSGLangRecipe is the shipped Inkling recipe: the pack's SGLang
+// two-Spark serve, taken from the catalog rather than hand-built so these
+// assertions are about a model the manager really installs.
+func twoSparkSGLangRecipe(t *testing.T) recipe.Recipe {
+	t.Helper()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := recipe.Find(recipes, "inkling-small-nvfp4-2s")
+	if !ok {
+		t.Fatal("Inkling recipe missing")
+	}
+	if !r.Distributed() || r.Runtime.Kind != "sglang" {
+		t.Fatalf("fixture is not a two-Spark SGLang recipe: kind=%s spark_count=%d", r.Runtime.Kind, r.Topology.SparkCount)
+	}
+	return r
+}
+
+// SGLang launches across two nodes with its own vocabulary: --nnodes,
+// --node-rank and a single --dist-init-addr host:port. Borrowing vLLM's
+// --master-addr/--master-port here would leave both ranks waiting for a
+// rendezvous neither of them was ever told about.
+func TestDistributedSGLangUsesItsOwnMultiNodeFlags(t *testing.T) {
+	r := twoSparkSGLangRecipe(t)
+	head := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501}
+	worker := Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501}
+
+	entrypoint, headArgs, err := runtimeCommand(r, head)
+	if err != nil {
+		t.Fatalf("distributed sglang command: %v", err)
+	}
+	if strings.Join(entrypoint, " ") != "python3 -m sglang.launch_server" {
+		t.Fatalf("entrypoint=%q", entrypoint)
+	}
+	for flag, want := range map[string]string{
+		"--nnodes": "2", "--node-rank": "0", "--dist-init-addr": "169.254.10.1:29501", "--tp-size": "2",
+	} {
+		if got, ok := argumentValue(headArgs, flag); !ok || got != want {
+			t.Fatalf("head %s=%q, want %q", flag, got, want)
+		}
+	}
+	// vLLM's flags are not SGLang's; none of them may leak into this command.
+	for _, flag := range []string{"--master-addr", "--master-port", "--headless", "--distributed-executor-backend", "--nccl-init-addr"} {
+		if hasArgument(headArgs, flag) {
+			t.Fatalf("sglang launch grew a flag from another runtime: %s", flag)
+		}
+	}
+	// ADR 0007: under host networking nothing publishes a port, so the head
+	// binds the recipe's host port on loopback itself.
+	if host, _ := argumentValue(headArgs, "--host"); host != "127.0.0.1" {
+		t.Fatalf("head bound %q, want loopback", host)
+	}
+	if port, _ := argumentValue(headArgs, "--port"); port != fmt.Sprint(r.Service.DefaultHostPort) {
+		t.Fatalf("head port %q, want the recipe host port", port)
+	}
+
+	workerArgs := sglangArgs(r, worker)
+	if rank, _ := argumentValue(workerArgs, "--node-rank"); rank != "1" {
+		t.Fatalf("worker rank %q, want 1", rank)
+	}
+	// Both ranks meet at the head's address, so the worker carries the same
+	// rendezvous value and differs only in its rank.
+	if address, _ := argumentValue(workerArgs, "--dist-init-addr"); address != "169.254.10.1:29501" {
+		t.Fatalf("worker rendezvous %q, want the head's", address)
+	}
+	// The worker is handed a host and a port like every other rank and, with
+	// no headless mode to stop it, binds them on its own machine. Its Spark's
+	// own preflight has to know that, or the port is checked on one machine
+	// and bound on the other.
+	if host, _ := argumentValue(workerArgs, "--host"); host != "127.0.0.1" {
+		t.Fatalf("worker bound %q, want loopback", host)
+	}
+	if port, binds := RankBindsHostPort(r, worker); !binds || port != r.Service.DefaultHostPort {
+		t.Fatalf("sglang worker binds (%d, %v), want the recipe host port", port, binds)
+	}
+	if port, binds := RankBindsHostPort(r, head); !binds || port != r.Service.DefaultHostPort {
+		t.Fatalf("sglang head binds (%d, %v), want the recipe host port", port, binds)
+	}
+	// A vLLM worker is --headless and binds nothing, and must stay that way.
+	vllm := twoSparkRecipe(t)
+	if _, binds := RankBindsHostPort(vllm, worker); binds {
+		t.Fatal("a headless vLLM worker was reported as binding a host port")
+	}
+	if port, binds := RankBindsHostPort(vllm, head); !binds || port != vllm.Service.DefaultHostPort {
+		t.Fatalf("vllm head binds (%d, %v), want the recipe host port", port, binds)
+	}
+	// Single-node serving binds the recipe's host port, as it always has.
+	if port, binds := RankBindsHostPort(vllm, Placement{}); !binds || port != vllm.Service.DefaultHostPort {
+		t.Fatalf("single-node binds (%d, %v), want the recipe host port", port, binds)
+	}
+
+	// A single-node SGLang serve must be untouched by any of this.
+	singleArgs := sglangArgs(sglangRecipe(), Placement{})
+	for _, flag := range []string{"--nnodes", "--node-rank", "--dist-init-addr"} {
+		if hasArgument(singleArgs, flag) {
+			t.Fatalf("single-Spark sglang launch grew %s", flag)
+		}
+	}
+	if host, _ := argumentValue(singleArgs, "--host"); host != "0.0.0.0" {
+		t.Fatalf("single-Spark sglang host changed to %q", host)
+	}
+}
+
+// Reboot drift is measured against the flag the runtime was actually given.
+// SGLang carries the rendezvous as one host:port value, so comparing vLLM's
+// two flags against an SGLang container would find nothing to disagree with
+// and the ranks would come back up pointed at an address that is gone.
+func TestStaleLaunchComparesEachRuntimesRendezvousFlag(t *testing.T) {
+	sglang := twoSparkSGLangRecipe(t)
+	vllm := twoSparkRecipe(t)
+	worker := Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.37.9", MasterPort: 29501}
+
+	yesterday := ContainerState{Command: sglangArgs(sglang, Placement{Role: RoleWorker, NodeCount: 2, MasterAddress: "169.254.205.1", MasterPort: 29501})}
+	drift := staleLaunch(yesterday, sglang, worker)
+	if len(drift) != 1 || drift[0].Flag != "--dist-init-addr" || drift[0].Actual != "169.254.205.1:29501" || drift[0].Expected != "169.254.37.9:29501" {
+		t.Fatalf("sglang drift=%#v, want the rendezvous flag alone", drift)
+	}
+
+	today := ContainerState{Command: sglangArgs(sglang, worker)}
+	if drift := staleLaunch(today, sglang, worker); len(drift) != 0 {
+		t.Fatalf("a container already at this job's address was called stale: %#v", drift)
+	}
+
+	// A half-resolved placement knows nothing about where the ranks meet, and
+	// SGLang's single value cannot be compared on one half alone.
+	unresolved := Placement{Role: RoleWorker, NodeCount: 2, MasterAddress: "169.254.37.9"}
+	if drift := staleLaunch(yesterday, sglang, unresolved); len(drift) != 0 {
+		t.Fatalf("an unresolved rendezvous produced drift: %#v", drift)
+	}
+
+	// The vLLM shape is unchanged, and a single-node placement never drifts.
+	vllmYesterday := ContainerState{Command: vllmArgs(vllm, Placement{Role: RoleWorker, NodeCount: 2, MasterAddress: "169.254.205.1", MasterPort: 29501})}
+	drift = staleLaunch(vllmYesterday, vllm, worker)
+	if len(drift) != 1 || drift[0].Flag != "--master-addr" || drift[0].Expected != "169.254.37.9" {
+		t.Fatalf("vllm drift=%#v, want the master address alone", drift)
+	}
+	if drift := staleLaunch(yesterday, sglang, Placement{}); drift != nil {
+		t.Fatalf("a single-node placement produced drift: %#v", drift)
 	}
 }
 

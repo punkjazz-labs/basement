@@ -1,0 +1,156 @@
+schema_version: 1
+id: inkling-small-nvfp4-2s
+# The pack's first SGLang recipe and its first multimodal model: Inkling
+# Small is a 276B MoE with 12B active parameters that takes text, image and
+# audio in and answers in text. Nemotron Omni is served text-only here
+# because its omni path is not confirmed on the runtime that recipe pins;
+# this recipe puts no modality limit on the serve, so Inkling is the first
+# one that offers those inputs, and qualification is what confirms image and
+# audio actually work end to end.
+#
+# The 4-bit weights are the publisher's own quantization (NVIDIA ModelOpt
+# NVFP4, published by Thinking Machines alongside the base model), not a
+# third-party conversion of someone else's release. At 170.8 GB they do not
+# fit one 128 GB Spark, so this recipe splits the model across two GB10
+# machines cabled back to back with ConnectX-7 and serves it with SGLang at
+# TP=2, which puts 85.4 GB of weights on each node.
+#
+# Launch topology follows the two-Spark vLLM recipe already in the pack, with
+# SGLang's own multi-node vocabulary: every rank runs sglang.launch_server
+# with --nnodes 2, its own --node-rank, and the same --dist-init-addr, and
+# each node detects its own cabled ConnectX port at deploy time. The
+# interface names below are the fallback for when the kernel's answer is
+# missing or ambiguous, not the primary source.
+#
+# Deliberately conservative first configuration, in honesty order:
+# - context_length starts at 131072. The publisher states 1048576, and the
+#   recipe does not spend that budget before a qualification run on our own
+#   hardware says what the two Sparks actually hold.
+# - no speculative decoding. The DSpark drafter artifact that the published
+#   configuration pairs with this model declares no licence at all, which is
+#   a hard blocker under ADR 0006: nothing unlicensed is downloaded or
+#   served. It stays out until its terms are stated by its publisher.
+# - kv_cache_dtype is left unset, so SGLang's own default applies. The 4-bit
+#   KV cache dtype used in the published configuration (fp4_mx_block16) is
+#   not in this schema's allowlist, and the allowlist widens only on the
+#   other side of qualification, never to fit a recipe.
+# - attention_backend is triton, which this schema already admits.
+# - the runtime image is pinned by digest to the community DGX Spark build
+#   of lmsysorg/sglang. Its tag at this digest is dev-inkling-small-dgx-spark
+#   and it carries the SM121 work this model needs; what it does on our own
+#   two Sparks is unverified until the install runs.
+# - image_disk_bytes is not measured. It is three times the pinned image's
+#   compressed registry size, the same conservative ratio every recipe in
+#   the pack uses for its disk guardrail, and qualification on hardware
+#   corrects it.
+# - memory_model omitted, for the same reason the two-Spark DeepSeek recipe
+#   omits it: TP=2 shards weights across nodes and the schema's flat
+#   single-node formula would be wrong by construction. The figures it would
+#   be derived from, for whoever measures this at qualification: weights
+#   170764923366 bytes in total; global-attention KV of 28672 bytes per
+#   token at bf16, 14336 at fp8; and 35 of 42 layers are sliding-window
+#   (512), so their KV is bounded per sequence rather than growing with
+#   context.
+version: 1
+display_name: Inkling Small NVFP4
+publisher: Thinking Machines
+model_by: Thinking Machines
+recipe_by: drowzeys (SGLang configuration)
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://huggingface.co/thinkingmachines/Inkling-Small-NVFP4
+  revision: b6a99534467840620d411e4cd4ad5819b2610d9c
+topology:
+  spark_count: 2
+  interconnect:
+    kind: connectx7
+    master_port: 29501
+    shared_environment:
+      NCCL_IB_DISABLE: "0"
+      NCCL_IB_HCA: rocep1s0f0
+      NCCL_IB_GID_INDEX: "3"
+      NCCL_SOCKET_IFNAME: enp1s0f0np0
+      GLOO_SOCKET_IFNAME: enp1s0f0np0
+      TP_SOCKET_IFNAME: enp1s0f0np0
+      NCCL_IGNORE_CPU_AFFINITY: "1"
+      NCCL_DEBUG: WARN
+    head_environment: {}
+    worker_environment: {}
+runtime:
+  kind: sglang
+  image: lmsysorg/sglang
+  digest: sha256:7d3617a95c2d09b233dc6eb654ed746eaa1f69903b1012c2bedc13732d2e3590
+  image_bytes: 14149510658
+  image_disk_bytes: 42448531974
+  # No build-time environment: the vLLM names the other recipes set
+  # (CUTE_DSL_ARCH, MAX_JOBS) belong to that runtime's compilation path and
+  # mean nothing to this image, and nothing is added on speculation.
+  environment: {}
+  shm_bytes: 34359738368
+  memory_lock: true
+  ipc_lock: true
+artifacts:
+  - role: primary
+    repository: thinkingmachines/Inkling-Small-NVFP4
+    revision: b6a99534467840620d411e4cd4ad5819b2610d9c
+    expected_bytes: 170764923366
+    licence: Apache-2.0
+    # Apache-2.0 covers the weights. Thinking Machines also publishes an
+    # Acceptable Use Policy at
+    # https://thinkingmachines.ai/model-acceptable-use-policy which governs
+    # use of the model. This schema records one licence link per artifact
+    # and it must be an HTTPS Hugging Face URL, so the policy is recorded
+    # here rather than in a field invented for it, and licence_url points at
+    # the artifact's own pinned tree (the ADR 0006 pattern) so the user sees
+    # exactly the revision they are accepting.
+    licence_url: https://huggingface.co/thinkingmachines/Inkling-Small-NVFP4/tree/b6a99534467840620d411e4cd4ad5819b2610d9c
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 12000000000
+  safety_margin_bytes: 20000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: thinkingmachines/Inkling-Small-NVFP4
+  sglang:
+    tensor_parallel_size: 2
+    mem_fraction_static: "0.85"
+    context_length: 131072
+    max_running_requests: 8
+    quantization: modelopt_fp4
+    kv_cache_dtype: ""
+    speculative_algorithm: ""
+    speculative_num_draft_tokens: 0
+    speculative_model_role: ""
+    chat_template_file: ""
+    tool_call_parser: inkling
+    reasoning_parser: inkling
+    attention_backend: triton
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_memory_capacity
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: verify_memory
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared

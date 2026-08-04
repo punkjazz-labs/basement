@@ -303,6 +303,12 @@ func (p *PeerClient) Preflight(ctx context.Context, target PeerTarget, execution
 	}
 	receipt := map[string]any{"peer": target.Name, "ready": response.Ready, "checks": response.Checks}
 	if !response.Ready {
+		// The other Spark is named when it has a name: a port to clear or a
+		// disk to free is on one specific machine, and the owner has to walk
+		// to the right one.
+		if target.Name != "" {
+			return receipt, fmt.Errorf("the other Spark (%s) is not ready to run this model: %s", target.Name, failedCheckSummary(response.Checks))
+		}
 		return receipt, fmt.Errorf("the other Spark is not ready to run this model: %s", failedCheckSummary(response.Checks))
 	}
 	return receipt, nil

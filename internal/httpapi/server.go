@@ -363,8 +363,9 @@ func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) prefl
 }
 
 // runPreflightSkipping omits checks that do not apply to this node's part in
-// the deployment. A two-Spark worker rank publishes no HTTP port, so
-// verify_port there would fail on a condition that never mattered.
+// the deployment. The caller decides what does not apply: a two-Spark worker
+// rank that publishes no HTTP port skips verify_port, because there it would
+// fail on a condition that never mattered (see nodePreflight).
 func (s *Server) runPreflightSkipping(ctx context.Context, selected recipe.Recipe, skip map[string]bool) preflightResponse {
 	response := preflightResponse{RecipeID: selected.ID, Ready: true, Secrets: map[string]bool{}}
 	// The advisory checks see other running installs' disk reservations,

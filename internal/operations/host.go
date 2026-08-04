@@ -885,7 +885,7 @@ func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recip
 		return nil, nil, nil
 	}
 	stale := staleMounts(state, h.expectedMounts(r))
-	drift := staleLaunch(state, placement)
+	drift := staleLaunch(state, r, placement)
 	if len(stale) == 0 && len(drift) == 0 {
 		return nil, nil, nil
 	}
