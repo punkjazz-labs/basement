@@ -173,6 +173,74 @@ func TestLicenceTerritoryExclusionsAcceptedAndTracked(t *testing.T) {
 	}
 }
 
+func TestUpstreamLicenceRepository(t *testing.T) {
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := Find(recipes, "qwen36-35b-a3b-nvfp4-1s")
+	if !ok {
+		t.Fatal("Qwen 35 recipe missing")
+	}
+
+	const (
+		repository = "MiniMaxAI/MiniMax-H3"
+		revision   = "fa9c8ab1eaa21c8ae25e7e40b83b2e6002f340af"
+		licenceURL = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/fa9c8ab1eaa21c8ae25e7e40b83b2e6002f340af/LICENSE"
+	)
+	clone := func() Recipe {
+		candidate := base
+		candidate.Artifacts = append([]Artifact(nil), base.Artifacts...)
+		return candidate
+	}
+
+	t.Run("existing recipe", func(t *testing.T) {
+		if err := Validate(clone()); err != nil {
+			t.Fatalf("Validate() for a recipe without upstream licence fields = %v, want nil", err)
+		}
+	})
+	t.Run("pinned upstream licence", func(t *testing.T) {
+		candidate := clone()
+		candidate.Artifacts[0].LicenceRepository = repository
+		candidate.Artifacts[0].LicenceRevision = revision
+		candidate.Artifacts[0].LicenceURL = licenceURL
+		if err := Validate(candidate); err != nil {
+			t.Fatalf("Validate() with a pinned upstream licence = %v, want nil", err)
+		}
+	})
+
+	tests := []struct {
+		name   string
+		mutate func(*Artifact)
+		want   string
+	}{
+		{"repository without revision", func(artifact *Artifact) {
+			artifact.LicenceRepository = repository
+			artifact.LicenceURL = licenceURL
+		}, "licence_repository and licence_revision must be set together"},
+		{"mutable licence revision", func(artifact *Artifact) {
+			artifact.LicenceRepository = repository
+			artifact.LicenceRevision = "main"
+			artifact.LicenceURL = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE"
+		}, "licence_revision must be a 40-character immutable commit"},
+		{"licence URL at main", func(artifact *Artifact) {
+			artifact.LicenceRepository = repository
+			artifact.LicenceRevision = revision
+			artifact.LicenceURL = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE"
+		}, "licence_url must reference licence_repository at licence_revision"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := clone()
+			test.mutate(&candidate.Artifacts[0])
+			err := Validate(candidate)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate()=%v, want error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 // sglangCandidate is a pinned vLLM recipe re-pointed at SGLang. The shipped
 // SGLang recipe is two-Spark, so the single-node side of the schema is
 // exercised against a recipe whose every other field is already policy-clean.
