@@ -220,6 +220,36 @@ type VLLMConfig struct {
 	AsyncScheduling      bool                `yaml:"async_scheduling" json:"async_scheduling"`
 	PrefixCaching        bool                `yaml:"prefix_caching" json:"prefix_caching"`
 	AutoToolChoice       bool                `yaml:"auto_tool_choice" json:"auto_tool_choice"`
+	// BlockSize is --block-size, the token count in one KV cache block. It is
+	// pinned rather than left to vLLM because a KV cache dtype and its block
+	// size are one decision: the NVFP4 MLA cache path this recipe pack now
+	// serves DeepSeek V4 Flash with runs at 256 in the deployment that
+	// configuration comes from, and a mismatched block size is a different
+	// allocator, not a tuning preference. Absent, which is every recipe before this
+	// field, means no --block-size flag and vLLM's own default stands.
+	BlockSize int `yaml:"block_size,omitempty" json:"block_size,omitempty"`
+	// MaxCUDAGraphCaptureSize is --max-cudagraph-capture-size, the largest
+	// batch vLLM captures a CUDA graph for. Left alone, vLLM derives a ladder
+	// of capture sizes and holds a graph for each, and on a GB10 those graphs
+	// are spent from the same unified pool the weights and the KV cache live
+	// in. A recipe that knows the largest batch it can actually run says so and
+	// stops paying for the rest. Absent means vLLM's own sizing, unchanged.
+	MaxCUDAGraphCaptureSize int `yaml:"max_cudagraph_capture_size,omitempty" json:"max_cudagraph_capture_size,omitempty"`
+	// TokenizerMode is --tokenizer-mode. It names a tokenizer implementation
+	// the runtime image carries, not a file, so it is checked against the
+	// modes this pack has a recipe for rather than passed through. Absent means
+	// no flag and the runtime's default (auto) applies.
+	TokenizerMode string `yaml:"tokenizer_mode,omitempty" json:"tokenizer_mode,omitempty"`
+	// SpeculativeDraftSampleMethod becomes the draft_sample_method member of
+	// the --speculative-config document. It is how the draft heads pick their
+	// proposed tokens, and like every other speculative setting it is only
+	// meaningful beside a speculative method.
+	SpeculativeDraftSampleMethod string `yaml:"speculative_draft_sample_method,omitempty" json:"speculative_draft_sample_method,omitempty"`
+	// FlashInferAutotune turns on --enable-flashinfer-autotune, which lets
+	// FlashInfer pick each kernel's tiling by measuring at startup instead of
+	// using its compiled-in default. It costs start time and writes to the
+	// FlashInfer workspace, so a recipe asks for it deliberately.
+	FlashInferAutotune bool `yaml:"enable_flashinfer_autotune,omitempty" json:"enable_flashinfer_autotune,omitempty"`
 	// DisableQuantFusions turns off exactly two of vLLM's default-on
 	// compilation passes, fuse_norm_quant and fuse_act_quant, by emitting one
 	// fixed --compilation-config document. It is a boolean rather than a

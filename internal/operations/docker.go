@@ -604,6 +604,9 @@ func vllmArgs(r recipe.Recipe, placement Placement) []string {
 		if v.SpeculativeMoE != "" {
 			specConfig["moe_backend"] = v.SpeculativeMoE
 		}
+		if v.SpeculativeDraftSampleMethod != "" {
+			specConfig["draft_sample_method"] = v.SpeculativeDraftSampleMethod
+		}
 		if v.SpeculativeModelRole != "" {
 			specConfig["model"] = artifactMountPath(v.SpeculativeModelRole)
 		}
@@ -615,8 +618,15 @@ func vllmArgs(r recipe.Recipe, placement Placement) []string {
 	args = appendOptional(args, "--moe-backend", v.MoEBackend)
 	args = appendOptional(args, "--linear-backend", v.LinearBackend)
 	args = appendOptional(args, "--load-format", v.LoadFormat)
+	args = appendOptional(args, "--tokenizer-mode", v.TokenizerMode)
 	if v.MaxBatchedTokens > 0 {
 		args = append(args, "--max-num-batched-tokens", fmt.Sprint(v.MaxBatchedTokens))
+	}
+	if v.BlockSize > 0 {
+		args = append(args, "--block-size", fmt.Sprint(v.BlockSize))
+	}
+	if v.MaxCUDAGraphCaptureSize > 0 {
+		args = append(args, "--max-cudagraph-capture-size", fmt.Sprint(v.MaxCUDAGraphCaptureSize))
 	}
 	if v.MultimodalImageLimit > 0 {
 		limit, _ := json.Marshal(map[string]int{"image": v.MultimodalImageLimit})
@@ -647,6 +657,9 @@ func vllmArgs(r recipe.Recipe, placement Placement) []string {
 	}
 	if v.AutoToolChoice {
 		args = append(args, "--enable-auto-tool-choice")
+	}
+	if v.FlashInferAutotune {
+		args = append(args, "--enable-flashinfer-autotune")
 	}
 	if v.DisableQuantFusions {
 		args = append(args, "--compilation-config", disabledQuantFusionsConfig)

@@ -492,6 +492,82 @@ func TestOnlyTheTwoSparkFlashRecipeDeclaresAWritablePath(t *testing.T) {
 	}
 }
 
+// The GB10 vLLM build the two-Spark DeepSeek V4 Flash recipe pins accepts
+// values no other image in the pack does. Widening the policy for it must not
+// widen it into a passthrough: each new field still has a closed set of
+// answers, and the settings that only mean something together still have to
+// arrive together.
+func TestVLLMPolicyBoundsTheGB10RuntimeSettings(t *testing.T) {
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := Find(recipes, "deepseek-v4-flash-0731-2s")
+	if !ok {
+		t.Fatal("DeepSeek V4 Flash two-Spark recipe missing")
+	}
+	tests := []struct {
+		name   string
+		mutate func(*VLLMConfig)
+		want   string
+	}{
+		{"unknown kv cache dtype", func(v *VLLMConfig) { v.KVCacheDType = "nvfp4_anything" }, "outside the recipe policy"},
+		{"unknown moe backend", func(v *VLLMConfig) { v.MoEBackend = "b12x_experimental" }, "outside the recipe policy"},
+		{"unknown tokenizer mode", func(v *VLLMConfig) { v.TokenizerMode = "mistral" }, "outside the recipe policy"},
+		{"unknown draft sample method", func(v *VLLMConfig) { v.SpeculativeDraftSampleMethod = "greedy" }, "outside the recipe policy"},
+		{"unknown speculative method", func(v *VLLMConfig) { v.SpeculativeMethod = "eagle3" }, "outside the recipe policy"},
+		{"block size vLLM does not take", func(v *VLLMConfig) { v.BlockSize = 200 }, "block_size must be unset"},
+		{"capture size below the batch it must cover", func(v *VLLMConfig) { v.MaxCUDAGraphCaptureSize = v.MaxNumSeqs - 1 }, "max_cudagraph_capture_size"},
+		{"unbounded capture ladder", func(v *VLLMConfig) { v.MaxCUDAGraphCaptureSize = 4096 }, "max_cudagraph_capture_size"},
+		{"negative capture size", func(v *VLLMConfig) { v.MaxCUDAGraphCaptureSize = -1 }, "max_cudagraph_capture_size"},
+		{"draft sampling without a method", func(v *VLLMConfig) {
+			v.SpeculativeMethod, v.SpeculativeTokens = "", 0
+		}, "require a speculative method"},
+		{"DSpark pointed at a second model", func(v *VLLMConfig) { v.SpeculativeModelRole = "primary" }, "must not reference a separate speculative model"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := base
+			vllm := *base.Service.VLLM
+			test.mutate(&vllm)
+			candidate.Service.VLLM = &vllm
+			err := Validate(candidate)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate()=%v, want error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+// The runtime environment stays an allowlist of exact pairs. A GB10 arch list
+// is only ever the GB10 target, and the B12X MoE switch can only be turned on.
+func TestRuntimeEnvironmentAllowlistPinsValuesNotJustNames(t *testing.T) {
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := Find(recipes, "deepseek-v4-flash-0731-2s")
+	if !ok {
+		t.Fatal("DeepSeek V4 Flash two-Spark recipe missing")
+	}
+	for name, value := range map[string]string{
+		"TORCH_CUDA_ARCH_LIST":      "12.0+PTX",
+		"FLASHINFER_CUDA_ARCH_LIST": "9.0a",
+		"VLLM_USE_B12X_MOE":         "0",
+	} {
+		candidate := base
+		candidate.Runtime.Environment = make(map[string]string, len(base.Runtime.Environment))
+		for existing, current := range base.Runtime.Environment {
+			candidate.Runtime.Environment[existing] = current
+		}
+		candidate.Runtime.Environment[name] = value
+		err := Validate(candidate)
+		if err == nil || !strings.Contains(err.Error(), "outside the allowlist") {
+			t.Fatalf("%s=%s Validate()=%v, want an allowlist rejection", name, value, err)
+		}
+	}
+}
+
 func TestDecodeStrictRejectsUnknownField(t *testing.T) {
 	_, err := DecodeStrict([]byte("schema_version: 1\nid: valid-recipe\nunexpected: true\n"))
 	if err == nil || !strings.Contains(err.Error(), "field unexpected not found") {

@@ -212,6 +212,93 @@ func TestRecipesWithoutTheKnobSendNoCompilationConfig(t *testing.T) {
 	}
 }
 
+// The two-Spark DeepSeek V4 Flash recipe exists to reproduce a deployment of
+// this model that has been observed serving, on the GB10 vLLM build that
+// deployment runs. Every flag below was read off that deployment's own serve
+// command, so this test is what keeps the recipe and the command builder from
+// drifting away from it one field at a time.
+func TestDeepSeekV4FlashLaunchesTheObservedServeCommand(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flash, ok := recipe.Find(recipes, "deepseek-v4-flash-0731-2s")
+	if !ok {
+		t.Fatal("DeepSeek V4 Flash two-Spark recipe missing")
+	}
+	head := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501}
+	args := vllmArgs(flash, head)
+	for flag, want := range map[string]string{
+		"--kv-cache-dtype":               "nvfp4_ds_mla",
+		"--block-size":                   "256",
+		"--moe-backend":                  "flashinfer_b12x",
+		"--tokenizer-mode":               "deepseek_v4",
+		"--reasoning-parser":             "deepseek_v4",
+		"--tool-call-parser":             "deepseek_v4",
+		"--max-cudagraph-capture-size":   "36",
+		"--max-num-batched-tokens":       "8192",
+		"--max-num-seqs":                 "6",
+		"--gpu-memory-utilization":       "0.78",
+		"--distributed-executor-backend": "mp",
+	} {
+		got, present := argumentValue(args, flag)
+		if !present || got != want {
+			t.Fatalf("%s=%q present=%v, want %q", flag, got, present, want)
+		}
+	}
+	for _, flag := range []string{"--enable-prefix-caching", "--async-scheduling", "--enable-chunked-prefill", "--enable-auto-tool-choice", "--enable-flashinfer-autotune", "--trust-remote-code"} {
+		if !hasArgument(args, flag) {
+			t.Fatalf("%s missing from: %s", flag, strings.Join(args, " "))
+		}
+	}
+	// The draft heads live in the served checkpoint, so the document names a
+	// method and how it samples, and never a second model.
+	spec, ok := argumentValue(args, "--speculative-config")
+	if !ok {
+		t.Fatalf("no --speculative-config: %s", strings.Join(args, " "))
+	}
+	want := `{"draft_sample_method":"probabilistic","method":"dspark","num_speculative_tokens":5}`
+	if spec != want {
+		t.Fatalf("--speculative-config %s, want %s", spec, want)
+	}
+	// The capture ladder must bound the batches this recipe can actually run:
+	// max_num_seqs sequences drafting speculative_tokens tokens each.
+	v := flash.Service.VLLM
+	if v.MaxCUDAGraphCaptureSize != v.MaxNumSeqs*(v.SpeculativeTokens+1) {
+		t.Fatalf("capture size %d does not match %d sequences of %d drafted tokens", v.MaxCUDAGraphCaptureSize, v.MaxNumSeqs, v.SpeculativeTokens)
+	}
+}
+
+// The GB10 build's flags must stay opt-in. A recipe that names none of these
+// fields has to launch byte-for-byte as it did before they existed, because
+// every other image in the pack would reject them at start.
+func TestRecipesWithoutTheGB10KnobsSendNoneOfTheirFlags(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, r := range recipes {
+		v := r.Service.VLLM
+		if v == nil || v.BlockSize > 0 || v.MaxCUDAGraphCaptureSize > 0 || v.TokenizerMode != "" || v.FlashInferAutotune || v.SpeculativeDraftSampleMethod != "" {
+			continue
+		}
+		seen++
+		args := vllmArgs(r, Placement{})
+		for _, flag := range []string{"--block-size", "--max-cudagraph-capture-size", "--tokenizer-mode", "--enable-flashinfer-autotune"} {
+			if hasArgument(args, flag) {
+				t.Fatalf("%s gained %s it never asked for", r.ID, flag)
+			}
+		}
+		if spec, ok := argumentValue(args, "--speculative-config"); ok && strings.Contains(spec, "draft_sample_method") {
+			t.Fatalf("%s gained a draft sample method it never asked for: %s", r.ID, spec)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("every vLLM recipe set the new knobs, so this test proved nothing")
+	}
+}
+
 // sglangRecipe is the shape an SGLang recipe will have once one is
 // qualified: no such recipe ships yet, so the command builder is pinned
 // against a hand-built recipe rather than the catalog.

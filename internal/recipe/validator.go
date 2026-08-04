@@ -110,6 +110,13 @@ func Validate(r Recipe) error {
 		// long decodes on GB10 until the driver reports out of memory, so a
 		// recipe may turn them off but never force them on.
 		"VLLM_USE_BREAKABLE_CUDAGRAPH": {"0": true},
+		// Opt-in only, and only to the GB10 target. A runtime image built
+		// before GB10 defaults these arch lists to the previous Blackwell
+		// generation, and anything it compiles at run time then targets that
+		// instead of the machine it is running on.
+		"TORCH_CUDA_ARCH_LIST":      {"12.1a": true},
+		"FLASHINFER_CUDA_ARCH_LIST": {"12.1a": true},
+		"VLLM_USE_B12X_MOE":         {"1": true},
 	}
 	// TMPDIR may only point at a surface the recipe itself declares writable:
 	// runtimes whose JIT caches load compiled objects need an exec-friendly
@@ -478,18 +485,36 @@ func topologyProblems(t Topology) []string {
 	return problems
 }
 
+// allowedVLLMBlockSizes is the set of KV cache block sizes a recipe may pin.
+// 0 means the recipe pinned nothing and vLLM keeps its own default.
+var allowedVLLMBlockSizes = map[int]bool{0: true, 16: true, 32: true, 64: true, 128: true, 256: true}
+
+// maxVLLMCUDAGraphCaptureSize bounds the largest batch a recipe may ask vLLM
+// to capture a CUDA graph for. Every captured size holds device memory on a
+// machine with no separate VRAM to fail into, so the schema caps the number a
+// recipe can name rather than trusting it.
+const maxVLLMCUDAGraphCaptureSize = 1024
+
 func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 	// Tensor parallelism spans the whole topology: one rank per Spark.
 	if v.TensorParallelSize != sparkCount || v.MaxModelLen <= 0 || v.MaxNumSeqs <= 0 || v.MaxBatchedTokens < 0 || v.MultimodalImageLimit < 0 || v.MultimodalImageLimit > 8 {
 		return errors.New("vllm numeric settings are invalid")
 	}
+	// Every value here is one a maintainer has seen a runtime image accept for
+	// a recipe in this pack. nvfp4_ds_mla, flashinfer_b12x as a MoE backend,
+	// the dspark speculative method and the deepseek_v4 parsers and tokenizer
+	// mode are not stock vLLM: they exist in the GB10 build the two-Spark
+	// DeepSeek V4 Flash recipe pins, and a recipe that names them on an image
+	// without them fails at start rather than silently serving something else.
 	allowed := map[string]map[string]bool{
-		"kv": {"": true, "fp8": true}, "attention": {"": true, "flashinfer": true},
-		"moe": {"": true, "auto": true, "marlin": true}, "linear": {"": true, "flashinfer_b12x": true},
-		"spec_method": {"": true, "mtp": true, "dflash": true}, "spec_moe": {"": true, "triton": true},
-		"reasoning": {"qwen3": true, "poolside_v1": true},
-		"tool":      {"qwen3_xml": true, "qwen3_coder": true, "poolside_v1": true},
-		"load":      {"": true, "fastsafetensors": true},
+		"kv": {"": true, "fp8": true, "nvfp4_ds_mla": true}, "attention": {"": true, "flashinfer": true},
+		"moe": {"": true, "auto": true, "marlin": true, "flashinfer_b12x": true}, "linear": {"": true, "flashinfer_b12x": true},
+		"spec_method": {"": true, "mtp": true, "dflash": true, "dspark": true}, "spec_moe": {"": true, "triton": true},
+		"spec_draft_sample": {"": true, "probabilistic": true},
+		"reasoning":         {"qwen3": true, "poolside_v1": true, "deepseek_v4": true},
+		"tool":              {"qwen3_xml": true, "qwen3_coder": true, "poolside_v1": true, "deepseek_v4": true},
+		"load":              {"": true, "fastsafetensors": true},
+		"tokenizer":         {"": true, "auto": true, "deepseek_v4": true},
 	}
 	// disable_quant_fusions carries no allowlist because its type is one: the
 	// field is a boolean, so the only compilation configuration a recipe can
@@ -499,8 +524,20 @@ func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 	if !allowed["kv"][v.KVCacheDType] || !allowed["attention"][v.AttentionBackend] || !allowed["moe"][v.MoEBackend] ||
 		!allowed["linear"][v.LinearBackend] ||
 		!allowed["spec_method"][v.SpeculativeMethod] || !allowed["spec_moe"][v.SpeculativeMoE] ||
-		!allowed["reasoning"][v.ReasoningParser] || !allowed["tool"][v.ToolCallParser] || !allowed["load"][v.LoadFormat] {
+		!allowed["spec_draft_sample"][v.SpeculativeDraftSampleMethod] ||
+		!allowed["reasoning"][v.ReasoningParser] || !allowed["tool"][v.ToolCallParser] || !allowed["load"][v.LoadFormat] ||
+		!allowed["tokenizer"][v.TokenizerMode] {
 		return errors.New("vllm setting is outside the recipe policy")
+	}
+	if !allowedVLLMBlockSizes[v.BlockSize] {
+		return errors.New("vllm block_size must be unset or one of 16, 32, 64, 128, 256")
+	}
+	// A capture size below max_num_seqs would leave the busiest batch this
+	// recipe admits running eager while smaller ones run captured, which is
+	// the opposite of what bounding the ladder is for.
+	if v.MaxCUDAGraphCaptureSize < 0 || v.MaxCUDAGraphCaptureSize > maxVLLMCUDAGraphCaptureSize ||
+		(v.MaxCUDAGraphCaptureSize > 0 && v.MaxCUDAGraphCaptureSize < v.MaxNumSeqs) {
+		return errors.New("vllm max_cudagraph_capture_size must be unset, at least max_num_seqs, and no more than " + strconv.Itoa(maxVLLMCUDAGraphCaptureSize))
 	}
 	util, err := strconv.ParseFloat(v.GPUMemoryUtil, 64)
 	if err != nil || util <= 0 || util > 0.95 || v.SpeculativeTokens < 0 || v.SpeculativeTokens > 32 {
@@ -508,14 +545,16 @@ func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 	}
 	// An empty method means the model has no speculative decoding; a recipe
 	// must not carry draft settings it cannot honour.
-	if v.SpeculativeMethod == "" && (v.SpeculativeTokens != 0 || v.SpeculativeModelRole != "" || v.SpeculativeMoE != "") {
+	if v.SpeculativeMethod == "" && (v.SpeculativeTokens != 0 || v.SpeculativeModelRole != "" || v.SpeculativeMoE != "" || v.SpeculativeDraftSampleMethod != "") {
 		return errors.New("speculative settings require a speculative method")
 	}
 	if v.SpeculativeMethod != "" && v.SpeculativeTokens <= 0 {
 		return errors.New("a speculative method requires a positive draft token count")
 	}
-	if v.SpeculativeMethod == "mtp" && v.SpeculativeModelRole != "" {
-		return errors.New("MTP must not reference a separate speculative model")
+	// MTP and DSpark both draft from heads carried by the served checkpoint
+	// itself, so there is no second model for them to point at.
+	if (v.SpeculativeMethod == "mtp" || v.SpeculativeMethod == "dspark") && v.SpeculativeModelRole != "" {
+		return errors.New("MTP and DSpark draft from the served model's own heads and must not reference a separate speculative model")
 	}
 	if v.SpeculativeMethod == "dflash" && (v.SpeculativeModelRole == "" || !roles[v.SpeculativeModelRole] || v.SpeculativeModelRole == "primary") {
 		return errors.New("DFlash must reference a declared non-primary artifact role")
