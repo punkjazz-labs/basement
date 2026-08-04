@@ -394,6 +394,8 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		return h.waitHTTP(ctx, r, progress)
 	case "verify_openai_inference":
 		return h.verifyInference(ctx, r)
+	case "verify_media_generation":
+		return h.verifyMediaGeneration(ctx, r, progress)
 	case "measure_throughput":
 		return h.measureThroughput(ctx, r)
 	case "remove_artifact_if_unshared":
@@ -476,6 +478,18 @@ type runtimeMemoryPlan struct {
 }
 
 func memoryPlan(r recipe.Recipe) (runtimeMemoryPlan, error) {
+	if c, media := r.MediaGeneration(); media {
+		// ComfyUI has no device memory fraction to read: it loads what a
+		// workflow asks for and holds it, so the claim is the recipe's own
+		// measured total. There is no context length and no KV cache, and
+		// both stay absent rather than reading zero, which would look like a
+		// model that plans for no context at all.
+		planned, ok := r.PlannedMemoryBytes()
+		if !ok {
+			return runtimeMemoryPlan{}, fmt.Errorf("recipe declares runtime kind %q without a memory model", r.Runtime.Kind)
+		}
+		return runtimeMemoryPlan{budgetBytes: planned, maxConcurrentRequests: c.ConcurrentGenerations}, nil
+	}
 	if r.Runtime.Kind == "llamacpp" {
 		planned, ok := r.PlannedMemoryBytes()
 		if !ok {
@@ -610,6 +624,14 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 	case "verify_openai_inference":
 		_, err := h.verifyInference(ctx, r)
 		return err == nil
+	case "verify_media_generation":
+		// The text kinds re-run their proof here, because asking a running
+		// model for one short answer costs a second. A media proof is a real
+		// generation and costs minutes at best, so a resumed job checks the
+		// proof instead of repeating it: the receipt names the files the
+		// verification produced, and they are still on disk and still
+		// non-empty, or this returns false and the step runs again.
+		return h.mediaGenerationProven(receipt)
 	case "stop_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		return errors.Is(err, ErrContainerNotFound) || (err == nil && !state.Running)
@@ -688,10 +710,17 @@ func (h *HostExecutor) waitHTTP(ctx context.Context, r recipe.Recipe, progress P
 	return nil, fmt.Errorf("the model server did not become HTTP-ready within %d minutes", minutes)
 }
 
-// healthPath is the runtime's liveness route. vLLM and SGLang both serve
-// /health; a kind whose route differs adds a case here rather than changing
-// the wait loop.
-func healthPath(_ recipe.Recipe) string { return "/health" }
+// healthPath is the runtime's liveness route. vLLM, SGLang and llama-server
+// all serve /health; ComfyUI does not, and its documented /queue answers with
+// the queue state as JSON. The route is deliberately not "/": that serves the
+// ComfyUI web app, which basement never exposes to anyone, so treating it as
+// a health signal would be checking a page nobody may open.
+func healthPath(r recipe.Recipe) string {
+	if r.Runtime.Kind == "comfyui" {
+		return "/queue"
+	}
+	return "/health"
+}
 
 func (h *HostExecutor) health(ctx context.Context, r recipe.Recipe) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, h.modelURL(r)+healthPath(r), nil)
@@ -751,6 +780,94 @@ func (h *HostExecutor) verifyInference(ctx context.Context, r recipe.Recipe) (ma
 		return nil, fmt.Errorf("inference returned an empty model response (finish_reason %q); body: %s", result.Choices[0].FinishReason, truncateForError(raw, 2048))
 	}
 	return map[string]any{"endpoint": h.modelURL(r) + "/v1", "served_model_id": r.Service.ServedModelID, "response_non_empty": true, "answered": answer != "", "reasoning_only": answer == "" && reasoning != "", "finish_reason": result.Choices[0].FinishReason, "reported_model": result.Model}, nil
+}
+
+// mediaVerificationSeed is the seed the install proof always generates with.
+// It is fixed so two installs of the same recipe on the same machine produce
+// the same clip, which is what makes the receipt comparable; it is not a
+// quality choice and no user ever sees it.
+const mediaVerificationSeed = 1
+
+// verifyMediaGeneration is the media counterpart of verify_openai_inference:
+// the cheapest honest proof that the thing actually works. It generates the
+// smallest clip the recipe admits — its minimum duration at its default short
+// edge — and requires a non-empty file on disk afterwards. Nothing weaker
+// would do: a workflow that validates upstream and then writes nothing is
+// exactly the failure this step exists to catch, and it is the first thing an
+// owner would hit rather than the last.
+//
+// It is expensive, and honestly so. The wait is the recipe's own start
+// timeout, so a recipe that knows how long its smallest generation takes says
+// so in one place and both the health wait and this step honour it.
+func (h *HostExecutor) verifyMediaGeneration(ctx context.Context, r recipe.Recipe, progress Progress) (map[string]any, error) {
+	c, ok := r.MediaGeneration()
+	if !ok {
+		return nil, fmt.Errorf("recipe %s is not a media model, so it has no generation to verify", r.ID)
+	}
+	name, ok := c.Graphs[recipe.ModeTextToVideo]
+	if !ok {
+		return nil, fmt.Errorf("recipe %s declares no %s workflow to verify with", r.ID, recipe.ModeTextToVideo)
+	}
+	raw, err := recipe.Graph(name)
+	if err != nil {
+		return nil, err
+	}
+	frames := c.Frames(c.MinBlocks)
+	graph, err := recipe.RenderGraph(raw, recipe.GraphInputs{
+		Prompt: "A slow pan across a quiet room.",
+		Seed:   mediaVerificationSeed,
+		Frames: frames,
+		Width:  c.DefaultShortEdge,
+		Height: c.DefaultShortEdge,
+	})
+	if err != nil {
+		return nil, err
+	}
+	destination := filepath.Join(h.GenerationRoot(r), "install-verification")
+	// A previous attempt's files must not be able to pass for this one's.
+	if err := os.RemoveAll(destination); err != nil {
+		return nil, err
+	}
+	report := func(elapsed time.Duration, queue QueueState) error {
+		if progress == nil {
+			return nil
+		}
+		return progress(map[string]any{
+			"status": "generating", "elapsed_seconds": int64(elapsed.Seconds()),
+			"queue_running": queue.Running, "queue_pending": queue.Pending,
+		})
+	}
+	outcome, err := RunGeneration(ctx, NewComfyUIClient(h.modelURL(r)), graph, h.GenerationRoot(r), destination, startTimeout(r), report)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"mode": recipe.ModeTextToVideo, "prompt_id": outcome.PromptID,
+		"frames": frames, "blocks": c.MinBlocks, "width": c.DefaultShortEdge, "height": c.DefaultShortEdge,
+		"seed": mediaVerificationSeed, "output_files": outcome.Files, "bytes": outcome.Bytes,
+		"duration_seconds": math.Round(outcome.Duration.Seconds()*10) / 10,
+	}, nil
+}
+
+// mediaGenerationProven reads a recorded verification receipt and confirms
+// what it claims is still true on disk. It is deliberately strict about the
+// receipt's shape: an unreadable one proves nothing, and proving nothing
+// means running the generation again.
+func (h *HostExecutor) mediaGenerationProven(receipt json.RawMessage) bool {
+	var recorded struct {
+		OutputFiles []string `json:"output_files"`
+		Bytes       int64    `json:"bytes"`
+	}
+	if json.Unmarshal(receipt, &recorded) != nil || recorded.Bytes <= 0 || len(recorded.OutputFiles) == 0 {
+		return false
+	}
+	for _, name := range recorded.OutputFiles {
+		info, err := os.Stat(name)
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // truncateForError keeps error payloads readable while preserving enough of
@@ -923,7 +1040,42 @@ func (h *HostExecutor) expectedMounts(r recipe.Recipe) map[string]string {
 	for index := range r.Artifacts {
 		paths[index] = h.artifactPath(r, index)
 	}
-	return containerMounts(r, paths, h.cachePath(r))
+	return containerMounts(r, paths, h.cachePath(r), h.mediaMounts(r))
+}
+
+// GenerationRoot is where a media model's generations live under a data
+// directory. It is the host side of the container's output directory, so
+// results land straight into a directory basement owns and nothing is ever
+// read back out of the container. It is a plain function because two layers
+// need the same answer: the step executor mounts it, and the generation API
+// serves files out of it.
+func GenerationRoot(dataDir, recipeID string) string {
+	return filepath.Join(dataDir, "generations", recipeID)
+}
+
+func (h *HostExecutor) GenerationRoot(r recipe.Recipe) string {
+	return GenerationRoot(h.dataDir, r.ID)
+}
+
+// generationInputRoot is where source images are staged for the modes that
+// take one. It is a dot-directory inside the generation root so a listing of
+// results never has to skip it by name.
+func (h *HostExecutor) generationInputRoot(r recipe.Recipe) string {
+	return filepath.Join(h.GenerationRoot(r), ".input")
+}
+
+// mediaMounts are the read-write bind mounts a media runtime needs, keyed by
+// container path. Every other kind gets none, so nothing that shipped before
+// this kind changes shape.
+func (h *HostExecutor) mediaMounts(r recipe.Recipe) map[string]string {
+	c, ok := r.MediaGeneration()
+	if !ok {
+		return nil
+	}
+	return map[string]string{
+		c.OutputDirectory: h.GenerationRoot(r),
+		c.InputDirectory:  h.generationInputRoot(r),
+	}
 }
 
 // writeGeneratedConfig records how this machine launches r: the pinned image
@@ -980,7 +1132,38 @@ func (h *HostExecutor) createContainer(ctx context.Context, execution Execution,
 	if err := os.MkdirAll(cachePath, 0o750); err != nil {
 		return "", err
 	}
-	return h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, r, execution.Placement)
+	writable := h.mediaMounts(r)
+	for _, host := range writable {
+		if err := os.MkdirAll(host, 0o750); err != nil {
+			return "", err
+		}
+	}
+	if err := h.writeComfyUIRuntimeState(r, cachePath); err != nil {
+		return "", err
+	}
+	return h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, writable, r, execution.Placement)
+}
+
+// writeComfyUIRuntimeState puts the two things a media runtime needs before
+// it can start into the container's one writable persistent bind: the model
+// folder map, because ComfyUI has no command-line flag per model folder and
+// its documented alternative is a file, and an empty directory for its own
+// state, because the container root is read-only. Both are rewritten every
+// time a container is created, so neither can describe a layout the recipe
+// has since moved off. Every other runtime kind gets nothing here.
+func (h *HostExecutor) writeComfyUIRuntimeState(r recipe.Recipe, cachePath string) error {
+	if _, ok := r.MediaGeneration(); !ok {
+		return nil
+	}
+	document := comfyUIModelPaths(r)
+	if strings.TrimSpace(document) == "" {
+		return fmt.Errorf("the recipe pins no model folders, so the media runtime would start with no weights to load")
+	}
+	name := filepath.Join(cachePath, filepath.Base(comfyUIModelPathsFile))
+	if err := os.WriteFile(name, []byte(document), 0o640); err != nil {
+		return fmt.Errorf("write the media runtime's model paths: %w", err)
+	}
+	return os.MkdirAll(filepath.Join(cachePath, filepath.Base(comfyUIUserDirectory)), 0o750)
 }
 
 // containerDrift is everything about an existing container of ours that no

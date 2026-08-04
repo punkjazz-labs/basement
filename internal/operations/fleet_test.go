@@ -129,7 +129,7 @@ func TestDistributedContainerGetsTheFabricAndItsEnvironment(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"worker-container"}`))}, nil
 	})}}
 	worker := Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29501}
-	if _, err := client.Create(context.Background(), "worker", r.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", r, worker); err != nil {
+	if _, err := client.Create(context.Background(), "worker", r.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", nil, r, worker); err != nil {
 		t.Fatal(err)
 	}
 	hostConfig := body["HostConfig"].(map[string]any)

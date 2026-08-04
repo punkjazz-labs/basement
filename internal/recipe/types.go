@@ -202,6 +202,82 @@ type Service struct {
 	VLLM            *VLLMConfig     `yaml:"vllm,omitempty" json:"vllm,omitempty"`
 	SGLang          *SGLangConfig   `yaml:"sglang,omitempty" json:"sglang,omitempty"`
 	LlamaCpp        *LlamaCppConfig `yaml:"llamacpp,omitempty" json:"llamacpp,omitempty"`
+	ComfyUI         *ComfyUIConfig  `yaml:"comfyui,omitempty" json:"comfyui,omitempty"`
+}
+
+// ComfyUIConfig is what a media recipe pins about the model it serves. Every
+// numeric limit here is a fact about the model rather than a preference: the
+// console reads them to build its controls, and the generation API validates
+// against them, so neither can ever offer or accept a size or a duration the
+// model does not take.
+//
+// The graphs are the exception to the "recipes carry no runtime program"
+// rule, and they are held to it in a different way: they are pinned files
+// shipped inside basement, not text a recipe writes, and they never appear in
+// an API response. A recipe names them; it cannot supply them.
+type ComfyUIConfig struct {
+	// Graphs maps a generation mode onto a workflow file under
+	// internal/recipe/graphs. The mode names are a closed set (see
+	// allowedGenerationModes) because each one is a code path in the
+	// generation driver, not a label.
+	Graphs map[string]string `yaml:"graphs" json:"graphs"`
+	// OutputDirectory and InputDirectory are absolute container paths.
+	// basement owns both: it bind-mounts host directories under its data
+	// directory onto them, reads results out of the first, and stages source
+	// images into the second.
+	OutputDirectory string `yaml:"output_directory" json:"output_directory"`
+	InputDirectory  string `yaml:"input_directory" json:"input_directory"`
+	// The canvas. DefaultShortEdge is what the console offers first;
+	// MaxShortEdge and MaxLongEdge bound what the model accepts. All three
+	// are multiples of CanvasMultiple, because the model's own canvas is.
+	DefaultShortEdge int `yaml:"default_short_edge" json:"default_short_edge"`
+	MaxShortEdge     int `yaml:"max_short_edge" json:"max_short_edge"`
+	MaxLongEdge      int `yaml:"max_long_edge" json:"max_long_edge"`
+	// The duration grid: frames = FrameBlock*blocks + FrameOffset, played at
+	// FramesPerSecond. A duration is expressed in blocks everywhere inside
+	// basement and converted to seconds only for display, so a request can
+	// never name a frame count the model would round away from.
+	FrameBlock      int `yaml:"frame_block" json:"frame_block"`
+	FrameOffset     int `yaml:"frame_offset" json:"frame_offset"`
+	FramesPerSecond int `yaml:"frames_per_second" json:"frames_per_second"`
+	MinBlocks       int `yaml:"min_blocks" json:"min_blocks"`
+	MaxBlocks       int `yaml:"max_blocks" json:"max_blocks"`
+	DefaultBlocks   int `yaml:"default_blocks" json:"default_blocks"`
+	// ConcurrentGenerations is how many generations may run at once. It is
+	// pinned at 1 (see validateComfyUI): a generation on a GB10 holds the
+	// whole device for minutes at a time, and nothing has qualified a second
+	// one running beside it. Requests beyond that are queued in order, never
+	// refused.
+	ConcurrentGenerations int `yaml:"concurrent_generations" json:"concurrent_generations"`
+}
+
+// CanvasMultiple is the grid every generated dimension sits on. It is the
+// model's own constraint, not a rounding convenience, which is why a request
+// off the grid is refused rather than snapped to it.
+const CanvasMultiple = 32
+
+// Frames is how many frames a duration of blocks generates. blocks is
+// validated against MinBlocks and MaxBlocks before it reaches here.
+func (c ComfyUIConfig) Frames(blocks int) int { return c.FrameBlock*blocks + c.FrameOffset }
+
+// Seconds is the wall-clock length of a generation of blocks, for display
+// only. It is derived from the frame grid, never stated separately, so the
+// number the console shows and the frames the model makes cannot disagree.
+func (c ComfyUIConfig) Seconds(blocks int) float64 {
+	if c.FramesPerSecond <= 0 {
+		return 0
+	}
+	return float64(c.Frames(blocks)) / float64(c.FramesPerSecond)
+}
+
+// MediaGeneration reports the recipe's media configuration, and false for
+// every recipe that serves text. It is how the API and the runtime adapter
+// ask "is this a media model" without reading the kind string in two places.
+func (r Recipe) MediaGeneration() (ComfyUIConfig, bool) {
+	if r.Runtime.Kind != "comfyui" || r.Service.ComfyUI == nil {
+		return ComfyUIConfig{}, false
+	}
+	return *r.Service.ComfyUI, true
 }
 
 type VLLMConfig struct {
@@ -347,22 +423,36 @@ func (s Service) MemoryFraction(kind string) (string, bool) {
 	return "", false
 }
 
-// PlannedMemoryBytes reports the device memory a llama.cpp recipe holds, as
-// an absolute number: the mapped weights, the KV cache for the whole pinned
-// context, and the runtime overhead measured at qualification.
+// PlannedMemoryBytes reports the device memory a recipe holds as an absolute
+// number, for the kinds whose footprint is absolute: the mapped weights, the
+// KV cache for the whole pinned context, and the runtime overhead measured at
+// qualification.
 //
 // vLLM and SGLang are told what share of the device to claim and then fill
 // it; llama.cpp is told nothing of the sort. It maps the GGUF and sizes the
 // cache from --ctx-size, so its footprint follows from the recipe's own
-// figures and is knowable only when the recipe states a memory_model. The
-// second result is false for every other kind, and for a llama.cpp recipe
-// with no memory model — which the validator refuses.
+// figures and is knowable only when the recipe states a memory_model. ComfyUI
+// is the same shape with a simpler sum: it holds the weights it loads plus
+// whatever the diffusion pipeline needs while a generation runs, and it keeps
+// no KV cache at all, so its kv_bytes_per_token is zero by construction.
+// The second result is false for every other kind, and for a recipe of these
+// kinds with no memory model — which the validator refuses.
 // The figures come from a recipe file, which is data this process did not
 // write, so the arithmetic is checked rather than assumed. An overflowing
 // product wraps to a small positive number, and a small positive number is
 // exactly what an OOM guardrail waves through, so overflow reports "no
 // footprint" instead of a footprint that flatters the recipe.
 func (r Recipe) PlannedMemoryBytes() (int64, bool) {
+	if r.Runtime.Kind == "comfyui" {
+		if r.Service.ComfyUI == nil || r.MemoryModel == nil {
+			return 0, false
+		}
+		m := *r.MemoryModel
+		if m.WeightsBytes < 0 || m.RuntimeOverheadBytes < 0 {
+			return 0, false
+		}
+		return addWithoutOverflow(m.WeightsBytes, m.RuntimeOverheadBytes)
+	}
 	if r.Runtime.Kind != "llamacpp" || r.Service.LlamaCpp == nil || r.MemoryModel == nil {
 		return 0, false
 	}

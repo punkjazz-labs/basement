@@ -216,7 +216,8 @@ func (e *Engine) releaseRuntime() { <-e.runtime }
 var runtimeOperations = map[string]bool{
 	"stop_container": true, "create_container": true, "verify_memory": true,
 	"start_container": true, "wait_http": true, "verify_openai_inference": true,
-	"remove_container": true, "measure_throughput": true,
+	"verify_media_generation": true,
+	"remove_container":        true, "measure_throughput": true,
 }
 
 // switchesServing lists the job kinds that change which model this machine
@@ -583,18 +584,19 @@ func (e *Engine) plan(ctx context.Context, job store.Job, target recipe.Recipe, 
 			ops = downloadOnlyOperations(ops)
 		}
 	case "start":
-		ops = []recipe.Operation{{Type: "verify_memory"}, {Type: "start_container"}, {Type: "wait_http"}, {Type: "verify_openai_inference"}}
+		verify := recipe.Operation{Type: recipe.InferenceVerification(target.Runtime.Kind)}
+		ops = []recipe.Operation{{Type: "verify_memory"}, {Type: "start_container"}, {Type: "wait_http"}, verify}
 		// A download-only install never wrote the runtime config or created
 		// the container (see downloadOnlyOperations); the first start after
 		// one has to do both before the usual start sequence, and only then
 		// does the host port actually get bound.
 		if model, modelErr := e.store.Model(ctx, target.ID); modelErr == nil && model.ContainerID == "" {
-			ops = []recipe.Operation{{Type: "verify_port"}, {Type: "write_generated_config"}, {Type: "create_container"}, {Type: "verify_memory"}, {Type: "start_container"}, {Type: "wait_http"}, {Type: "verify_openai_inference"}}
+			ops = []recipe.Operation{{Type: "verify_port"}, {Type: "write_generated_config"}, {Type: "create_container"}, {Type: "verify_memory"}, {Type: "start_container"}, {Type: "wait_http"}, verify}
 		}
 	case "stop":
 		ops = []recipe.Operation{{Type: "stop_container"}}
 	case "smoke-test":
-		ops = []recipe.Operation{{Type: "wait_http"}, {Type: "verify_openai_inference"}}
+		ops = []recipe.Operation{{Type: "wait_http"}, {Type: recipe.InferenceVerification(target.Runtime.Kind)}}
 	case "benchmark":
 		ops = []recipe.Operation{{Type: "wait_http"}, {Type: "measure_throughput"}}
 	case "remove":
@@ -735,7 +737,7 @@ func distributedPlans(ops []recipe.Operation, target recipe.Recipe, deployment o
 		case "create_container", "verify_memory", "start_container":
 			workerBringUp = append(workerBringUp, plannedOperation{Operation: op, Recipe: target, Placement: worker})
 			headBringUp = append(headBringUp, plannedOperation{Operation: op, Recipe: target, Placement: head})
-		case "wait_http", "verify_openai_inference", "measure_throughput":
+		case "wait_http", "verify_openai_inference", "verify_media_generation", "measure_throughput":
 			tail = append(tail, plannedOperation{Operation: op, Recipe: target, Placement: head})
 		case "pull_image", "download_artifact", "write_generated_config":
 			checkPeer()
@@ -820,7 +822,7 @@ func downloadOnlyOperations(ops []recipe.Operation) []recipe.Operation {
 	trimmed := make([]recipe.Operation, 0, len(ops))
 	for _, op := range ops {
 		switch op.Type {
-		case "write_generated_config", "create_container", "verify_memory", "start_container", "wait_http", "verify_openai_inference":
+		case "write_generated_config", "create_container", "verify_memory", "start_container", "wait_http", "verify_openai_inference", "verify_media_generation":
 			return trimmed
 		case "verify_port":
 			continue
@@ -901,8 +903,13 @@ func (e *Engine) activeRecipe(ctx context.Context, target recipe.Recipe) (*recip
 func rollbackWasVerified(job store.Job) bool {
 	for _, step := range job.Steps {
 		// A distributed rollback names the node it ran on, so the recorded
-		// step is "rollback_verify_openai_inference:head".
-		if strings.HasPrefix(step.Operation, "rollback_verify_openai_inference") && step.State == "completed" {
+		// step is "rollback_verify_openai_inference:head". A media model is
+		// proved by generating rather than by answering, so either
+		// verification counts as the rollback having been proved.
+		if step.State != "completed" {
+			continue
+		}
+		if strings.HasPrefix(step.Operation, "rollback_verify_openai_inference") || strings.HasPrefix(step.Operation, "rollback_verify_media_generation") {
 			return true
 		}
 	}
@@ -924,7 +931,9 @@ func rollbackPlans(target recipe.Recipe, targetDeployment operations.Deployment,
 			plans = append(plans, plannedOperation{Operation: recipe.Operation{Type: op}, Recipe: previous, Placement: previousDeployment.Worker})
 		}
 	}
-	for _, op := range []string{"verify_memory", "start_container", "wait_http", "verify_openai_inference"} {
+	// The model coming back is the one whose kind decides how it is proved:
+	// a rollback onto a media model has to generate, not ask for tokens.
+	for _, op := range []string{"verify_memory", "start_container", "wait_http", recipe.InferenceVerification(previous.Runtime.Kind)} {
 		plans = append(plans, plannedOperation{Operation: recipe.Operation{Type: op}, Recipe: previous, Placement: previousDeployment.Head})
 	}
 	return plans
@@ -1164,7 +1173,7 @@ func stateFor(kind, operation string) string {
 		"pull_image": "downloading_runtime", "download_artifact": "downloading_models", "write_generated_config": "configuring", "create_container": "configuring",
 		operations.VerifyFabric:   "preflighting",
 		operations.VerifyPeerNode: "preflighting",
-		"start_container":         "starting", "wait_http": "verifying_health", "verify_openai_inference": "verifying_inference", "stop_container": "stopping", "remove_container": "removing", "remove_artifact_if_unshared": "removing", "measure_throughput": "benchmarking",
+		"start_container":         "starting", "wait_http": "verifying_health", "verify_openai_inference": "verifying_inference", "verify_media_generation": "verifying_generation", "stop_container": "stopping", "remove_container": "removing", "remove_artifact_if_unshared": "removing", "measure_throughput": "benchmarking",
 	}
 	if state := states[operation]; state != "" {
 		return state

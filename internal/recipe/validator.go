@@ -40,7 +40,34 @@ var allowedOperations = map[string]bool{
 	"pull_image":             true, "download_artifact": true, "write_generated_config": true,
 	"create_container": true, "start_container": true, "stop_container": true,
 	"remove_container": true, "wait_http": true, "verify_openai_inference": true,
+	"verify_media_generation":     true,
 	"remove_artifact_if_unshared": true,
+}
+
+// InferenceVerification names the operation that proves a freshly installed
+// model really produces output, for the runtime kind given. Every install
+// ends in one of these and no install may end without one: it is the step
+// that separates "the container answered a health check" from "the model
+// works". A media model produces no tokens and has no OpenAI endpoint, so it
+// is proved by generating the smallest clip its recipe allows instead.
+func InferenceVerification(kind string) string {
+	if kind == "comfyui" {
+		return "verify_media_generation"
+	}
+	return "verify_openai_inference"
+}
+
+// serviceInternalPort is the port a runtime's server binds inside its
+// container. It is fixed per kind rather than free, so a recipe cannot point
+// the health wait, the proxy and the container's published port at three
+// different numbers. vLLM, SGLang and llama-server are all launched on 8000
+// by their argument builders; ComfyUI binds its own documented 8188, which is
+// also why a media model never contends with the text endpoint.
+func serviceInternalPort(kind string) int {
+	if kind == "comfyui" {
+		return 8188
+	}
+	return 8000
 }
 
 func DecodeStrict(data []byte) (Recipe, error) {
@@ -197,8 +224,8 @@ func Validate(r Recipe) error {
 		}
 		seenSecrets[secret] = true
 	}
-	if r.Service.InternalPort != 8000 || r.Service.DefaultHostPort < 1024 || r.Service.DefaultHostPort > 65535 {
-		problems = append(problems, "service ports are invalid")
+	if r.Service.InternalPort != serviceInternalPort(r.Runtime.Kind) || r.Service.DefaultHostPort < 1024 || r.Service.DefaultHostPort > 65535 {
+		problems = append(problems, fmt.Sprintf("service ports are invalid; a %s recipe serves on internal_port %d", r.Runtime.Kind, serviceInternalPort(r.Runtime.Kind)))
 	}
 	if r.Service.ServedModelID == "" || filepath.IsAbs(r.Service.ServedModelID) || strings.Contains(r.Service.ServedModelID, "..") {
 		problems = append(problems, "served_model_id is unsafe")
@@ -226,10 +253,10 @@ func Validate(r Recipe) error {
 			problems = append(problems, "run_shell is forbidden")
 		}
 	}
-	installSequence := []string{"verify_architecture", "verify_dgx_spark", "verify_memory_capacity", "verify_disk", "verify_port", "verify_docker", "verify_nvidia_runtime", "verify_artifact_access", "pull_image", "download_artifact", "write_generated_config", "create_container", "verify_memory", "start_container", "wait_http", "verify_openai_inference"}
+	installSequence := []string{"verify_architecture", "verify_dgx_spark", "verify_memory_capacity", "verify_disk", "verify_port", "verify_docker", "verify_nvidia_runtime", "verify_artifact_access", "pull_image", "download_artifact", "write_generated_config", "create_container", "verify_memory", "start_container", "wait_http", InferenceVerification(r.Runtime.Kind)}
 	uninstallSequence := []string{"stop_container", "remove_container", "remove_artifact_if_unshared"}
 	if !operationSequenceEqual(r.Operations, installSequence) {
-		problems = append(problems, "install operations must use the complete verified lifecycle in order")
+		problems = append(problems, "install operations must use the complete verified lifecycle in order, ending in "+InferenceVerification(r.Runtime.Kind))
 	}
 	if !operationSequenceEqual(r.Uninstall, uninstallSequence) {
 		problems = append(problems, "uninstall operations must use the complete safe lifecycle in order")
@@ -364,7 +391,7 @@ func operationSequenceEqual(operations []Operation, expected []string) bool {
 
 // allowedRuntimeKinds grows one kind at a time, and only once the manager can
 // build that runtime's command, memory model, health wait and metric mapping.
-var allowedRuntimeKinds = map[string]bool{"vllm": true, "sglang": true, "llamacpp": true}
+var allowedRuntimeKinds = map[string]bool{"vllm": true, "sglang": true, "llamacpp": true, "comfyui": true}
 
 func runtimeKindNames() []string {
 	names := make([]string, 0, len(allowedRuntimeKinds))
@@ -380,7 +407,7 @@ func runtimeKindNames() []string {
 // content errors instead of hiding behind the kind mismatch.
 func validateRuntimeBlocks(r Recipe, roles map[string]bool, sparkCount int) []string {
 	var problems []string
-	declared := make([]string, 0, 3)
+	declared := make([]string, 0, 4)
 	if r.Service.VLLM != nil {
 		declared = append(declared, "service.vllm")
 	}
@@ -389,6 +416,9 @@ func validateRuntimeBlocks(r Recipe, roles map[string]bool, sparkCount int) []st
 	}
 	if r.Service.LlamaCpp != nil {
 		declared = append(declared, "service.llamacpp")
+	}
+	if r.Service.ComfyUI != nil {
+		declared = append(declared, "service.comfyui")
 	}
 	switch {
 	case len(declared) == 0:
@@ -410,6 +440,9 @@ func validateRuntimeBlocks(r Recipe, roles map[string]bool, sparkCount int) []st
 	}
 	if r.Service.LlamaCpp != nil {
 		problems = append(problems, llamaCppProblems(r, sparkCount)...)
+	}
+	if r.Service.ComfyUI != nil {
+		problems = append(problems, comfyUIProblems(r, sparkCount)...)
 	}
 	return append(problems, chatTemplateReachabilityProblems(r)...)
 }
@@ -701,6 +734,260 @@ func llamaCppMemoryProblems(r Recipe) []string {
 	// overflow the way a sum against an attacker-chosen planned total could.
 	if r.Requirements.MinimumMemoryBytes > 0 && planned > r.Requirements.MinimumMemoryBytes-r.Requirements.MemoryReserveBytes {
 		problems = append(problems, "llamacpp planned memory does not preserve the per-node memory reserve")
+	}
+	return problems
+}
+
+// comfyUIModelFolders is the complete set of top-level directories a media
+// recipe's weights may sit in. ComfyUI resolves a checkpoint by folder name,
+// so these names are load-bearing rather than descriptive: a file under a
+// folder ComfyUI does not know is a file no workflow can ever reference.
+// The list widens when a recipe is qualified that needs a folder on it, the
+// same way every other allowlist in this file does.
+var comfyUIModelFolders = map[string]bool{
+	"diffusion_models": true, "text_encoders": true, "vae": true,
+	"clip": true, "clip_vision": true, "loras": true, "controlnet": true,
+	"upscale_models": true,
+}
+
+// maxComfyUICanvasEdge bounds the largest dimension a recipe may declare.
+// The canvas figures reach the console as the controls it offers and the
+// generation API as the sizes it accepts, and an unbounded edge on a machine
+// with one unified memory pool is an out-of-memory the user asked for by
+// moving a slider.
+const maxComfyUICanvasEdge = 4096
+
+// maxComfyUIBlocks bounds the longest duration a recipe may declare, on the
+// same reasoning as the canvas: a block is 17-odd frames of video and every
+// one of them is minutes of wall clock on this hardware.
+const maxComfyUIBlocks = 256
+
+// comfyUIProblems validates the media block against the whole recipe. Like
+// llama.cpp it is checked against more than itself: the graphs it names have
+// to be files this binary actually ships, the directories it claims have to
+// be ones the container layout leaves free, and the footprint has to come
+// from a memory model, because ComfyUI is handed no share of the device to
+// bound it with.
+func comfyUIProblems(r Recipe, sparkCount int) []string {
+	var problems []string
+	c := *r.Service.ComfyUI
+	// ComfyUI serves one machine. Nothing here builds a second rank, and a
+	// recipe that asked for one would quietly run on one node instead.
+	if sparkCount != 1 {
+		problems = append(problems, "comfyui recipes run on a single Spark; serving one media model across two Sparks is not supported")
+	}
+	problems = append(problems, comfyUIGraphProblems(c)...)
+	problems = append(problems, comfyUIDirectoryProblems(r, c)...)
+	problems = append(problems, comfyUICanvasProblems(c)...)
+	problems = append(problems, comfyUIDurationProblems(c)...)
+	if c.ConcurrentGenerations != 1 {
+		// Stated as a schema rule rather than left to the API: a second
+		// generation beside the first has never been measured on this
+		// hardware, and the generation queue is written against this number.
+		problems = append(problems, "comfyui concurrent_generations must be 1; further requests are queued in order rather than run beside the first")
+	}
+	problems = append(problems, comfyUIWeightsProblems(r)...)
+	return append(problems, comfyUIMemoryProblems(r)...)
+}
+
+func comfyUIGraphProblems(c ComfyUIConfig) []string {
+	var problems []string
+	if len(c.Graphs) == 0 {
+		return []string{"comfyui graphs must name at least one workflow"}
+	}
+	if _, ok := c.Graphs[ModeTextToVideo]; !ok {
+		// The install verification generates through this mode, so a recipe
+		// without it could not be proved to work at all.
+		problems = append(problems, "comfyui graphs must include "+ModeTextToVideo)
+	}
+	modes := make([]string, 0, len(c.Graphs))
+	for mode := range c.Graphs {
+		modes = append(modes, mode)
+	}
+	sort.Strings(modes)
+	for _, mode := range modes {
+		name := c.Graphs[mode]
+		if !allowedGenerationModes[mode] {
+			problems = append(problems, "comfyui graph mode "+mode+" is not one of: "+strings.Join(GenerationModeNames(), ", "))
+			continue
+		}
+		raw, err := Graph(name)
+		if err != nil {
+			problems = append(problems, "comfyui graph for "+mode+": "+err.Error())
+			continue
+		}
+		tokens, err := GraphTokens(raw)
+		if err != nil {
+			problems = append(problems, "comfyui graph "+name+": "+err.Error())
+			continue
+		}
+		required := RequiredGraphTokens(mode)
+		sort.Strings(required)
+		if strings.Join(tokens, " ") != strings.Join(required, " ") {
+			problems = append(problems, fmt.Sprintf("comfyui graph %s carries %s but %s requires exactly %s", name, joinOrNone(tokens), mode, strings.Join(required, " ")))
+		}
+	}
+	return problems
+}
+
+func joinOrNone(tokens []string) string {
+	if len(tokens) == 0 {
+		return "no substitutable tokens"
+	}
+	return strings.Join(tokens, " ")
+}
+
+// comfyUIDirectoryProblems holds the two directories basement bind-mounts
+// into the container to the same rules writable_paths is held to. They are
+// mounted read-write over whatever the image has there, so one over /model
+// would hide the weights and one over /root/.cache would throw away the
+// compilation cache on every restart.
+func comfyUIDirectoryProblems(r Recipe, c ComfyUIConfig) []string {
+	var problems []string
+	reserved := []string{TempMountPath, CacheMountPath}
+	for _, artifact := range r.Artifacts {
+		reserved = append(reserved, ArtifactMountPath(artifact.Role))
+	}
+	for field, declared := range map[string]string{"output_directory": c.OutputDirectory, "input_directory": c.InputDirectory} {
+		if declared == "" {
+			problems = append(problems, "comfyui "+field+" is required")
+			continue
+		}
+		if declared == "/" || len(declared) > maxWritablePathLength || !writablePathPattern.MatchString(declared) || path.Clean(declared) != declared {
+			problems = append(problems, "comfyui "+field+" must be an absolute container path with no trailing slash, relative segment or unusual character")
+			continue
+		}
+		for _, occupied := range append(reserved, r.Runtime.WritablePaths...) {
+			if pathsOverlap(declared, occupied) {
+				problems = append(problems, "comfyui "+field+" "+declared+" collides with the container's "+occupied+" mount")
+			}
+		}
+	}
+	if c.OutputDirectory != "" && c.InputDirectory != "" && pathsOverlap(c.OutputDirectory, c.InputDirectory) {
+		// basement stages source images into one and reads results out of
+		// the other; nested, a staged image would read back as a result.
+		problems = append(problems, "comfyui output_directory and input_directory must be separate paths")
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+func comfyUICanvasProblems(c ComfyUIConfig) []string {
+	var problems []string
+	for field, edge := range map[string]int{"default_short_edge": c.DefaultShortEdge, "max_short_edge": c.MaxShortEdge, "max_long_edge": c.MaxLongEdge} {
+		if edge <= 0 || edge > maxComfyUICanvasEdge || edge%CanvasMultiple != 0 {
+			problems = append(problems, fmt.Sprintf("comfyui %s must be a positive multiple of %d no greater than %d", field, CanvasMultiple, maxComfyUICanvasEdge))
+		}
+	}
+	sort.Strings(problems)
+	if len(problems) > 0 {
+		return problems
+	}
+	if c.DefaultShortEdge > c.MaxShortEdge {
+		problems = append(problems, "comfyui default_short_edge must not exceed max_short_edge")
+	}
+	if c.MaxShortEdge > c.MaxLongEdge {
+		problems = append(problems, "comfyui max_short_edge must not exceed max_long_edge")
+	}
+	return problems
+}
+
+func comfyUIDurationProblems(c ComfyUIConfig) []string {
+	var problems []string
+	if c.FrameBlock <= 0 {
+		problems = append(problems, "comfyui frame_block must be positive; it is the frame count one block of duration adds")
+	}
+	if c.FrameOffset < 0 {
+		problems = append(problems, "comfyui frame_offset must not be negative")
+	}
+	if c.FramesPerSecond <= 0 || c.FramesPerSecond > 240 {
+		problems = append(problems, "comfyui frames_per_second must be between 1 and 240")
+	}
+	if c.MinBlocks < 1 || c.MaxBlocks > maxComfyUIBlocks || c.MinBlocks > c.MaxBlocks {
+		problems = append(problems, fmt.Sprintf("comfyui min_blocks and max_blocks must satisfy 1 <= min_blocks <= max_blocks <= %d", maxComfyUIBlocks))
+		return problems
+	}
+	if c.DefaultBlocks < c.MinBlocks || c.DefaultBlocks > c.MaxBlocks {
+		problems = append(problems, "comfyui default_blocks must be between min_blocks and max_blocks")
+	}
+	return problems
+}
+
+// comfyUIWeightsProblems requires per-file pinning and holds every pinned
+// file to ComfyUI's own model folder layout. A media repository publishes
+// every variant of a model side by side (the H3 repackaging is hundreds of
+// gigabytes), so a whole-snapshot download is not a thing a Spark could do;
+// and a file outside a folder ComfyUI resolves is a file nothing can load.
+func comfyUIWeightsProblems(r Recipe) []string {
+	index, ok := r.ArtifactIndex("primary")
+	if !ok {
+		return nil
+	}
+	files := r.Artifacts[index].Files
+	if len(files) == 0 {
+		return []string{"a comfyui recipe must pin its weights file by file; a media repository holds every variant of the model side by side"}
+	}
+	var problems []string
+	folders := map[string]bool{}
+	for _, file := range files {
+		folder, _, nested := strings.Cut(file.Name, "/")
+		if !nested || !comfyUIModelFolders[folder] {
+			problems = append(problems, "comfyui weights file "+file.Name+" must sit in one of ComfyUI's model folders: "+comfyUIModelFolderNames())
+			continue
+		}
+		folders[folder] = true
+	}
+	if len(problems) == 0 && len(folders) == 0 {
+		problems = append(problems, "comfyui weights pin no model folder")
+	}
+	return problems
+}
+
+func comfyUIModelFolderNames() string {
+	names := make([]string, 0, len(comfyUIModelFolders))
+	for name := range comfyUIModelFolders {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// comfyUIMemoryProblems is the media counterpart of the device memory
+// fraction check. ComfyUI is handed no share of the device: it loads the
+// weights it is asked for and holds them plus whatever the pipeline needs
+// while a generation runs, so the footprint is an absolute number the recipe
+// states and this confirms it leaves the host reserve intact. Without a
+// memory model there is no number at all, and an unbounded runtime on a
+// machine with no discrete VRAM to fail into takes the host down with it.
+func comfyUIMemoryProblems(r Recipe) []string {
+	if r.MemoryModel == nil {
+		return []string{"a comfyui recipe must declare memory_model; ComfyUI claims an absolute footprint rather than a share of the device"}
+	}
+	var problems []string
+	m := *r.MemoryModel
+	if m.WeightsBytes <= 0 || m.RuntimeOverheadBytes < 0 {
+		problems = append(problems, "comfyui memory_model must state positive weights and a non-negative runtime overhead")
+	}
+	// A diffusion pipeline keeps no KV cache, so a per-token figure here
+	// would be a number nothing computes from and nothing spends.
+	if m.KVBytesPerToken != 0 {
+		problems = append(problems, "comfyui memory_model kv_bytes_per_token must be 0; a media model keeps no KV cache")
+	}
+	if primaryIndex, ok := r.ArtifactIndex("primary"); ok && m.WeightsBytes != r.Artifacts[primaryIndex].ExpectedBytes {
+		problems = append(problems, "comfyui memory_model weights_bytes must equal the primary artifact's expected_bytes")
+	}
+	if len(problems) > 0 {
+		return problems
+	}
+	planned, ok := r.PlannedMemoryBytes()
+	if !ok {
+		return append(problems, "comfyui memory_model adds up to a footprint too large to represent")
+	}
+	// Written as a subtraction for the same reason the llama.cpp check is:
+	// the reserve is already known to be below the minimum, so the
+	// right-hand side cannot overflow.
+	if r.Requirements.MinimumMemoryBytes > 0 && planned > r.Requirements.MinimumMemoryBytes-r.Requirements.MemoryReserveBytes {
+		problems = append(problems, "comfyui planned memory does not preserve the per-node memory reserve")
 	}
 	return problems
 }
