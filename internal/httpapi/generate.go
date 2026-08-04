@@ -173,12 +173,13 @@ func (s *Server) generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		ModelID   string `json:"model_id"`
-		Mode      string `json:"mode"`
-		Prompt    string `json:"prompt"`
-		Blocks    int    `json:"blocks"`
-		ShortEdge int    `json:"short_edge"`
-		Seed      *int64 `json:"seed"`
+		ModelID string `json:"model_id"`
+		Mode    string `json:"mode"`
+		Prompt  string `json:"prompt"`
+		Blocks  int    `json:"blocks"`
+		Width   int    `json:"width"`
+		Height  int    `json:"height"`
+		Seed    *int64 `json:"seed"`
 	}
 	if err := decodeBody(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -207,7 +208,8 @@ func (s *Server) generateHandler(w http.ResponseWriter, r *http.Request) {
 			target.DisplayName, config.MinBlocks, config.MaxBlocks, request.Blocks))
 		return
 	}
-	if err := validateShortEdge(request.ShortEdge, target, config); err != nil {
+	shortEdge, err := validateCanvas(request.Width, request.Height, target, config)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -218,8 +220,8 @@ func (s *Server) generateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	record, err := s.store.CreateGeneration(r.Context(), store.Generation{
 		RecipeID: target.ID, Mode: request.Mode, Prompt: prompt,
-		Blocks: request.Blocks, ShortEdge: request.ShortEdge,
-		Width: request.ShortEdge, Height: request.ShortEdge,
+		Blocks: request.Blocks, ShortEdge: shortEdge,
+		Width: request.Width, Height: request.Height,
 		Frames: config.Frames(request.Blocks), Seed: seed,
 	})
 	if err != nil {
@@ -277,25 +279,28 @@ func validateMode(mode string, config recipe.ComfyUIConfig) error {
 	return nil
 }
 
-// validateShortEdge holds a requested size to the model's own canvas. It
-// never rounds and never clamps: a request off the grid is answered with the
-// rule it broke, because a server that silently changed the size would return
-// a clip that is not the one that was asked for.
-func validateShortEdge(edge int, target recipe.Recipe, config recipe.ComfyUIConfig) error {
-	if edge <= 0 || edge%recipe.CanvasMultiple != 0 {
-		return fmt.Errorf("short_edge must be a positive multiple of %d, and this request asked for %d", recipe.CanvasMultiple, edge)
+// validateCanvas holds a requested size to the model's own canvas. It never
+// rounds and never clamps: a request off the grid is answered with the rule it
+// broke, because a server that silently changed the size would return a clip
+// that is not the one that was asked for.
+func validateCanvas(width, height int, target recipe.Recipe, config recipe.ComfyUIConfig) (int, error) {
+	if width <= 0 || width%recipe.CanvasMultiple != 0 {
+		return 0, fmt.Errorf("width must be a positive multiple of %d, and this request asked for %d", recipe.CanvasMultiple, width)
 	}
-	if edge > config.MaxShortEdge {
-		return fmt.Errorf("%s generates a short edge of at most %d pixels, and this request asked for %d", target.DisplayName, config.MaxShortEdge, edge)
+	if height <= 0 || height%recipe.CanvasMultiple != 0 {
+		return 0, fmt.Errorf("height must be a positive multiple of %d, and this request asked for %d", recipe.CanvasMultiple, height)
 	}
-	// The request names one edge and basement generates a square, so the long
-	// edge is the same number. The bound is still checked rather than assumed,
-	// because the day a request carries an aspect ratio this is the check that
-	// has to already be here.
-	if edge > config.MaxLongEdge {
-		return fmt.Errorf("%s generates a long edge of at most %d pixels, and this request asked for %d", target.DisplayName, config.MaxLongEdge, edge)
+	shortEdge, longEdge := width, height
+	if shortEdge > longEdge {
+		shortEdge, longEdge = longEdge, shortEdge
 	}
-	return nil
+	if shortEdge > config.MaxShortEdge {
+		return 0, fmt.Errorf("%s generates a short edge of at most %d pixels, and this request asked for %d", target.DisplayName, config.MaxShortEdge, shortEdge)
+	}
+	if longEdge > config.MaxLongEdge {
+		return 0, fmt.Errorf("%s generates a long edge of at most %d pixels, and this request asked for %d", target.DisplayName, config.MaxLongEdge, longEdge)
+	}
+	return shortEdge, nil
 }
 
 // resolveSeed takes the request's seed or makes one. A seed basement chose is

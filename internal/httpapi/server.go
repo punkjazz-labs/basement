@@ -505,15 +505,46 @@ func (s *Server) listRecipes(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	type mediaGenerationView struct {
+		Modes                 []string `json:"modes"`
+		DefaultShortEdge      int      `json:"default_short_edge"`
+		MaxShortEdge          int      `json:"max_short_edge"`
+		MaxLongEdge           int      `json:"max_long_edge"`
+		CanvasMultiple        int      `json:"canvas_multiple"`
+		FrameBlock            int      `json:"frame_block"`
+		FrameOffset           int      `json:"frame_offset"`
+		FramesPerSecond       int      `json:"frames_per_second"`
+		MinBlocks             int      `json:"min_blocks"`
+		MaxBlocks             int      `json:"max_blocks"`
+		DefaultBlocks         int      `json:"default_blocks"`
+		ConcurrentGenerations int      `json:"concurrent_generations"`
+	}
 	type view struct {
 		recipe.Recipe
-		ArtifactBytes int64 `json:"artifact_bytes"`
-		RequiredBytes int64 `json:"required_bytes"`
+		ArtifactBytes   int64                `json:"artifact_bytes"`
+		RequiredBytes   int64                `json:"required_bytes"`
+		MediaGeneration *mediaGenerationView `json:"media_generation,omitempty"`
 	}
 	effective := s.effectiveRecipes()
 	result := make([]view, 0, len(effective))
 	for _, item := range effective {
-		result = append(result, view{Recipe: item, ArtifactBytes: item.TotalArtifactBytes(), RequiredBytes: item.RequiredBytes()})
+		response := view{Recipe: item, ArtifactBytes: item.TotalArtifactBytes(), RequiredBytes: item.RequiredBytes()}
+		if config, media := item.MediaGeneration(); media {
+			modes := make([]string, 0, len(config.Graphs))
+			for mode := range config.Graphs {
+				modes = append(modes, mode)
+			}
+			sort.Strings(modes)
+			response.MediaGeneration = &mediaGenerationView{
+				Modes: modes, DefaultShortEdge: config.DefaultShortEdge,
+				MaxShortEdge: config.MaxShortEdge, MaxLongEdge: config.MaxLongEdge,
+				CanvasMultiple: recipe.CanvasMultiple, FrameBlock: config.FrameBlock,
+				FrameOffset: config.FrameOffset, FramesPerSecond: config.FramesPerSecond,
+				MinBlocks: config.MinBlocks, MaxBlocks: config.MaxBlocks,
+				DefaultBlocks: config.DefaultBlocks, ConcurrentGenerations: config.ConcurrentGenerations,
+			}
+		}
+		result = append(result, response)
 	}
 	writeJSON(w, http.StatusOK, result)
 }

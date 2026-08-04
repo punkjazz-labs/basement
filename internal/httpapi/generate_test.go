@@ -224,7 +224,7 @@ func (c *mediaConsole) awaitStatus(t *testing.T, id string, states ...string) ma
 	return nil
 }
 
-const goodRequest = `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"a quiet room","blocks":1,"short_edge":768}`
+const goodRequest = `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"a quiet room","blocks":1,"width":1152,"height":768}`
 
 func TestGenerateValidatesAgainstTheRecipe(t *testing.T) {
 	console := newMediaConsole(t)
@@ -233,16 +233,19 @@ func TestGenerateValidatesAgainstTheRecipe(t *testing.T) {
 		body string
 		want string
 	}{
-		{"no prompt", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"   ","blocks":1,"short_edge":768}`, "a prompt is required"},
-		{"prompt too long", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"` + strings.Repeat("x", 2001) + `","blocks":1,"short_edge":768}`, "at most 2000 characters"},
-		{"unknown mode", `{"model_id":"media-test-1s","mode":"text_to_music","prompt":"x","blocks":1,"short_edge":768}`, "mode must be one of: text_to_video"},
-		{"source image mode", `{"model_id":"media-test-1s","mode":"image_to_video","prompt":"x","blocks":1,"short_edge":768}`, "mode must be one of: text_to_video"},
-		{"blocks below the minimum", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":0,"short_edge":768}`, "between 1 and 21 blocks"},
-		{"blocks above the maximum", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":22,"short_edge":768}`, "between 1 and 21 blocks"},
-		{"short edge off the grid", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"short_edge":700}`, "multiple of 32"},
-		{"short edge beyond the canvas", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"short_edge":1024}`, "short edge of at most 768 pixels"},
-		{"negative seed", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"short_edge":768,"seed":-1}`, "seed must be between"},
-		{"seed beyond what JSON carries", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"short_edge":768,"seed":9007199254740993}`, "seed must be between"},
+		{"no prompt", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"   ","blocks":1,"width":1152,"height":768}`, "a prompt is required"},
+		{"prompt too long", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"` + strings.Repeat("x", 2001) + `","blocks":1,"width":1152,"height":768}`, "at most 2000 characters"},
+		{"unknown mode", `{"model_id":"media-test-1s","mode":"text_to_music","prompt":"x","blocks":1,"width":1152,"height":768}`, "mode must be one of: text_to_video"},
+		{"source image mode", `{"model_id":"media-test-1s","mode":"image_to_video","prompt":"x","blocks":1,"width":1152,"height":768}`, "mode must be one of: text_to_video"},
+		{"blocks below the minimum", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":0,"width":1152,"height":768}`, "between 1 and 21 blocks"},
+		{"blocks above the maximum", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":22,"width":1152,"height":768}`, "between 1 and 21 blocks"},
+		{"width off the grid", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"width":1150,"height":768}`, "width must be a positive multiple of 32, and this request asked for 1150"},
+		{"height off the grid", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"width":1152,"height":767}`, "height must be a positive multiple of 32, and this request asked for 767"},
+		{"short edge beyond the canvas", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"width":1024,"height":1024}`, "short edge of at most 768 pixels, and this request asked for 1024"},
+		{"long edge beyond the canvas", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"width":1376,"height":768}`, "long edge of at most 1344 pixels, and this request asked for 1376"},
+		{"old short edge field", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"short_edge":768}`, `unknown field "short_edge"`},
+		{"negative seed", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"width":1152,"height":768,"seed":-1}`, "seed must be between"},
+		{"seed beyond what JSON carries", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":1,"width":1152,"height":768,"seed":9007199254740993}`, "seed must be between"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -266,11 +269,149 @@ func TestGenerateValidatesAgainstTheRecipe(t *testing.T) {
 	}
 }
 
+func TestValidateCanvas(t *testing.T) {
+	target := recipetest.Media()
+	config, ok := target.MediaGeneration()
+	if !ok {
+		t.Fatal("media fixture has no generation config")
+	}
+	for _, test := range []struct {
+		name          string
+		width, height int
+		wantShort     int
+		wantError     string
+	}{
+		{name: "width must be positive and on the grid", width: -32, height: 768, wantError: "width must be a positive multiple of 32, and this request asked for -32"},
+		{name: "height must be positive and on the grid", width: 768, height: 1150, wantError: "height must be a positive multiple of 32, and this request asked for 1150"},
+		{name: "short edge is bounded", width: 1024, height: 1024, wantError: "short edge of at most 768 pixels, and this request asked for 1024"},
+		{name: "long edge is bounded", width: 768, height: 1376, wantError: "long edge of at most 1344 pixels, and this request asked for 1376"},
+		{name: "landscape is valid", width: 1152, height: 768, wantShort: 768},
+		{name: "portrait is valid", width: 768, height: 1152, wantShort: 768},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			shortEdge, err := validateCanvas(test.width, test.height, target, config)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("error=%v, want it to name %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if shortEdge != test.wantShort {
+				t.Fatalf("short edge=%d, want %d", shortEdge, test.wantShort)
+			}
+		})
+	}
+}
+
+func TestGenerateAcceptsBothCanvasOrientations(t *testing.T) {
+	console := newMediaConsole(t)
+	for _, test := range []struct {
+		name          string
+		width, height int
+	}{
+		{name: "landscape", width: 1152, height: 768},
+		{name: "portrait", width: 768, height: 1152},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"` + test.name + `","blocks":1,"width":` + strconv.Itoa(test.width) + `,"height":` + strconv.Itoa(test.height) + `}`
+			status, accepted := console.generate(t, body)
+			if status != http.StatusAccepted {
+				t.Fatalf("status=%d body=%#v", status, accepted)
+			}
+			if accepted["width"] != float64(test.width) || accepted["height"] != float64(test.height) {
+				t.Fatalf("accepted canvas=%#vx%#v, want %dx%d", accepted["width"], accepted["height"], test.width, test.height)
+			}
+			record, err := console.store.Generation(t.Context(), accepted["generation_id"].(string))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record.ShortEdge != 768 || record.Width != test.width || record.Height != test.height {
+				t.Fatalf("stored canvas=%dx%d short_edge=%d", record.Width, record.Height, record.ShortEdge)
+			}
+		})
+	}
+}
+
+func TestRecipeCatalogReportsMediaGenerationConfigOnlyForMedia(t *testing.T) {
+	textRecipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	media := recipetest.Media()
+	text := textRecipes[0]
+	server := &Server{}
+	server.SetRecipes([]recipe.Recipe{media, text}, []recipe.Recipe{media, text})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/recipes", nil)
+	response := httptest.NewRecorder()
+	server.listRecipes(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	type mediaGeneration struct {
+		Modes                 []string `json:"modes"`
+		DefaultShortEdge      int      `json:"default_short_edge"`
+		MaxShortEdge          int      `json:"max_short_edge"`
+		MaxLongEdge           int      `json:"max_long_edge"`
+		CanvasMultiple        int      `json:"canvas_multiple"`
+		FrameBlock            int      `json:"frame_block"`
+		FrameOffset           int      `json:"frame_offset"`
+		FramesPerSecond       int      `json:"frames_per_second"`
+		MinBlocks             int      `json:"min_blocks"`
+		MaxBlocks             int      `json:"max_blocks"`
+		DefaultBlocks         int      `json:"default_blocks"`
+		ConcurrentGenerations int      `json:"concurrent_generations"`
+	}
+	var body []struct {
+		ID              string          `json:"id"`
+		MediaGeneration json.RawMessage `json:"media_generation"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	var sawMedia, sawText bool
+	for _, item := range body {
+		switch item.ID {
+		case media.ID:
+			sawMedia = true
+			if len(item.MediaGeneration) == 0 {
+				t.Fatal("media recipe has no media_generation block")
+			}
+			if strings.Contains(string(item.MediaGeneration), "t2v.json") {
+				t.Fatalf("media_generation exposed a graph file name: %s", item.MediaGeneration)
+			}
+			var config mediaGeneration
+			if err := json.Unmarshal(item.MediaGeneration, &config); err != nil {
+				t.Fatal(err)
+			}
+			if len(config.Modes) != 1 || config.Modes[0] != recipe.ModeTextToVideo {
+				t.Fatalf("modes=%v", config.Modes)
+			}
+			if config.DefaultShortEdge != 768 || config.MaxShortEdge != 768 || config.MaxLongEdge != 1344 || config.CanvasMultiple != recipe.CanvasMultiple ||
+				config.FrameBlock != 17 || config.FrameOffset != 5 || config.FramesPerSecond != 24 || config.MinBlocks != 1 || config.MaxBlocks != 21 ||
+				config.DefaultBlocks != 7 || config.ConcurrentGenerations != 1 {
+				t.Fatalf("media_generation=%#v", config)
+			}
+		case text.ID:
+			sawText = true
+			if len(item.MediaGeneration) != 0 {
+				t.Fatalf("text recipe gained media_generation: %#v", item.MediaGeneration)
+			}
+		}
+	}
+	if !sawMedia || !sawText {
+		t.Fatalf("catalog omitted fixture recipes: media=%t text=%t", sawMedia, sawText)
+	}
+}
+
 // TestGenerateRefusesModelsThatCannotAnswer covers the three conflicts: a
 // model that is not the one running, a text model, and nothing running at all.
 func TestGenerateRefusesModelsThatCannotAnswer(t *testing.T) {
 	console := newMediaConsole(t)
-	status, body := console.generate(t, `{"model_id":"some-other-model","mode":"text_to_video","prompt":"x","blocks":1,"short_edge":768}`)
+	status, body := console.generate(t, `{"model_id":"some-other-model","mode":"text_to_video","prompt":"x","blocks":1,"width":1152,"height":768}`)
 	if status != http.StatusConflict || !strings.Contains(body["error"].(string), "switch to some-other-model") {
 		t.Fatalf("status=%d body=%#v", status, body)
 	}
@@ -319,12 +460,18 @@ func TestGenerateRunsAndServesTheResult(t *testing.T) {
 	if accepted["frames"] != float64(22) {
 		t.Fatalf("frames=%#v, want the recipe's own grid", accepted["frames"])
 	}
+	if accepted["width"] != float64(1152) || accepted["height"] != float64(768) {
+		t.Fatalf("accepted canvas=%#vx%#v", accepted["width"], accepted["height"])
+	}
 	view := console.awaitStatus(t, id, "completed", "failed")
 	if view["status"] != "completed" {
 		t.Fatalf("generation did not complete: %#v", view)
 	}
 	if view["seed"].(float64) != seed {
 		t.Fatalf("the recorded seed changed: %#v", view["seed"])
+	}
+	if view["short_edge"] != float64(768) || view["width"] != float64(1152) || view["height"] != float64(768) {
+		t.Fatalf("recorded canvas=%#vx%#v short_edge=%#v", view["width"], view["height"], view["short_edge"])
 	}
 	if view["file_url"] != "/api/v1/generations/"+id+"/file" {
 		t.Fatalf("file_url=%#v", view["file_url"])
@@ -374,7 +521,7 @@ func TestGenerationsQueueInOrder(t *testing.T) {
 	rest := make([]string, 0, 2)
 	for index, prompt := range []string{"first", "second", "third"} {
 		status, accepted := console.generate(t,
-			`{"model_id":"media-test-1s","mode":"text_to_video","prompt":"`+prompt+`","blocks":1,"short_edge":768,"seed":`+strconv.Itoa(index+1)+`}`)
+			`{"model_id":"media-test-1s","mode":"text_to_video","prompt":"`+prompt+`","blocks":1,"width":1152,"height":768,"seed":`+strconv.Itoa(index+1)+`}`)
 		if status != http.StatusAccepted {
 			t.Fatalf("%s status=%d body=%#v", prompt, status, accepted)
 		}
@@ -415,8 +562,8 @@ func TestGenerationsQueueInOrder(t *testing.T) {
 func TestQueuedGenerationCanBeCancelledBeforeItStarts(t *testing.T) {
 	console := newMediaConsole(t)
 	console.runtime.hold(true)
-	_, running := console.generate(t, `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"first","blocks":1,"short_edge":768}`)
-	_, waiting := console.generate(t, `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"second","blocks":1,"short_edge":768}`)
+	_, running := console.generate(t, `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"first","blocks":1,"width":1152,"height":768}`)
+	_, waiting := console.generate(t, `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"second","blocks":1,"width":1152,"height":768}`)
 	runningID, waitingID := running["generation_id"].(string), waiting["generation_id"].(string)
 	console.awaitStatus(t, runningID, "running")
 
