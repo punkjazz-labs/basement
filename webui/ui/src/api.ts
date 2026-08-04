@@ -8,6 +8,7 @@ export interface Artifact {
   expected_bytes: number
   licence: string
   licence_url: string
+  licence_territory_exclusions?: string[]
 }
 
 // MemoryModel is present only for recipes maintainers have qualified for the
@@ -478,6 +479,57 @@ const randomUUID = (): string => {
 }
 
 export const idempotency = () => ({ 'Idempotency-Key': randomUUID() })
+
+export interface InstallRequest {
+  confirmed: true
+  accept_licence: boolean
+  confirm_territory_eligibility: boolean
+  activate: boolean
+}
+
+// One request shape is shared by local and delegated installs so neither
+// path can silently drop a confirmation the install API requires.
+export function installRequest(
+  acceptLicence: boolean,
+  confirmTerritoryEligibility: boolean,
+  activate: boolean,
+): InstallRequest {
+  return {
+    confirmed: true,
+    accept_licence: acceptLicence,
+    confirm_territory_eligibility: confirmTerritoryEligibility,
+    activate,
+  }
+}
+
+export const licenceArtifacts = (recipe: Recipe): Artifact[] =>
+  recipe.artifacts.filter(artifact => Boolean(artifact.licence || artifact.licence_url))
+
+export const licenceTerritoryExclusions = (recipe: Recipe): string[] => [
+  ...new Set(recipe.artifacts.flatMap(artifact => artifact.licence_territory_exclusions ?? [])),
+]
+
+const joinedTerritories = (territories: string[]): string => {
+  if (territories.length < 2) return territories[0] ?? ''
+  if (territories.length === 2) return `${territories[0]} or ${territories[1]}`
+  return `${territories.slice(0, -1).join(', ')} or ${territories[territories.length - 1]}`
+}
+
+export function territoryEligibilityLabel(recipe: Recipe): string | undefined {
+  const territories = licenceTerritoryExclusions(recipe)
+  if (territories.length === 0) return undefined
+  return `I confirm I am not located in ${joinedTerritories(territories)}`
+}
+
+export function installConfirmationsComplete(
+  recipe: Recipe,
+  acceptLicence: boolean,
+  confirmTerritoryEligibility: boolean,
+): boolean {
+  const licenceRequired = licenceArtifacts(recipe).length > 0
+  const territoryConfirmationRequired = licenceTerritoryExclusions(recipe).length > 0
+  return (!licenceRequired || acceptLicence) && (!territoryConfirmationRequired || confirmTerritoryEligibility)
+}
 
 export function formatBytes(value?: number): string {
   if (!value) return 'n/a'

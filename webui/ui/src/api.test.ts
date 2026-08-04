@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, apiBlob, ApiError, formatTokens, OfflineError, runtimeLabel } from './api'
+import {
+  api, apiBlob, ApiError, formatTokens, installConfirmationsComplete, installRequest, licenceArtifacts,
+  OfflineError, runtimeLabel, territoryEligibilityLabel, type Artifact, type Recipe,
+} from './api'
 
 const jsonResponse = (body: unknown, init: { status?: number; ok?: boolean } = {}) => ({
   ok: init.ok ?? true,
@@ -87,5 +90,69 @@ describe('runtimeLabel', () => {
     expect(runtimeLabel('tensorrt')).toBe('tensorrt')
     expect(runtimeLabel(undefined)).toBe('the pinned runtime')
     expect(runtimeLabel('')).toBe('the pinned runtime')
+  })
+})
+
+const artifact = (overrides: Partial<Artifact> = {}): Artifact => ({
+  role: 'primary',
+  repository: 'publisher/model',
+  revision: 'revision',
+  expected_bytes: 1,
+  licence: 'Model Community Licence',
+  licence_url: 'https://huggingface.co/publisher/model/blob/revision/LICENSE',
+  ...overrides,
+})
+
+const recipeWith = (...artifacts: Artifact[]): Recipe => ({ artifacts } as Recipe)
+
+describe('install confirmations', () => {
+  it('puts the checkbox values into the install request instead of constants', () => {
+    expect(installRequest(false, true, false)).toEqual({
+      confirmed: true,
+      accept_licence: false,
+      confirm_territory_eligibility: true,
+      activate: false,
+    })
+    expect(installRequest(true, false, true)).toEqual({
+      confirmed: true,
+      accept_licence: true,
+      confirm_territory_eligibility: false,
+      activate: true,
+    })
+  })
+
+  it('requires both confirmations when the recipe excludes territories', () => {
+    const recipe = recipeWith(artifact({ licence_territory_exclusions: ['Northern Reach'] }))
+    expect(installConfirmationsComplete(recipe, false, false)).toBe(false)
+    expect(installConfirmationsComplete(recipe, true, false)).toBe(false)
+    expect(installConfirmationsComplete(recipe, false, true)).toBe(false)
+    expect(installConfirmationsComplete(recipe, true, true)).toBe(true)
+  })
+
+  it('requires only licence acceptance when the recipe has no territory exclusions', () => {
+    const recipe = recipeWith(artifact())
+    expect(territoryEligibilityLabel(recipe)).toBeUndefined()
+    expect(installConfirmationsComplete(recipe, false, true)).toBe(false)
+    expect(installConfirmationsComplete(recipe, true, false)).toBe(true)
+  })
+
+  it('uses the recipe territory names in the self-attestation label', () => {
+    const recipe = recipeWith(artifact({
+      licence_territory_exclusions: ['Northern Reach', 'Southern Reach', 'Island Reach'],
+    }))
+    expect(territoryEligibilityLabel(recipe)).toBe(
+      'I confirm I am not located in Northern Reach, Southern Reach or Island Reach',
+    )
+  })
+
+  it('returns every artifact that carries licence data for display', () => {
+    const primary = artifact()
+    const drafter = artifact({
+      role: 'drafter',
+      repository: 'publisher/drafter',
+      licence: 'Drafter Licence',
+      licence_url: 'https://huggingface.co/publisher/drafter/blob/revision/LICENSE',
+    })
+    expect(licenceArtifacts(recipeWith(primary, drafter))).toEqual([primary, drafter])
   })
 })
