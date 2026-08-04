@@ -50,6 +50,25 @@ func TestGenerationLifecycle(t *testing.T) {
 	if running.Status != "running" || running.StartedAt == "" {
 		t.Fatalf("running=%#v", running)
 	}
+	if err := database.UpdateGenerationProgress(ctx, record.ID, 7, 20, "14"); err != nil {
+		t.Fatal(err)
+	}
+	running, _ = database.Generation(ctx, record.ID)
+	if running.ProgressValue != 7 || running.ProgressMax != 20 || running.ProgressPhase != "14" {
+		t.Fatalf("persisted progress=%#v", running)
+	}
+	// Executing a new node clears the old node's percentage until ComfyUI
+	// reports a new value and maximum for it.
+	if err := database.UpdateGenerationProgress(ctx, record.ID, 0, 0, "91"); err != nil {
+		t.Fatal(err)
+	}
+	running, _ = database.Generation(ctx, record.ID)
+	if running.ProgressValue != 0 || running.ProgressMax != 0 || running.ProgressPhase != "91" {
+		t.Fatalf("unknown progress for the new node=%#v", running)
+	}
+	if err := database.UpdateGenerationProgress(ctx, record.ID, 21, 20, "91"); err == nil {
+		t.Fatal("progress beyond ComfyUI's reported maximum must be refused")
+	}
 
 	if err := database.CompleteGeneration(ctx, record.ID, "/data/generations/media-test-1s/"+record.ID+"/clip.mp4", 1234); err != nil {
 		t.Fatal(err)

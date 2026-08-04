@@ -697,6 +697,20 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .gen-result-meta span { white-space: nowrap; }
 .gen-working { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .gen-working span:last-child { margin-left: auto; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.gen-progress { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+.gen-progress-head, .gen-progress-count { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.gen-progress-head span:last-child, .gen-progress-count {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+.gen-progress-head span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gen-progress-track { height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.gen-progress-track > span {
+  display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.35s ease;
+}
+.gen-progress-count { color: var(--faint); font-size: 11px; }
+@media (prefers-reduced-motion: reduce) {
+  .gen-progress-track > span { transition: none; }
+}
 .gen-result-error { margin: 0; color: var(--fail); font-size: 12px; overflow-wrap: anywhere; }
 .gen-result-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .gen-finished-time { color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }

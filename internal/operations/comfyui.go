@@ -8,13 +8,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/punkjazz-labs/basement/internal/recipe"
+	"golang.org/x/net/websocket"
 )
 
 // ComfyUIClient speaks the handful of ComfyUI HTTP routes basement drives. It
@@ -232,11 +235,164 @@ type GenerationOutcome struct {
 // ordering test does not have to sit out real seconds.
 var GenerationPollInterval = 2 * time.Second
 
-// GenerationProgress is called on every poll while a generation runs, with
-// the elapsed time and the queue as ComfyUI reports it. It never carries a
-// percentage: ComfyUI publishes step progress on its websocket only, and a
-// percentage derived from anything else would be an invented number.
-type GenerationProgress func(elapsed time.Duration, queue QueueState) error
+// GenerationProgressReconnectInterval paces reconnects after ComfyUI's
+// optional progress socket drops. Production never reassigns it; tests make
+// it short so proving a reconnect does not have to wait on a real backoff.
+var GenerationProgressReconnectInterval = 250 * time.Millisecond
+
+// GenerationStepProgress is the sampler progress ComfyUI reported. Max zero
+// means it reported only an executing node, so no percentage is known yet.
+// Node is ComfyUI's own node identifier, not a phase name basement invented.
+type GenerationStepProgress struct {
+	Value int64
+	Max   int64
+	Node  string
+}
+
+// GenerationProgressUpdate is either a history-poll heartbeat or websocket
+// enrichment. Queue is present only for a poll and Step only for a websocket
+// execution event, so a caller never mistakes an absent reading for zero.
+type GenerationProgressUpdate struct {
+	Elapsed time.Duration
+	Queue   *QueueState
+	Step    *GenerationStepProgress
+}
+
+// GenerationProgress is called while a generation runs. An error from a poll
+// callback still stops the operation as before. An error from a websocket
+// callback only stops that enrichment attempt: the socket is never allowed
+// to decide whether the generation succeeded.
+type GenerationProgress func(update GenerationProgressUpdate) error
+
+type comfyUIProgressSocket interface {
+	Receive() ([]byte, error)
+	Close() error
+}
+
+type netProgressSocket struct{ conn *websocket.Conn }
+
+func (s netProgressSocket) Receive() ([]byte, error) {
+	var message []byte
+	err := websocket.Message.Receive(s.conn, &message)
+	return message, err
+}
+
+func (s netProgressSocket) Close() error { return s.conn.Close() }
+
+// Production never reassigns this. Tests replace it with deterministic
+// sockets so reconnects and permanent failures need no listener or runtime.
+var dialComfyUIProgress = func(ctx context.Context, endpoint, origin string) (comfyUIProgressSocket, error) {
+	config, err := websocket.NewConfig(endpoint, origin)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := config.DialContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conn.MaxPayloadBytes = 8 << 20
+	return netProgressSocket{conn: conn}, nil
+}
+
+var comfyUIClientSequence atomic.Uint64
+
+func nextComfyUIClientID() string {
+	return fmt.Sprintf("basement-%d", comfyUIClientSequence.Add(1))
+}
+
+func (c *ComfyUIClient) progressEndpoint(clientID string) (string, error) {
+	endpoint, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", err
+	}
+	switch endpoint.Scheme {
+	case "http":
+		endpoint.Scheme = "ws"
+	case "https":
+		endpoint.Scheme = "wss"
+	default:
+		return "", fmt.Errorf("the media runtime URL uses unsupported scheme %q", endpoint.Scheme)
+	}
+	endpoint.Path = strings.TrimSuffix(endpoint.Path, "/") + "/ws"
+	query := endpoint.Query()
+	query.Set("clientId", clientID)
+	endpoint.RawQuery = query.Encode()
+	return endpoint.String(), nil
+}
+
+// watchProgress reconnects for as long as the history poll is running. A
+// malformed event, a binary preview, a refused handshake and a dropped socket
+// are all progress failures only: they are ignored or retried, never returned
+// to RunGeneration.
+func (c *ComfyUIClient) watchProgress(ctx context.Context, clientID, promptID string, report func(GenerationStepProgress) error) {
+	endpoint, err := c.progressEndpoint(clientID)
+	if err != nil {
+		return
+	}
+	for {
+		dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		socket, err := dialComfyUIProgress(dialCtx, endpoint, c.baseURL)
+		cancel()
+		if err == nil {
+			stopClosing := context.AfterFunc(ctx, func() { _ = socket.Close() })
+			for {
+				message, receiveErr := socket.Receive()
+				if receiveErr != nil {
+					break
+				}
+				step, ok := parseComfyUIProgress(message, promptID)
+				if ok && report(step) != nil {
+					break
+				}
+			}
+			stopClosing()
+			_ = socket.Close()
+		}
+		timer := time.NewTimer(GenerationProgressReconnectInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// parseComfyUIProgress follows ComfyUI's {"type":...,"data":...} websocket
+// envelope. execution_start/success/error are deliberately not outcomes here:
+// /history remains the only authority for success and failure.
+func parseComfyUIProgress(message []byte, promptID string) (GenerationStepProgress, bool) {
+	var event struct {
+		Type string `json:"type"`
+		Data struct {
+			PromptID string          `json:"prompt_id"`
+			Node     json.RawMessage `json:"node"`
+			Value    *int64          `json:"value"`
+			Max      *int64          `json:"max"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(message, &event) != nil || event.Data.PromptID != promptID {
+		return GenerationStepProgress{}, false
+	}
+	var node string
+	_ = json.Unmarshal(event.Data.Node, &node)
+	switch event.Type {
+	case "executing":
+		if node == "" {
+			return GenerationStepProgress{}, false
+		}
+		return GenerationStepProgress{Node: node}, true
+	case "progress":
+		if event.Data.Value == nil || event.Data.Max == nil || *event.Data.Max <= 0 || *event.Data.Value < 0 || *event.Data.Value > *event.Data.Max {
+			return GenerationStepProgress{}, false
+		}
+		return GenerationStepProgress{Value: *event.Data.Value, Max: *event.Data.Max, Node: node}, true
+	default:
+		return GenerationStepProgress{}, false
+	}
+}
 
 // RunGeneration submits a rendered workflow, waits for it, and moves what the
 // run produced into destination. It is the one driver both the install
@@ -250,10 +406,28 @@ type GenerationProgress func(elapsed time.Duration, queue QueueState) error
 // ComfyUI name them.
 func RunGeneration(ctx context.Context, client *ComfyUIClient, graph []byte, outputRoot, destination string, deadline time.Duration, progress GenerationProgress) (GenerationOutcome, error) {
 	started := time.Now()
-	promptID, err := client.Submit(ctx, graph, "basement")
+	clientID := nextComfyUIClientID()
+	promptID, err := client.Submit(ctx, graph, clientID)
 	if err != nil {
 		return GenerationOutcome{}, err
 	}
+	progressCtx, stopProgress := context.WithCancel(ctx)
+	var progressDone chan struct{}
+	if progress != nil {
+		progressDone = make(chan struct{})
+		go func() {
+			defer close(progressDone)
+			client.watchProgress(progressCtx, clientID, promptID, func(step GenerationStepProgress) error {
+				return progress(GenerationProgressUpdate{Elapsed: time.Since(started), Step: &step})
+			})
+		}()
+	}
+	defer func() {
+		stopProgress()
+		if progressDone != nil {
+			<-progressDone
+		}
+	}()
 	expiry := started.Add(deadline)
 	for {
 		entry, err := client.History(ctx, promptID)
@@ -280,7 +454,7 @@ func RunGeneration(ctx context.Context, client *ComfyUIClient, graph []byte, out
 		}
 		if progress != nil {
 			queue, _ := client.Queue(ctx)
-			if err := progress(time.Since(started), queue); err != nil {
+			if err := progress(GenerationProgressUpdate{Elapsed: time.Since(started), Queue: &queue}); err != nil {
 				return GenerationOutcome{}, err
 			}
 		}

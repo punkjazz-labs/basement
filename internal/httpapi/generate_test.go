@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -612,6 +613,7 @@ func TestGenerationEndpointsRequireASession(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/v1/generate", goodRequest},
 		{http.MethodGet, "/api/v1/generations", ""},
+		{http.MethodGet, "/api/v1/generations/events", ""},
 		{http.MethodGet, "/api/v1/generations/gen_x", ""},
 		{http.MethodGet, "/api/v1/generations/gen_x/file", ""},
 		{http.MethodPost, "/api/v1/generations/gen_x/cancel", ""},
@@ -622,6 +624,138 @@ func TestGenerationEndpointsRequireASession(t *testing.T) {
 		if response.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("%s %s status=%d, want 401", call.method, call.path, response.StatusCode)
 		}
+	}
+}
+
+type generationEventRecorder struct {
+	header http.Header
+	writes chan string
+}
+
+func newGenerationEventRecorder() *generationEventRecorder {
+	return &generationEventRecorder{header: make(http.Header), writes: make(chan string, 8)}
+}
+
+func (r *generationEventRecorder) Header() http.Header { return r.header }
+func (r *generationEventRecorder) WriteHeader(int)     {}
+func (r *generationEventRecorder) Flush()              {}
+func (r *generationEventRecorder) Write(body []byte) (int, error) {
+	r.writes <- string(append([]byte(nil), body...))
+	return len(body), nil
+}
+
+func awaitGenerationEvent(t *testing.T, recorder *generationEventRecorder) string {
+	t.Helper()
+	select {
+	case event := <-recorder.writes:
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("generation event did not arrive")
+		return ""
+	}
+}
+
+func TestGenerationEventsEmitSnapshotsAndCleanUpOnDisconnect(t *testing.T) {
+	dataDir := t.TempDir()
+	database, err := store.Open(filepath.Join(dataDir, "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authManager, err := auth.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := New("test-version", dataDir, authManager, database, nil, nil, nil, nil)
+	defer manager.Close()
+	unauthenticated := httptest.NewRecorder()
+	manager.Handler().ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/v1/generations/events", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated stream status=%d", unauthenticated.Code)
+	}
+	token, err := os.ReadFile(authManager.PairingTokenPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	paired := httptest.NewRecorder()
+	if _, err := authManager.Pair(paired, strings.TrimSpace(string(token))); err != nil {
+		t.Fatal(err)
+	}
+	cookies := paired.Result().Cookies()
+
+	type openStream struct {
+		recorder *generationEventRecorder
+		cancel   context.CancelFunc
+		done     chan struct{}
+	}
+	open := func() openStream {
+		ctx, cancel := context.WithCancel(context.Background())
+		request := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/generations/events", nil)
+		for _, cookie := range cookies {
+			request.AddCookie(cookie)
+		}
+		recorder := newGenerationEventRecorder()
+		done := make(chan struct{})
+		go func() {
+			manager.Handler().ServeHTTP(recorder, request)
+			close(done)
+		}()
+		return openStream{recorder: recorder, cancel: cancel, done: done}
+	}
+	first, second := open(), open()
+	defer first.cancel()
+	defer second.cancel()
+	for index, stream := range []openStream{first, second} {
+		initial := awaitGenerationEvent(t, stream.recorder)
+		if !strings.Contains(initial, "event: generation") || !strings.Contains(initial, `"generations":[]`) {
+			t.Fatalf("stream %d initial event=%q", index+1, initial)
+		}
+	}
+	if count := manager.generations.subscriberCount(); count != 2 {
+		t.Fatalf("subscribers=%d, want one per console tab", count)
+	}
+
+	record, err := database.CreateGeneration(t.Context(), mediaGenerationRecord())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartGeneration(t.Context(), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateGenerationProgress(t.Context(), record.ID, 3, 20, "14"); err != nil {
+		t.Fatal(err)
+	}
+	manager.generations.changed()
+	for index, stream := range []openStream{first, second} {
+		event := awaitGenerationEvent(t, stream.recorder)
+		if !strings.Contains(event, record.ID) || !strings.Contains(event, `"status":"running"`) ||
+			!strings.Contains(event, `"progress_value":3`) || !strings.Contains(event, `"progress_max":20`) {
+			t.Fatalf("stream %d progress event=%q", index+1, event)
+		}
+	}
+
+	first.cancel()
+	second.cancel()
+	for index, stream := range []openStream{first, second} {
+		select {
+		case <-stream.done:
+		case <-time.After(time.Second):
+			t.Fatalf("stream %d did not stop after disconnect", index+1)
+		}
+	}
+	deadline := time.Now().Add(time.Second)
+	for manager.generations.subscriberCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if count := manager.generations.subscriberCount(); count != 0 {
+		t.Fatalf("subscribers=%d after both tabs disconnected", count)
+	}
+}
+
+func mediaGenerationRecord() store.Generation {
+	return store.Generation{
+		RecipeID: "media-test-1s", Mode: "text_to_video", Prompt: "a quiet room",
+		Blocks: 1, ShortEdge: 768, Width: 1152, Height: 768, Frames: 22, Seed: 1,
 	}
 }
 

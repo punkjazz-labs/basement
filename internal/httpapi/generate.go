@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -46,15 +47,21 @@ type generationQueue struct {
 	// pending is submission order. First in, first generated: a queue that
 	// reordered would make the position basement reports a guess.
 	pending []string
-	// live carries the running generation's progress, which is not persisted
-	// because it is only meaningful while the process that measured it runs.
+	// live carries the running generation's elapsed time and runtime queue,
+	// which are only meaningful while the process that measured them runs.
+	// ComfyUI's reported step progress is persisted on the generation row.
 	live map[string]liveGeneration
 	// cancels the running generation. Present for at most one id at a time.
 	cancels map[string]context.CancelFunc
 	// wake is signalled on every enqueue; buffered by one so a submission
 	// never blocks on a worker that is already awake.
 	wake chan struct{}
-	once sync.Once
+	// subscribers are the open generation SSE streams. Their one-slot signals
+	// coalesce bursts of sampler steps; every receiver reads a fresh store
+	// snapshot, so a coalesced terminal change cannot be lost.
+	subscribers      map[uint64]chan struct{}
+	nextSubscriberID uint64
+	once             sync.Once
 }
 
 // liveGeneration is what basement can honestly say about a generation while
@@ -68,13 +75,17 @@ type liveGeneration struct {
 }
 
 func newGenerationQueue() *generationQueue {
-	return &generationQueue{live: map[string]liveGeneration{}, cancels: map[string]context.CancelFunc{}, wake: make(chan struct{}, 1)}
+	return &generationQueue{
+		live: map[string]liveGeneration{}, cancels: map[string]context.CancelFunc{}, wake: make(chan struct{}, 1),
+		subscribers: map[uint64]chan struct{}{},
+	}
 }
 
 func (q *generationQueue) enqueue(id string) int {
 	q.mu.Lock()
 	q.pending = append(q.pending, id)
 	position := len(q.pending)
+	q.changedLocked()
 	q.mu.Unlock()
 	select {
 	case q.wake <- struct{}{}:
@@ -118,6 +129,7 @@ func (q *generationQueue) withdraw(id string) bool {
 			continue
 		}
 		q.pending = append(q.pending[:index], q.pending[index+1:]...)
+		q.changedLocked()
 		return true
 	}
 	return false
@@ -127,6 +139,7 @@ func (q *generationQueue) setLive(id string, live liveGeneration) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.live[id] = live
+	q.changedLocked()
 }
 
 func (q *generationQueue) liveState(id string) (liveGeneration, bool) {
@@ -147,6 +160,42 @@ func (q *generationQueue) release(id string) {
 	defer q.mu.Unlock()
 	delete(q.cancels, id)
 	delete(q.live, id)
+	q.changedLocked()
+}
+
+func (q *generationQueue) changed() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.changedLocked()
+}
+
+func (q *generationQueue) changedLocked() {
+	for _, subscriber := range q.subscribers {
+		select {
+		case subscriber <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (q *generationQueue) subscribe() (<-chan struct{}, func()) {
+	q.mu.Lock()
+	q.nextSubscriberID++
+	id := q.nextSubscriberID
+	updates := make(chan struct{}, 1)
+	q.subscribers[id] = updates
+	q.mu.Unlock()
+	return updates, func() {
+		q.mu.Lock()
+		delete(q.subscribers, id)
+		q.mu.Unlock()
+	}
+}
+
+func (q *generationQueue) subscriberCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.subscribers)
 }
 
 // interrupt stops a running generation, and reports whether there was one.
@@ -381,10 +430,13 @@ func (s *Server) runOneGeneration(id string) {
 		// this worker picking it up. Nothing to run and nothing to report.
 		return
 	}
+	s.generations.changed()
 	fail := func(status, message string) {
 		failCtx, failCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer failCancel()
-		_ = s.store.FailGeneration(failCtx, id, status, message)
+		if s.store.FailGeneration(failCtx, id, status, message) == nil {
+			s.generations.changed()
+		}
 	}
 	// The exact installed version, never the catalog's current entry: the
 	// running container is the one that was installed, and its port and its
@@ -419,8 +471,18 @@ func (s *Server) runOneGeneration(id string) {
 	}
 	root := operations.GenerationRoot(s.dataDir, target.ID)
 	client := operations.NewComfyUIClient(fmt.Sprintf("http://127.0.0.1:%d", target.Service.DefaultHostPort))
-	progress := func(elapsed time.Duration, queue operations.QueueState) error {
-		s.generations.setLive(id, liveGeneration{Elapsed: elapsed, Queue: queue})
+	progress := func(update operations.GenerationProgressUpdate) error {
+		live, _ := s.generations.liveState(id)
+		live.Elapsed = update.Elapsed
+		if update.Queue != nil {
+			live.Queue = *update.Queue
+		}
+		if update.Step != nil {
+			if err := s.store.UpdateGenerationProgress(ctx, id, update.Step.Value, update.Step.Max, update.Step.Node); err != nil {
+				return err
+			}
+		}
+		s.generations.setLive(id, live)
 		return nil
 	}
 	outcome, err := operations.RunGeneration(ctx, client, graph, root, filepath.Join(root, id), generationTimeout(target), progress)
@@ -441,7 +503,9 @@ func (s *Server) runOneGeneration(id string) {
 	// and the first is the one the gallery plays.
 	completeCtx, completeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer completeCancel()
-	_ = s.store.CompleteGeneration(completeCtx, id, outcome.Files[0], outcome.Bytes)
+	if s.store.CompleteGeneration(completeCtx, id, outcome.Files[0], outcome.Bytes) == nil {
+		s.generations.changed()
+	}
 }
 
 // generationTimeout bounds one generation. It reuses the recipe's own start
@@ -506,12 +570,86 @@ func (s *Server) generationView(record store.Generation) map[string]any {
 			view["queue_position"] = position
 		}
 	}
+	if record.Status == "running" && record.ProgressMax > 0 {
+		view["progress_value"] = record.ProgressValue
+		view["progress_max"] = record.ProgressMax
+	}
+	if record.Status == "running" && record.ProgressPhase != "" {
+		view["progress_phase"] = record.ProgressPhase
+	}
 	if live, ok := s.generations.liveState(record.ID); ok {
 		view["elapsed_seconds"] = int64(live.Elapsed.Seconds())
 		view["runtime_queue_running"] = live.Queue.Running
 		view["runtime_queue_pending"] = live.Queue.Pending
 	}
 	return view
+}
+
+// generationEvents is one authenticated stream for the whole Generate view.
+// It sends the same newest-first snapshot as the gallery endpoint whenever
+// progress or state changes. An empty snapshot is an explicit idle state, so
+// a new tab never waits silently for a generation that does not exist.
+func (s *Server) generationEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, errors.New("streaming is unavailable"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	updates, unsubscribe := s.generations.subscribe()
+	defer unsubscribe()
+	last := ""
+	writeSnapshot := func() bool {
+		records, err := s.store.Generations(r.Context(), 0)
+		if err != nil {
+			return false
+		}
+		views := make([]map[string]any, 0, len(records))
+		for _, record := range records {
+			views = append(views, s.generationView(record))
+		}
+		body, err := json.Marshal(map[string]any{"generations": views})
+		if err != nil {
+			return false
+		}
+		current := string(body)
+		if current == last {
+			return true
+		}
+		if _, err := fmt.Fprintf(w, "event: generation\ndata: %s\n\n", body); err != nil {
+			return false
+		}
+		flusher.Flush()
+		last = current
+		return true
+	}
+	if !writeSnapshot() {
+		return
+	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-s.closing:
+			return
+		case <-updates:
+			if !writeSnapshot() {
+				return
+			}
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 // generationAction routes everything under /api/v1/generations/{id}.
@@ -610,6 +748,7 @@ func (s *Server) cancelGeneration(w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		s.generations.changed()
 	case "running":
 		if !s.generations.interrupt(id) {
 			writeError(w, http.StatusConflict, errors.New("this generation is not running on this manager, so there is nothing to cancel"))
@@ -660,6 +799,7 @@ func (s *Server) deleteGeneration(w http.ResponseWriter, r *http.Request, id str
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.generations.changed()
 	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "reclaimed_bytes": reclaimed})
 }
 

@@ -828,14 +828,25 @@ func (h *HostExecutor) verifyMediaGeneration(ctx context.Context, r recipe.Recip
 	if err := os.RemoveAll(destination); err != nil {
 		return nil, err
 	}
-	report := func(elapsed time.Duration, queue QueueState) error {
+	report := func(update GenerationProgressUpdate) error {
 		if progress == nil {
 			return nil
 		}
-		return progress(map[string]any{
-			"status": "generating", "elapsed_seconds": int64(elapsed.Seconds()),
-			"queue_running": queue.Running, "queue_pending": queue.Pending,
-		})
+		receipt := map[string]any{
+			"status": "generating", "elapsed_seconds": int64(update.Elapsed.Seconds()),
+		}
+		if update.Queue != nil {
+			receipt["queue_running"] = update.Queue.Running
+			receipt["queue_pending"] = update.Queue.Pending
+		}
+		if update.Step != nil {
+			receipt["progress_value"] = update.Step.Value
+			receipt["progress_max"] = update.Step.Max
+			if update.Step.Node != "" {
+				receipt["progress_phase"] = update.Step.Node
+			}
+		}
+		return progress(receipt)
 	}
 	outcome, err := RunGeneration(ctx, NewComfyUIClient(h.modelURL(r)), graph, h.GenerationRoot(r), destination, startTimeout(r), report)
 	if err != nil {
