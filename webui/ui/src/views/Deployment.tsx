@@ -26,6 +26,19 @@ function firstStartNote(recipe?: Recipe): string {
 }
 
 function phasePlan(job: Job, recipe?: Recipe): Phase[] {
+  const mediaVerification: Phase = recipe?.media_generation
+    ? {
+        title: 'Verify generation',
+        note: 'Health and a real generation',
+        states: ['verifying_health', 'verifying_generation'],
+        operations: ['wait_http', 'verify_media_generation'],
+      }
+    : {
+        title: 'Verify endpoint',
+        note: 'Health and real inference',
+        states: ['verifying_health', 'verifying_inference'],
+        operations: ['wait_http', 'verify_openai_inference'],
+      }
   if (job.kind === 'install') {
     const firstStart = firstStartNote(recipe)
     return [
@@ -34,14 +47,19 @@ function phasePlan(job: Job, recipe?: Recipe): Phase[] {
       { title: 'Download model', note: 'Resumable model files', states: ['downloading_models'], operations: ['download_artifact'] },
       { title: 'Configure service', note: 'Owned configuration and container', states: ['configuring'], operations: ['write_generated_config', 'create_container'] },
       { title: 'Start model', note: 'Safe memory reservation', activeNote: firstStart, states: ['checking_memory', 'starting', 'stopping'], operations: ['stop_container', 'verify_memory', 'start_container'] },
-      { title: 'Verify endpoint', note: 'Health and real inference', activeNote: firstStart, states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
+      { ...mediaVerification, activeNote: firstStart },
     ]
   }
   if (job.kind === 'start') {
     return [
       { title: 'Reserve hardware', note: 'Stop the active model, check memory', states: ['queued', 'stopping', 'checking_memory'], operations: ['stop_container', 'verify_memory'] },
       { title: 'Start model', note: 'Launch the pinned runtime', states: ['starting'], operations: ['start_container'] },
-      { title: 'Verify endpoint', note: 'Health and real inference', activeNote: 'Waiting for the model to load and answer. This takes a few minutes when memory is cold.', states: ['verifying_health', 'verifying_inference'], operations: ['wait_http', 'verify_openai_inference'] },
+      {
+        ...mediaVerification,
+        activeNote: recipe?.media_generation
+          ? 'Waiting for the model to load and complete its verification generation.'
+          : 'Waiting for the model to load and answer. This takes a few minutes when memory is cold.',
+      },
     ]
   }
   if (job.kind === 'remove') {
@@ -54,7 +72,9 @@ function phasePlan(job: Job, recipe?: Recipe): Phase[] {
   if (job.kind === 'smoke-test') {
     return [
       { title: 'Check endpoint', note: 'Wait for a healthy response', states: ['queued', 'verifying_health'], operations: ['wait_http'] },
-      { title: 'Run inference', note: 'Require a non-empty model response', states: ['verifying_inference'], operations: ['verify_openai_inference'] },
+      recipe?.media_generation
+        ? { title: 'Run generation', note: 'Require a completed media file', states: ['verifying_generation'], operations: ['verify_media_generation'] }
+        : { title: 'Run inference', note: 'Require a non-empty model response', states: ['verifying_inference'], operations: ['verify_openai_inference'] },
     ]
   }
   if (job.kind === 'benchmark') {
@@ -243,11 +263,12 @@ function activePhaseIndex(job: Job, phases: Phase[]): number {
   return index >= 0 ? index : 0
 }
 
-export default function DeploymentDialog({ job, recipes, onClose, onOpenPlayground }: {
+export default function DeploymentDialog({ job, recipes, onClose, onOpenPlayground, onOpenGenerate }: {
   job: Job | null
   recipes: Recipe[]
   onClose: () => void
   onOpenPlayground: () => void
+  onOpenGenerate: () => void
 }) {
   const ref = useRef<HTMLDialogElement>(null)
 
@@ -261,6 +282,10 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
   if (!job) return <dialog ref={ref} onClose={onClose} />
 
   const recipe = recipes.find(item => item.id === job.recipe_id)
+  const isMedia = Boolean(recipe?.media_generation)
+  const mediaReady = !isMedia || job.steps.some(step =>
+    stepOperation(step.operation) === 'verify_media_generation' && step.state === 'completed',
+  )
   const phases = phasePlan(job, recipe)
   const activeIndex = activePhaseIndex(job, phases)
   const succeeded = terminal(job.state) && job.state !== 'failed' && job.state !== 'cancelled'
@@ -384,15 +409,19 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
                     install: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
                     start: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
                     benchmark: 'Measured with a real request on this Spark.',
-                    'smoke-test': 'The model answered a real inference request.',
+                    'smoke-test': isMedia
+                      ? 'The model completed a real generation.'
+                      : 'The model answered a real inference request.',
                     stop: 'The model has stopped.',
                     remove: 'The model has been removed.',
                   }[job.kind] ?? 'Finished.'
                 : ''}
           </span>
           {!terminal(job.state) && <button className="danger" onClick={cancel}>Cancel {noun}</button>}
-          {succeeded && (job.kind === 'install' || job.kind === 'start') && (
-            <button className="brand" onClick={onOpenPlayground}>Try it in the playground</button>
+          {succeeded && mediaReady && (job.kind === 'install' || job.kind === 'start') && (
+            <button className="brand" onClick={isMedia ? onOpenGenerate : onOpenPlayground}>
+              {isMedia ? 'Generate video' : 'Try it in the playground'}
+            </button>
           )}
           <button className="ghost" onClick={onClose}>Close</button>
         </div>

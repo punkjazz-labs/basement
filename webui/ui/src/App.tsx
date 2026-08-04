@@ -7,6 +7,7 @@ import Pairing from './views/Pairing'
 import Models from './views/Models'
 import Roles from './views/Roles'
 import Playground from './views/Playground'
+import Generate from './views/Generate'
 import Connect from './views/Connect'
 import Monitor from './views/Monitor'
 import Fleet from './views/Fleet'
@@ -15,13 +16,14 @@ import Activity from './views/Activity'
 import DeploymentDialog from './views/Deployment'
 import { ConfirmHost } from './confirm'
 
-const TABS = ['Models', 'Roles', 'Playground', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
+const TABS = ['Models', 'Roles', 'Playground', 'Generate', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
 type Tab = (typeof TABS)[number]
 
 const DESC: Record<Tab, string> = {
   Models: 'The best open models, tuned for your Spark. Pick one and click Install.',
   Roles: 'Persistent endpoints that stay stable while you change the model behind them.',
   Playground: 'Talk to the model that is serving right now.',
+  Generate: 'Create a video from a prompt on the model that is running.',
   Connect: 'Endpoint, API keys and client snippets for this Spark.',
   Monitor: 'Live GPU health and serving metrics.',
   Fleet: 'Every Spark you have added, and what each one is serving right now.',
@@ -43,6 +45,7 @@ export interface AppState {
   refreshPeers: () => Promise<void>
   openDeployment: (jobID: string) => void
   openPlayground: () => void
+  openGenerate: () => void
   openFleet: () => void
 }
 
@@ -226,6 +229,16 @@ export default function App() {
     () => recipes.find(recipe => recipe.id === activeModel?.recipe_id),
     [recipes, activeModel],
   )
+  const activeMedia = Boolean(activeModel?.status === 'ready' && activeRecipe?.media_generation)
+  const visibleTabs = TABS.filter(name =>
+    name === 'Generate' ? activeMedia : name === 'Playground' ? !activeMedia : true,
+  )
+
+  useEffect(() => {
+    if (tab === 'Generate' && !activeMedia) setTab('Models')
+    if (tab === 'Playground' && activeMedia) setTab('Generate')
+  }, [tab, activeMedia])
+
   const working = jobs.some(job => !terminal(job.state))
   const failedRecently = !working && jobs[0]?.state === 'failed'
   const railClass = working ? 'working' : activeModel?.status === 'ready' ? 'serving' : failedRecently ? 'failed' : ''
@@ -244,6 +257,7 @@ export default function App() {
     system, recipes, models, jobs, peers, refresh, refreshModelsAndJobs, refreshPeers,
     openDeployment: id => setSelectedJobID(id),
     openPlayground: () => setTab('Playground'),
+    openGenerate: () => setTab('Generate'),
     openFleet: () => setTab('Fleet'),
   }
   const selectedJob = jobs.find(job => job.id === selectedJobID) ?? null
@@ -256,7 +270,7 @@ export default function App() {
           <strong>basement</strong>
         </a>
         <nav aria-label="Console sections">
-          {TABS.map(name => (
+          {visibleTabs.map(name => (
             <button key={name} aria-current={tab === name} onClick={() => setTab(name)}>
               {name}
               {name === 'Activity' && runningJobs > 0 && <span className="badge">{runningJobs}</span>}
@@ -267,7 +281,7 @@ export default function App() {
           <div className={`foot-live ${railClass}`} role="status" aria-live="polite">
             <i className="led" aria-hidden="true" />
             <span>{railLabel}</span>
-            {liveTPS !== null && activeModel?.status === 'ready' && (
+            {liveTPS !== null && activeModel?.status === 'ready' && !activeMedia && (
               <span className="tps">{liveTPS.toFixed(1)} tok/s</span>
             )}
           </div>
@@ -290,7 +304,7 @@ export default function App() {
           </div>
           <p className="desc">{DESC[tab]}</p>
         </header>
-        <main id="main">
+        <main id="main" className={tab === 'Generate' ? 'wide-generate' : undefined}>
           {tab === 'Models' && <Models {...state} />}
           {tab === 'Roles' && <Roles {...state} />}
           {/* The playground stays mounted so switching tabs never wipes the
@@ -303,6 +317,9 @@ export default function App() {
               recipeID={activeRecipe?.id}
             />
           </div>
+          {tab === 'Generate' && activeRecipe?.media_generation && (
+            <Generate recipe={activeRecipe} recipes={recipes} />
+          )}
           {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
           {tab === 'Monitor' && <Monitor telemetry={telemetry} activeName={activeRecipe?.display_name} />}
           {tab === 'Fleet' && <Fleet {...state} liveTPS={liveTPS} />}
@@ -317,6 +334,10 @@ export default function App() {
         onOpenPlayground={() => {
           setSelectedJobID('')
           setTab('Playground')
+        }}
+        onOpenGenerate={() => {
+          setSelectedJobID('')
+          refreshModelsAndJobs().then(() => setTab('Generate'))
         }}
       />
       <ConfirmHost />
