@@ -763,19 +763,48 @@ func truncateForError(raw []byte, limit int) string {
 	return s
 }
 
-// measureThroughput streams a fixed generation and reports device-measured
-// decode speed and time to first token, so the catalog shows numbers observed
-// on this Spark rather than editorial estimates.
+// measureMinDecodeDuration is how long measureThroughput lets a model decode
+// before it cuts the sample off. A fixed token count finishes in only a few
+// seconds on a fast model — the previous 256-token budget measured DeepSeek
+// V4 Flash at 36.5 tok/s against 34.7-44.9 tok/s across the qualification's
+// own multi-thousand-token runs, because a few seconds of decode is not
+// enough to average out normal run-to-run jitter. Targeting a duration
+// instead keeps the sample window comparable across models of very
+// different speeds: a slow model just produces fewer tokens in the same
+// thirty seconds, rather than the measurement ending before it has settled.
+const measureMinDecodeDuration = 30 * time.Second
+
+// measureMaxTokens is a safety ceiling only, not the thing being targeted.
+// It exists so a model fast enough to decode this many tokens inside
+// measureMinDecodeDuration (well over 100 tok/s) still has a defined stopping
+// point, and so the request prompt below (written to keep a model talking
+// for a while) cannot run away indefinitely on its own.
+const measureMaxTokens = 4096
+
+// measureThroughput streams a generation and reports device-measured decode
+// speed and time to first token, so the catalog shows numbers observed on
+// this Spark rather than editorial estimates. See measureMinDecodeDuration
+// for why the sample runs to a duration rather than a fixed token count.
 func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (map[string]any, error) {
 	body, _ := json.Marshal(map[string]any{
-		"model":          r.Service.ServedModelID,
-		"messages":       []map[string]string{{"role": "user", "content": "Explain, in about 200 plain-language words, why local inference on personal hardware matters."}},
-		"max_tokens":     256,
+		"model": r.Service.ServedModelID,
+		// Asked to write at length so the model keeps decoding for the whole
+		// measurement window instead of finishing early on a short answer;
+		// measureMaxTokens is the real stopping point, this is just the
+		// instruction that gets it there.
+		"messages":       []map[string]string{{"role": "user", "content": "Write a long, detailed essay of at least 2000 words on why local inference on personal hardware matters. Cover privacy, cost at scale, latency, offline reliability, and customization, with concrete examples throughout, and keep expanding on each point rather than summarizing early."}},
+		"max_tokens":     measureMaxTokens,
 		"temperature":    0,
 		"stream":         true,
 		"stream_options": map[string]bool{"include_usage": true},
 	})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, h.modelURL(r)+"/v1/chat/completions", bytes.NewReader(body))
+	// Cancelling once the duration target is hit (below) is what actually
+	// stops the request; without a request-scoped context there would be no
+	// way to end the stream early short of waiting for the model to finish
+	// on its own.
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(reqCtx, http.MethodPost, h.modelURL(r)+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	client := *h.http
 	client.Timeout = 5 * time.Minute
@@ -837,6 +866,16 @@ func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (
 				chunkCount++
 			}
 		}
+		// The duration target, not measureMaxTokens, is what normally ends
+		// the sample: once thirty seconds of decode have been observed,
+		// cancelling the request stops the model generating further tokens
+		// no one is going to count. completionTokens falls back to
+		// chunkCount below, exactly as it already does for a server that
+		// never sends a final usage frame.
+		if !firstToken.IsZero() && time.Since(firstToken) >= measureMinDecodeDuration {
+			cancel()
+			break
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read benchmark stream: %w", err)
@@ -855,6 +894,11 @@ func (h *HostExecutor) measureThroughput(ctx context.Context, r recipe.Recipe) (
 	if completionTokens == 0 {
 		completionTokens = chunkCount
 	}
+	// The decode window starts at firstToken, not at started: time to first
+	// token is prefill and queueing, not decode, so it is already excluded
+	// from the tok/s window below rather than counted as free generation
+	// time. The started-based fallback only covers the pathological case
+	// where firstToken and finished land on the same clock tick.
 	generation := finished.Sub(firstToken).Seconds()
 	if generation <= 0 {
 		generation = finished.Sub(started).Seconds()
