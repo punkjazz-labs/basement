@@ -16,7 +16,7 @@ readonly remote_dir="$1"
 readonly image_tag="$2"
 
 cd "${remote_dir}"
-docker build --build-arg MAX_JOBS=4 --tag "${image_tag}" .
-docker image inspect "${image_tag}" --format 'Image ID: {{.Id}}'
-docker image inspect "${image_tag}" --format 'Size: {{.Size}} bytes'
+sudo docker build --build-arg MAX_JOBS=4 --tag "${image_tag}" .
+sudo docker image inspect "${image_tag}" --format 'Image ID: {{.Id}}'
+sudo docker image inspect "${image_tag}" --format 'Size: {{.Size}} bytes'
 REMOTE
