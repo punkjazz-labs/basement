@@ -41,10 +41,14 @@ func NewHostExecutor(dataDir, dockerSocket string, provider inventory.Provider) 
 var networkRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second}
 
 // transientNetworkError recognizes failures that a working machine recovers
-// from on its own: resolver hiccups, dropped connections, registry blips.
-// Docker flattens typed errors into event strings, so the match is textual
-// by design. Anything else (auth, missing image, disk guard) surfaces
-// immediately.
+// from on its own: resolver hiccups, dropped connections, registry blips, and
+// a mid-stream HTTP/2 reset (observed on real hardware during multi-hour, tens
+// of gigabytes weight downloads as "stream error: stream ID ...; CANCEL" from
+// net/http's bundled HTTP/2 transport). That transport keeps the concrete
+// error type unexported, so it cannot be matched with errors.As; Docker's
+// daemon flattens its own errors into event strings the same way. The match
+// is textual for both, by design. Anything else (auth, missing image, disk
+// guard, a checksum mismatch) surfaces immediately.
 func transientNetworkError(err error) bool {
 	if err == nil {
 		return false
@@ -62,6 +66,7 @@ func transientNetworkError(err error) bool {
 		"network is unreachable",
 		"service unavailable",
 		"bad gateway",
+		"stream error", // HTTP/2 stream-level reset, e.g. "stream error: stream ID 19; CANCEL"
 	} {
 		if strings.Contains(message, marker) {
 			return true
@@ -73,10 +78,28 @@ func transientNetworkError(err error) bool {
 // retryNetwork reruns op while it fails on what looks like a temporary
 // network problem. The user is never asked to redo a blip by hand; only a
 // persistent outage surfaces, carrying the machine-side checks to run.
+//
+// Every retry is recorded, not just replayed: each attempt is announced
+// through progress (visible on the job's live step receipt as it happens),
+// and on eventual success the count and the per-attempt errors are folded
+// into the returned receipt as "retries" and "retry_events" so a completed
+// step still shows that a network blip happened, instead of reading as if
+// the download had gone through cleanly the first time. op's resume
+// mechanism (Range from bytes already on disk for a weight download, layers
+// Docker already has for an image pull) is what makes each retry pick up
+// where the last attempt left off rather than starting over.
 func (h *HostExecutor) retryNetwork(ctx context.Context, what string, progress Progress, op func() (map[string]any, error)) (map[string]any, error) {
+	var events []map[string]any
 	for attempt := 0; ; attempt++ {
 		value, err := op()
 		if err == nil || ctx.Err() != nil || !transientNetworkError(err) {
+			if err == nil && len(events) > 0 {
+				if value == nil {
+					value = map[string]any{}
+				}
+				value["retries"] = len(events)
+				value["retry_events"] = events
+			}
 			return value, err
 		}
 		if attempt >= len(h.retryDelays) {
@@ -85,6 +108,7 @@ func (h *HostExecutor) retryNetwork(ctx context.Context, what string, progress P
 			}
 			return nil, err
 		}
+		events = append(events, map[string]any{"attempt": attempt + 1, "error": err.Error(), "retry_after_seconds": h.retryDelays[attempt].Seconds()})
 		if progress != nil {
 			if problem := progress(map[string]any{"status": "retrying after a network error", "attempt": attempt + 1, "error": err.Error()}); problem != nil {
 				return nil, problem

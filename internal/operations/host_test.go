@@ -2,8 +2,11 @@ package operations
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -435,6 +439,211 @@ func TestRetryNetworkStopsWhenCancelled(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("retry ignored cancellation")
+	}
+}
+
+// h2StreamErrorServer serves one HuggingFace-shaped repository over real
+// HTTP/2 (EnableHTTP2, TLS) so a mid-stream failure is the genuine "stream
+// error: stream ID ...; CANCEL"-shaped error net/http's bundled HTTP/2
+// transport produces, the same failure seen on real hardware mid-download,
+// rather than a stand-in. The first abortAfter resolve requests are cut off
+// after writing half of whatever range was asked for; requests after that
+// serve the rest of the file cleanly. resolveRequests counts every resolve
+// hit; rangeRequests counts how many carried a Range header, which is what
+// proves a retry resumed from bytes already on disk instead of restarting
+// the file.
+func h2StreamErrorServer(t *testing.T, content []byte, abortAfter int32, resolveRequests, rangeRequests *int32) (*httptest.Server, string) {
+	t.Helper()
+	revision := strings.Repeat("a", 40)
+	sum := sha256.Sum256(content)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/models/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"sha": revision,
+				"siblings": []map[string]any{{
+					"rfilename": "weights/model.bin",
+					"size":      len(content),
+					"blobId":    strings.Repeat("b", 40),
+					"lfs":       map[string]any{"sha256": hex.EncodeToString(sum[:]), "size": len(content)},
+				}},
+			})
+		case strings.Contains(r.URL.Path, "/resolve/"):
+			attempt := atomic.AddInt32(resolveRequests, 1)
+			start := 0
+			if value := r.Header.Get("Range"); value != "" {
+				atomic.AddInt32(rangeRequests, 1)
+				_, _ = fmt.Sscanf(value, "bytes=%d-", &start)
+				w.WriteHeader(http.StatusPartialContent)
+			}
+			if attempt <= abortAfter {
+				half := start + (len(content)-start)/2
+				_, _ = w.Write(content[start:half])
+				w.(http.Flusher).Flush()
+				panic(http.ErrAbortHandler)
+			}
+			_, _ = w.Write(content[start:])
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server, revision
+}
+
+// TestDownloadArtifactRetriesTransientStreamErrorInPlaceAndResumes is task
+// #47: a transient HTTP/2 stream reset mid-download (observed twice on real
+// hardware during a 167 GB weight download) must be retried in place, not
+// fail the install job, and the retry must resume from the bytes already
+// written rather than starting the file over.
+func TestDownloadArtifactRetriesTransientStreamErrorInPlaceAndResumes(t *testing.T) {
+	content := make([]byte, 512<<10)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	var resolveRequests, rangeRequests int32
+	server, revision := h2StreamErrorServer(t, content, 1, &resolveRequests, &rangeRequests)
+	executor := &HostExecutor{hf: &HFClient{client: server.Client(), baseURL: server.URL}, retryDelays: []time.Duration{0, 0, 0, 0, 0}}
+	target := t.TempDir()
+	artifact := recipe.Artifact{Repository: "owner/model", Revision: revision, ExpectedBytes: int64(len(content))}
+	var events []map[string]any
+	progress := func(v any) error {
+		if m, ok := v.(map[string]any); ok {
+			events = append(events, m)
+		}
+		return nil
+	}
+	receipt, err := executor.retryNetwork(context.Background(), "downloading model weights", progress, func() (map[string]any, error) {
+		return executor.hf.Download(context.Background(), artifact, target, progress)
+	})
+	if err != nil {
+		t.Fatalf("a single transient HTTP/2 stream error should be retried in place, not fail the job: %v", err)
+	}
+	if resolveRequests < 2 {
+		t.Fatalf("resolve endpoint was only hit %d times, the failure was never retried", resolveRequests)
+	}
+	if rangeRequests == 0 {
+		t.Fatal("retry did not resume with a Range request from the bytes already written to disk")
+	}
+	if receipt["bytes_verified"] != int64(len(content)) {
+		t.Fatalf("receipt=%#v", receipt)
+	}
+	if retries, ok := receipt["retries"].(int); !ok || retries < 1 {
+		t.Fatalf("the retry was not recorded on the job step receipt, so it would be undiagnosable: %#v", receipt)
+	}
+	found := false
+	for _, event := range events {
+		if event["status"] == "retrying after a network error" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no retry was reported through progress, so a live job would show nothing happened")
+	}
+	downloaded, err := os.ReadFile(filepath.Join(target, "weights/model.bin"))
+	if err != nil || string(downloaded) != string(content) {
+		t.Fatalf("downloaded content did not match after the retry: err=%v", err)
+	}
+}
+
+// TestDownloadArtifactDoesNotRetryLicenceErrors proves a 4xx from the
+// resolve endpoint (a gated or unlicensed repository) surfaces immediately.
+// Retrying it would only delay a decision the user has to make, not recover
+// from anything.
+func TestDownloadArtifactDoesNotRetryLicenceErrors(t *testing.T) {
+	content := []byte("gated weights")
+	revision := strings.Repeat("a", 40)
+	var resolveRequests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/models/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "model.bin", "size": len(content), "blobId": strings.Repeat("b", 40)}}})
+		case strings.Contains(r.URL.Path, "/resolve/"):
+			atomic.AddInt32(&resolveRequests, 1)
+			http.Error(w, "gated repository, request access first", http.StatusForbidden)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	executor := &HostExecutor{hf: &HFClient{client: server.Client(), baseURL: server.URL}, retryDelays: []time.Duration{0, 0, 0}}
+	target := t.TempDir()
+	artifact := recipe.Artifact{Repository: "owner/model", Revision: revision, ExpectedBytes: int64(len(content))}
+	_, err := executor.retryNetwork(context.Background(), "downloading model weights", nil, func() (map[string]any, error) {
+		return executor.hf.Download(context.Background(), artifact, target, nil)
+	})
+	if err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("a licence error must surface unchanged, got: %v", err)
+	}
+	if resolveRequests != 1 {
+		t.Fatalf("a licence error must not be retried, resolve was hit %d times", resolveRequests)
+	}
+}
+
+// TestDownloadArtifactDoesNotRetryChecksumMismatch proves a file that
+// downloads completely but hashes wrong is not retried: retrying would just
+// silently repeat the request against whatever served the wrong bytes, and
+// the actual defect (a corrupted or substituted file) should surface, not
+// be masked as a network blip.
+func TestDownloadArtifactDoesNotRetryChecksumMismatch(t *testing.T) {
+	content := []byte("expected weights content")
+	corrupted := []byte("corrupted weights content!")
+	sum := sha256.Sum256(content)
+	revision := strings.Repeat("a", 40)
+	var resolveRequests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/models/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "model.bin", "size": len(content), "blobId": strings.Repeat("b", 40), "lfs": map[string]any{"sha256": hex.EncodeToString(sum[:]), "size": len(content)}}}})
+		case strings.Contains(r.URL.Path, "/resolve/"):
+			atomic.AddInt32(&resolveRequests, 1)
+			_, _ = w.Write(corrupted)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	executor := &HostExecutor{hf: &HFClient{client: server.Client(), baseURL: server.URL}, retryDelays: []time.Duration{0, 0, 0}}
+	target := t.TempDir()
+	artifact := recipe.Artifact{Repository: "owner/model", Revision: revision, ExpectedBytes: int64(len(content))}
+	_, err := executor.retryNetwork(context.Background(), "downloading model weights", nil, func() (map[string]any, error) {
+		return executor.hf.Download(context.Background(), artifact, target, nil)
+	})
+	if err == nil || !strings.Contains(err.Error(), "content verification failed") {
+		t.Fatalf("a checksum mismatch must surface unchanged, got: %v", err)
+	}
+	if resolveRequests != 1 {
+		t.Fatalf("a checksum mismatch must not be retried, resolve was hit %d times", resolveRequests)
+	}
+}
+
+// TestDownloadArtifactSurfacesErrorAfterExhaustingRetries proves a
+// persistent (not transient) network problem still fails the job once
+// bounded retries run out, carrying the underlying cause instead of hiding
+// it behind a generic message.
+func TestDownloadArtifactSurfacesErrorAfterExhaustingRetries(t *testing.T) {
+	content := make([]byte, 4<<10)
+	var resolveRequests, rangeRequests int32
+	server, revision := h2StreamErrorServer(t, content, 1000, &resolveRequests, &rangeRequests)
+	executor := &HostExecutor{hf: &HFClient{client: server.Client(), baseURL: server.URL}, retryDelays: []time.Duration{0, 0}}
+	target := t.TempDir()
+	artifact := recipe.Artifact{Repository: "owner/model", Revision: revision, ExpectedBytes: int64(len(content))}
+	_, err := executor.retryNetwork(context.Background(), "downloading model weights", nil, func() (map[string]any, error) {
+		return executor.hf.Download(context.Background(), artifact, target, nil)
+	})
+	if err == nil {
+		t.Fatal("a persistent stream error should eventually surface, not retry forever silently")
+	}
+	if !strings.Contains(err.Error(), "failed 3 times on network errors") {
+		t.Fatalf("exhausted retries should say how many attempts were made: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "stream error") {
+		t.Fatalf("exhausted retries should keep the underlying cause, not hide it: %v", err)
+	}
+	if resolveRequests != 3 {
+		t.Fatalf("expected 3 attempts (the initial try plus 2 retries), got %d", resolveRequests)
 	}
 }
 
