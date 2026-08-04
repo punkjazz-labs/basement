@@ -146,6 +146,7 @@
   /* proof row: full-bleed squares */
   .proofqs{padding:0;}
   .proofqs .proofgrid{max-width:none;grid-template-columns:1fr 1fr;}
+  @media (max-width:900px){.proofqs .proofgrid{grid-template-columns:1fr;}}
   .sq{padding:84px clamp(40px,6vw,100px);}
   .sq.pareto .lab{margin-bottom:24px;}
   .pareto text{font-family:"Courier New",monospace;}
@@ -276,6 +277,42 @@
     .trust .fine{font-size:15px;}
     .sw code{font-size:12px;padding:10px 12px;}
     .vcap{margin-top:26px;font-size:14px;}
+  }
+
+  /* ===== narrow phones: hero collapses to a clean stack (no overlap) =====
+     Every hero child stays position:absolute (as in the desktop collage) but all
+     offsets are now chained off a handful of custom properties, so the whole
+     stack (wordmark -> photo -> tagline/buttons -> install bar) lays out top to
+     bottom with no fixed viewport-height assumption and nothing overlaps. */
+  @media (max-width:480px){
+    .hero{
+      position:relative;
+      height:var(--hero-h);
+      min-height:0;
+      overflow:visible;
+      padding:0;
+      --hpad:18px;
+      --big-h:calc(19vw * 0.84 + 40px);
+      --print-top:var(--big-h);
+      --print-w:calc(100vw - (var(--hpad) * 2));
+      --print-h:calc(var(--print-w) * 1.05);
+      --col-top:calc(var(--print-top) + var(--print-h) + 22px);
+      --col-h:185px;
+      --bar-top:calc(var(--col-top) + var(--col-h));
+      --hero-h:calc(var(--bar-top) + 150px);
+    }
+    .big{position:absolute;left:0;right:auto;top:14px;width:100%;font-size:19vw;}
+    .print{position:absolute;left:var(--hpad);top:var(--print-top);width:var(--print-w);height:var(--print-h);}
+    .sub{left:50%;top:calc(var(--print-top) + (var(--print-h) * 0.05));font-size:13px;padding:5px 10px;}
+    .band{left:calc(var(--hpad) + (var(--print-w) * 0.06));right:auto;width:calc(var(--print-w) * 0.7);top:calc(var(--print-top) + (var(--print-h) * 0.37));padding:8px 9px 7px;}
+    .burst{left:calc(var(--hpad) + (var(--print-w) * 0.72));right:auto;top:calc(var(--print-top) + (var(--print-h) * 0.04));width:calc(var(--print-w) * 0.26);height:calc(var(--print-w) * 0.26);}
+    .burst .txt .n{font-size:19px;}
+    .burst .txt .w{font-size:8px;}
+    .stkr{left:calc(var(--hpad) + (var(--print-w) * 0.04));top:calc(var(--print-top) + (var(--print-h) * 0.58));bottom:auto;width:calc(var(--print-w) * 0.4);height:calc(var(--print-w) * 0.4);font-size:15px;padding:14px;}
+    .stkr .s{font-size:10px;}
+    .col{position:absolute;left:0;right:auto;top:var(--col-top);bottom:auto;width:100%;padding:0 var(--hpad);display:flex;flex-direction:column;gap:10px;}
+    .colnote{font-size:16px;line-height:1.35;text-align:center;}
+    .heroBar{position:absolute;left:0;right:0;top:var(--bar-top);bottom:auto;flex-wrap:wrap;}
   }
 
   .sqhead{font-family:"Arial Rounded MT Bold","Helvetica Neue",sans-serif;font-size:clamp(24px,2.3vw,34px);
