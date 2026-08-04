@@ -2,7 +2,7 @@
 
 Source: audio transcript of the call (Italian), re-read in full on 2026-08-02.
 This file is the durable extraction of everything website-relevant. When a design
-round contradicts these notes, the notes win until the designer/the owner revise them.
+round contradicts these notes, the notes win until the designer or the owner revise them.
 
 ## The thesis
 
@@ -75,7 +75,7 @@ round contradicts these notes, the notes win until the designer/the owner revise
 
 ## Trust (what the section actually means)
 
-the designer on howtospark-type sites: "Non voglio copiare e incollare i loro comandi
+The designer on howtospark-type sites: "Non voglio copiare e incollare i loro comandi
 sul mio sito… questo è tutto vibe-coded… non ho la più pallida idea di cosa gira
 dentro… ogni tanto mi aggiunge nuove flags… c'è una curation che va migliorata."
 

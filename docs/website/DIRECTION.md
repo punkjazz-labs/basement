@@ -110,5 +110,5 @@ it does; screenshots of real terminal output beat adjectives.
 ## Next step
 
 Claude produces static mockups of directions A, B, C (same content, three skins:
-hero + a slice of the canvas + the install fragment). the owner picks; the winner gets a
+hero + a slice of the canvas + the install fragment). The owner picks; the winner gets a
 real spec with a token system. Per the design loop, no production code before that.

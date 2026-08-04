@@ -2,7 +2,7 @@
 
 Branch `spec/10-rename-basement`. Commit per section.
 
-the owner's decision: every mention of "RunOnSpark", "RunOnSpark Manager", and
+The owner's decision: every mention of "RunOnSpark", "RunOnSpark Manager", and
 "run on spark" becomes **basement**. The brand is lowercase in prose, UI copy,
 and filenames; capitalize only where a sentence starts. The public host is
 already `basement.punkjazz.ai`.

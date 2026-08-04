@@ -167,7 +167,7 @@ func TestInstallLANSkipsLinkLocalAddress(t *testing.T) {
 	route := newFakeRunner()
 	route.outputs["docker info"] = "nvidia runc \n"
 	route.outputs["route get"] = "192.168.99.148\n"
-	route.outputs["hostname -I"] = "169.254.205.1 192.168.99.148 100.64.0.15 \n"
+	route.outputs["hostname -I"] = "169.254.205.1 192.168.99.148 100.64.30.7 \n"
 	route.outputs["pairing-token"] = "tok\n"
 	result, err := Install(context.Background(), route, LocalFileSource{Path: "/tmp/binary"}, Options{Listen: ListenLAN}, nil)
 	if err != nil {
@@ -179,7 +179,7 @@ func TestInstallLANSkipsLinkLocalAddress(t *testing.T) {
 
 	fallback := newFakeRunner()
 	fallback.outputs["docker info"] = "nvidia runc \n"
-	fallback.outputs["hostname -I"] = "169.254.205.1 192.168.99.148 100.64.0.15 \n"
+	fallback.outputs["hostname -I"] = "169.254.205.1 192.168.99.148 100.64.30.7 \n"
 	fallback.outputs["pairing-token"] = "tok\n"
 	result, err = Install(context.Background(), fallback, LocalFileSource{Path: "/tmp/binary"}, Options{Listen: ListenLAN}, nil)
 	if err != nil {

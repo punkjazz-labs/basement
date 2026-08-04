@@ -806,7 +806,7 @@ func TestSiblingListenModeFollowsTheHead(t *testing.T) {
 		want   setup.ListenMode
 	}{
 		{"192.168.99.134:7070", setup.ListenLAN},
-		{"100.64.0.13:7070", setup.ListenTailscale},
+		{"100.64.10.5:7070", setup.ListenTailscale},
 		{"127.0.0.1:7070", setup.ListenLAN},
 		{"", setup.ListenLAN},
 	}
@@ -1099,7 +1099,7 @@ func TestFleetAdoptRefusesAddressesOffYourOwnNetwork(t *testing.T) {
 	}
 	// The machines this product is about are still adoptable, and the address
 	// the run is pinned to is the one that was checked.
-	for _, address := range []string{"192.168.99.137", "100.64.0.14", "10.0.0.5"} {
+	for _, address := range []string{"192.168.99.137", "100.64.20.6", "10.0.0.5"} {
 		pinned, err := checkAdoptionTarget(context.Background(), address)
 		if err != nil {
 			t.Errorf("%s was refused: %v", address, err)

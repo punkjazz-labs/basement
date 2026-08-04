@@ -147,7 +147,7 @@ including SGLang. Design and phasing recorded in
 rationale: Inkling needs SGLang, single-Spark DeepSeek lives in ds4/llama.cpp
 territory, Qwen family is vLLM. No single runtime covers the frontier.
 
-## Round 3 — 2026-08-03 evening, MiniMax H3 deep-check (the owner request)
+## Round 3 — 2026-08-03 evening, MiniMax H3 deep-check (owner request)
 
 ### MiniMax H3 — the community moment, and why we cannot catalog it
 - Traction confirmed by live X recent-search (36 posts/72h): 304-like ComfyUI

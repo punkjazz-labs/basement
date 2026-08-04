@@ -4,8 +4,9 @@ Branch `spec/09-update-affordance`. One commit.
 
 **Problem.** When an installed model's recipe has a newer version, the only
 visible affordance is inside the expanded card (the `Recipe updated` line with the
-ghost `Update` button, spec 04). the owner: the update must be visible at the row
-level, next to the row's existing action buttons, without expanding anything.
+ghost `Update` button, spec 04). The owner's requirement: the update must be
+visible at the row level, next to the row's existing action buttons, without
+expanding anything.
 
 **Change** (`webui/ui/src/views/Models.tsx`):
 1. In the installed-model row's action cluster (where Open / Start / Switch to

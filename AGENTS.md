@@ -20,9 +20,9 @@ you are touching.
 
 1. Read `~/.config/punkjazz/project-defaults.md` before project work. It is the
    canonical local source for model routing, email identity, and machine
-   addresses. If absent on a managed laptop, fetch
-   `/Users/example/knowledge-base/cognition/laptop-kit/v2/project-defaults.md`
-   through the `kb` helper before choosing infrastructure.
+   addresses. If absent on a managed laptop, fetch the canonical
+   project-defaults file through the `kb` helper before choosing
+   infrastructure.
 2. Read `docs/PROJECT-AUTONOMY.md` first. Its gates and `protected_paths` bind
    every agent, whatever harness you run in. The commit hooks enforce them.
 3. Unattended sessions: an open Flight Recorder exists at `.hermes-fr.yaml`

@@ -20,7 +20,7 @@
 set -eu
 
 TAG="${1:?usage: sign-macos-release.sh <tag>}"
-IDENTITY="${SIGN_IDENTITY:-Developer ID Application: the owner (TEAMID0000)}"
+IDENTITY="${SIGN_IDENTITY:?SIGN_IDENTITY must be set to the Developer ID Application identity, e.g. \"Developer ID Application: Your Name (TEAMID)\"}"
 PROFILE="${NOTARY_PROFILE:-basement}"
 
 WORK="$(mktemp -d)"

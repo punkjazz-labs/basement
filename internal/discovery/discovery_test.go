@@ -159,7 +159,7 @@ func TestAcceptedMDNSAddressTrustsOnlyTheResponder(t *testing.T) {
 		{"another machine's address advertised", net.ParseIP("192.168.99.1"), net.ParseIP("192.168.99.137"), ""},
 		{"responder itself is public", net.ParseIP("203.0.113.9"), net.ParseIP("203.0.113.9"), ""},
 		{"responder is loopback", nil, net.ParseIP("127.0.0.1"), ""},
-		{"tailnet responder", nil, net.ParseIP("100.64.0.13"), "100.64.0.13"},
+		{"tailnet responder", nil, net.ParseIP("100.64.10.5"), "100.64.10.5"},
 	}
 	for _, test := range cases {
 		got := acceptedMDNSAddress(test.advertised, test.source)
@@ -195,7 +195,7 @@ func TestMDNSCollectorDropsForeignAddressesAndCapsTheFlood(t *testing.T) {
 }
 
 func TestIsLocalFabric(t *testing.T) {
-	local := []string{"192.168.99.137", "10.1.2.3", "172.16.0.9", "169.254.1.1", "100.64.0.13", "fe80::1", "fd00::1"}
+	local := []string{"192.168.99.137", "10.1.2.3", "172.16.0.9", "169.254.1.1", "100.64.10.5", "fe80::1", "fd00::1"}
 	for _, address := range local {
 		if !IsLocalFabric(net.ParseIP(address)) {
 			t.Errorf("%s should read as local fabric", address)

@@ -298,8 +298,9 @@ built for macOS and Windows only.
    packaging/sign-macos-release.sh vX.Y.Z
    ```
 
-   It reads the identity from `SIGN_IDENTITY` and the keychain profile from
-   `NOTARY_PROFILE` (both have defaults in the script) and needs an
+   It reads the identity from `SIGN_IDENTITY` (required, no default — the
+   script fails with a clear message if it is unset) and the keychain profile
+   from `NOTARY_PROFILE` (defaults to `basement`), and needs an
    authenticated `gh`. It downloads the two darwin manager binaries from the
    release, `codesign`s them with a hardened runtime and a timestamp, notarizes
    each as a zip (a bare executable cannot be stapled), and re-uploads the
