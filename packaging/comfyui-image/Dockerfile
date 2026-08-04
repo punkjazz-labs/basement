@@ -1,7 +1,7 @@
-# Base tag: nvidia/cuda:13.0.2-runtime-ubuntu24.04
-# TODO(PINNING): RESOLVE THE LINUX/ARM64 MANIFEST DIGEST AT BUILD TIME AND
-# REPLACE THIS FLOATING TAG WITH nvidia/cuda@sha256:<digest> BEFORE PUBLISHING.
-FROM nvidia/cuda:13.0.2-runtime-ubuntu24.04
+# Base tag: nvidia/cuda:13.0.2-runtime-ubuntu24.04, pinned by its multi-arch
+# index digest (resolved from the Docker Hub registry API 2026-08-04; the
+# linux/arm64 child is sha256:bbfc230dfd4c3bb2eadacdc22cb7e2ea3453e93bb3ee40e241357eb0bcd5c6a6).
+FROM nvidia/cuda@sha256:6a0e31b59e70890446f2c17356d6efc0d54260090a8c63d6ca7c2ad049db95d2
 
 ARG MAX_JOBS=4
 ARG COMFYUI_COMMIT=b1693ecba9f5b65f8c80ab36b195ab963ec92413
