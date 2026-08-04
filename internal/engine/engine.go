@@ -442,7 +442,8 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		}
 		e.fail(ctx, jobID, index, cause)
 	}
-	for index, plan := range plans {
+	for index := 0; index < len(plans); index++ {
+		plan := plans[index]
 		if !runtimeHeld && (plan.BeginSwitch || runtimeOperations[plan.Operation.Type]) {
 			if err := e.acquireRuntime(ctx); err != nil {
 				abort(index, err)
@@ -494,6 +495,15 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 				e.cleanupAfterCancel(jobID)
 			}
 			return
+		}
+		if concurrentDownloadPair(plans, index) {
+			failedIndex, err := e.executeConcurrentDownloads(ctx, execution, index, plans[index:index+maxConcurrentNodeDownloads], deployment, previous, planned.previousDeployment)
+			if err != nil {
+				abort(failedIndex, err)
+				return
+			}
+			index++
+			continue
 		}
 		op, target := plan.Operation, plan.Recipe
 		execution.Placement = plan.Placement
@@ -561,6 +571,151 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		abort(len(plans)-1, err)
 		return
 	}
+}
+
+// A distributed plan has exactly one head and one worker today. Keeping this
+// limit beside the scheduling exception makes a future wider topology stay
+// bounded until it has an explicit concurrency policy of its own.
+const maxConcurrentNodeDownloads = 2
+
+func concurrentDownloadPair(plans []plannedOperation, index int) bool {
+	if index+maxConcurrentNodeDownloads > len(plans) {
+		return false
+	}
+	head, worker := plans[index], plans[index+1]
+	return head.Operation.Type == "download_artifact" && worker.Operation.Type == "download_artifact" &&
+		head.Placement.Role == operations.RoleHead && worker.Placement.Role == operations.RoleWorker &&
+		head.Recipe.ID == worker.Recipe.ID && head.Recipe.Version == worker.Recipe.Version
+}
+
+type concurrentDownload struct {
+	index     int
+	plan      plannedOperation
+	execution operations.Execution
+}
+
+type concurrentDownloadResult struct {
+	position int
+	receipt  map[string]any
+	err      error
+}
+
+// executeConcurrentDownloads is the only parallel step scheduler in the
+// engine. Both step rows are prepared before either transfer starts, then the
+// head and worker fetch the same pinned artifacts from upstream at the same
+// time. A failure cancels the shared context, waits for the sibling to stop,
+// and records both outcomes before the ordinary job failure path takes over.
+func (e *Engine) executeConcurrentDownloads(ctx context.Context, base operations.Execution, start int, plans []plannedOperation, deployment operations.Deployment, previous *recipe.Recipe, previousDeployment operations.Deployment) (int, error) {
+	downloads := make([]concurrentDownload, 0, maxConcurrentNodeDownloads)
+	for offset, plan := range plans {
+		index := start + offset
+		execution := base
+		execution.Placement = plan.Placement
+		execution.Peer = peerFor(plan, deployment, previous, previousDeployment)
+		execution.ReservedBytes = e.reservedByOthers(base.JobID)
+		previousStep, exists, err := e.store.Step(ctx, base.JobID, index)
+		if err != nil {
+			return index, err
+		}
+		if exists && previousStep.State == "completed" && e.executor.Completed(ctx, execution, plan.Operation, plan.Recipe, previousStep.Receipt) {
+			continue
+		}
+		downloads = append(downloads, concurrentDownload{index: index, plan: plan, execution: execution})
+	}
+	if len(downloads) == 0 {
+		return -1, nil
+	}
+	if err := e.store.UpdateJobState(ctx, base.JobID, stateFor(base.Kind, "download_artifact"), ""); err != nil {
+		return downloads[0].index, err
+	}
+	for position, download := range downloads {
+		if err := e.store.BeginStep(ctx, base.JobID, download.index, stepName(download.plan.Operation, download.plan.Placement)); err != nil {
+			for _, begun := range downloads[:position] {
+				_ = e.store.FailStep(context.Background(), base.JobID, begun.index, "download did not start because both node steps could not be recorded")
+			}
+			return download.index, err
+		}
+	}
+
+	pairCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan concurrentDownloadResult, len(downloads))
+	var progressWrites sync.Mutex
+	for position, download := range downloads {
+		go func(position int, download concurrentDownload) {
+			progress := func(value any) error {
+				// SQLite already has one connection, and this mutex makes the
+				// narrower promise explicit: receipts serialize, transfers do not.
+				progressWrites.Lock()
+				defer progressWrites.Unlock()
+				return e.store.UpdateStepReceipt(pairCtx, base.JobID, download.index, redact.JSON(value))
+			}
+			receipt, err := e.executor.Execute(pairCtx, download.execution, download.plan.Operation, download.plan.Recipe, progress)
+			if err != nil {
+				cancel()
+			}
+			results <- concurrentDownloadResult{position: position, receipt: receipt, err: err}
+		}(position, download)
+	}
+	outcomes := make([]concurrentDownloadResult, len(downloads))
+	for range downloads {
+		result := <-results
+		outcomes[result.position] = result
+	}
+
+	if ctx.Err() != nil {
+		for position := range outcomes {
+			if outcomes[position].err == nil {
+				outcomes[position].err = ctx.Err()
+			}
+		}
+	} else {
+		// A sibling that finished before cancellation keeps its verified
+		// receipt. That makes a later retry skip work already completed.
+		for position, outcome := range outcomes {
+			if outcome.err != nil {
+				continue
+			}
+			if err := e.store.CompleteStep(ctx, base.JobID, downloads[position].index, redact.JSON(outcome.receipt)); err != nil {
+				outcomes[position].err = err
+			}
+		}
+	}
+
+	primary := -1
+	if ctx.Err() == nil {
+		for position, outcome := range outcomes {
+			if outcome.err != nil && !errors.Is(outcome.err, context.Canceled) {
+				primary = position
+				break
+			}
+		}
+	}
+	if primary < 0 {
+		for position, outcome := range outcomes {
+			if outcome.err != nil {
+				primary = position
+				break
+			}
+		}
+	}
+	if primary < 0 {
+		return -1, nil
+	}
+	for position, outcome := range outcomes {
+		if position == primary || outcome.err == nil {
+			continue
+		}
+		message := redact.String(outcome.err.Error())
+		if errors.Is(outcome.err, context.Canceled) {
+			message = "cancelled after the other Spark's download failed"
+			if ctx.Err() != nil {
+				message = "cancelled while this step was running"
+			}
+		}
+		_ = e.store.FailStep(context.Background(), base.JobID, downloads[position].index, message)
+	}
+	return downloads[primary].index, outcomes[primary].err
 }
 
 // jobPlan is everything run() needs to execute and, if necessary, undo one

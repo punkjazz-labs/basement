@@ -38,10 +38,12 @@ manager.
 The console calls `/api/v1/...`. `internal/httpapi` authenticates (console
 session, API key, or fleet node key, per route) and writes a job row through
 `internal/store`. `internal/engine` reads the recipe, plans the job into an
-ordered list of operations, and runs them one at a time through
-`internal/operations`, which is the only package allowed to touch Docker, the
-filesystem, or the network. Receipts go back into the store; the console follows
-along on `GET /api/v1/jobs/{id}/events` (SSE).
+ordered list of operations, and runs them through `internal/operations`, which
+is the only package allowed to touch Docker, the filesystem, or the network.
+Operations run one at a time except for the matching head and worker artifact
+downloads of a two-Spark install; those two transfers overlap while their step
+rows and receipts remain separate. Receipts go back into the store; the console
+follows along on `GET /api/v1/jobs/{id}/events` (SSE).
 
 Two locks shape the engine: a mutex per recipe id, and a one-slot semaphore
 around every operation in `runtimeOperations` (`internal/engine/engine.go`) —

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
@@ -62,6 +63,105 @@ type fleetExecutor struct {
 
 func newFleetExecutor() *fleetExecutor {
 	return &fleetExecutor{running: map[string]bool{}, peerReady: true}
+}
+
+// synchronizedDownloadExecutor holds both node downloads at one barrier.
+// Reaching bothEntered proves neither call waited for the other to return.
+type synchronizedDownloadExecutor struct {
+	*fleetExecutor
+	downloadMu  sync.Mutex
+	entered     map[string]bool
+	bothEntered chan struct{}
+	release     chan struct{}
+	failRole    string
+	cancelled   map[string]bool
+	jobIDs      map[string][]string
+	resumeFrom  map[string]int64
+}
+
+func newSynchronizedDownloadExecutor() *synchronizedDownloadExecutor {
+	return &synchronizedDownloadExecutor{
+		fleetExecutor: newFleetExecutor(),
+		entered:       map[string]bool{},
+		bothEntered:   make(chan struct{}),
+		release:       make(chan struct{}),
+		cancelled:     map[string]bool{},
+		jobIDs:        map[string][]string{},
+		resumeFrom:    map[string]int64{},
+	}
+}
+
+func (f *synchronizedDownloadExecutor) Execute(ctx context.Context, execution operations.Execution, op recipe.Operation, r recipe.Recipe, progress operations.Progress) (map[string]any, error) {
+	if op.Type != "download_artifact" {
+		return f.fleetExecutor.Execute(ctx, execution, op, r, progress)
+	}
+	role := f.node(execution.Placement)
+	if role == operations.RoleWorker && execution.Peer == nil {
+		return nil, errors.New("the other Spark was not pinned when this job was planned, so it cannot be acted on")
+	}
+	f.downloadMu.Lock()
+	f.jobIDs[role] = append(f.jobIDs[role], execution.JobID)
+	if !f.entered[role] {
+		f.entered[role] = true
+		if len(f.entered) == 2 {
+			close(f.bothEntered)
+		}
+	}
+	resumed := f.resumeFrom[role]
+	f.downloadMu.Unlock()
+
+	completed := int64(51)
+	if role == operations.RoleWorker {
+		completed = 67
+	}
+	receipt := map[string]any{
+		"operation": op.Type, "node": execution.Placement.NodeName, "node_role": role,
+		"bytes_verified": int64(100), "resumed_from_bytes": resumed,
+	}
+	if progress != nil {
+		if err := progress(map[string]any{"node": execution.Placement.NodeName, "node_role": role, "bytes_complete": completed, "bytes_total": int64(100)}); err != nil {
+			if errors.Is(err, context.Canceled) {
+				f.markDownloadCancelled(role)
+			}
+			return receipt, err
+		}
+	}
+	select {
+	case <-f.bothEntered:
+	case <-ctx.Done():
+		f.markDownloadCancelled(role)
+		return receipt, ctx.Err()
+	}
+	if role == f.failRole {
+		return receipt, fmt.Errorf("download_artifact failed on %s", role)
+	}
+	select {
+	case <-f.release:
+		return receipt, nil
+	case <-ctx.Done():
+		f.markDownloadCancelled(role)
+		return receipt, ctx.Err()
+	}
+}
+
+func (f *synchronizedDownloadExecutor) markDownloadCancelled(role string) {
+	f.downloadMu.Lock()
+	f.cancelled[role] = true
+	f.downloadMu.Unlock()
+}
+
+func (f *synchronizedDownloadExecutor) downloadSnapshot() (map[string]bool, map[string][]string) {
+	f.downloadMu.Lock()
+	defer f.downloadMu.Unlock()
+	cancelled := make(map[string]bool, len(f.cancelled))
+	for role, value := range f.cancelled {
+		cancelled[role] = value
+	}
+	jobIDs := make(map[string][]string, len(f.jobIDs))
+	for role, values := range f.jobIDs {
+		jobIDs[role] = append([]string(nil), values...)
+	}
+	return cancelled, jobIDs
 }
 
 func (f *fleetExecutor) Plan(_ context.Context, r recipe.Recipe) (operations.Deployment, error) {
@@ -159,7 +259,7 @@ func indexOf(events []string, want string) int {
 	return -1
 }
 
-func newTwoSparkEngine(t *testing.T, fake *fleetExecutor) (*Engine, *store.Store, recipe.Recipe) {
+func newTwoSparkEngine(t *testing.T, fake operations.Executor) (*Engine, *store.Store, recipe.Recipe) {
 	t.Helper()
 	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
 	if err != nil {
@@ -229,6 +329,151 @@ func TestTwoSparkInstallStagesBothNodesAndStartsTheWorkerFirst(t *testing.T) {
 	}
 	if nodes["spark-a"] == 0 || nodes["spark-b"] == 0 {
 		t.Fatalf("receipts do not cover both Sparks: %v", nodes)
+	}
+}
+
+func TestTwoSparkArtifactDownloadsOverlapAndKeepReceiptsPerNode(t *testing.T) {
+	ctx := context.Background()
+	fake := newSynchronizedDownloadExecutor()
+	runner, s, r := newTwoSparkEngine(t, fake)
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "overlapping-downloads", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	select {
+	case <-fake.bothEntered:
+		// Each call waits at the barrier, so this can happen only when both
+		// transfers are in Execute at the same time.
+	case <-time.After(5 * time.Second):
+		_ = runner.Cancel(ctx, job.ID)
+		t.Fatal("head and worker downloads never overlapped")
+	}
+	close(fake.release)
+	finished := waitJob(t, s, job.ID, "ready")
+
+	receipts := map[string]map[string]any{}
+	for _, step := range finished.Steps {
+		if !strings.HasPrefix(step.Operation, "download_artifact:") {
+			continue
+		}
+		var receipt map[string]any
+		if err := json.Unmarshal(step.Receipt, &receipt); err != nil {
+			t.Fatalf("decode %s receipt: %v", step.Operation, err)
+		}
+		receipts[step.Operation] = receipt
+	}
+	for _, role := range []string{operations.RoleHead, operations.RoleWorker} {
+		operation := "download_artifact:" + role
+		receipt := receipts[operation]
+		if receipt["node_role"] != role {
+			t.Fatalf("%s receipt was attributed to %v: %#v", operation, receipt["node_role"], receipt)
+		}
+		wantNode := map[string]string{operations.RoleHead: "spark-a", operations.RoleWorker: "spark-b"}[role]
+		if receipt["node"] != wantNode {
+			t.Fatalf("%s receipt names %v, want %s: %#v", operation, receipt["node"], wantNode, receipt)
+		}
+	}
+}
+
+func TestTwoSparkDownloadFailureCancelsAndRecordsTheSibling(t *testing.T) {
+	ctx := context.Background()
+	fake := newSynchronizedDownloadExecutor()
+	fake.failRole = operations.RoleWorker
+	runner, s, r := newTwoSparkEngine(t, fake)
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "worker-download-fails", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	failed := waitJob(t, s, job.ID, "failed")
+	if !strings.Contains(failed.Error, "download_artifact failed on worker") {
+		t.Fatalf("worker download failure was not preserved: %s", failed.Error)
+	}
+	cancelled, _ := fake.downloadSnapshot()
+	if !cancelled[operations.RoleHead] {
+		t.Fatal("the head download was not cancelled after the worker failed")
+	}
+	states := map[string]store.Step{}
+	for _, step := range failed.Steps {
+		states[step.Operation] = step
+	}
+	head := states["download_artifact:"+operations.RoleHead]
+	worker := states["download_artifact:"+operations.RoleWorker]
+	if head.State != "failed" || !strings.Contains(head.Error, "other Spark's download failed") {
+		t.Fatalf("cancelled sibling outcome was not recorded: %#v", head)
+	}
+	if worker.State != "failed" || !strings.Contains(worker.Error, "failed on worker") {
+		t.Fatalf("primary worker failure was not recorded: %#v", worker)
+	}
+	assertBothNodesTornDown(t, s, job.ID, fake.recorded())
+}
+
+func TestInterruptedTwoSparkDownloadsResumeWithTheSameJobIdentity(t *testing.T) {
+	ctx := context.Background()
+	fake := newSynchronizedDownloadExecutor()
+	fake.resumeFrom[operations.RoleHead] = 40
+	fake.resumeFrom[operations.RoleWorker] = 60
+	runner, s, r := newTwoSparkEngine(t, fake)
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "resume-both-downloads", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := runner.deployment(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := runner.plan(ctx, job, r, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, plan := range planned.plans {
+		if plan.Operation.Type != "download_artifact" {
+			continue
+		}
+		if err := s.BeginStep(ctx, job.ID, index, stepName(plan.Operation, plan.Placement)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpdateStepReceipt(ctx, job.ID, index, map[string]any{"node_role": plan.Placement.Role, "bytes_complete": fake.resumeFrom[plan.Placement.Role]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.UpdateJobState(ctx, job.ID, "interrupted", "manager stopped during download"); err != nil {
+		t.Fatal(err)
+	}
+
+	runner.Start(job.ID)
+	select {
+	case <-fake.bothEntered:
+	case <-time.After(5 * time.Second):
+		_ = runner.Cancel(ctx, job.ID)
+		t.Fatal("interrupted node downloads did not resume together")
+	}
+	close(fake.release)
+	finished := waitJob(t, s, job.ID, "ready")
+	_, jobIDs := fake.downloadSnapshot()
+	for _, role := range []string{operations.RoleHead, operations.RoleWorker} {
+		if len(jobIDs[role]) != 1 || jobIDs[role][0] != job.ID {
+			t.Fatalf("%s resumed with job identities %v, want only %s", role, jobIDs[role], job.ID)
+		}
+		operation := "download_artifact:" + role
+		found := false
+		for _, step := range finished.Steps {
+			if step.Operation != operation {
+				continue
+			}
+			found = true
+			var receipt map[string]any
+			if err := json.Unmarshal(step.Receipt, &receipt); err != nil {
+				t.Fatal(err)
+			}
+			if receipt["resumed_from_bytes"] != float64(fake.resumeFrom[role]) {
+				t.Fatalf("%s receipt lost its resume point: %#v", operation, receipt)
+			}
+		}
+		if !found {
+			t.Fatalf("no resumed receipt for %s", operation)
+		}
 	}
 }
 
