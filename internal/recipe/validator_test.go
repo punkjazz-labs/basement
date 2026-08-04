@@ -480,8 +480,9 @@ func TestOnlyTheTwoSparkFlashRecipeDeclaresAWritablePath(t *testing.T) {
 	}
 	for _, r := range recipes {
 		if r.ID == "deepseek-v4-flash-0731-2s" {
-			if len(r.Runtime.WritablePaths) != 1 || r.Runtime.WritablePaths[0] != "/root/.tilelang" {
-				t.Fatalf("DeepSeek V4 Flash writable paths = %#v, want the tilelang kernel cache", r.Runtime.WritablePaths)
+			want := []string{"/root/.tilelang", "/root/tmp"}
+			if len(r.Runtime.WritablePaths) != len(want) || r.Runtime.WritablePaths[0] != want[0] || r.Runtime.WritablePaths[1] != want[1] {
+				t.Fatalf("DeepSeek V4 Flash writable paths = %#v, want the tilelang kernel cache and its exec temp dir", r.Runtime.WritablePaths)
 			}
 			continue
 		}

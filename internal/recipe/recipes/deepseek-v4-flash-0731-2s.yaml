@@ -64,6 +64,10 @@ runtime:
   environment:
     CUTE_DSL_ARCH: sm_121a
     MAX_JOBS: "4"
+    # tilelang also exports each compiled kernel into a tempfile directory and
+    # loads the shared object from there, so the process temp dir must allow
+    # exec too; /tmp stays noexec, TMPDIR moves to its own writable mount.
+    TMPDIR: /root/tmp
   # vLLM builds this model's "mhc" kernels with tilelang, which writes its JIT
   # kernel cache to /root/.tilelang while the module is being imported. On the
   # read-only root filesystem every container gets, that import raises OSError
@@ -72,6 +76,7 @@ runtime:
   # tilelang loads the shared objects it compiles, and /tmp is noexec.
   writable_paths:
     - /root/.tilelang
+    - /root/tmp
   shm_bytes: 34359738368
   memory_lock: true
   ipc_lock: true
