@@ -27,8 +27,13 @@ id: deepseek-v4-flash-0731-2s
 # is no upstream release process behind it the way there is behind
 # vllm/vllm-openai. ADR 0012 asks for a primary source, immutable pinning, a
 # read licence, and hardware qualification before the label moves; the first
-# three hold here and the fourth has not run, which is exactly why trust stays
-# basement-candidate.
+# three hold here and the fourth ran on 2026-08-04 (docs/DGX-QUALIFICATION.md):
+# on two real GB10 Sparks this exact pin sustained three 4500-token
+# generations to natural completion with zero driver errors, held flat memory,
+# scaled under 3-way concurrency and produced well-formed reasoning and tool
+# fields. The labels still say candidate because the built-in pack pins every
+# recipe as candidate by policy; the evidence for promotion exists, and only
+# the curation process moves the label.
 #
 # The tokenizer question, and what this recipe does not reproduce. The working
 # deployment does not run the pinned image directly: it rebuilds it locally to

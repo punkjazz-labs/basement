@@ -82,3 +82,42 @@ to ours. That rules out an environment difference and confirms the failure
 above is specific to the stock vLLM stack. Recipe version 2 pins the fork
 image by digest and mirrors the observed serve configuration; it stays
 candidate until it passes this same qualification on our hardware.
+
+## 2026-08-04: DeepSeek V4 Flash two-Spark qualification, second run: PASS
+
+Recipe version 2 (Anemll GB10 vLLM fork, nvfp4_ds_mla KV cache, dspark
+speculative decoding, flashinfer_b12x MoE), commit 0b0a19a, on the same two
+GB10 machines that failed the first run.
+
+Install: fabric preflight 1 ms round trip, image digest-pinned and pulled on
+both nodes, 167 GB weights downloaded and byte-verified per node (sequential
+head then worker at about 48 MB/s, roughly four hours end to end), engine
+started, health and inference probes passed. One operational note: the
+manager's HTTP API became unresponsive for minutes at a time while hashing
+the downloaded artifact.
+
+The critical test, sustained generation, the exact scenario that killed the
+stock stack at 400-1500 output tokens:
+
+- essay, 4500/4500 tokens, finish_reason length, 36.4 tok/s
+- technical, 4500/4500 tokens, finish_reason length, 44.9 tok/s
+- story, 3876 tokens, finish_reason stop with a real ending, 34.7 tok/s
+
+Zero new NVRM, Xid or NV_ERR lines in dmesg on either node across the whole
+battery (watch pipeline liveness-verified). Host memory flat at 105/104 GB of
+121 GB throughout. Three-way concurrency completed coherently at about 70
+tok/s aggregate versus about 38 single-stream. Reasoning arrives in its own
+field, named `reasoning` in the response JSON, with no think tags or DeepSeek
+special tokens leaking; a tool call executed with well-formed arguments.
+
+Pre-existing NV_ERR_NO_MEMORY lines exist in both nodes' dmesg from engine
+start (head 10, worker 7, some coinciding with this deployment's own
+container startup). Those are load-time allocator probes; the counts did not
+move during any test.
+
+Verdict: PASS. The evidence for dgx-spark-verified now exists, but the
+built-in pack pins every recipe as candidate by policy (the validator test
+enforces it, and this document's own rule is that evidence never promotes a
+label by itself), so the recipe labels are unchanged until the curation
+process promotes them. Trust would in any case stay basement-candidate on
+the image-provenance grounds documented in the recipe.
