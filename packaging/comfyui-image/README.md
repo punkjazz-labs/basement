@@ -32,11 +32,14 @@ Keep the selected tag in the adjacent comment.
 From the repository root on the Mac, run:
 
 ```sh
-./packaging/comfyui-image/build.sh
+COMFYUI_BUILD_HOST=user@spark-head ./packaging/comfyui-image/build.sh
 ```
 
+`COMFYUI_BUILD_HOST` is the ssh target of the Spark that does the build. It has
+no default, so the script never sends your source to someone else's machine.
+
 The script synchronizes this directory to
-`spark@spark-host.invalid:/tmp/comfyui-image-build/`, builds it natively as
+`${COMFYUI_BUILD_HOST}:/tmp/comfyui-image-build/`, builds it natively as
 `basement-comfyui:v0.30.0` with `MAX_JOBS=4`, then prints the image ID and size.
 It is safe to run again against the same temporary directory and image tag.
 

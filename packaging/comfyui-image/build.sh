@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly REMOTE_HOST="spark@spark-host.invalid"
+# The Spark that builds the image. There is no default: hardcoding one
+# operator's machine into a public repository leaks their network and sends
+# everyone else's build to a host they do not own.
+readonly REMOTE_HOST="${COMFYUI_BUILD_HOST:?set COMFYUI_BUILD_HOST to the ssh target of the Spark that should build the image, for example user@spark-head}"
 readonly REMOTE_DIR="/tmp/comfyui-image-build"
 readonly IMAGE_TAG="basement-comfyui:v0.30.0"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
