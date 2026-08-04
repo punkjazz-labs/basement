@@ -89,6 +89,17 @@ type Peer struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// Role is a stable name clients address instead of a model: an app asks for
+// role/fast forever while the owner changes which installed model answers to
+// it. A row exists only while a role has a model assigned, so an unassigned
+// role is an absent row rather than one pointing at nothing.
+type Role struct {
+	Name      string `json:"name"`
+	RecipeID  string `json:"recipe_id"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
@@ -194,6 +205,12 @@ CREATE TABLE IF NOT EXISTS peers (
   api_key TEXT NOT NULL,
   created_at TEXT NOT NULL,
   singleton INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS roles (
+  name TEXT PRIMARY KEY,
+  recipe_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -453,6 +470,16 @@ ON CONFLICT(recipe_id) DO UPDATE SET recipe_version=excluded.recipe_version,stat
 	return tx.Commit()
 }
 
+// ErrSwitchTargetChanged is what BeginSwitch gives when a third model has
+// taken the serving slot since this job planned its switch. A job decides
+// what to stop when it is planned, and a long install can be planned an hour
+// before it switches, by which time an owner's Start or a request that named
+// a role may have put something else there. Stopping the model the plan names
+// would then stop nothing and leave the real one running, so the switch is
+// refused instead. A previous model that has simply stopped is not this case:
+// the room the switch wanted is free, so it proceeds.
+var ErrSwitchTargetChanged = errors.New("another model took over serving while this job was running")
+
 func (s *Store) BeginSwitch(ctx context.Context, previousRecipeID, targetRecipeID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -460,12 +487,27 @@ func (s *Store) BeginSwitch(ctx context.Context, previousRecipeID, targetRecipeI
 	}
 	defer tx.Rollback()
 	timestamp := now()
-	result, err := tx.ExecContext(ctx, `UPDATE installed_models SET status='switching',active=1,updated_at=? WHERE recipe_id=?`, timestamp, previousRecipeID)
+	// active=1 is the guarantee: the row must still be the serving one at the
+	// moment the switch begins, not merely when it was planned.
+	result, err := tx.ExecContext(ctx, `UPDATE installed_models SET status='switching',updated_at=? WHERE recipe_id=? AND active=1`, timestamp, previousRecipeID)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
-		return os.ErrNotExist
+		var present int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM installed_models WHERE recipe_id=?`, previousRecipeID).Scan(&present); err != nil {
+			return err
+		}
+		if present == 0 {
+			return os.ErrNotExist
+		}
+		var usurpers int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM installed_models WHERE active=1 AND recipe_id NOT IN (?,?)`, previousRecipeID, targetRecipeID).Scan(&usurpers); err != nil {
+			return err
+		}
+		if usurpers > 0 {
+			return ErrSwitchTargetChanged
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE installed_models SET status='starting',active=0,updated_at=? WHERE recipe_id=?`, timestamp, targetRecipeID); err != nil {
 		return err
@@ -773,6 +815,95 @@ func (s *Store) PeerCredentials(ctx context.Context, id string) (Peer, string, e
 
 func (s *Store) DeletePeer(ctx context.Context, id string) error {
 	result, err := s.db.ExecContext(ctx, `DELETE FROM peers WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+// NormalizeRoleName trims and lower-cases a role name and rejects anything a
+// client could not put in a model field cleanly: the name travels as
+// "role/<name>" in an OpenAI request, so it holds to lowercase letters,
+// numbers and inner dashes and nothing else.
+func NormalizeRoleName(name string) (string, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	invalid := errors.New("a role name uses lowercase letters, numbers and dashes, like fast or code-review")
+	if name == "" || len(name) > 32 {
+		return "", invalid
+	}
+	for index, letter := range name {
+		switch {
+		case letter >= 'a' && letter <= 'z', letter >= '0' && letter <= '9':
+		case letter == '-' && index > 0 && index < len(name)-1:
+		default:
+			return "", invalid
+		}
+	}
+	return name, nil
+}
+
+// AssignRole points a role at an installed model, creating the role if this
+// is its first assignment. Whether the recipe is installed is the caller's
+// question to answer, not this table's. Reassigning keeps created_at, so a
+// role's age survives every change of the model behind it.
+func (s *Store) AssignRole(ctx context.Context, name, recipeID string) (Role, error) {
+	name, err := NormalizeRoleName(name)
+	if err != nil {
+		return Role{}, err
+	}
+	if strings.TrimSpace(recipeID) == "" {
+		return Role{}, errors.New("a model is required")
+	}
+	timestamp := now()
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO roles(name,recipe_id,created_at,updated_at) VALUES(?,?,?,?)
+ON CONFLICT(name) DO UPDATE SET recipe_id=excluded.recipe_id,updated_at=excluded.updated_at`, name, recipeID, timestamp, timestamp); err != nil {
+		return Role{}, err
+	}
+	return s.Role(ctx, name)
+}
+
+func (s *Store) Role(ctx context.Context, name string) (Role, error) {
+	name, err := NormalizeRoleName(name)
+	if err != nil {
+		return Role{}, os.ErrNotExist
+	}
+	var role Role
+	err = s.db.QueryRowContext(ctx, `SELECT name,recipe_id,created_at,updated_at FROM roles WHERE name=?`, name).
+		Scan(&role.Name, &role.RecipeID, &role.CreatedAt, &role.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Role{}, os.ErrNotExist
+	}
+	return role, err
+}
+
+// Roles lists every assigned role, oldest first, so the console shows custom
+// roles in the order they were added.
+func (s *Store) Roles(ctx context.Context) ([]Role, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name,recipe_id,created_at,updated_at FROM roles ORDER BY created_at, name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Role{}
+	for rows.Next() {
+		var role Role
+		if err := rows.Scan(&role.Name, &role.RecipeID, &role.CreatedAt, &role.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, role)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ClearRole(ctx context.Context, name string) error {
+	name, err := NormalizeRoleName(name)
+	if err != nil {
+		return os.ErrNotExist
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM roles WHERE name=?`, name)
 	if err != nil {
 		return err
 	}

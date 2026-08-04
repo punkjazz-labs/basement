@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, idempotency, copyText, type APIKey } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
 import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
+import { DEFAULT_ROLE } from '../roles'
 
 const SNIPPETS = ['curl', 'Python', 'JavaScript', 'LiteLLM'] as const
 type Snippet = (typeof SNIPPETS)[number]
@@ -61,7 +62,10 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
   const [copied, setCopied] = useState('')
 
   const base = `${window.location.origin}/v1`
-  const model = activeModelID ?? '<model id, shown when a model is active>'
+  // The snippets name a role rather than a model id, so what they produce
+  // keeps working after the model behind that role changes. role/standard is
+  // the one role that answers before anything has been assigned to it.
+  const model = `role/${DEFAULT_ROLE}`
 
   const load = () => api<APIKey[]>('/api/v1/keys').then(setKeys).catch(() => {})
   useEffect(() => {
@@ -200,6 +204,10 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
           </button>
           <pre><code>{snippetFor(snippet, base, model)}</code></pre>
         </div>
+        <p className="muted" style={{ fontSize: 12.5 }}>
+          <code>{model}</code> follows whatever model is serving until you assign one to it on the Roles page,
+          where you can also point it, and the other roles, at a model of your choosing.
+        </p>
         <p className="faint" style={{ fontSize: 12.5, marginBottom: 0 }}>
           Set <code>BASEMENT_API_KEY</code> to a key from above. Works with the OpenAI SDKs, Cursor, Continue, LiteLLM, Open WebUI, and anything else OpenAI-compatible.
         </p>

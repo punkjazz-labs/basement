@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -461,6 +462,101 @@ func TestResetTokenCountersLeavesTotalsAndCountsNextReadingInFull(t *testing.T) 
 	}
 	if len(usage) != 1 || usage[0].PromptTokens != 190 || usage[0].GenerationTokens != 70 {
 		t.Fatalf("next reading after reset was not counted in full: %+v", usage)
+	}
+}
+
+// A role is a stable name an app keeps pointing at while the owner changes
+// the model behind it, so reassigning must move the model without the role
+// itself looking new, and clearing must leave no row to route to.
+func TestRolesAreReassignedAndCleared(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.AssignRole(ctx, "fast", "qwen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Name != "fast" || created.RecipeID != "qwen" {
+		t.Fatalf("unexpected role: %+v", created)
+	}
+	if _, err := s.AssignRole(ctx, "reasoning", "nemotron"); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := s.AssignRole(ctx, "fast", "nemotron")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.RecipeID != "nemotron" {
+		t.Fatalf("reassignment did not move the model: %+v", moved)
+	}
+	if moved.CreatedAt != created.CreatedAt {
+		t.Fatalf("reassignment restarted the role's life: %s then %s", created.CreatedAt, moved.CreatedAt)
+	}
+	if moved.UpdatedAt == created.UpdatedAt {
+		t.Fatalf("reassignment did not record a change: %+v", moved)
+	}
+
+	// Assignments outlive the manager process: an app pointing at role/fast
+	// must still reach the same model after a restart.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	roles, err := s.Roles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roles) != 2 || roles[0].Name != "fast" || roles[1].Name != "reasoning" {
+		t.Fatalf("roles did not survive a restart in order: %+v", roles)
+	}
+
+	if err := s.ClearRole(ctx, "fast"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Role(ctx, "fast"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a cleared role still resolves: %v", err)
+	}
+	if err := s.ClearRole(ctx, "fast"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clearing an unassigned role returned %v, want os.ErrNotExist", err)
+	}
+}
+
+// The name travels to clients as "role/<name>", so what the table accepts is
+// exactly what an OpenAI model field can carry back unchanged.
+func TestRoleNamesAreLowercaseSlugs(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, name := range []string{"", "  ", "Fast Model", "-fast", "fast-", "fast/er", "fast_er", strings.Repeat("f", 33)} {
+		if _, err := s.AssignRole(ctx, name, "qwen"); err == nil {
+			t.Errorf("role name %q was accepted", name)
+		}
+	}
+	// A name is stored in the one form clients will send, so the same role
+	// cannot exist twice in different casings.
+	if _, err := s.AssignRole(ctx, "  Code-Review  ", "qwen"); err != nil {
+		t.Fatal(err)
+	}
+	role, err := s.Role(ctx, "code-review")
+	if err != nil || role.RecipeID != "qwen" {
+		t.Fatalf("role=%+v err=%v", role, err)
+	}
+	roles, err := s.Roles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roles) != 1 || roles[0].Name != "code-review" {
+		t.Fatalf("normalized name was not stored once: %+v", roles)
 	}
 }
 

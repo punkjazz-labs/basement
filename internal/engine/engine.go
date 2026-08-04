@@ -48,6 +48,9 @@ type Engine struct {
 	// SetTokenSampler. Held atomically because it is installed after the
 	// engine may already be resuming interrupted jobs.
 	tokenSampler atomic.Pointer[TokenSampler]
+	// switchGuard is taken around the part of a job that changes which model
+	// serves; see SetSwitchGuard. Held atomically for the same reason.
+	switchGuard atomic.Pointer[SwitchGuard]
 }
 
 // TokenSampler takes a reading of a model's runtime token counters.
@@ -216,6 +219,67 @@ var runtimeOperations = map[string]bool{
 	"remove_container": true, "measure_throughput": true,
 }
 
+// switchesServing lists the job kinds that change which model this machine
+// serves, and therefore have to announce themselves to whatever is waiting on
+// the answer (see SetSwitchGuard). A smoke test and a benchmark run against
+// the model that is already serving and change nothing, so they are not here.
+var switchesServing = map[string]bool{
+	"start": true, "install": true, "stop": true, "remove": true,
+}
+
+// SwitchGuard is called just before a job starts changing which model serves,
+// and the function it returns is called when that job is finished changing it.
+// It is how the HTTP layer keeps a request that has been let through to one
+// model from being cut off by a switch to another one, whoever asked for the
+// switch: a request naming a role, the console's Start button, or an install
+// that activates what it downloaded.
+type SwitchGuard func(ctx context.Context, recipeID string) func()
+
+// SetSwitchGuard installs that hook. With none installed nothing coordinates,
+// which is what the engine's own tests want. Safe to call from any goroutine.
+func (e *Engine) SetSwitchGuard(guard SwitchGuard) { e.switchGuard.Store(&guard) }
+
+func (e *Engine) holdSwitch(ctx context.Context, recipeID string) func() {
+	if guard := e.switchGuard.Load(); guard != nil && *guard != nil {
+		return (*guard)(ctx, recipeID)
+	}
+	return func() {}
+}
+
+// premiseHolds re-reads the model this job planned to switch away from and
+// reports whether that plan still describes this machine. A previous model
+// that has simply stopped leaves the room this job wanted free, so that is
+// not a failure; another model holding the serving slot is, because stopping
+// the one the plan names would stop nothing and leave the real one running.
+//
+// A plan with nothing to stop is not held to this. Two installs that both
+// began with nothing serving are allowed to finish and each activate, which
+// is how concurrent installs have always worked here; what this guards is a
+// plan that names a model to stop and would stop the wrong one.
+func (e *Engine) premiseHolds(ctx context.Context, target recipe.Recipe, previous *recipe.Recipe) error {
+	if previous == nil {
+		return nil
+	}
+	models, err := e.store.Models(ctx)
+	if err != nil {
+		return err
+	}
+	for _, model := range models {
+		if !model.Active || model.RecipeID == target.ID {
+			continue
+		}
+		if model.RecipeID == previous.ID {
+			continue
+		}
+		name := model.RecipeID
+		if active, ok := e.pinnedOrEffective(model.RecipeID, model.RecipeVersion); ok {
+			name = active.DisplayName
+		}
+		return fmt.Errorf("%s took over serving while this job was preparing, so %s was not started; start it again from the console", name, target.DisplayName)
+	}
+	return nil
+}
+
 func (e *Engine) ResumeInterrupted(ctx context.Context) error {
 	jobs, err := e.store.ListJobs(ctx, 100)
 	if err != nil {
@@ -317,6 +381,8 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 			e.releaseRuntime()
 		}
 	}()
+	switchHeld := func() {}
+	defer func() { switchHeld() }()
 	execution := operations.Execution{JobID: job.ID, Kind: job.Kind}
 	if job.Kind == "remove" {
 		var payload RemovePayload
@@ -388,6 +454,27 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 				return
 			}
 			runtimeHeld = true
+			// The mutating phase starts here, and this is where a job that
+			// changes what this machine serves tells the rest of the manager
+			// so (see SetSwitchGuard). Preflight, downloads and a two-Spark
+			// cable check all happen before this point and hold nothing, so a
+			// long install or an unreachable worker never blocks an unrelated
+			// stop while the current model is still serving perfectly well.
+			if switchesServing[job.Kind] {
+				switchHeld = e.holdSwitch(ctx, r.ID)
+			}
+			// Everything this plan does from here follows from one reading of
+			// the live active model, taken when the plan was made. That
+			// reading can be an hour old on an install, and a start that
+			// queued behind another switch is working from a reading taken
+			// before it. Re-taking it here is enough on its own: containers
+			// are only ever started and stopped under the runtime lock this
+			// job now holds, so what serves cannot change again until this
+			// job is done with it.
+			if err := e.premiseHolds(ctx, r, previous); err != nil {
+				abort(index, err)
+				return
+			}
 		}
 		if plan.BeginSwitch {
 			if previous == nil {
@@ -395,6 +482,10 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 				return
 			}
 			if err := e.store.BeginSwitch(ctx, previous.ID, r.ID); err != nil {
+				if errors.Is(err, store.ErrSwitchTargetChanged) {
+					abort(index, fmt.Errorf("another model took over serving while this job was running, so %s was not started; start it again from the console", r.DisplayName))
+					return
+				}
 				abort(index, fmt.Errorf("record switch intent: %w", err))
 				return
 			}

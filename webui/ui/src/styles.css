@@ -295,6 +295,101 @@ input[type='text'], input[type='password'], textarea {
 .token-total .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; color: var(--ink); }
 .token-total small { color: var(--faint); font-size: 11.5px; margin-left: 9px; }
 
+/* ---- Roles: the same row idiom as Models, plus the explainer that runs
+   before the first role is assigned. --------------------------------------- */
+
+.hero.about-roles { padding: 22px 26px 24px; }
+.hero.about-roles .hero-top { gap: 14px; align-items: flex-start; }
+.hero.about-roles .hero-name h2 { font-size: 17px; letter-spacing: -0.01em; }
+.hero.about-roles .hero-name .pub { max-width: 58ch; }
+.hero-top .glyph {
+  width: 40px; height: 40px; border-radius: 11px; flex: none;
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  display: grid; place-items: center; color: var(--accent-deep);
+}
+.explain-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 20px 0 4px; }
+.explain-grid .cell { border-top: 1px solid var(--line); padding-top: 12px; }
+.explain-grid h3 { font-size: 12.5px; font-weight: 650; margin: 0 0 5px; }
+.explain-grid p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+.hero-note {
+  margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line);
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+}
+.hero-note p { margin: 0; font-size: 12.5px; color: var(--ink); max-width: 62ch; }
+.hero-note p strong { font-weight: 650; }
+.hero-note .spacer { flex: 1; }
+@media (max-width: 980px) {
+  .explain-grid { grid-template-columns: 1fr; gap: 12px; }
+  .explain-grid .cell { padding-top: 10px; }
+}
+
+.rtable { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
+.rthead, .rrow {
+  display: grid; grid-template-columns: minmax(160px, 1.1fr) minmax(230px, 1.6fr) minmax(180px, 1.1fr) 146px minmax(140px, auto) 18px;
+  align-items: center; padding: 0 16px; column-gap: 14px;
+}
+.rthead {
+  height: 32px; background: var(--panel); border-bottom: 1px solid var(--line);
+  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
+}
+.rrow { min-height: 64px; border-bottom: 1px solid var(--line); padding-block: 11px; cursor: pointer; }
+.rrow:hover, .rrow.open { background: var(--hover); }
+.rrow:last-child, .rdetail:last-child { border-bottom: 0; }
+.r-caret { display: flex; justify-content: flex-end; color: var(--faint); transition: transform 0.15s ease; }
+.r-caret.open { transform: rotate(90deg); }
+.rrow:hover .r-caret { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) {
+  .r-caret { transition: none; }
+}
+
+.r-id { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.r-id .glyph {
+  width: 30px; height: 30px; border-radius: 8px; flex: none; display: grid; place-items: center;
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: -0.02em;
+  background: var(--surface-2); border: 1px solid var(--line-strong); color: var(--muted);
+}
+.r-id .nm { font-weight: 600; font-size: 13px; }
+.r-id .use { color: var(--muted); font-size: 12px; margin-top: 1px; }
+
+.r-endpoint { display: grid; gap: 3px; min-width: 0; }
+.r-endpoint .url { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); min-width: 0; }
+.r-endpoint .url span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.r-endpoint .modelname { font-family: var(--mono); font-size: 11.5px; }
+.r-endpoint .modelname code { background: var(--surface-2); padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); }
+.copy-btn { background: none; border: 0; color: var(--faint); padding: 1px 4px; border-radius: 4px; font-size: 11px; flex: none; }
+.copy-btn:hover { color: var(--ink); background: var(--surface-2); }
+
+.r-model { min-width: 0; }
+.r-model .nm { font-weight: 550; font-size: 12.5px; }
+.r-model .fp { color: var(--faint); font-size: 11px; font-family: var(--mono); margin-top: 1px; }
+.r-status { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+.sdot.wait { background: var(--faint); }
+.r-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.r-actions button { white-space: nowrap; }
+
+.rdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }
+.rdetail .facts { margin-bottom: 16px; grid-template-columns: 150px 1fr; }
+.picker-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.picker-head h3 { font-size: 13px; font-weight: 650; margin: 0; }
+.budget-line {
+  font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 12px; margin-bottom: 12px;
+}
+.budget-line strong { color: var(--ink); font-weight: 600; }
+.swap-note { font-size: 11.5px; color: var(--warn); margin-top: 6px; display: flex; gap: 6px; align-items: flex-start; }
+.swap-note::before { content: "·"; color: var(--warn); font-weight: 800; }
+.install-choice .confirm-check.over { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.picker-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; align-items: center; }
+.picker-foot .quiet { margin-right: auto; }
+
+.rrow.add { cursor: default; }
+.rrow.add:hover { background: none; }
+.add-role { display: flex; align-items: center; gap: 12px; padding: 4px 0; grid-column: 1 / -1; }
+.add-role .txt { flex: 1; }
+.add-role .txt strong { display: block; font-size: 12.5px; font-weight: 600; }
+.add-role .txt span { display: block; font-size: 11.5px; color: var(--faint); margin-top: 1px; }
+
 /* ---- Fleet: same row idiom as Models, one extra identity column for the
    serving model, so widths differ but nothing else does. */
 .mtable.fleet .mthead, .mtable.fleet .mrow {

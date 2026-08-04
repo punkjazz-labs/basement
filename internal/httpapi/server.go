@@ -88,6 +88,15 @@ type Server struct {
 	updateResult  map[string]any
 	updateFetched time.Time
 
+	// gate keeps model switches apart from the requests they would cut off
+	// (see servingGate in roles.go). One Spark serves one model, so a switch
+	// landing on a request already on its way to another model would answer
+	// somebody with the wrong model or with nothing at all.
+	gate *servingGate
+	// activationMu makes "is a start already running for this model, and if
+	// not, start one" a single step; see startJobFor.
+	activationMu sync.Mutex
+
 	// tokenMu serializes every read-then-record of a model's runtime token
 	// counters (CaptureTokenUsage and CaptureFinalTokenUsage both take it for
 	// their whole call). Reading the counters is a network round trip, so two
@@ -120,8 +129,16 @@ type preflightResponse struct {
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), adoption: newAdoptionState()}
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState()}
 	server.SetRecipes(recipes, recipes)
+	// Every job that changes which model serves announces itself to the
+	// serving gate through this hook, whoever asked for it (see roles.go).
+	// It is wired here rather than by the caller because a manager whose
+	// switches are uncoordinated answers requests with the wrong model, and
+	// that is not something a caller should be able to forget.
+	if e != nil {
+		e.SetSwitchGuard(server.holdSwitch)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.health)
 	mux.HandleFunc("/api/v1/auth/pair", server.pair)
@@ -146,6 +163,11 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	// Token usage is this Spark's own accounting and stays on this Spark: a
 	// fleet does not add its members' totals up anywhere yet.
 	mux.HandleFunc("/api/v1/tokens", server.withReadAuth(server.tokenUsage))
+	// Roles: the stable names clients address on /v1 instead of a model id.
+	// Console session only, on both: what a key holder may reach through /v1
+	// is inference, never a change to which model answers to a name.
+	mux.HandleFunc("/api/v1/roles", server.roles)
+	mux.HandleFunc("/api/v1/roles/", server.roleAction)
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
 	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
 	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateCheck))
@@ -791,20 +813,27 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 }
 
 // proxyModel is the stable OpenAI-compatible endpoint: it forwards /v1/* to
-// the active model's loopback-only port. Clients authenticate with an API key
+// the serving model's loopback-only port. Clients authenticate with an API key
 // (Authorization: Bearer rosk_...) or an existing console session, so the
 // endpoint URL never changes when models are switched and the raw model port
-// is never exposed to the network (ADR 0007).
+// is never exposed to the network (ADR 0007). Which model serves a given
+// request is inferenceTarget's decision: the active one, or the one a role
+// names (see roles.go).
 func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeInference(r) {
 		writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", "provide a valid basement API key as 'Authorization: Bearer rosk_...'")
 		return
 	}
-	active, ok := s.activeReadyRecipe(r.Context())
+	active, hold, ok := s.inferenceTarget(w, r)
 	if !ok {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "model_not_ready", "no model is active and ready; start one from the basement console")
 		return
 	}
+	// The hold keeps a model switch from starting underneath this request
+	// before it reaches the runtime. It is given up as soon as the runtime's
+	// response headers come back, so a long streamed answer never blocks a
+	// switch; the deferred release is the backstop for a request that never
+	// gets that far.
+	defer hold.release()
 	target := fmt.Sprintf("127.0.0.1:%d", active.Service.DefaultHostPort)
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -819,7 +848,12 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request) {
 			req.Header.Del("Referer")
 		},
 		FlushInterval: -1, // stream token-by-token
+		ModifyResponse: func(*http.Response) error {
+			hold.release()
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			hold.release()
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "the model runtime did not respond: "+err.Error())
 		},
 	}
@@ -1408,9 +1442,16 @@ func (s *Server) CountTokens(ctx context.Context) {
 // captureActiveTokenUsage records a reading for whichever model is serving
 // here. Nothing serving means there is nothing to count, which is not an
 // error: usage is only ever counted while basement serves the model.
+//
+// Which model that is has to be decided under tokenMu, not before taking it:
+// choosing outside the lock and then waiting for it means the model chosen
+// can have been stopped and had its counters reset in between, and the
+// reading taken afterwards would be added to a series that already ended.
 func (s *Server) captureActiveTokenUsage(ctx context.Context) {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
 	if active, ok := s.activeReadyRecipe(ctx); ok {
-		s.CaptureTokenUsage(ctx, active)
+		s.captureTokenUsageLocked(ctx, active)
 	}
 }
 

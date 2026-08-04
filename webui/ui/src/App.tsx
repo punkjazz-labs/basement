@@ -5,6 +5,7 @@ import {
 } from './api'
 import Pairing from './views/Pairing'
 import Models from './views/Models'
+import Roles from './views/Roles'
 import Playground from './views/Playground'
 import Connect from './views/Connect'
 import Monitor from './views/Monitor'
@@ -14,11 +15,12 @@ import Activity from './views/Activity'
 import DeploymentDialog from './views/Deployment'
 import { ConfirmHost } from './confirm'
 
-const TABS = ['Models', 'Playground', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
+const TABS = ['Models', 'Roles', 'Playground', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
 type Tab = (typeof TABS)[number]
 
 const DESC: Record<Tab, string> = {
   Models: 'The best open models, tuned for your Spark. Pick one and click Install.',
+  Roles: 'Persistent endpoints that stay stable while you change the model behind them.',
   Playground: 'Talk to the model that is serving right now.',
   Connect: 'Endpoint, API keys and client snippets for this Spark.',
   Monitor: 'Live GPU health and serving metrics.',
@@ -290,6 +292,7 @@ export default function App() {
         </header>
         <main id="main">
           {tab === 'Models' && <Models {...state} />}
+          {tab === 'Roles' && <Roles {...state} />}
           {/* The playground stays mounted so switching tabs never wipes the
               conversation and a streaming reply keeps flowing. */}
           <div style={{ display: tab === 'Playground' ? 'contents' : 'none' }}>

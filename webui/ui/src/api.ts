@@ -195,6 +195,16 @@ export interface Peer {
   base_url: string
 }
 
+// One role and the model answering to it today. A role with no model has no
+// entry at all, so an absent name is unassigned rather than assigned to
+// nothing.
+export interface Role {
+  name: string
+  recipe_id: string
+  created_at: string
+  updated_at: string
+}
+
 // ---- Finding and adopting a second Spark ------------------------------------
 // One machine the network sweep answered for. gb10_hint and basement are the
 // sweep's own findings, never a guess made here: they rank the list the
