@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, formatBytes, runtimeLabel, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepElapsedSeconds, stepOperation, type Job, type Recipe, type Step } from '../api'
+import { api, benchmarkReceipt, formatBytes, runtimeLabel, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepElapsedSeconds, stepOperation, type Job, type Recipe, type Step } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
 
 // verify_fabric is the two Sparks meeting over the cable and verify_peer_node
@@ -271,9 +271,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
   const kicker = { 'smoke-test': 'Model test', benchmark: 'Speed measurement' }[job.kind] ?? 'Deployment'
   const current = [...job.steps].reverse().find(step => step.state === 'running')
     ?? [...job.steps].reverse().find(step => step.state === 'failed')
-  const benchReceipt = succeeded && job.kind === 'benchmark'
-    ? [...job.steps].reverse().find(step => step.operation === 'measure_throughput' && step.state === 'completed')?.receipt
-    : undefined
+  const benchReceipt = benchmarkReceipt(job)
 
   const cancel = async () => {
     const { ok } = await confirmBox({

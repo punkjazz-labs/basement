@@ -622,6 +622,19 @@ export const operationCopy: Record<string, string> = {
 export const stepOperation = (operation: string): string =>
   operation.replace(/^rollback_/, '').split(':')[0]
 
+// The deployment dialog's celebration screen (tok/s, first-token, sample
+// size) reads the completed measure_throughput step's receipt. A two-Spark
+// job records that step as "measure_throughput:head", so this must compare
+// through stepOperation the same way every other operation match does — a
+// bare-string comparison here is exactly the bug class the engine just fixed
+// for distributed jobs, just on the console side instead.
+export function benchmarkReceipt(job: Job): Record<string, unknown> | undefined {
+  if (job.kind !== 'benchmark' || !terminal(job.state) || job.state === 'failed' || job.state === 'cancelled') {
+    return undefined
+  }
+  return [...job.steps].reverse().find(step => stepOperation(step.operation) === 'measure_throughput' && step.state === 'completed')?.receipt
+}
+
 // How long a step has been running, from the server's own started_at rather
 // than from whenever the UI happened to render it — closing and reopening
 // the deployment dialog must not reset the clock. A completed step reports
