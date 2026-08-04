@@ -662,6 +662,132 @@ func TestBearerKeyOnlyReachesInstallOnModelRoutes(t *testing.T) {
 	}
 }
 
+// TestInstallRequiresTerritoryEligibilityConfirmation pins section 5.3: a
+// recipe whose artifact carries licence_territory_exclusions gates install on
+// a second, separate confirmation from licence acceptance, refused with 400
+// naming the missing confirmation exactly as accept_licence is, a no-op for a
+// recipe without the field, and read back on a later preflight so a reinstall
+// does not ask again.
+func TestInstallRequiresTerritoryEligibilityConfirmation(t *testing.T) {
+	dataDir := t.TempDir()
+	database, err := store.Open(filepath.Join(dataDir, "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	authManager, err := auth.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := singleSpark(recipes)
+	gated := base
+	gated.Artifacts = append([]recipe.Artifact(nil), base.Artifacts...)
+	gated.Artifacts[0].LicenceTerritoryExclusions = []string{
+		"European Union", "United Kingdom", "Republic of Korea", "United States of America",
+	}
+	modified := append([]recipe.Recipe(nil), recipes...)
+	for i, r := range modified {
+		if r.ID == gated.ID {
+			modified[i] = gated
+		}
+	}
+	executor := &apiExecutor{done: map[string]bool{}}
+	runner := engine.New(database, executor, modified)
+	srv := New("test-version", dataDir, authManager, database, readyInventory{}, executor, runner, modified)
+	server := httptest.NewServer(srv.Handler())
+	t.Cleanup(server.Close)
+
+	tokenBytes, err := os.ReadFile(authManager.PairingTokenPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimSpace(string(tokenBytes))
+	paired := doRequest(t, http.MethodPost, server.URL+"/api/v1/auth/pair", `{"token":"`+token+`"}`, nil, map[string]string{"Origin": server.URL})
+	if paired.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(paired.Body)
+		t.Fatalf("pair status=%d body=%s", paired.StatusCode, data)
+	}
+	var pairResult struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(paired.Body).Decode(&pairResult); err != nil {
+		t.Fatal(err)
+	}
+	cookies := paired.Cookies()
+	paired.Body.Close()
+	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": pairResult.CSRF, "Idempotency-Key": "territory-install"}
+
+	// Licence accepted but territory confirmation omitted: refused, naming
+	// the missing confirmation, and nothing is written.
+	missing := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+gated.ID+"/install",
+		`{"confirmed":true,"accept_licence":true,"activate":false}`, cookies, headers)
+	missingBody, _ := io.ReadAll(missing.Body)
+	missing.Body.Close()
+	if missing.StatusCode != http.StatusBadRequest {
+		t.Fatalf("install without territory confirmation status=%d body=%s", missing.StatusCode, missingBody)
+	}
+	if !bytes.Contains(missingBody, []byte("territory eligibility confirmation is required")) {
+		t.Fatalf("refusal did not name the missing confirmation: %s", missingBody)
+	}
+
+	// False explicitly is the same refusal as omitted.
+	explicitFalse := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+gated.ID+"/install",
+		`{"confirmed":true,"accept_licence":true,"confirm_territory_eligibility":false,"activate":false}`, cookies, headers)
+	explicitFalseBody, _ := io.ReadAll(explicitFalse.Body)
+	explicitFalse.Body.Close()
+	if explicitFalse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("install with confirm_territory_eligibility=false status=%d body=%s", explicitFalse.StatusCode, explicitFalseBody)
+	}
+
+	// A recipe without the field is unaffected: the pack's second
+	// single-Spark recipe carries no exclusions and installs with the field
+	// entirely absent from the request.
+	other := secondSingleSpark(modified).ID
+	if other == "" || other == gated.ID {
+		t.Fatal("need a second single-Spark recipe with no territory exclusions")
+	}
+	ungated := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+other+"/install", `{"confirmed":true,"accept_licence":true,"activate":false}`, cookies,
+		map[string]string{"Origin": server.URL, "X-CSRF-Token": pairResult.CSRF, "Idempotency-Key": "ungated-install"})
+	ungatedBody, _ := io.ReadAll(ungated.Body)
+	ungated.Body.Close()
+	if ungated.StatusCode != http.StatusAccepted {
+		t.Fatalf("ungated install status=%d body=%s", ungated.StatusCode, ungatedBody)
+	}
+
+	// True installs, is recorded, and a later preflight reads it back.
+	confirmed := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+gated.ID+"/install",
+		`{"confirmed":true,"accept_licence":true,"confirm_territory_eligibility":true,"activate":false}`, cookies, headers)
+	confirmedBody, _ := io.ReadAll(confirmed.Body)
+	confirmed.Body.Close()
+	if confirmed.StatusCode != http.StatusAccepted {
+		t.Fatalf("install with territory confirmation status=%d body=%s", confirmed.StatusCode, confirmedBody)
+	}
+	var created struct {
+		Job store.Job `json:"job"`
+	}
+	if err := json.Unmarshal(confirmedBody, &created); err != nil {
+		t.Fatal(err)
+	}
+	waitAPIJob(t, server.URL, created.Job.ID, cookies, "ready")
+
+	preflight := doRequest(t, http.MethodGet, server.URL+"/api/v1/preflight?recipe_id="+gated.ID, "", cookies, nil)
+	preflightBody, _ := io.ReadAll(preflight.Body)
+	preflight.Body.Close()
+	var preflightResult struct {
+		TerritoryEligibilityConfirmed bool `json:"territory_eligibility_confirmed"`
+	}
+	if err := json.Unmarshal(preflightBody, &preflightResult); err != nil {
+		t.Fatal(err)
+	}
+	if !preflightResult.TerritoryEligibilityConfirmed {
+		t.Fatalf("preflight did not read back the recorded confirmation: %s", preflightBody)
+	}
+}
+
 // TestDelegatedInstallActivatesOnlyWhenAskedExplicitly pins the rest of the
 // least-privilege rule (ADR 0013). A bearer key may put a model on this
 // Spark, but an install that says nothing about activation must not switch
@@ -1066,6 +1192,44 @@ func TestDelegatedPlacementProxy(t *testing.T) {
 		if response.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("unauthenticated %s status=%d, want 401", path, response.StatusCode)
 		}
+	}
+}
+
+// TestDelegatedPlacementRelaysTerritoryConfirmation pins the peer side of
+// section 5.3: confirm_territory_eligibility travels through peerInstall
+// exactly as accept_licence does, re-encoded untouched, because the peer
+// owns its own licence and territory record.
+func TestDelegatedPlacementRelaysTerritoryConfirmation(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := singleSpark(recipes).ID
+	peer := newDelegatePeer(t, "rosk_peerkey2")
+	peerID := registerPeer(t, server, cookies, csrf, peer.URL, "rosk_peerkey2")
+	mutating := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf, "Idempotency-Key": "place-territory"}
+
+	installed := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers/"+peerID+"/models/"+target+"/install",
+		`{"confirmed":true,"accept_licence":true,"confirm_territory_eligibility":true,"activate":false}`, cookies, mutating)
+	installedBody, _ := io.ReadAll(installed.Body)
+	installed.Body.Close()
+	if installed.StatusCode != http.StatusAccepted {
+		t.Fatalf("delegated install status=%d body=%s", installed.StatusCode, installedBody)
+	}
+	peer.mu.Lock()
+	gotBody := peer.installBody
+	peer.mu.Unlock()
+	var forwarded struct {
+		Confirmed                   bool `json:"confirmed"`
+		AcceptLicence               bool `json:"accept_licence"`
+		ConfirmTerritoryEligibility bool `json:"confirm_territory_eligibility"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &forwarded); err != nil {
+		t.Fatalf("peer saw an unreadable body %q: %v", gotBody, err)
+	}
+	if !forwarded.Confirmed || !forwarded.AcceptLicence || !forwarded.ConfirmTerritoryEligibility {
+		t.Fatalf("confirm_territory_eligibility was not forwarded untouched: %s", gotBody)
 	}
 }
 

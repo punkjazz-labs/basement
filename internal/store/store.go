@@ -175,6 +175,12 @@ CREATE TABLE IF NOT EXISTS accepted_licences (
   accepted_at TEXT NOT NULL,
   PRIMARY KEY(recipe_id, recipe_version)
 );
+CREATE TABLE IF NOT EXISTS territory_confirmations (
+  recipe_id TEXT NOT NULL,
+  recipe_version INTEGER NOT NULL,
+  confirmed_at TEXT NOT NULL,
+  PRIMARY KEY(recipe_id, recipe_version)
+);
 CREATE TABLE IF NOT EXISTS api_keys (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -926,6 +932,17 @@ func (s *Store) AcceptLicence(ctx context.Context, recipeID string, version int)
 func (s *Store) LicenceAccepted(ctx context.Context, recipeID string, version int) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM accepted_licences WHERE recipe_id=? AND recipe_version=?`, recipeID, version).Scan(&count)
+	return count == 1, err
+}
+
+func (s *Store) ConfirmTerritoryEligibility(ctx context.Context, recipeID string, version int) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO territory_confirmations(recipe_id,recipe_version,confirmed_at) VALUES(?,?,?)`, recipeID, version, now())
+	return err
+}
+
+func (s *Store) TerritoryEligibilityConfirmed(ctx context.Context, recipeID string, version int) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM territory_confirmations WHERE recipe_id=? AND recipe_version=?`, recipeID, version).Scan(&count)
 	return count == 1, err
 }
 

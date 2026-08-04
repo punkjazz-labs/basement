@@ -150,6 +150,16 @@ type Artifact struct {
 	ExpectedBytes int64  `yaml:"expected_bytes" json:"expected_bytes"`
 	Licence       string `yaml:"licence" json:"licence"`
 	LicenceURL    string `yaml:"licence_url" json:"licence_url"`
+	// LicenceTerritoryExclusions names the territories this artifact's
+	// licence excludes, in the licence's own words, copied rather than
+	// composed, the same rule already enforced for Licence and LicenceURL.
+	// Absent (nil) means the licence carries no territorial restriction;
+	// present means the console must show this list and the install API
+	// must require a second, separate confirmation
+	// (confirm_territory_eligibility) before install can proceed. It carries
+	// no meaning without Licence and LicenceURL, which every artifact
+	// already requires unconditionally.
+	LicenceTerritoryExclusions []string `yaml:"licence_territory_exclusions,omitempty" json:"licence_territory_exclusions,omitempty"`
 	// Files narrows the artifact to named files inside the pinned revision.
 	// Absent means the whole repository snapshot, exactly as before; present
 	// means these files and only these, each verified against its own pinned
@@ -419,6 +429,19 @@ func (r Recipe) ArtifactIndex(role string) (int, bool) {
 
 type Operation struct {
 	Type string `yaml:"type" json:"type"`
+}
+
+// RequiresTerritoryConfirmation reports whether any artifact carries a
+// territory-exclusion licence term, in which case the install API must
+// require confirm_territory_eligibility (section 5.3) before install can
+// proceed.
+func (r Recipe) RequiresTerritoryConfirmation() bool {
+	for _, artifact := range r.Artifacts {
+		if len(artifact.LicenceTerritoryExclusions) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (r Recipe) TotalArtifactBytes() int64 {

@@ -110,6 +110,12 @@ func TestRecipePolicyRejectsUnsafeVariants(t *testing.T) {
 		{"licence url for another repository", func(r *Recipe) {
 			r.Artifacts[0].LicenceURL = "https://huggingface.co/someone-else/Other-Model/blob/main/LICENSE.md"
 		}, "artifact's own repository"},
+		{"empty territory exclusions list", func(r *Recipe) {
+			r.Artifacts[0].LicenceTerritoryExclusions = []string{}
+		}, "licence_territory_exclusions must be a non-empty list"},
+		{"blank territory exclusion entry", func(r *Recipe) {
+			r.Artifacts[0].LicenceTerritoryExclusions = []string{"European Union", "   "}
+		}, "licence_territory_exclusions must be a non-empty list"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -127,6 +133,43 @@ func TestRecipePolicyRejectsUnsafeVariants(t *testing.T) {
 				t.Fatalf("Validate()=%v, want error containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+// TestLicenceTerritoryExclusionsAcceptedAndTracked proves the field is
+// accepted when it is a well-formed, non-empty list of non-blank strings,
+// that an absent field leaves a recipe unaffected (the shipped pack has no
+// such field yet and still validates), and that RequiresTerritoryConfirmation
+// answers correctly in both cases.
+func TestLicenceTerritoryExclusionsAcceptedAndTracked(t *testing.T) {
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := Find(recipes, "qwen36-35b-a3b-nvfp4-1s")
+	if !ok {
+		t.Fatal("Qwen 35 recipe missing")
+	}
+	if base.RequiresTerritoryConfirmation() {
+		t.Fatalf("a recipe with no licence_territory_exclusions must not require territory confirmation: %#v", base.Artifacts)
+	}
+
+	candidate := base
+	candidate.Artifacts = append([]Artifact(nil), base.Artifacts...)
+	candidate.Operations = append([]Operation(nil), base.Operations...)
+	candidate.Requirements.Secrets = append([]string(nil), base.Requirements.Secrets...)
+	candidate.Runtime.Environment = make(map[string]string, len(base.Runtime.Environment))
+	for name, value := range base.Runtime.Environment {
+		candidate.Runtime.Environment[name] = value
+	}
+	candidate.Artifacts[0].LicenceTerritoryExclusions = []string{
+		"European Union", "United Kingdom", "Republic of Korea", "United States of America",
+	}
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() with a well-formed licence_territory_exclusions list = %v, want nil", err)
+	}
+	if !candidate.RequiresTerritoryConfirmation() {
+		t.Fatal("a recipe whose artifact carries licence_territory_exclusions must require territory confirmation")
 	}
 }
 

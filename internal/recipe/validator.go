@@ -163,6 +163,17 @@ func Validate(r Recipe) error {
 		} else if licenceURL.Path != "/"+artifact.Repository && !strings.HasPrefix(licenceURL.Path, "/"+artifact.Repository+"/") {
 			problems = append(problems, prefix+" licence_url must reference the artifact's own repository")
 		}
+		if artifact.LicenceTerritoryExclusions != nil {
+			blank := false
+			for _, exclusion := range artifact.LicenceTerritoryExclusions {
+				if strings.TrimSpace(exclusion) == "" {
+					blank = true
+				}
+			}
+			if len(artifact.LicenceTerritoryExclusions) == 0 || blank {
+				problems = append(problems, prefix+" licence_territory_exclusions must be a non-empty list of non-blank strings")
+			}
+		}
 	}
 	if !roles["primary"] {
 		problems = append(problems, "artifacts must contain one primary role")

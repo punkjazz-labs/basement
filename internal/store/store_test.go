@@ -560,6 +560,51 @@ func TestRoleNamesAreLowercaseSlugs(t *testing.T) {
 	}
 }
 
+// TestTerritoryEligibilityConfirmationRoundTrips mirrors accepted_licences:
+// unconfirmed by default, recorded only on an explicit true, idempotent on a
+// repeat confirmation, and keyed by recipe id and version so a later version
+// of the same recipe starts unconfirmed again.
+func TestTerritoryEligibilityConfirmationRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	confirmed, err := s.TerritoryEligibilityConfirmed(ctx, "minimax-h3-comfyui-1s", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed {
+		t.Fatal("a recipe version nobody confirmed must read back unconfirmed")
+	}
+
+	if err := s.ConfirmTerritoryEligibility(ctx, "minimax-h3-comfyui-1s", 1); err != nil {
+		t.Fatal(err)
+	}
+	// A repeat confirmation (e.g. a retried install request) must not error
+	// or duplicate the row.
+	if err := s.ConfirmTerritoryEligibility(ctx, "minimax-h3-comfyui-1s", 1); err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err = s.TerritoryEligibilityConfirmed(ctx, "minimax-h3-comfyui-1s", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !confirmed {
+		t.Fatal("confirmation did not persist")
+	}
+
+	stillUnconfirmed, err := s.TerritoryEligibilityConfirmed(ctx, "minimax-h3-comfyui-1s", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillUnconfirmed {
+		t.Fatal("a different recipe version must not inherit another version's confirmation")
+	}
+}
+
 // A model with no usage row yet has no counters to reset, and that must not
 // be an error: basement's pre-stop path calls this even for a model that was
 // never successfully sampled.
