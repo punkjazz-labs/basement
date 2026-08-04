@@ -37,6 +37,43 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           shellcheck packaging/*.sh
 
+      # Everything above proves the code compiles and its tests pass. None of
+      # it proves the thing we ship actually starts: a binary can build,
+      # vet and test clean and still fail on its first real boot, which is
+      # exactly how a wrong install path once shipped unnoticed. So run the
+      # manager the way a Spark runs it and require it to answer.
+      - name: Built manager boots and serves
+        run: |
+          set -euo pipefail
+          go build -o /tmp/basement-smoke ./cmd/basement
+
+          test "$(/tmp/basement-smoke version)" = "dev"
+
+          data="$(mktemp -d)"
+          /tmp/basement-smoke --listen 127.0.0.1:7071 --data-dir "$data" &
+          manager=$!
+          # Kill the manager however this step ends, so a failure below never
+          # leaves the job hanging on a live background process.
+          trap 'kill "$manager" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 50); do
+            if curl -sf http://127.0.0.1:7071/healthz > /tmp/health.json; then
+              break
+            fi
+            # A manager that died is never going to answer, so stop waiting
+            # for it and let the check below report the failure.
+            kill -0 "$manager" 2>/dev/null || break
+            sleep 0.2
+          done
+
+          grep -q '"status":"ok"' /tmp/health.json
+          # The console is compiled into the binary, so serving its page is
+          # the check that the embedded assets are really in there.
+          curl -sf http://127.0.0.1:7071/ | grep -q '<title>basement</title>'
+          # Reaching a real endpoint unauthenticated must not be an accident:
+          # the console API answers a session or an API key, never anonymity.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7071/api/v1/models)" = "401"
+
       - name: Build ARM64 release binary
         run: |
           mkdir -p dist
