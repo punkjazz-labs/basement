@@ -204,7 +204,13 @@ The schema is `internal/recipe/types.go`; the rules are
   from a fixed allowlist); one Spark must not.
 - **runtime** — `kind` (`vllm` or `sglang`), `image` without a tag, `digest`
   pinned to `sha256:<64 hex>`, `image_bytes`, `image_disk_bytes`, `shm_bytes`,
-  and an environment restricted to an allowlist of name/value pairs.
+  and an environment restricted to an allowlist of name/value pairs. Optional
+  `writable_paths` names absolute container paths a runtime must be able to
+  write before it can serve (a JIT kernel cache, typically); each becomes its
+  own bounded tmpfs, writable and nosuid but not noexec, because such a cache
+  holds shared objects the runtime loads. The manager owns the size, and the
+  validator refuses a path that is the container root, the scratch `/tmp`, or
+  at or inside any mount the container already has.
 - **artifacts** — one or more, exactly one `role: primary`. Each carries
   `repository`, a 40-hex `revision`, `expected_bytes`, `licence` and a
   `licence_url` that must point at that artifact's own Hugging Face repository.

@@ -97,6 +97,48 @@ type Runtime struct {
 	// never promises a number the wait does not honour. 0 means the default
 	// of 20 minutes.
 	StartTimeoutMinutes int `yaml:"start_timeout_minutes" json:"start_timeout_minutes"`
+	// WritablePaths are absolute container paths a runtime must be able to
+	// write before it can serve at all. The container's root filesystem is
+	// read only and its scratch tmpfs is noexec, which is right for everything
+	// that ships today and wrong for a runtime that compiles kernels at import
+	// time: tilelang writes its JIT cache to /root/.tilelang while the module
+	// is being imported, so on a read-only root vLLM raises OSError and the
+	// worker dies — after the weights have loaded. Pointing such a cache at
+	// /tmp does not help either, because the compiler writes a shared object
+	// and then loads it, which noexec forbids.
+	//
+	// Each entry becomes its own small tmpfs, writable and nosuid but not
+	// noexec. The size is the manager's choice rather than the recipe's: on a
+	// GB10 a tmpfs spends the same unified memory the model is loading into,
+	// so a recipe names the paths and the manager bounds them. Absent means
+	// the container gets exactly the filesystem it always had.
+	WritablePaths []string `yaml:"writable_paths,omitempty" json:"writable_paths,omitempty"`
+}
+
+// The container filesystem layout every recipe is served under. It is declared
+// beside the schema because two parts of the program need the same answer: the
+// container builder mounts these paths, and the validator has to know which
+// paths a recipe may not claim as writable. A second copy of this layout would
+// drift from the first without anything failing.
+const (
+	// CacheMountPath is the one writable bind mount: the compilation cache,
+	// which is kept on disk so it survives restarts.
+	CacheMountPath = "/root/.cache"
+	// TempMountPath is the container's scratch tmpfs. Nothing loads code from
+	// it, so it is mounted noexec.
+	TempMountPath = "/tmp"
+	// PrimaryMountPath is where the model itself is mounted, read only.
+	PrimaryMountPath = "/model"
+)
+
+// ArtifactMountPath is where the artifact with this role is mounted inside the
+// container. The primary artifact is the model and keeps its own path; every
+// other role is mounted under its own name.
+func ArtifactMountPath(role string) string {
+	if role == "primary" {
+		return PrimaryMountPath
+	}
+	return "/" + role
 }
 
 func (r Runtime) Reference() string { return r.Image + "@" + r.Digest }

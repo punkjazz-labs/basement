@@ -243,7 +243,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if err := h.verifyRuntimeInputs(r); err != nil {
 			return nil, err
 		}
-		stale, drift, err := h.replaceStaleContainer(ctx, r, execution.Placement)
+		drift, err := h.replaceStaleContainer(ctx, r, execution.Placement)
 		if err != nil {
 			return nil, err
 		}
@@ -252,11 +252,14 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 			return nil, err
 		}
 		receipt := map[string]any{"container_id": id, "container_name": containerName(r)}
-		if len(stale) > 0 {
-			receipt["recreated_after_move"] = mountMismatchReceipt(stale)
+		if len(drift.Mounts) > 0 {
+			receipt["recreated_after_move"] = mountMismatchReceipt(drift.Mounts)
 		}
-		if len(drift) > 0 {
-			receipt["recreated_after_address_change"] = launchMismatchReceipt(drift)
+		if len(drift.Writable) > 0 {
+			receipt["recreated_for_writable_paths"] = mountMismatchReceipt(drift.Writable)
+		}
+		if len(drift.Launch) > 0 {
+			receipt["recreated_after_address_change"] = launchMismatchReceipt(drift.Launch)
 		}
 		if execution.Placement.Distributed() {
 			receipt["node_rank"] = execution.Placement.Rank()
@@ -276,11 +279,11 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		// otherwise read as a container that was never there.
 		_, inspectErr := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		missing := errors.Is(inspectErr, ErrContainerNotFound)
-		stale, drift, err := h.replaceStaleContainer(ctx, r, execution.Placement)
+		drift, err := h.replaceStaleContainer(ctx, r, execution.Placement)
 		if err != nil {
 			return nil, err
 		}
-		if missing || len(stale) > 0 || len(drift) > 0 {
+		if missing || drift.found() {
 			// A container is never created without the record of how it was
 			// launched; on a machine where remove_container deleted that record
 			// this writes it again first.
@@ -305,15 +308,22 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if missing {
 			receipt["recreated_missing"] = containerName(r)
 		}
-		if len(stale) > 0 {
-			receipt["recreated_after_move"] = mountMismatchReceipt(stale)
+		if len(drift.Mounts) > 0 {
+			receipt["recreated_after_move"] = mountMismatchReceipt(drift.Mounts)
+		}
+		// A recipe that has since declared a writable path describes a
+		// container this one is not: its root filesystem is read-only and the
+		// path the runtime compiles into does not exist, which the runtime
+		// discovers only after loading the weights.
+		if len(drift.Writable) > 0 {
+			receipt["recreated_for_writable_paths"] = mountMismatchReceipt(drift.Writable)
 		}
 		// A two-Spark model meets at an address the kernel assigns to the
 		// cabled port, and that address can differ after a reboot. The
 		// container built by the last deployment still holds the old one, so
 		// it is rebuilt here against the address this job just resolved.
-		if len(drift) > 0 {
-			receipt["recreated_after_address_change"] = launchMismatchReceipt(drift)
+		if len(drift.Launch) > 0 {
+			receipt["recreated_after_address_change"] = launchMismatchReceipt(drift.Launch)
 		}
 		return receipt, nil
 	case "stop_container":
@@ -549,10 +559,14 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 	case "create_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		// Labels alone say the container is ours and for this recipe version;
-		// they say nothing about where it reads the model from. One whose
-		// binds no longer match this machine's layout is not "already
-		// created" — it has to be built again (see staleMounts).
-		return err == nil && containerLabelsMatch(state.Labels, r) && len(staleMounts(state, h.expectedMounts(r))) == 0
+		// they say nothing about where it reads the model from, or about what
+		// it is allowed to write. One whose binds no longer match this
+		// machine's layout, or whose writable paths no longer match the
+		// recipe, is not "already created" — it has to be built again (see
+		// staleMounts and staleTmpfs).
+		return err == nil && containerLabelsMatch(state.Labels, r) &&
+			len(staleMounts(state, h.expectedMounts(r))) == 0 &&
+			len(staleTmpfs(state, containerTmpfs(r))) == 0
 	case "start_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		return err == nil && state.Running
@@ -890,36 +904,56 @@ func (h *HostExecutor) createContainer(ctx context.Context, execution Execution,
 	return h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, r, execution.Placement)
 }
 
-// replaceStaleContainer removes a container of ours that is still pointed at
-// a directory this manager has moved away from — an install adopted across
-// the rename (spec 10) is the case that produced this, its container holding
-// binds under the pre-rename data directory long after the files moved — or,
-// on a two-Spark model, one still holding the fabric address the other rank
-// had during an earlier deployment. It returns what disagreed, so the caller
-// can create the container again and the receipt can say why. Nothing is
-// touched unless a mount source or a launch flag positively disagrees.
-func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recipe, placement Placement) ([]mountMismatch, []launchMismatch, error) {
+// containerDrift is everything about an existing container of ours that no
+// longer matches what creating it today would produce. Each kind is a
+// different story and the receipt tells them apart.
+type containerDrift struct {
+	Mounts   []mountMismatch
+	Writable []mountMismatch
+	Launch   []launchMismatch
+}
+
+func (d containerDrift) found() bool {
+	return len(d.Mounts) > 0 || len(d.Writable) > 0 || len(d.Launch) > 0
+}
+
+// replaceStaleContainer removes a container of ours that no longer matches
+// this machine or this recipe: one still pointed at a directory this manager
+// has moved away from (an install adopted across the rename (spec 10) is the
+// case that produced this, its container holding binds under the pre-rename
+// data directory long after the files moved), one built before its recipe
+// declared a writable path, or, on a two-Spark model, one still holding the
+// fabric address the other rank had during an earlier deployment. It returns
+// what disagreed, so the caller can create the container again and the receipt
+// can say why. Nothing is touched unless something positively disagrees.
+func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recipe, placement Placement) (containerDrift, error) {
 	name := h.resolveContainerName(ctx, r)
 	state, err := h.docker.Container(ctx, name)
 	if err != nil || !containerLabelsMatch(state.Labels, r) {
-		return nil, nil, nil
+		return containerDrift{}, nil
 	}
-	stale := staleMounts(state, h.expectedMounts(r))
-	drift := staleLaunch(state, r, placement)
-	if len(stale) == 0 && len(drift) == 0 {
-		return nil, nil, nil
+	drift := containerDrift{
+		Mounts:   staleMounts(state, h.expectedMounts(r)),
+		Writable: staleTmpfs(state, containerTmpfs(r)),
+		Launch:   staleLaunch(state, r, placement),
+	}
+	if !drift.found() {
+		return containerDrift{}, nil
 	}
 	reason := "the addresses this job resolved"
-	if len(stale) > 0 {
-		reason = stale[0].Expected
+	switch {
+	case len(drift.Mounts) > 0:
+		reason = drift.Mounts[0].Expected
+	case len(drift.Writable) > 0:
+		reason = "the writable paths this recipe declares"
 	}
 	if err := h.docker.Stop(ctx, name); err != nil {
-		return nil, nil, fmt.Errorf("stop the model container so it can be rebuilt against %s: %w", reason, err)
+		return containerDrift{}, fmt.Errorf("stop the model container so it can be rebuilt against %s: %w", reason, err)
 	}
 	if err := h.docker.Remove(ctx, name); err != nil {
-		return nil, nil, fmt.Errorf("remove the model container so it can be rebuilt against %s: %w", reason, err)
+		return containerDrift{}, fmt.Errorf("remove the model container so it can be rebuilt against %s: %w", reason, err)
 	}
-	return stale, drift, nil
+	return drift, nil
 }
 
 // verifyRuntimeInputs checks that every host path the generated command

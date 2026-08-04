@@ -67,6 +67,12 @@ type ContainerState struct {
 	// fabric address of the other rank inside it, so this is the only way to
 	// tell that a container is still pointed at an address that has changed.
 	Command []string
+	// Tmpfs is the in-memory filesystems the container was created with, keyed
+	// by mount point, with the mount options Docker recorded for each. Fixed
+	// at creation like the binds, and never reported in Mounts (which carries
+	// bind sources), so it is the only way to tell that a container predates
+	// its recipe declaring a writable path.
+	Tmpfs map[string]string
 }
 
 func NewDockerClient(socket string) *DockerClient {
@@ -240,6 +246,9 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 			Labels map[string]string
 			Cmd    []string
 		}
+		HostConfig struct {
+			Tmpfs map[string]string
+		}
 		Mounts []struct {
 			Source      string
 			Destination string
@@ -254,7 +263,7 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 			mounts[mount.Destination] = mount.Source
 		}
 	}
-	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels, Mounts: mounts, Command: body.Config.Cmd}, nil
+	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels, Mounts: mounts, Command: body.Config.Cmd, Tmpfs: body.HostConfig.Tmpfs}, nil
 }
 
 func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, r recipe.Recipe, placement Placement) (string, error) {
@@ -288,7 +297,7 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 		"PortBindings":   map[string]any{port: []map[string]string{{"HostIp": "127.0.0.1", "HostPort": fmt.Sprint(r.Service.DefaultHostPort)}}},
 		"DeviceRequests": []map[string]any{{"Driver": "nvidia", "Count": -1, "Capabilities": [][]string{{"gpu"}}}},
 		"ReadonlyRootfs": true,
-		"Tmpfs":          map[string]string{"/tmp": "rw,noexec,nosuid,size=8g"},
+		"Tmpfs":          containerTmpfs(r),
 	}
 	if r.Runtime.ShmBytes > 0 {
 		hostConfig["ShmSize"] = r.Runtime.ShmBytes
@@ -816,16 +825,35 @@ func appendOptional(args []string, flag, value string) []string {
 	return append(args, flag, value)
 }
 
-func artifactMountPath(role string) string {
-	if role == "primary" {
-		return "/model"
-	}
-	return "/" + role
-}
+func artifactMountPath(role string) string { return recipe.ArtifactMountPath(role) }
 
-// cacheMountPath is the one writable mount a container gets; the rest of its
-// root filesystem is read-only.
-const cacheMountPath = "/root/.cache"
+// cacheMountPath is the one writable bind mount a container gets; the rest of
+// its root filesystem is read-only. Declared with the schema, because the
+// validator has to keep recipes off it.
+const cacheMountPath = recipe.CacheMountPath
+
+// Mount options for the two kinds of in-memory filesystem a container gets.
+// They differ in one deliberate way: a JIT compiler writes a shared object
+// into its cache directory and then loads it, so noexec on a writable path
+// would replace one import-time failure with another. nosuid stays on both.
+const (
+	tempTmpfsOptions     = "rw,noexec,nosuid,size=8g"
+	writableTmpfsOptions = "rw,nosuid,size=4g"
+)
+
+// containerTmpfs is the complete set of in-memory filesystems a container for
+// r is created with, keyed the way Docker's HostConfig.Tmpfs is: the scratch
+// mount every container has always had, plus one private mount per writable
+// path the recipe declares. A recipe cannot reach the scratch mount or shadow
+// a bind through this map — the validator refuses those paths — so a recipe
+// declaring nothing produces exactly the filesystem that shipped before.
+func containerTmpfs(r recipe.Recipe) map[string]string {
+	mounts := map[string]string{recipe.TempMountPath: tempTmpfsOptions}
+	for _, writable := range r.Runtime.WritablePaths {
+		mounts[writable] = writableTmpfsOptions
+	}
+	return mounts
+}
 
 // containerMounts is where a container for r must read each of its mount
 // points from on this host right now: one per artifact role, plus the
@@ -872,6 +900,37 @@ func staleMounts(state ContainerState, expected map[string]string) []mountMismat
 	}
 	sort.Slice(stale, func(i, j int) bool { return stale[i].MountPoint < stale[j].MountPoint })
 	return stale
+}
+
+// staleTmpfs reports the in-memory mounts an existing container was created
+// with that no longer describe what this recipe asks for. Docker fixes a
+// container's tmpfs mounts at creation exactly as it fixes its binds, so a
+// container built before its recipe declared a writable path has no such mount
+// and never will: the runtime imports, finds the path read-only, and the
+// worker dies after the weights have loaded. A path the recipe has since
+// dropped counts too, so a container's writable surface never outlives the
+// reason it was granted.
+//
+// A container reporting no tmpfs at all is not evidence of anything — a daemon
+// that does not report host configuration is silence, not disagreement — and
+// no container is rebuilt on silence.
+func staleTmpfs(state ContainerState, expected map[string]string) []mountMismatch {
+	if len(state.Tmpfs) == 0 {
+		return nil
+	}
+	drift := make([]mountMismatch, 0, len(expected))
+	for mountPoint, want := range expected {
+		if actual, mounted := state.Tmpfs[mountPoint]; !mounted || actual != want {
+			drift = append(drift, mountMismatch{MountPoint: mountPoint, Actual: actual, Expected: want})
+		}
+	}
+	for mountPoint, actual := range state.Tmpfs {
+		if _, wanted := expected[mountPoint]; !wanted {
+			drift = append(drift, mountMismatch{MountPoint: mountPoint, Actual: actual})
+		}
+	}
+	sort.Slice(drift, func(i, j int) bool { return drift[i].MountPoint < drift[j].MountPoint })
+	return drift
 }
 
 // launchMismatch is a launch flag whose value was fixed into an existing

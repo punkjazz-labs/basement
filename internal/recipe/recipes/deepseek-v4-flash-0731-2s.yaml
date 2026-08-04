@@ -64,6 +64,14 @@ runtime:
   environment:
     CUTE_DSL_ARCH: sm_121a
     MAX_JOBS: "4"
+  # vLLM builds this model's "mhc" kernels with tilelang, which writes its JIT
+  # kernel cache to /root/.tilelang while the module is being imported. On the
+  # read-only root filesystem every container gets, that import raises OSError
+  # and the worker dies reporting tilelang as missing, after the 74 GiB of
+  # weights have loaded. The cache cannot live on the scratch tmpfs either:
+  # tilelang loads the shared objects it compiles, and /tmp is noexec.
+  writable_paths:
+    - /root/.tilelang
   shm_bytes: 34359738368
   memory_lock: true
   ipc_lock: true

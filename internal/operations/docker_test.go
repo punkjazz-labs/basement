@@ -474,6 +474,125 @@ func TestRuntimeCommandRejectsAMismatchedRecipe(t *testing.T) {
 	}
 }
 
+// createHostConfig runs a container creation against a stub daemon and hands
+// back the HostConfig the manager asked for.
+func createHostConfig(t *testing.T, r recipe.Recipe) map[string]any {
+	t.Helper()
+	var body map[string]any
+	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"container-id"}`))}, nil
+	})}}
+	paths := make([]string, len(r.Artifacts))
+	for index := range r.Artifacts {
+		paths[index] = fmt.Sprintf("/managed/artifact-%d", index)
+	}
+	if _, err := client.Create(context.Background(), "managed-name", r.Runtime.Reference(), paths, "/managed/cache", r, Placement{}); err != nil {
+		t.Fatal(err)
+	}
+	host, ok := body["HostConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("create request carried no host configuration: %#v", body)
+	}
+	return host
+}
+
+// A recipe's writable paths become their own tmpfs, and that tmpfs is not
+// noexec: tilelang compiles a shared object into its cache and then loads it,
+// so a noexec mount would trade the read-only failure for a load failure. The
+// scratch mount is untouched by any of this, and a recipe that declares
+// nothing gets exactly the filesystem that shipped before.
+func TestWritablePathsBecomeTheirOwnLoadableTmpfs(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flash, ok := recipe.Find(recipes, "deepseek-v4-flash-0731-2s")
+	if !ok {
+		t.Fatal("DeepSeek V4 Flash two-Spark recipe missing")
+	}
+	tmpfs, _ := createHostConfig(t, flash)["Tmpfs"].(map[string]any)
+	if len(tmpfs) != 2 {
+		t.Fatalf("tmpfs=%#v, want the scratch mount and the tilelang cache", tmpfs)
+	}
+	if tmpfs["/tmp"] != "rw,noexec,nosuid,size=8g" {
+		t.Fatalf("the scratch mount changed: %#v", tmpfs["/tmp"])
+	}
+	options, _ := tmpfs["/root/.tilelang"].(string)
+	if options != "rw,nosuid,size=4g" {
+		t.Fatalf("tilelang cache mounted %q, want a bounded writable mount", options)
+	}
+	if strings.Contains(options, "noexec") {
+		t.Fatalf("a JIT kernel cache was mounted noexec: %q", options)
+	}
+	if !strings.Contains(options, "nosuid") {
+		t.Fatalf("a writable path was mounted without nosuid: %q", options)
+	}
+
+	// Every runtime kind gets the same treatment; nothing about this is vLLM's.
+	for _, id := range []string{"inkling-small-nvfp4-2s", "deepseek-v4-flash-0731-ud-iq3-xxs-1s"} {
+		r, ok := recipe.Find(recipes, id)
+		if !ok {
+			t.Fatalf("%s recipe missing", id)
+		}
+		r.Runtime.WritablePaths = []string{"/root/.tilelang"}
+		tmpfs, _ := createHostConfig(t, r)["Tmpfs"].(map[string]any)
+		if tmpfs["/root/.tilelang"] != "rw,nosuid,size=4g" || tmpfs["/tmp"] != "rw,noexec,nosuid,size=8g" {
+			t.Fatalf("%s (%s) tmpfs=%#v", id, r.Runtime.Kind, tmpfs)
+		}
+	}
+
+	// A recipe declaring nothing keeps the single scratch mount.
+	qwen, ok := recipe.Find(recipes, "qwen36-35b-a3b-nvfp4-1s")
+	if !ok {
+		t.Fatal("Qwen 35 recipe missing")
+	}
+	tmpfs, _ = createHostConfig(t, qwen)["Tmpfs"].(map[string]any)
+	if len(tmpfs) != 1 || tmpfs["/tmp"] != "rw,noexec,nosuid,size=8g" {
+		t.Fatalf("a recipe with no writable paths got tmpfs=%#v", tmpfs)
+	}
+}
+
+// Docker fixes a container's tmpfs mounts at creation, exactly as it fixes its
+// binds, so a container built before its recipe declared a writable path never
+// gains one. Without this the update would install a recipe the running
+// container does not implement, and the worker would keep dying on a
+// read-only cache directory after every weight was loaded.
+func TestStaleTmpfsNoticesADriftedWritableSurface(t *testing.T) {
+	expected := map[string]string{"/tmp": tempTmpfsOptions, "/root/.tilelang": writableTmpfsOptions}
+
+	yesterday := ContainerState{Tmpfs: map[string]string{"/tmp": tempTmpfsOptions}}
+	drift := staleTmpfs(yesterday, expected)
+	if len(drift) != 1 || drift[0].MountPoint != "/root/.tilelang" || drift[0].Actual != "" || drift[0].Expected != writableTmpfsOptions {
+		t.Fatalf("drift=%#v, want the missing writable path alone", drift)
+	}
+
+	if drift := staleTmpfs(ContainerState{Tmpfs: expected}, expected); len(drift) != 0 {
+		t.Fatalf("a container already carrying its writable paths was called stale: %#v", drift)
+	}
+
+	// A path the recipe has dropped is drift too: a writable, loadable mount
+	// must not outlive the recipe that asked for it.
+	extra := ContainerState{Tmpfs: map[string]string{"/tmp": tempTmpfsOptions, "/root/.tilelang": writableTmpfsOptions}}
+	if drift := staleTmpfs(extra, map[string]string{"/tmp": tempTmpfsOptions}); len(drift) != 1 || drift[0].MountPoint != "/root/.tilelang" || drift[0].Expected != "" {
+		t.Fatalf("drift=%#v, want the withdrawn writable path", drift)
+	}
+
+	// Changed options count as much as a missing mount.
+	relaxed := ContainerState{Tmpfs: map[string]string{"/tmp": tempTmpfsOptions, "/root/.tilelang": "rw,noexec,nosuid,size=4g"}}
+	if drift := staleTmpfs(relaxed, expected); len(drift) != 1 || drift[0].MountPoint != "/root/.tilelang" {
+		t.Fatalf("drift=%#v, want the differently mounted path", drift)
+	}
+
+	// A daemon that reports no host configuration is silence, not
+	// disagreement, and no container is rebuilt on silence.
+	if drift := staleTmpfs(ContainerState{}, expected); drift != nil {
+		t.Fatalf("an unreported tmpfs produced drift: %#v", drift)
+	}
+}
+
 func toStrings(values []any) []string {
 	result := make([]string, len(values))
 	for index, value := range values {

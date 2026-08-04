@@ -470,6 +470,14 @@ func writeArtifactFixture(t *testing.T, executor *HostExecutor, r recipe.Recipe)
 }
 
 func containerFixtureJSON(id string, running bool, labels, mounts map[string]string, command ...string) string {
+	return containerFixtureWithTmpfs(id, running, labels, mounts, nil, command...)
+}
+
+// containerFixtureWithTmpfs is containerFixtureJSON plus the in-memory mounts
+// Docker records in host configuration, which is where a recipe's writable
+// paths land. Fixtures that leave it nil describe a daemon that reports none,
+// which is silence rather than disagreement.
+func containerFixtureWithTmpfs(id string, running bool, labels, mounts, tmpfs map[string]string, command ...string) string {
 	status := "exited"
 	if running {
 		status = "running"
@@ -479,10 +487,11 @@ func containerFixtureJSON(id string, running bool, labels, mounts map[string]str
 		entries = append(entries, map[string]string{"Type": "bind", "Source": source, "Destination": destination})
 	}
 	encoded, err := json.Marshal(map[string]any{
-		"ID":     id,
-		"State":  map[string]any{"Running": running, "Status": status},
-		"Config": map[string]any{"Labels": labels, "Cmd": command},
-		"Mounts": entries,
+		"ID":         id,
+		"State":      map[string]any{"Running": running, "Status": status},
+		"Config":     map[string]any{"Labels": labels, "Cmd": command},
+		"HostConfig": map[string]any{"Tmpfs": tmpfs},
+		"Mounts":     entries,
 	})
 	if err != nil {
 		panic(err)
@@ -726,6 +735,112 @@ func TestStartContainerLeavesAMatchingContainerAlone(t *testing.T) {
 	}
 	if _, missing := receipt["recreated_missing"]; missing {
 		t.Error("a container that was right there was reported as missing")
+	}
+}
+
+// A container keeps the tmpfs mounts it was created with for life, so an
+// installed model whose recipe has since declared a writable path is running a
+// container that does not implement it: the runtime compiles into a directory
+// on the read-only root, and the worker dies once every weight is loaded. An
+// update has to rebuild it, exactly as a moved bind does.
+func TestStartContainerRebuildsWhenTheRecipeGainedAWritablePath(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	r.Runtime.WritablePaths = []string{"/root/.tilelang"}
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	name := containerName(r)
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+	beforeTheRecipeChanged := map[string]string{recipe.TempMountPath: tempTmpfsOptions}
+	created, started := false, false
+	var stopped, removed []string
+	var createBody map[string]any
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		path := request.URL.Path
+		switch {
+		case request.Method == http.MethodPost && strings.HasPrefix(path, "/containers/create"):
+			if err := json.NewDecoder(request.Body).Decode(&createBody); err != nil {
+				t.Fatal(err)
+			}
+			created = true
+			return dockerFixtureResponse(http.StatusCreated, `{"ID":"rebuilt-id"}`), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			stopped = append(stopped, containerFromPath(path))
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodDelete:
+			removed = append(removed, containerFromPath(path))
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+			started = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case containerFromPath(path) == legacyContainerName(r):
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		case created:
+			return dockerFixtureResponse(http.StatusOK, containerFixtureWithTmpfs("rebuilt-id", started, labels, executor.expectedMounts(r), containerTmpfs(r))), nil
+		case len(removed) > 0:
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		default:
+			return dockerFixtureResponse(http.StatusOK, containerFixtureWithTmpfs("old-id", false, labels, executor.expectedMounts(r), beforeTheRecipeChanged)), nil
+		}
+	})}}
+
+	// A container without the writable path is not "already created", or
+	// nothing ever rebuilds it.
+	if executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Error("a container missing the recipe's writable path was accepted as already created")
+	}
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if !created || !started {
+		t.Fatalf("created=%v started=%v, want the container rebuilt and started", created, started)
+	}
+	if len(stopped) != 1 || stopped[0] != name || len(removed) != 1 || removed[0] != name {
+		t.Fatalf("stopped=%v removed=%v, want only the stale container %q", stopped, removed, name)
+	}
+	rebuilt, ok := receipt["recreated_for_writable_paths"].([]map[string]any)
+	if !ok || len(rebuilt) != 1 || rebuilt[0]["mount_point"] != "/root/.tilelang" {
+		t.Fatalf("receipt does not report the writable path: %#v", receipt["recreated_for_writable_paths"])
+	}
+	// The two repairs are different stories: nothing moved on this machine.
+	if _, moved := receipt["recreated_after_move"]; moved {
+		t.Errorf("a recipe change was reported as a moved directory: %#v", receipt["recreated_after_move"])
+	}
+	host, _ := createBody["HostConfig"].(map[string]any)
+	tmpfs, _ := host["Tmpfs"].(map[string]any)
+	if tmpfs["/root/.tilelang"] != writableTmpfsOptions {
+		t.Fatalf("the rebuilt container does not carry the writable path: %#v", tmpfs)
+	}
+}
+
+// The same container once it carries the mount is left exactly as it is: a
+// rebuild on every start would throw away a loaded model for nothing.
+func TestStartContainerLeavesADeclaredWritablePathAlone(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	r.Runtime.WritablePaths = []string{"/root/.tilelang"}
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/start"):
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodGet && containerFromPath(request.URL.Path) == containerName(r):
+			return dockerFixtureResponse(http.StatusOK, containerFixtureWithTmpfs("live-id", true, labels, executor.expectedMounts(r), containerTmpfs(r))), nil
+		default:
+			t.Fatalf("a matching container was disturbed: %s %s", request.Method, request.URL)
+			return nil, nil
+		}
+	})}}
+	if !executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Error("a container carrying its recipe's writable path was not recognized as created")
+	}
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if _, rebuilt := receipt["recreated_for_writable_paths"]; rebuilt {
+		t.Errorf("a matching container was reported as rebuilt: %#v", receipt)
 	}
 }
 

@@ -396,6 +396,101 @@ func TestWholeSnapshotArtifactsStayValidWithoutFilePinning(t *testing.T) {
 	}
 }
 
+// writablePathCandidate is a pinned recipe with room for writable paths. The
+// base is policy-clean in every other respect, so a subtest's failure is
+// always about the path it set.
+func writablePathCandidate(t *testing.T, id string) Recipe {
+	t.Helper()
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := Find(recipes, id)
+	if !ok {
+		t.Fatalf("%s recipe missing", id)
+	}
+	base.Runtime.WritablePaths = nil
+	return base
+}
+
+// A writable path is the only part of the schema that changes what the
+// container's filesystem means, so it is held to the layout the manager owns.
+// A tmpfs over /model would hide the weights behind an empty directory and the
+// runtime would fail inside its own argument validation; one over /root/.cache
+// would throw the compilation cache away on every restart.
+func TestValidateRejectsWritablePathsOutsideTheManagedLayout(t *testing.T) {
+	tests := []struct {
+		name  string
+		id    string
+		paths []string
+		want  string
+	}{
+		{"the container root", "qwen36-35b-a3b-nvfp4-1s", []string{"/"}, "must not be the container root"},
+		{"a relative path", "qwen36-35b-a3b-nvfp4-1s", []string{"root/.tilelang"}, "must be an absolute container path"},
+		{"a trailing slash", "qwen36-35b-a3b-nvfp4-1s", []string{"/root/.tilelang/"}, "must be an absolute container path"},
+		{"a climbing segment", "qwen36-35b-a3b-nvfp4-1s", []string{"/root/../etc"}, "must be an absolute container path"},
+		{"a mount option smuggled into the path", "qwen36-35b-a3b-nvfp4-1s", []string{"/root/.tilelang,size=512g"}, "must be an absolute container path"},
+		{"a path longer than the limit", "qwen36-35b-a3b-nvfp4-1s", []string{"/" + strings.Repeat("a", maxWritablePathLength)}, "must be an absolute container path"},
+		{"the scratch tmpfs", "qwen36-35b-a3b-nvfp4-1s", []string{"/tmp"}, "collides with the container's /tmp mount"},
+		{"a directory inside the scratch tmpfs", "qwen36-35b-a3b-nvfp4-1s", []string{"/tmp/kernels"}, "collides with the container's /tmp mount"},
+		{"the model mount", "qwen36-35b-a3b-nvfp4-1s", []string{"/model"}, "collides with the container's /model mount"},
+		{"a directory inside the model mount", "qwen36-35b-a3b-nvfp4-1s", []string{"/model/kernels"}, "collides with the container's /model mount"},
+		{"the compilation cache", "qwen36-35b-a3b-nvfp4-1s", []string{"/root/.cache"}, "collides with the container's /root/.cache mount"},
+		{"a directory containing the compilation cache", "qwen36-35b-a3b-nvfp4-1s", []string{"/root"}, "collides with the container's /root/.cache mount"},
+		// Every artifact role is a mount, not just the primary one.
+		{"a second artifact's mount", "laguna-s-2-1-nvfp4-dflash-1s", []string{"/drafter"}, "collides with the container's /drafter mount"},
+		{"the same path twice", "qwen36-35b-a3b-nvfp4-1s", []string{"/root/.tilelang", "/root/.tilelang"}, "declared more than once"},
+		{"a path inside another declared path", "qwen36-35b-a3b-nvfp4-1s", []string{"/root/.tilelang", "/root/.tilelang/kernels"}, "is inside /root/.tilelang"},
+		{"more paths than the limit", "qwen36-35b-a3b-nvfp4-1s", []string{"/a", "/b", "/c", "/d", "/e"}, "at most 4 paths"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := writablePathCandidate(t, test.id)
+			candidate.Runtime.WritablePaths = test.paths
+			err := Validate(candidate)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate()=%v, want error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsWritableCachePaths(t *testing.T) {
+	candidate := writablePathCandidate(t, "qwen36-35b-a3b-nvfp4-1s")
+	candidate.Runtime.WritablePaths = []string{"/root/.tilelang", "/opt/kernel-cache"}
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate()=%v, want nil", err)
+	}
+	// A recipe that declares none keeps exactly the filesystem it had.
+	candidate.Runtime.WritablePaths = nil
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() without writable paths=%v, want nil", err)
+	}
+}
+
+// vLLM builds DeepSeek V4 Flash's "mhc" kernels with tilelang, which writes
+// its JIT cache to /root/.tilelang at import time and dies on the read-only
+// root filesystem after the weights have loaded. No other recipe in the pack
+// compiles kernels that way, and every one of them serves on the unchanged
+// filesystem today, so none of them may quietly gain a writable mount.
+func TestOnlyTheTwoSparkFlashRecipeDeclaresAWritablePath(t *testing.T) {
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range recipes {
+		if r.ID == "deepseek-v4-flash-0731-2s" {
+			if len(r.Runtime.WritablePaths) != 1 || r.Runtime.WritablePaths[0] != "/root/.tilelang" {
+				t.Fatalf("DeepSeek V4 Flash writable paths = %#v, want the tilelang kernel cache", r.Runtime.WritablePaths)
+			}
+			continue
+		}
+		if len(r.Runtime.WritablePaths) != 0 {
+			t.Fatalf("%s gained writable paths: %#v", r.ID, r.Runtime.WritablePaths)
+		}
+	}
+}
+
 func TestDecodeStrictRejectsUnknownField(t *testing.T) {
 	_, err := DecodeStrict([]byte("schema_version: 1\nid: valid-recipe\nunexpected: true\n"))
 	if err == nil || !strings.Contains(err.Error(), "field unexpected not found") {

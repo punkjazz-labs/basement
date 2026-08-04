@@ -26,6 +26,11 @@ var (
 	// runtime resolves the name against its own parser registry, and this only
 	// guarantees the value cannot be read as another command-line option.
 	parserNamePattern = regexp.MustCompile(`^([a-z0-9][a-z0-9_.-]*)?$`)
+	// writablePathPattern admits an absolute path of ordinary name components.
+	// A leading dot is allowed because these are dot-directories by nature
+	// (/root/.tilelang); "." and ".." are not, which the cleanliness check
+	// beside it refuses.
+	writablePathPattern = regexp.MustCompile(`^(/[A-Za-z0-9][A-Za-z0-9._-]*|/\.[A-Za-z0-9][A-Za-z0-9._-]*)+$`)
 )
 
 var allowedOperations = map[string]bool{
@@ -107,6 +112,7 @@ func Validate(r Recipe) error {
 			problems = append(problems, "runtime environment is outside the allowlist")
 		}
 	}
+	problems = append(problems, writablePathProblems(r)...)
 	if len(r.Artifacts) == 0 {
 		problems = append(problems, "at least one artifact is required")
 	}
@@ -232,6 +238,81 @@ func artifactFileProblems(artifact Artifact, prefix string) []string {
 		problems = append(problems, fmt.Sprintf("%s files total %d bytes but expected_bytes is %d", prefix, total, artifact.ExpectedBytes))
 	}
 	return problems
+}
+
+// maxWritablePaths bounds how many private tmpfs mounts one recipe may ask
+// for. Each is unified memory the model does not get, and a runtime that needs
+// more than a handful of writable cache roots is a runtime nobody has
+// qualified.
+const maxWritablePaths = 4
+
+// maxWritablePathLength bounds one path, so a recipe cannot hand the daemon a
+// mount point of unbounded length.
+const maxWritablePathLength = 128
+
+// writablePathProblems validates runtime.writable_paths. Each entry is mounted
+// as its own tmpfs inside the container, which makes it the only part of the
+// schema that can change what the container's filesystem means, so it is held
+// to the layout the manager owns: a writable path may not be the root, may not
+// take over the scratch tmpfs, and may not sit anywhere near a mount that is
+// already there. A writable tmpfs over /model would hide the weights behind an
+// empty directory; one over /root/.cache would throw away the compilation
+// cache on every restart; one containing either would do the same from above.
+// A recipe declaring none keeps exactly the filesystem it has always had.
+func writablePathProblems(r Recipe) []string {
+	paths := r.Runtime.WritablePaths
+	if len(paths) == 0 {
+		return nil
+	}
+	var problems []string
+	if len(paths) > maxWritablePaths {
+		problems = append(problems, fmt.Sprintf("runtime writable_paths must declare at most %d paths", maxWritablePaths))
+	}
+	reserved := []string{TempMountPath, CacheMountPath}
+	for _, artifact := range r.Artifacts {
+		reserved = append(reserved, ArtifactMountPath(artifact.Role))
+	}
+	seen := make(map[string]bool, len(paths))
+	for _, writable := range paths {
+		if writable == "/" {
+			problems = append(problems, "runtime writable_path must not be the container root")
+			continue
+		}
+		if len(writable) > maxWritablePathLength || !writablePathPattern.MatchString(writable) || path.Clean(writable) != writable {
+			problems = append(problems, "runtime writable_path "+writable+" must be an absolute container path with no trailing slash, relative segment or unusual character")
+			continue
+		}
+		if seen[writable] {
+			problems = append(problems, "runtime writable_path "+writable+" is declared more than once")
+			continue
+		}
+		seen[writable] = true
+		for _, occupied := range reserved {
+			if pathsOverlap(writable, occupied) {
+				problems = append(problems, "runtime writable_path "+writable+" collides with the container's "+occupied+" mount")
+			}
+		}
+		for other := range seen {
+			if other != writable && pathsOverlap(writable, other) {
+				problems = append(problems, "runtime writable_path "+writable+" is inside "+other)
+			}
+		}
+	}
+	return problems
+}
+
+// pathsOverlap reports whether two absolute container paths are the same path
+// or one contains the other. Both are already clean, so the comparison is by
+// component and /modelling is not inside /model.
+func pathsOverlap(a, b string) bool {
+	return a == b || strings.HasPrefix(a, withTrailingSlash(b)) || strings.HasPrefix(b, withTrailingSlash(a))
+}
+
+func withTrailingSlash(p string) string {
+	if strings.HasSuffix(p, "/") {
+		return p
+	}
+	return p + "/"
 }
 
 func operationSequenceEqual(operations []Operation, expected []string) bool {
