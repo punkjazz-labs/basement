@@ -1,11 +1,14 @@
 package operations
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -74,6 +77,95 @@ func TestHuggingFaceDownloadResumesAndVerifies(t *testing.T) {
 	}
 	if client.Complete(artifact, target) {
 		t.Fatal("corrupted completed artifact was reused")
+	}
+}
+
+type cancellableDownloadBody struct {
+	ctx        context.Context
+	prefix     []byte
+	prefixSent chan struct{}
+	sent       bool
+}
+
+func (b *cancellableDownloadBody) Read(buffer []byte) (int, error) {
+	if !b.sent {
+		b.sent = true
+		count := copy(buffer, b.prefix)
+		close(b.prefixSent)
+		return count, nil
+	}
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (*cancellableDownloadBody) Close() error { return nil }
+
+func TestHuggingFaceCancelledDownloadKeepsItsResumablePartial(t *testing.T) {
+	content := make([]byte, 256<<10)
+	for index := range content {
+		content[index] = byte(index)
+	}
+	sum := sha256.Sum256(content)
+	revision := strings.Repeat("a", 40)
+	prefixSent := make(chan struct{})
+	rangeStart := make(chan int64, 1)
+	manifest, err := json.Marshal(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "weights/model.bin", "size": len(content), "blobId": strings.Repeat("b", 40), "lfs": map[string]any{"sha256": hex.EncodeToString(sum[:]), "size": len(content)}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		response := &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Request: request}
+		if strings.HasPrefix(request.URL.Path, "/api/models/") {
+			response.Body = io.NopCloser(bytes.NewReader(manifest))
+			return response, nil
+		}
+		if value := request.Header.Get("Range"); value != "" {
+			var start int64
+			_, _ = fmt.Sscanf(value, "bytes=%d-", &start)
+			rangeStart <- start
+			response.StatusCode = http.StatusPartialContent
+			response.Status = "206 Partial Content"
+			response.Body = io.NopCloser(bytes.NewReader(content[start:]))
+			return response, nil
+		}
+		response.Body = &cancellableDownloadBody{ctx: request.Context(), prefix: content[:64<<10], prefixSent: prefixSent}
+		return response, nil
+	})
+	client := &HFClient{client: &http.Client{Transport: transport}, baseURL: "https://model.invalid"}
+	artifact := recipe.Artifact{Role: "primary", Repository: "owner/model", Revision: revision, ExpectedBytes: int64(len(content))}
+	target := filepath.Join(t.TempDir(), "artifact")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.Download(ctx, artifact, target, nil)
+		result <- err
+	}()
+	<-prefixSent
+	cancel()
+	if err := <-result; err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled transfer returned %v, want context cancellation", err)
+	}
+	partial := filepath.Join(target, "weights/model.bin.part")
+	info, err := os.Stat(partial)
+	if err != nil || info.Size() == 0 || info.Size() >= int64(len(content)) {
+		t.Fatalf("cancelled transfer did not retain a useful partial: size=%v err=%v", func() any {
+			if info == nil {
+				return nil
+			}
+			return info.Size()
+		}(), err)
+	}
+
+	receipt, err := client.Download(context.Background(), artifact, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start := <-rangeStart; start != info.Size() {
+		t.Fatalf("resume started at byte %d, want retained partial size %d", start, info.Size())
+	}
+	if receipt["bytes_verified"] != int64(len(content)) || !client.Complete(artifact, target) {
+		t.Fatalf("resumed transfer was not verified: %#v", receipt)
 	}
 }
 
