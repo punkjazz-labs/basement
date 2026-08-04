@@ -442,6 +442,15 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .confirm-check span { display: block; font-weight: 500; }
 .confirm-check small { display: block; color: var(--faint); font-weight: 400; margin-top: 1px; }
 
+.licence-details { display: grid; gap: 14px; }
+.licence-detail { display: grid; gap: 8px; }
+.licence-detail + .licence-detail { border-top: 1px solid var(--line); padding-top: 14px; }
+.licence-name { color: var(--ink); font-size: 14px; font-weight: 650; margin: 0; }
+.licence-copy { color: var(--muted); font-size: 12.5px; margin: 0; }
+.territory-list { color: var(--ink); display: grid; font-size: 12.5px; gap: 3px; margin: 0; padding-left: 18px; }
+.licence-links { display: flex; flex-wrap: wrap; font-size: 12.5px; gap: 16px; }
+.licence-consents { display: grid; gap: 8px; }
+
 .install-choice { display: grid; gap: 8px; }
 
 /* Whole-row selection, matching the setup wizard: the row is the control,

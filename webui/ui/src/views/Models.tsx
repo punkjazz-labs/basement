@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   api, idempotency, terminal, formatBytes, formatTokens, runtimeLabel, startTimeoutMinutes, modelStateWord, peerModelList,
-  updatePlan,
+  updatePlan, installRequest, installConfirmationsComplete, licenceArtifacts, territoryEligibilityLabel,
   type InstalledModel, type Job, type Peer, type Preflight, type Recipe, type StorageInfo, type PeerSummary,
   type TokenUsage,
 } from '../api'
@@ -43,6 +43,7 @@ export default function Models({
 }: AppState) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [licence, setLicence] = useState(false)
+  const [territoryEligibility, setTerritoryEligibility] = useState(false)
   // Whether the install switches to the new model as soon as it is ready.
   // Only meaningful when another model is serving; defaults to the
   // historical behaviour so a single click still installs and serves.
@@ -175,11 +176,6 @@ export default function Models({
   }
   const verbFor = (recipe: Recipe, where: Placement) =>
     where === 'peer' ? peerInstallVerb(recipe) : installVerb(recipe)
-  // The licence was accepted when the first install of this recipe was
-  // confirmed; a resume or reinstall never asks again.
-  const licenceAccepted = (recipe: Recipe) =>
-    jobs.some(job => job.recipe_id === recipe.id && job.kind === 'install')
-
   const setBusy = (id: string, busy: boolean) => {
     setPending(previous => {
       const next = new Set(previous)
@@ -217,6 +213,7 @@ export default function Models({
       const switchFrom = activeOther(recipe.id)?.recipe_id ?? (own?.active ? recipe.id : undefined)
       setConfirm({ recipe, preflight, switchFrom })
       setLicence(false)
+      setTerritoryEligibility(false)
       setActivate(true)
       setPlacement('local')
       setPeerPreflight(null)
@@ -254,15 +251,16 @@ export default function Models({
     confirm &&
     run(confirm.recipe.id, async () => {
       const recipe = confirm.recipe
+      if (!installConfirmationsComplete(recipe, licence, territoryEligibility)) return
       // The picker is only ever shown with a peer in hand; without one there
       // is nothing to delegate to, and quietly installing here instead would
       // not be what was asked for.
       if (placement === 'peer' && !peer) return
-      const body = JSON.stringify({
-        confirmed: true,
-        accept_licence: true,
-        activate: switchFromFor(placement) ? activate : true,
-      })
+      const body = JSON.stringify(installRequest(
+        licence,
+        territoryEligibility,
+        switchFromFor(placement) ? activate : true,
+      ))
       if (placement === 'peer' && peer) {
         await api<{ job?: Job }>(
           `/api/v1/peers/${encodeURIComponent(peer.id)}/models/${encodeURIComponent(recipe.id)}/install`,
@@ -685,7 +683,9 @@ export default function Models({
           const machine = onPeer && peer ? peer.name : 'This Spark'
           const verb = verbFor(recipe, placement)
           const switchFrom = switchFromFor(placement)
-          const licenceAlready = onPeer ? Boolean(peerPreflight?.licence_accepted) : licenceAccepted(recipe)
+          const licences = licenceArtifacts(recipe)
+          const territoryLabel = territoryEligibilityLabel(recipe)
+          const confirmationsComplete = installConfirmationsComplete(recipe, licence, territoryEligibility)
           // An update has a version already installed on the target machine
           // to name. Only this Spark's disk is readable from this console, so
           // a delegated update states the versions and leaves that Spark's
@@ -915,22 +915,49 @@ export default function Models({
                         : `${machine} downloads and serves this model. What this Spark is serving does not change.`}
                     </p>
                   )}
-                  <a href={recipe.artifacts[0].licence_url} target="_blank" rel="noreferrer">
-                    Read the {recipe.artifacts[0].licence} licence ↗
-                  </a>
-                  {licenceAlready ? (
-                    <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
-                      {onPeer
-                        ? `Licence already accepted on ${machine}.`
-                        : 'Licence already accepted with the first install of this model.'}
-                    </p>
-                  ) : (
-                    <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <input type="checkbox" checked={licence} onChange={event => setLicence(event.target.checked)} />
-                      I accept the model licence
-                    </label>
+                  {licences.length > 0 && (
+                    <div className="licence-details">
+                      {licences.map(artifact => (
+                        <section className="licence-detail" key={`${artifact.role}:${artifact.repository}`}>
+                          {artifact.licence && <p className="licence-name">{artifact.licence}</p>}
+                          {(artifact.licence_territory_exclusions?.length ?? 0) > 0 && (
+                            <>
+                              <p className="licence-copy">This licence does not grant rights in these territories:</p>
+                              <ul className="territory-list">
+                                {artifact.licence_territory_exclusions?.map(territory => (
+                                  <li key={territory}>{territory}</li>
+                                ))}
+                              </ul>
+                            </>
+                          )}
+                          {artifact.licence_url && (
+                            <div className="licence-links">
+                              <a href={artifact.licence_url} target="_blank" rel="noreferrer">Read the licence ↗</a>
+                            </div>
+                          )}
+                        </section>
+                      ))}
+                    </div>
                   )}
-                  {foot(licenceAlready || licence)}
+                  <div className="licence-consents">
+                    {licences.length > 0 && (
+                      <label className="confirm-check">
+                        <input type="checkbox" checked={licence} onChange={event => setLicence(event.target.checked)} />
+                        <span>I accept the model licence</span>
+                      </label>
+                    )}
+                    {territoryLabel && (
+                      <label className="confirm-check">
+                        <input
+                          type="checkbox"
+                          checked={territoryEligibility}
+                          onChange={event => setTerritoryEligibility(event.target.checked)}
+                        />
+                        <span>{territoryLabel}</span>
+                      </label>
+                    )}
+                  </div>
+                  {foot(confirmationsComplete)}
                 </>
               ) : shown ? (
                 <>
