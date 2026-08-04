@@ -242,6 +242,9 @@ CREATE TABLE IF NOT EXISTS generations (
   error TEXT NOT NULL DEFAULT '',
   output_path TEXT NOT NULL DEFAULT '',
   bytes INTEGER NOT NULL DEFAULT 0,
+  progress_value INTEGER NOT NULL DEFAULT 0,
+  progress_max INTEGER NOT NULL DEFAULT 0,
+  progress_phase TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   started_at TEXT NOT NULL DEFAULT '',
   finished_at TEXT NOT NULL DEFAULT ''
@@ -249,7 +252,10 @@ CREATE TABLE IF NOT EXISTS generations (
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
-	return s.migratePeersSingleton()
+	if err := s.migratePeersSingleton(); err != nil {
+		return err
+	}
+	return s.migrateGenerationProgress()
 }
 
 // migratePeersSingleton brings a database created before this column up to
@@ -296,6 +302,45 @@ func (s *Store) migratePeersSingleton() error {
 	}
 	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS peers_singleton ON peers(singleton)`); err != nil {
 		return fmt.Errorf("constrain peers to a single row: %w", err)
+	}
+	return nil
+}
+
+// migrateGenerationProgress keeps the progress bridge additive for databases
+// created before these columns existed. Older binaries ignore extra SQLite
+// columns, so a manager rollback can still read every generation row.
+func (s *Store) migrateGenerationProgress() error {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info('generations')`)
+	if err != nil {
+		return fmt.Errorf("inspect generations table: %w", err)
+	}
+	present := map[string]bool{}
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			rows.Close()
+			return err
+		}
+		present[column] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "progress_value", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "progress_max", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "progress_phase", definition: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if present[column.name] {
+			continue
+		}
+		if _, err := s.db.Exec(`ALTER TABLE generations ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
+			return fmt.Errorf("add generations.%s: %w", column.name, err)
+		}
 	}
 	return nil
 }
@@ -996,19 +1041,22 @@ type Generation struct {
 	Error     string `json:"error,omitempty"`
 	// OutputPath is the file on this machine. It is absent until the
 	// generation finishes and is never a path outside the data directory.
-	OutputPath string `json:"output_path,omitempty"`
-	Bytes      int64  `json:"bytes,omitempty"`
-	CreatedAt  string `json:"created_at"`
-	StartedAt  string `json:"started_at,omitempty"`
-	FinishedAt string `json:"finished_at,omitempty"`
+	OutputPath    string `json:"output_path,omitempty"`
+	Bytes         int64  `json:"bytes,omitempty"`
+	ProgressValue int64  `json:"progress_value,omitempty"`
+	ProgressMax   int64  `json:"progress_max,omitempty"`
+	ProgressPhase string `json:"progress_phase,omitempty"`
+	CreatedAt     string `json:"created_at"`
+	StartedAt     string `json:"started_at,omitempty"`
+	FinishedAt    string `json:"finished_at,omitempty"`
 }
 
-const generationColumns = `id,recipe_id,mode,prompt,blocks,short_edge,width,height,frames,seed,status,error,output_path,bytes,created_at,started_at,finished_at`
+const generationColumns = `id,recipe_id,mode,prompt,blocks,short_edge,width,height,frames,seed,status,error,output_path,bytes,progress_value,progress_max,progress_phase,created_at,started_at,finished_at`
 
 func scanGeneration(row interface{ Scan(...any) error }) (Generation, error) {
 	var g Generation
 	err := row.Scan(&g.ID, &g.RecipeID, &g.Mode, &g.Prompt, &g.Blocks, &g.ShortEdge, &g.Width, &g.Height, &g.Frames, &g.Seed,
-		&g.Status, &g.Error, &g.OutputPath, &g.Bytes, &g.CreatedAt, &g.StartedAt, &g.FinishedAt)
+		&g.Status, &g.Error, &g.OutputPath, &g.Bytes, &g.ProgressValue, &g.ProgressMax, &g.ProgressPhase, &g.CreatedAt, &g.StartedAt, &g.FinishedAt)
 	return g, err
 }
 
@@ -1023,9 +1071,9 @@ func (s *Store) CreateGeneration(ctx context.Context, g Generation) (Generation,
 	g.ID = id
 	g.Status = "queued"
 	g.CreatedAt = now()
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO generations(`+generationColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO generations(`+generationColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		g.ID, g.RecipeID, g.Mode, g.Prompt, g.Blocks, g.ShortEdge, g.Width, g.Height, g.Frames, g.Seed,
-		g.Status, "", "", 0, g.CreatedAt, "", ""); err != nil {
+		g.Status, "", "", 0, 0, 0, "", g.CreatedAt, "", ""); err != nil {
 		return Generation{}, err
 	}
 	return g, nil
@@ -1066,6 +1114,24 @@ func (s *Store) Generations(ctx context.Context, limit int) ([]Generation, error
 // picked up by a worker that was already holding its id.
 func (s *Store) StartGeneration(ctx context.Context, id string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE generations SET status='running', started_at=? WHERE id=? AND status='queued'`, now(), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+// UpdateGenerationProgress persists only values ComfyUI actually reported.
+// max zero clears determinate progress for a newly executing node; it never
+// means zero percent. The row must still be running, so a late websocket event
+// cannot rewrite a generation after /history made it terminal.
+func (s *Store) UpdateGenerationProgress(ctx context.Context, id string, value, max int64, phase string) error {
+	if value < 0 || max < 0 || (max == 0 && value != 0) || (max > 0 && value > max) {
+		return errors.New("generation progress is outside its reported range")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE generations SET progress_value=?, progress_max=?, progress_phase=? WHERE id=? AND status='running'`, value, max, phase, id)
 	if err != nil {
 		return err
 	}

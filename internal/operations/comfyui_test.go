@@ -3,12 +3,17 @@ package operations
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -392,5 +397,186 @@ func TestHistoryCollectsOnlyOutputTypeFiles(t *testing.T) {
 	}
 	if !entry.Present || !entry.Completed || strings.Join(entry.Outputs, ",") != "clip.mp4" {
 		t.Fatalf("entry=%#v", entry)
+	}
+}
+
+func TestComfyUIProgressParsingUsesPromptScopedEventShapes(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		message string
+		want    GenerationStepProgress
+		ok      bool
+	}{
+		{
+			name:    "executing node",
+			message: `{"type":"executing","data":{"node":"14","display_node":"14","prompt_id":"p1"}}`,
+			want:    GenerationStepProgress{Node: "14"}, ok: true,
+		},
+		{
+			name:    "sampler progress",
+			message: `{"type":"progress","data":{"value":7,"max":20,"prompt_id":"p1","node":"14"}}`,
+			want:    GenerationStepProgress{Value: 7, Max: 20, Node: "14"}, ok: true,
+		},
+		{
+			name:    "different prompt",
+			message: `{"type":"progress","data":{"value":8,"max":20,"prompt_id":"p2","node":"14"}}`,
+		},
+		{
+			name:    "execution start is not progress",
+			message: `{"type":"execution_start","data":{"prompt_id":"p1"}}`,
+		},
+		{
+			name:    "execution success is not an outcome",
+			message: `{"type":"execution_success","data":{"prompt_id":"p1","timestamp":1754301600000}}`,
+		},
+		{
+			name:    "execution error is not an outcome",
+			message: `{"type":"execution_error","data":{"prompt_id":"p1","node_id":"14","node_type":"SamplerCustomAdvanced","exception_message":"failed"}}`,
+		},
+		{
+			name:    "binary preview is ignored",
+			message: "\x00\x01preview",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := parseComfyUIProgress([]byte(test.message), "p1")
+			if ok != test.ok || got != test.want {
+				t.Fatalf("progress=%#v ok=%t, want %#v ok=%t", got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+type scriptedProgressSocket struct {
+	mu       sync.Mutex
+	messages [][]byte
+	closed   bool
+}
+
+func (s *scriptedProgressSocket) Receive() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.messages) == 0 {
+		return nil, io.EOF
+	}
+	message := s.messages[0]
+	s.messages = s.messages[1:]
+	return message, nil
+}
+
+func (s *scriptedProgressSocket) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	return nil
+}
+
+func holdProgressSeams(t *testing.T) {
+	t.Helper()
+	previousDial := dialComfyUIProgress
+	previousReconnect := GenerationProgressReconnectInterval
+	t.Cleanup(func() {
+		dialComfyUIProgress = previousDial
+		GenerationProgressReconnectInterval = previousReconnect
+	})
+}
+
+func TestComfyUIProgressReconnectsAfterTheSocketDrops(t *testing.T) {
+	holdProgressSeams(t)
+	GenerationProgressReconnectInterval = time.Millisecond
+	first := &scriptedProgressSocket{messages: [][]byte{
+		[]byte(`{"type":"progress","data":{"value":1,"max":20,"prompt_id":"p1","node":"14"}}`),
+	}}
+	second := &scriptedProgressSocket{messages: [][]byte{
+		[]byte(`{"type":"progress","data":{"value":2,"max":20,"prompt_id":"p1","node":"14"}}`),
+	}}
+	var dials atomic.Int32
+	dialComfyUIProgress = func(_ context.Context, endpoint, _ string) (comfyUIProgressSocket, error) {
+		if !strings.Contains(endpoint, "/ws?clientId=basement-test") {
+			t.Errorf("endpoint=%q", endpoint)
+		}
+		if dials.Add(1) == 1 {
+			return first, nil
+		}
+		return second, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	updates := make(chan GenerationStepProgress, 4)
+	done := make(chan struct{})
+	go func() {
+		NewComfyUIClient("http://127.0.0.1:8188").watchProgress(ctx, "basement-test", "p1", func(step GenerationStepProgress) error {
+			updates <- step
+			return nil
+		})
+		close(done)
+	}()
+	for _, want := range []int64{1, 2} {
+		select {
+		case got := <-updates:
+			if got.Value != want || got.Max != 20 {
+				t.Fatalf("progress=%#v, want value %d of 20", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("progress value %d did not arrive", want)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("progress watcher did not stop")
+	}
+	if dials.Load() < 2 {
+		t.Fatalf("dials=%d, want a reconnect", dials.Load())
+	}
+}
+
+func TestFailingProgressSocketDoesNotFailTheGeneration(t *testing.T) {
+	holdProgressSeams(t)
+	previousPoll := GenerationPollInterval
+	t.Cleanup(func() { GenerationPollInterval = previousPoll })
+	GenerationPollInterval = time.Millisecond
+	GenerationProgressReconnectInterval = time.Millisecond
+	var dials atomic.Int32
+	dialComfyUIProgress = func(context.Context, string, string) (comfyUIProgressSocket, error) {
+		dials.Add(1)
+		return nil, errors.New("socket unavailable")
+	}
+
+	outputRoot := t.TempDir()
+	var polls atomic.Int32
+	client := &ComfyUIClient{baseURL: "http://runtime.test", http: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body := "{}"
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == "/prompt":
+			body = `{"prompt_id":"p1"}`
+		case request.Method == http.MethodGet && request.URL.Path == "/queue":
+			body = `{"queue_running":[],"queue_pending":[]}`
+		case request.Method == http.MethodGet && request.URL.Path == "/history/p1":
+			if polls.Add(1) > 10 {
+				if err := os.WriteFile(filepath.Join(outputRoot, "clip.mp4"), []byte("video bytes"), 0o640); err != nil {
+					return nil, err
+				}
+				body = `{"p1":{"status":{"status_str":"success","completed":true,"messages":[]},"outputs":{"6":{"gifs":[{"filename":"clip.mp4","subfolder":"","type":"output"}]}}}}`
+			}
+		default:
+			return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})}}
+	outcome, err := RunGeneration(
+		context.Background(), client, []byte(`{"1":{"class_type":"Test"}}`),
+		outputRoot, filepath.Join(t.TempDir(), "generation"), time.Second,
+		func(GenerationProgressUpdate) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("generation failed with its optional socket: %v", err)
+	}
+	if len(outcome.Files) != 1 || outcome.Bytes == 0 {
+		t.Fatalf("outcome=%#v", outcome)
+	}
+	if dials.Load() == 0 {
+		t.Fatal("the failing progress socket was not attempted")
 	}
 }

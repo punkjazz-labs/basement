@@ -179,6 +179,7 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	// on the owner's own machine that produces files on it.
 	mux.HandleFunc("/api/v1/generate", server.withReadAuth(server.generateHandler))
 	mux.HandleFunc("/api/v1/generations", server.withReadAuth(server.listGenerations))
+	mux.HandleFunc("/api/v1/generations/events", server.withReadAuth(server.generationEvents))
 	mux.HandleFunc("/api/v1/generations/", server.withReadAuth(server.generationAction))
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
 	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))

@@ -31,6 +31,49 @@ function RunningElapsed({ generation }: { generation: Generation }) {
   return <span>Elapsed {elapsed === null ? '0:00' : formatElapsed(elapsed)}</span>
 }
 
+export function GenerationProgress({ generation }: { generation: Generation }) {
+  const value = generation.progress_value
+  const max = generation.progress_max
+  // The runtime reports which graph node is working, as its id. That is an
+  // internal number with no meaning to anyone reading this screen, so it is
+  // recorded but not shown; the bar is what says how far along this is.
+  const phase = 'Generating'
+  const determinate = typeof value === 'number' && typeof max === 'number'
+    && Number.isFinite(value) && Number.isFinite(max) && value >= 0 && max > 0 && value <= max
+  if (!determinate) {
+    return (
+      <div className="gen-working" role="status">
+        <span className="sdot busy" aria-hidden="true" />
+        <span>{phase}</span>
+        <RunningElapsed generation={generation} />
+      </div>
+    )
+  }
+  const percent = value / max * 100
+  return (
+    <div className="gen-progress" role="status">
+      <div className="gen-progress-head">
+        <span>{phase}</span>
+        <RunningElapsed generation={generation} />
+      </div>
+      <div
+        className="gen-progress-track"
+        role="progressbar"
+        aria-label="Generation progress"
+        aria-valuemin={0}
+        aria-valuemax={max}
+        aria-valuenow={value}
+      >
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <div className="gen-progress-count">
+        <span>{value} of {max}</span>
+        <span>{Math.round(percent)}%</span>
+      </div>
+    </div>
+  )
+}
+
 // The file endpoint deliberately says attachment. Fetching it through the
 // authenticated helper and giving the resulting Blob its own URL is what
 // makes local playback possible without exposing the runtime or a host path.
@@ -134,11 +177,7 @@ function GenerationCard({ generation, recipe, busy, selected, onSelect, onCancel
       </div>
 
       {generation.status === 'running' && (
-        <div className="gen-working" role="status">
-          <span className="sdot busy" aria-hidden="true" />
-          <span>Generating</span>
-          <RunningElapsed generation={generation} />
-        </div>
+        <GenerationProgress generation={generation} />
       )}
       {generation.status === 'queued' && (
         <div className="gen-working" role="status">
@@ -183,6 +222,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   const [submitting, setSubmitting] = useState(false)
   const [busyID, setBusyID] = useState('')
   const [selectedVideoID, setSelectedVideoID] = useState('')
+  const [streamAvailable, setStreamAvailable] = useState(true)
 
   useEffect(() => {
     const preferred = sizes[1] ?? sizes[0]
@@ -212,6 +252,31 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   }, [loadGenerations])
 
   useEffect(() => {
+    if (typeof EventSource === 'undefined') {
+      setStreamAvailable(false)
+      return
+    }
+    const stream = new EventSource('/api/v1/generations/events')
+    stream.onopen = () => setStreamAvailable(true)
+    stream.onerror = () => setStreamAvailable(false)
+    const receive = (event: Event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as { generations?: Generation[] }
+        if (!Array.isArray(payload.generations)) return
+        setGenerations([...payload.generations].sort((left, right) => right.created_at.localeCompare(left.created_at)))
+        setLoadError('')
+      } catch {
+        // A later valid event or the polling fallback repairs the view.
+      }
+    }
+    stream.addEventListener('generation', receive)
+    return () => {
+      stream.removeEventListener('generation', receive)
+      stream.close()
+    }
+  }, [])
+
+  useEffect(() => {
     setSelectedVideoID(current => {
       if (generations.some(generation => generation.id === current && generation.status === 'completed')) {
         return current
@@ -222,7 +287,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
 
   const hasActive = generations.some(generation => generationActive(generation.status))
   useEffect(() => {
-    if (!hasActive) return
+    if (!hasActive && streamAvailable) return
     let cancelled = false
     const poll = () => {
       if (document.hidden || cancelled) return
@@ -233,7 +298,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
       cancelled = true
       clearInterval(timer)
     }
-  }, [hasActive, loadGenerations])
+  }, [hasActive, loadGenerations, streamAvailable])
 
   if (!config) return null
 

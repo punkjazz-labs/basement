@@ -145,6 +145,9 @@ export interface Generation {
   started_at?: string
   finished_at?: string
   queue_position?: number
+  progress_value?: number
+  progress_max?: number
+  progress_phase?: string
   file_url?: string
 }
 

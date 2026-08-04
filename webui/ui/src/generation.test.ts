@@ -1,9 +1,12 @@
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
   canvasOptions, durationOptions, generationElapsedSeconds, generationState, generationTerminal,
   type CanvasOption,
 } from './generation'
 import type { Generation, MediaGenerationConfig } from './api'
+import { GenerationProgress } from './views/Generate'
 
 const config = (overrides: Partial<MediaGenerationConfig> = {}): MediaGenerationConfig => ({
   modes: ['text_to_video'],
@@ -102,5 +105,43 @@ describe('generation state formatting', () => {
       created_at: '2026-08-04T10:00:00Z', started_at: '2026-08-04T10:01:00Z',
     } satisfies Generation
     expect(generationElapsedSeconds(running, Date.parse('2026-08-04T10:03:30Z'))).toBe(150)
+  })
+})
+
+describe('generation progress rendering', () => {
+  const running = (progress: Partial<Generation> = {}): Generation => ({
+    id: 'gen-1', model_id: 'media', mode: 'text_to_video', prompt: 'fog', blocks: 1,
+    short_edge: 768, width: 1152, height: 768, frames: 22, seed: 1, status: 'running',
+    created_at: '2026-08-04T10:00:00Z', started_at: '2026-08-04T10:01:00Z',
+    ...progress,
+  })
+
+  it('renders ComfyUI step counts as determinate progress', () => {
+    const markup = renderToStaticMarkup(createElement(GenerationProgress, {
+      generation: running({ progress_value: 7, progress_max: 20, progress_phase: '14' }),
+    }))
+    expect(markup).toContain('role="progressbar"')
+    expect(markup).toContain('aria-valuenow="7"')
+    expect(markup).toContain('aria-valuemax="20"')
+    expect(markup).toContain('width:35%')
+    // The runtime's node id is recorded but deliberately not shown: it means
+    // nothing to the person reading this screen.
+    expect(markup).not.toContain('14')
+    expect(markup).toContain('Generating')
+    expect(markup).toContain('7 of 20')
+    expect(markup).toContain('35%')
+    expect(markup).not.toContain('sdot busy')
+  })
+
+  it('keeps the indeterminate state when ComfyUI reported no maximum', () => {
+    const markup = renderToStaticMarkup(createElement(GenerationProgress, {
+      generation: running({ progress_value: 0, progress_max: 0, progress_phase: '14' }),
+    }))
+    expect(markup).not.toContain('role="progressbar"')
+    expect(markup).toContain('sdot busy')
+    expect(markup).not.toContain('Node')
+    expect(markup).toContain('Generating')
+    expect(markup).toContain('Elapsed')
+    expect(markup).not.toContain('%')
   })
 })
