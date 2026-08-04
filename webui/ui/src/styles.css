@@ -1,18 +1,18 @@
 /* basement console — dark only, site palette (basement.punkjazz.ai).
-   Near-black green ground, cream ink, hairlines, dense 13px scale.
+   Near-black slate ground, cream ink, hairlines, dense 13px scale.
    Color roles are strict: orange = primary actions + the wordmark,
    NVIDIA green = a model is serving (nothing else, ever), forest = the
    RECOMMENDED stamp, amber = warning, red = failure. Measured numbers
    are receipts and stay quiet. */
 
 :root {
-  --bg: #12180f;
-  --surface: #171e13;
-  --surface-2: #202818;
-  --panel: #151b11;
-  --hover: #1b2316;
-  --line: #2a331f;
-  --line-strong: #3c4730;
+  --bg: #131519;
+  --surface: #181a1f;
+  --surface-2: #22242b;
+  --panel: #16181d;
+  --hover: #1d1f25;
+  --line: #2c2f37;
+  --line-strong: #40444f;
   --ink: #efe8d2;
   --muted: #a9ab93;
   --faint: #75795f;
