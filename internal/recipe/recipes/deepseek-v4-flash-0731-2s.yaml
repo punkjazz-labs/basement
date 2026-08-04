@@ -112,7 +112,11 @@ service:
     attention_backend: ""
     moe_backend: auto
     linear_backend: ""
-    gpu_memory_utilization: "0.85"
+    # 0.80, not the pack's usual 0.85: on unified memory the manager, Docker
+    # and the OS live inside the same pool vLLM budgets from, and at 0.85 the
+    # first long generation pushed the driver out of memory on real hardware
+    # (NVRM NV_ERR_NO_MEMORY mid-decode with this model serving alone).
+    gpu_memory_utilization: "0.80"
     max_model_len: 131072
     max_num_seqs: 8
     max_num_batched_tokens: 0
