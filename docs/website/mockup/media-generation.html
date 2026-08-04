@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>basement console — Generate (mockup)</title>
+<style>
+/* basement console — dark only, site palette (basement.punkjazz.ai).
+   Near-black slate ground, cream ink, hairlines, dense 13px scale.
+   Color roles are strict: orange = primary actions + the wordmark,
+   NVIDIA green = a model is serving (nothing else, ever), forest = the
+   RECOMMENDED stamp, amber = warning, red = failure. Measured numbers
+   are receipts and stay quiet.
+
+   This copy is embedded verbatim from webui/ui/src/styles.css so the
+   mockup renders with the console's exact tokens. Generate-specific
+   additions live in the block marked below. */
+
+:root {
+  --bg: #131519;
+  --surface: #181a1f;
+  --surface-2: #22242b;
+  --panel: #16181d;
+  --hover: #1d1f25;
+  --line: #2c2f37;
+  --line-strong: #40444f;
+  --ink: #efe8d2;
+  --muted: #a9ab93;
+  --faint: #75795f;
+  --accent: #dd3c10;
+  --accent-ink: #fff4e8;
+  --accent-deep: #f2703c;
+  --live: #76b900;
+  --chip: #1d4733;
+  --chip-line: #2f5f47;
+  --warn: #d9a12f;
+  --fail: #e0644e;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", Roboto, sans-serif;
+  --radius: 8px;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 13.5px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+#root { min-height: 100dvh; }
+
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+button { font: inherit; cursor: pointer; }
+h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+a { color: var(--ink); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+.skip-link {
+  position: absolute; left: -9999px; top: 0; z-index: 100;
+  background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 0 0 8px 0;
+}
+.skip-link:focus { left: 0; }
+
+.shell { display: grid; grid-template-columns: 192px 1fr; min-height: 100dvh; }
+
+.side {
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+  display: flex; flex-direction: column;
+  padding: 16px 8px 12px;
+  position: sticky; top: 0; height: 100dvh;
+}
+.side-mark { display: flex; align-items: center; gap: 8px; padding: 2px 10px 16px; text-decoration: none; color: var(--accent); }
+.side-mark strong { font-size: 13.5px; font-weight: 650; letter-spacing: -0.01em; }
+
+.side nav { display: grid; gap: 1px; }
+.side nav button {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: 0; color: var(--muted); text-align: left;
+  padding: 5px 10px; border-radius: 6px; font-size: 12.5px; font-weight: 450;
+}
+.side nav button:hover { color: var(--ink); background: var(--surface-2); }
+.side nav button[aria-current='true'] { color: var(--ink); background: var(--surface-2); font-weight: 550; }
+.side nav .badge { margin-left: auto; font-size: 11px; font-family: var(--mono); color: var(--warn); }
+
+.side-foot {
+  margin-top: auto; padding: 10px 10px 0; display: grid; gap: 3px;
+  font-size: 11px; color: var(--faint); line-height: 1.6;
+}
+.foot-live { display: flex; align-items: center; gap: 6px; color: var(--muted); font-weight: 500; min-width: 0; flex-wrap: wrap; row-gap: 1px; }
+.foot-live span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.foot-live .led { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
+.foot-live.serving .led { background: var(--live); animation: breathe 2.6s ease-in-out infinite; }
+.foot-live.working .led { background: var(--warn); animation: breathe 1.2s ease-in-out infinite; }
+.foot-live.failed .led { background: var(--fail); }
+.foot-live .tps { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); flex-basis: 100%; padding-left: 12px; }
+.side-update {
+  display: inline-block; text-decoration: none; font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent-deep); border-radius: 999px; padding: 2px 9px; width: fit-content; font-weight: 550;
+}
+@keyframes breathe { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .foot-live .led { animation: none !important; }
+}
+
+.content { min-width: 0; display: flex; flex-direction: column; }
+.content-head { padding: 26px 36px 0; max-width: 1032px; }
+.content-head .head-row { display: flex; align-items: center; gap: 12px; }
+.content-head h1 { font-size: 16px; }
+.content-head .desc { color: var(--muted); font-size: 12.5px; margin: 3px 0 0; }
+.offline {
+  margin-left: auto; font-size: 11.5px; font-weight: 550; color: var(--fail);
+  border: 1px solid color-mix(in srgb, var(--fail) 40%, var(--line));
+  border-radius: 999px; padding: 3px 10px;
+}
+
+main { flex: 1; width: 100%; max-width: 1032px; padding: 18px 36px 80px; }
+
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px 20px; box-shadow: var(--shadow);
+}
+.stack { display: grid; gap: 14px; }
+.kicker { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 4px; font-weight: 600; }
+.muted { color: var(--muted); }
+.faint { color: var(--faint); }
+.error-text { color: var(--fail); }
+.empty {
+  color: var(--faint); border: 1px dashed var(--line-strong); border-radius: 10px;
+  padding: 30px; text-align: center;
+}
+.empty p { margin: 0; }
+.empty-actions { display: flex; gap: 10px; justify-content: center; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+
+button.primary {
+  background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent); border-radius: 999px;
+  padding: 5px 16px; font-weight: 650; font-size: 12.5px;
+}
+button.primary:hover { filter: brightness(1.05); }
+button.primary:disabled { background: var(--surface-2); color: var(--faint); border-color: var(--line-strong); cursor: default; filter: none; }
+button.ghost {
+  background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink);
+  border-radius: 999px; padding: 5px 16px; font-weight: 500; font-size: 12.5px;
+}
+button.ghost:hover { border-color: var(--faint); }
+button.ghost:disabled { opacity: 0.4; cursor: default; }
+button.quiet { background: none; border: 0; color: var(--muted); padding: 5px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 500; }
+button.quiet:hover { color: var(--ink); background: var(--surface-2); }
+button.quiet:disabled { opacity: 0.4; cursor: default; }
+
+input[type='text'], input[type='password'], textarea {
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong);
+  border-radius: 7px; padding: 8px 11px; font: inherit;
+}
+
+.section-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.section-head h2 { font-size: 14px; }
+.section-head .spacer { flex: 1; }
+
+.tag {
+  font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--ink); background: var(--chip); border: 1px solid var(--chip-line);
+  border-radius: 4px; padding: 1px 5px; white-space: nowrap;
+}
+.tag.quiet { color: var(--muted); background: var(--surface-2); border-color: var(--line-strong); }
+
+.facts { display: grid; grid-template-columns: 110px 1fr; row-gap: 7px; column-gap: 12px; font-size: 12.5px; margin: 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.facts dd code { background: var(--surface-2); padding: 1px 6px; border-radius: 5px; font-size: 11.5px; }
+
+.field { display: grid; gap: 4px; }
+.field span { font-size: 12px; color: var(--muted); }
+.field input { width: 100%; }
+
+/* ---- Dialogs ---- */
+dialog, .dialog-surface {
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong);
+  border-radius: 12px; box-shadow: 0 20px 60px rgb(10 14 8 / 0.2); padding: 0; max-width: 560px; width: 100%;
+  overflow-x: hidden;
+}
+.dialog-pad { padding: 20px 24px; display: grid; gap: 14px; }
+.dialog-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.dialog-head h2 { font-size: 17px; }
+.dialog-close { background: none; border: 0; color: var(--faint); font-size: 20px; line-height: 1; padding: 4px; }
+.dialog-close:hover { color: var(--ink); }
+.dialog-foot { display: flex; justify-content: end; gap: 10px; align-items: center; }
+.dialog-foot button { white-space: nowrap; }
+
+.confirm-check { display: flex; gap: 9px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+.confirm-check input { margin-top: 2px; accent-color: var(--accent); }
+.confirm-check span { display: block; font-weight: 500; }
+.confirm-check small { display: block; color: var(--faint); font-weight: 400; margin-top: 1px; }
+
+/* ---- Playground (composer idiom, reused by Generate's prompt field) ---- */
+.play-head img, .play-head .glyph { border-radius: 8px; flex: none; }
+.play-head strong { font-size: 14px; font-weight: 600; display: block; }
+.play-head .faint { font-size: 12px; }
+.composer {
+  display: flex; gap: 10px; align-items: flex-end;
+  border: 1px solid var(--line-strong); background: var(--surface);
+  border-radius: 16px; padding: 8px 8px 8px 16px;
+}
+.composer:focus-within { border-color: var(--faint); }
+.composer textarea {
+  flex: 1; resize: none; border: 0; background: none; outline: none;
+  min-height: 24px; max-height: 160px; padding: 5px 0;
+  font: inherit; font-size: 13.5px; color: var(--ink);
+}
+
+/* ---- Storage (row idiom, referenced for consistency) ---- */
+.storage-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.storage-row:last-child { border-bottom: 0; }
+.storage-row .grow { flex: 1; min-width: 140px; overflow-wrap: anywhere; }
+
+/* ---- Progress bar, lifted from the install/download dialog idiom ---- */
+.sub-progress { display: grid; gap: 4px; margin-top: 2px; }
+.sub-progress .stats { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; min-width: 0; overflow: hidden; }
+.sub-progress .stats span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sub-progress .stats .eta { color: var(--faint); flex: 0 1 auto; }
+.sub-progress .bar { height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.sub-progress .bar span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.sub-progress .nums { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sub-progress .bar span { transition: none; }
+}
+
+/* =========================================================================
+   Generate view — mockup additions, spec 11 (docs/plans/11-media-generation.md)
+   Same idiom as the rest of the console: cards, pills, facts dl, hairlines.
+   ========================================================================= */
+
+.gen-context { align-items: center; gap: 12px; }
+.gen-context .glyph {
+  width: 34px; height: 34px; border-radius: 9px; flex: none; display: grid; place-items: center;
+  background: var(--surface-2); border: 1px solid var(--line-strong); color: var(--muted);
+  font-family: var(--mono); font-weight: 700; font-size: 12px;
+}
+.gen-context .spacer { flex: 1; }
+
+/* Segmented pill choices, built from radios so the mockup is genuinely
+   clickable without a script: same visual language as the console's
+   existing snippet-language tabs and whole-row install-choice controls. */
+.pill-group { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill-group input { position: absolute; opacity: 0; width: 0; height: 0; }
+.pill-group label {
+  display: inline-flex; align-items: center; background: none; border: 1px solid var(--line);
+  color: var(--muted); border-radius: 999px; padding: 5px 13px; font-size: 12px; font-weight: 500; cursor: pointer;
+}
+.pill-group label:hover { border-color: var(--line-strong); }
+.pill-group label:has(input:checked) { color: var(--bg); background: var(--ink); border-color: var(--ink); font-weight: 600; }
+.pill-group label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.gen-form { display: grid; gap: 16px; }
+.gen-controls { display: grid; grid-template-columns: 1.3fr 1.3fr 1fr; gap: 20px; align-items: start; }
+.gen-controls .field span { margin-bottom: 6px; }
+.gen-controls .hint { display: block; margin-top: 7px; font-size: 11px; color: var(--faint); }
+
+/* Hidden unless "Image to video" is picked, using the same :has() trick the
+   console already relies on for install-choice selection. */
+.image-source {
+  display: none; gap: 10px; align-items: center; border: 1px dashed var(--line-strong);
+  border-radius: 10px; padding: 12px 14px; color: var(--faint); font-size: 12.5px;
+}
+.gen-form:has(#mode-image:checked) .image-source { display: flex; }
+.image-source svg { flex: none; color: var(--faint); }
+
+.gen-foot { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; padding-top: 2px; border-top: 1px solid var(--line); margin-top: 2px; }
+.gen-foot p { margin: 0; max-width: 60ch; }
+
+.queue-item { padding: 12px 0; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+.queue-item:last-of-type { border-bottom: 0; }
+.queue-item .qhead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.queue-item .qhead strong { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 56ch; }
+.queue-item .qmeta { color: var(--faint); font-size: 11.5px; }
+.queue-item .qstate { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.queue-item .qstate .spacer { flex: 1; }
+.queue-note { color: var(--faint); font-size: 11.5px; margin: 6px 0 0; }
+.sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); flex: none; }
+.sdot.busy { background: var(--warn); animation: breathe 1.2s ease-in-out infinite; }
+.sdot.wait { background: var(--faint); }
+
+.results-strip { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 10px; }
+.result-thumb {
+  flex: 0 0 92px; height: 92px; border-radius: 9px; border: 1px solid var(--line);
+  background: linear-gradient(160deg, var(--surface-2), var(--panel)); position: relative; cursor: pointer; overflow: hidden;
+}
+.result-thumb:hover { border-color: var(--line-strong); }
+.result-thumb.selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+.result-thumb .play { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); }
+.result-thumb .dur {
+  position: absolute; bottom: 4px; right: 5px; font-family: var(--mono); font-size: 9.5px;
+  background: rgb(0 0 0 / 0.55); color: #fff; padding: 1px 4px; border-radius: 4px;
+}
+
+.result-preview { display: grid; grid-template-columns: 240px 1fr; gap: 22px; margin-top: 16px; }
+.preview-frame {
+  aspect-ratio: 2 / 3; border-radius: 10px; border: 1px solid var(--line);
+  background: linear-gradient(160deg, var(--surface-2), var(--panel)); display: grid; place-items: center;
+  position: relative; color: var(--faint);
+}
+.preview-frame .tag { position: absolute; top: 8px; left: 8px; }
+.preview-frame .dur {
+  position: absolute; bottom: 8px; right: 10px; font-family: var(--mono); font-size: 11px;
+  color: var(--muted); background: rgb(0 0 0 / 0.4); padding: 2px 7px; border-radius: 6px;
+}
+.preview-body { display: grid; gap: 12px; align-content: start; min-width: 0; }
+.preview-body .facts dd { color: var(--ink); }
+.preview-body .prompt-text { font-size: 12.5px; color: var(--ink); margin: 0; overflow-wrap: anywhere; }
+.preview-actions { display: flex; gap: 10px; }
+
+.mockup-ribbon {
+  background: var(--panel); border-bottom: 1px solid var(--line); color: var(--faint);
+  font-family: var(--mono); font-size: 11px; text-align: center; padding: 6px 10px;
+}
+.mockup-note { color: var(--faint); font-size: 12px; margin: 0 0 14px; max-width: 62ch; }
+
+.licence-wrap { max-width: 560px; }
+.licence-wrap .territory-list { margin: 8px 0 0; padding-left: 18px; color: var(--ink); font-size: 12.5px; display: grid; gap: 3px; }
+.licence-wrap .licence-links { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; }
+.licence-wrap p { margin: 0; font-size: 12.5px; color: var(--muted); }
+.licence-wrap .licence-name { color: var(--ink); font-size: 14px; font-weight: 650; margin: 0; }
+
+@media (max-width: 900px) {
+  .gen-controls { grid-template-columns: 1fr; }
+  .result-preview { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="mockup-ribbon">Design mockup for owner review — Generate view, spec 11 (media-generation) — not shipped code</div>
+
+<div class="shell">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <aside class="side">
+    <a class="side-mark" href="#" aria-label="basement"><strong>basement</strong></a>
+    <nav aria-label="Console sections">
+      <button>Models</button>
+      <button>Roles</button>
+      <button>Playground</button>
+      <button aria-current="true">Generate</button>
+      <button>Connect</button>
+      <button>Monitor</button>
+      <button>Fleet</button>
+      <button>Storage</button>
+      <button>Activity</button>
+    </nav>
+    <div class="side-foot">
+      <div class="foot-live serving" role="status">
+        <i class="led" aria-hidden="true"></i>
+        <span>MiniMax H3</span>
+      </div>
+      <span>spark-head · 71.4 GB free</span>
+      <span>manager 0.14.2</span>
+    </div>
+  </aside>
+
+  <div class="content">
+    <header class="content-head">
+      <div class="head-row"><h1>Generate</h1></div>
+      <p class="desc">Create a video from a prompt on the model that is running.</p>
+    </header>
+
+    <main id="main">
+      <div class="stack">
+
+        <!-- Model context -->
+        <div class="section-head gen-context">
+          <div class="glyph">H3</div>
+          <div>
+            <strong style="font-size:14px; font-weight:600; display:block;">MiniMax H3</strong>
+            <div class="faint" style="font-size:12px;">Serving on this Spark · int8 weights</div>
+          </div>
+          <span class="spacer"></span>
+          <span class="tag quiet">video + audio</span>
+        </div>
+
+        <!-- Composer -->
+        <section class="card">
+          <div class="gen-form">
+            <div class="pill-group" role="radiogroup" aria-label="Mode">
+              <label>
+                <input type="radio" name="gen-mode" id="mode-text" checked>
+                Text to video
+              </label>
+              <label>
+                <input type="radio" name="gen-mode" id="mode-image">
+                Image to video
+              </label>
+            </div>
+
+            <div class="composer">
+              <textarea rows="2" aria-label="Prompt" placeholder="Describe the clip">A slow dolly shot through a foggy pine forest at dawn, shafts of light between the trees</textarea>
+            </div>
+
+            <div class="image-source">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5.5-5.5L9 17"/></svg>
+              <span>Drop a source image, or click to choose. Used to start the clip (image to video).</span>
+            </div>
+
+            <div class="gen-controls">
+              <div class="field">
+                <span>Size</span>
+                <div class="pill-group" role="radiogroup" aria-label="Size">
+                  <label><input type="radio" name="gen-size" id="size-1">768 × 768</label>
+                  <label><input type="radio" name="gen-size" id="size-2" checked>768 × 1152</label>
+                  <label><input type="radio" name="gen-size" id="size-3">544 × 960</label>
+                  <label><input type="radio" name="gen-size" id="size-4">768 × 1344</label>
+                </div>
+                <span class="hint">Up to 768px short edge, 1344px long edge, rounded to a multiple of 32.</span>
+              </div>
+              <div class="field">
+                <span>Duration</span>
+                <div class="pill-group" role="radiogroup" aria-label="Duration">
+                  <label><input type="radio" name="gen-duration" id="dur-1">~5s</label>
+                  <label><input type="radio" name="gen-duration" id="dur-2" checked>8s</label>
+                  <label><input type="radio" name="gen-duration" id="dur-3">~10s</label>
+                  <label><input type="radio" name="gen-duration" id="dur-4">~15s</label>
+                </div>
+                <span class="hint">Follows the model's frame grid: 17 frames per block, plus 5, at 24 fps.</span>
+              </div>
+              <div class="field">
+                <span>Seed (optional)</span>
+                <input type="text" placeholder="Generated automatically if left blank">
+              </div>
+            </div>
+
+            <div class="gen-foot">
+              <p class="faint">
+                Generation on a Spark takes minutes, not seconds. Community reports on Spark
+                hardware range from about 17 to 80 minutes per clip, depending on length and
+                size. Start it, then check back.
+              </p>
+              <button class="primary">Generate</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Queue / progress -->
+        <section class="card">
+          <div class="section-head" style="margin-bottom:2px;">
+            <h2>Queue</h2>
+          </div>
+
+          <div class="queue-item">
+            <div class="qhead">
+              <span class="sdot busy" aria-hidden="true"></span>
+              <strong>A slow dolly shot through a foggy pine forest at dawn, shafts of light between the trees</strong>
+            </div>
+            <div class="qmeta">Text to video · 768 × 1152 · 8s · 192 frames</div>
+            <div class="sub-progress">
+              <div class="stats">
+                <span>Generating · queue 1 of 2 · 41%</span>
+                <span class="eta">About 9 to 12 min remaining, estimate from this Spark's last 4 completed generations</span>
+              </div>
+              <div class="bar"><span style="width:41%"></span></div>
+              <div class="nums">Elapsed 6:58</div>
+            </div>
+            <div class="qstate">
+              <span class="spacer"></span>
+              <button class="quiet">Cancel</button>
+            </div>
+          </div>
+
+          <div class="queue-item">
+            <div class="qhead">
+              <span class="sdot wait" aria-hidden="true"></span>
+              <strong>Close-up of rain on a window, city lights blurred behind it, night</strong>
+            </div>
+            <div class="qmeta">Image to video · 768 × 768 · ~5s · 124 frames</div>
+            <div class="qstate muted">Queued · position 2 of 2, starts after the current generation finishes</div>
+          </div>
+
+          <p class="queue-note">
+            Before this Spark has completed a generation, a queued item shows elapsed time only.
+            A remaining-time estimate appears once one full generation has finished here.
+          </p>
+        </section>
+
+        <!-- Results -->
+        <section class="card">
+          <div class="section-head" style="margin-bottom:2px;">
+            <h2>Results</h2>
+            <span class="spacer"></span>
+            <span class="muted" style="font-size:12px;">Newest first · played from local disk only</span>
+          </div>
+
+          <div class="results-strip">
+            <div class="result-thumb selected" role="button" tabindex="0" aria-label="Foggy pine forest, selected">
+              <span class="play" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </span>
+              <span class="dur">8s</span>
+            </div>
+            <div class="result-thumb" role="button" tabindex="0" aria-label="Waves on black sand">
+              <span class="play" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </span>
+              <span class="dur">~5s</span>
+            </div>
+            <div class="result-thumb" role="button" tabindex="0" aria-label="Cat and a glass, slow motion">
+              <span class="play" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </span>
+              <span class="dur">~10s</span>
+            </div>
+            <div class="result-thumb" role="button" tabindex="0" aria-label="Clouds over a ridge, timelapse">
+              <span class="play" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </span>
+              <span class="dur">~15s</span>
+            </div>
+          </div>
+
+          <div class="result-preview">
+            <div class="preview-frame">
+              <span class="tag quiet">video + audio</span>
+              <svg width="30" height="30" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+              <span class="dur">8s · 768 × 1152</span>
+            </div>
+            <div class="preview-body">
+              <p class="prompt-text">"A slow dolly shot through a foggy pine forest at dawn, shafts of light between the trees"</p>
+              <dl class="facts">
+                <dt>Mode</dt><dd>Text to video</dd>
+                <dt>Size</dt><dd>768 × 1152</dd>
+                <dt>Duration</dt><dd>8s · 192 frames</dd>
+                <dt>Seed</dt><dd><code>481932</code></dd>
+                <dt>Generated in</dt><dd>17m 44s</dd>
+                <dt>Model</dt><dd>MiniMax H3 · int8 weights</dd>
+              </dl>
+              <div class="preview-actions">
+                <button class="ghost">Download</button>
+                <button class="quiet">Delete</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Reference: empty state, shown for completeness of the mockup -->
+        <section>
+          <p class="kicker" style="margin-bottom:8px;">Reference — empty state, no media model installed</p>
+          <div class="empty">
+            <p><strong>No media model is installed.</strong></p>
+            <div class="empty-actions">
+              <button class="ghost">Go to Models</button>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <div style="margin-top:40px; border-top:1px solid var(--line); padding-top:28px;">
+        <h2 style="font-size:15px; margin-bottom:6px;">Install flow: territory licence screen</h2>
+        <p class="mockup-note">
+          Fragment of the model install dialog for a territory-gated recipe (spec section 5.3).
+          Shown here as a static panel for review; in the console it opens from the same install
+          dialog used by every other model. Both boxes start unticked and neither carries
+          "recommended" styling; Install stays disabled until both are ticked.
+        </p>
+
+        <div class="licence-wrap">
+          <div class="dialog-surface">
+            <form class="dialog-pad">
+              <div class="dialog-head">
+                <div>
+                  <p class="kicker">Install model</p>
+                  <h2>MiniMax H3</h2>
+                </div>
+                <button type="button" class="dialog-close" aria-label="Close">×</button>
+              </div>
+
+              <p class="licence-name">MiniMax H3 Community License Agreement</p>
+
+              <p>This licence does not grant rights in these territories:</p>
+              <ul class="territory-list">
+                <li>European Union</li>
+                <li>United Kingdom</li>
+                <li>Republic of Korea</li>
+                <li>United States of America</li>
+              </ul>
+
+              <p>
+                Commercial products and services earning more than 20 million US dollars a year
+                in revenue need separate written authorization from MiniMax, and must display
+                "MiniMax H3" in their interface.
+              </p>
+
+              <div class="licence-links">
+                <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" target="_blank" rel="noreferrer">Read the licence ↗</a>
+                <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/QA-about-License.md" target="_blank" rel="noreferrer">Read MiniMax's licence Q&amp;A ↗</a>
+              </div>
+
+              <label class="confirm-check">
+                <input type="checkbox">
+                <span>I accept the model licence</span>
+              </label>
+
+              <label class="confirm-check">
+                <input type="checkbox">
+                <span>
+                  I confirm I am not located in the European Union, the United Kingdom, the
+                  Republic of Korea or the United States of America
+                </span>
+              </label>
+
+              <div class="dialog-foot">
+                <button type="button" class="ghost">Cancel</button>
+                <button type="button" class="primary" disabled>Install</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+</body>
+</html>
