@@ -49,3 +49,27 @@ Run these after the basic lifecycle passes, one machine at a time:
 For future multi-Spark qualification, capture the memory and disk receipt for every node. Deliberately constrain one node while leaving aggregate cluster capacity above the recipe total; preflight must still fail and identify the exact node. Do not promote multi-Spark support from aggregate-only evidence.
 
 Record performance separately from acceptance: cold-start time, prompt length, output tokens, tokens per second, idle and peak unified memory, GPU-visible free memory, planned runtime allocation, host reserve, peak storage, minimum disk headroom, and whether compilation cache was warm. Tuning changes require a new recipe version and another complete lifecycle run.
+
+## 2026-08-04: DeepSeek V4 Flash two-Spark qualification run
+
+Eight install attempts on the two EdgeXpert machines, each clearing a real
+layer. What now works, proven on hardware: the fabric preflight answers
+before any staging (verify_fabric passed as step zero on every attempt),
+persistent link-local addresses survive on both machines, NCCL rendezvous
+over the cable, synchronized 74 GiB weight loads per rank in under three
+minutes, drift rebuilds when a recipe changes its mounts or image, and the
+full install lifecycle to ready including the built-in inference check.
+
+What blocks acceptance: sustained generation dies with a driver-level
+NV_ERR_NO_MEMORY whose onset tracks sequence length, not the memory budget.
+It reproduced at 0.85 and 0.80 utilization and with breakable CUDA graphs
+disabled, always minutes into a long answer while short answers complete.
+This matches the reported sm_121 decode-kernel behavior where per-step
+allocations grow with the KV history. Upstream tracking: vllm-project/vllm
+issues 48054 (fixed by the v0.26.0 pin this recipe now carries) and 50773
+(open). A crashed engine also leaves its container in a state Docker still
+reports as running, so recovery needs a container restart, not a retry.
+
+Verdict: recipe stays candidate. Revisit when upstream ships a fix for the
+long-decode allocation growth; the recipe pin, cache mounts, fusion opt-out
+and cudagraph opt-out all stay, each documented in the recipe itself.
