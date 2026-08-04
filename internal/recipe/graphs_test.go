@@ -3,12 +3,18 @@ package recipe_test
 import (
 	"encoding/json"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/recipe/recipetest"
 )
+
+type apiGraphNode struct {
+	ClassType string         `json:"class_type"`
+	Inputs    map[string]any `json:"inputs"`
+}
 
 func TestRenderGraphSubstitutesTypedValues(t *testing.T) {
 	rendered, err := recipe.RenderGraph([]byte(recipetest.TextToVideoGraph), recipe.GraphInputs{
@@ -152,5 +158,122 @@ func TestShippedGraphsAreValidJSON(t *testing.T) {
 		if _, err := recipe.GraphTokens(raw); err != nil {
 			t.Fatalf("%s: %v", entry.Name(), err)
 		}
+	}
+}
+
+func TestMiniMaxH3GraphsRenderAsAPIPrompts(t *testing.T) {
+	// These are the node classes used by the converted workflows and present
+	// in the pinned ComfyUI v0.30.0 /object_info response. Keeping the set
+	// explicit catches a misspelled or frontend-only class before it ships.
+	objectInfoClasses := map[string]bool{
+		"BasicGuider":           true,
+		"BasicScheduler":        true,
+		"CLIPLoader":            true,
+		"CreateVideo":           true,
+		"KSamplerSelect":        true,
+		"LoadImage":             true,
+		"MiniMaxH3ImageToVideo": true,
+		"RandomNoise":           true,
+		"SamplerCustomAdvanced": true,
+		"SaveVideo":             true,
+		"UNETLoader":            true,
+		"VAEDecode":             true,
+		"VAEDecodeAudio":        true,
+		"VAELoader":             true,
+	}
+	tests := []struct {
+		name  string
+		mode  string
+		image string
+	}{
+		{"minimax-h3-t2v.json", recipe.ModeTextToVideo, ""},
+		{"minimax-h3-i2v.json", recipe.ModeImageToVideo, "source.png"},
+	}
+	for _, test := range tests {
+		t.Run(test.mode, func(t *testing.T) {
+			raw, err := recipe.Graph(test.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tokens, err := recipe.GraphTokens(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantTokens := recipe.RequiredGraphTokens(test.mode)
+			slices.Sort(wantTokens)
+			if !slices.Equal(tokens, wantTokens) {
+				t.Fatalf("tokens=%q, want %q", tokens, wantTokens)
+			}
+			hasImage := slices.Contains(tokens, recipe.GraphImageToken)
+			if hasImage != (test.mode == recipe.ModeImageToVideo) {
+				t.Fatalf("image token present=%t for %s", hasImage, test.mode)
+			}
+
+			rendered, err := recipe.RenderGraph(raw, recipe.GraphInputs{
+				Prompt: "a camera tracks a runner",
+				Seed:   42,
+				Frames: 124,
+				Width:  1344,
+				Height: 768,
+				Image:  test.image,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]apiGraphNode
+			if err := json.Unmarshal(rendered, &document); err != nil {
+				t.Fatalf("rendered graph is not valid JSON: %v", err)
+			}
+			if strings.Contains(string(rendered), "{{") {
+				t.Fatalf("a substitution token survived rendering: %s", rendered)
+			}
+			for id, node := range document {
+				if !objectInfoClasses[node.ClassType] {
+					t.Errorf("node %s has class_type %q absent from the pinned object_info", id, node.ClassType)
+				}
+			}
+		})
+	}
+}
+
+func TestMiniMaxH3GraphsKeepPinnedTemplateSettings(t *testing.T) {
+	for _, name := range []string{"minimax-h3-t2v.json", "minimax-h3-i2v.json"} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := recipe.Graph(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]apiGraphNode
+			if err := json.Unmarshal(raw, &document); err != nil {
+				t.Fatal(err)
+			}
+			checks := []struct {
+				node  string
+				input string
+				want  any
+			}{
+				{"6", "unet_name", "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+				{"6", "weight_dtype", "default"},
+				{"9", "scheduler", "simple"},
+				{"9", "steps", float64(20)},
+				{"9", "denoise", float64(1)},
+				{"11", "vae_name", "minimax_h3_video_vae_fp16.safetensors"},
+				{"13", "clip_name", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"},
+				{"13", "type", "minimax"},
+				{"13", "device", "default"},
+				{"17", "sampler_name", "res_multistep"},
+				{"24", "vae_name", "minimax_h3_audio_vae_fp32.safetensors"},
+				{"91", "fps", float64(24)},
+				{"91", "bit_depth", float64(8)},
+				{"92", "filename_prefix", "video/MiniMax_H3"},
+				{"92", "format", "auto"},
+				{"92", "codec", "auto"},
+			}
+			for _, check := range checks {
+				if got := document[check.node].Inputs[check.input]; got != check.want {
+					t.Errorf("node %s input %s=%#v, want %#v", check.node, check.input, got, check.want)
+				}
+			}
+		})
 	}
 }

@@ -26,5 +26,7 @@ missing `{{PROMPT}}` is rejected rather than shipped, so a graph can never
 silently ignore what the user asked for; a graph carrying `{{IMAGE}}` in a
 text-to-video mode is rejected too, because nothing would ever substitute it.
 
-No graph ships yet. The MiniMax H3 graphs arrive with the recipe that names
-them, from the official ComfyUI templates for that model.
+The MiniMax H3 text-to-video and image-to-video graphs are mechanical API-format
+conversions of the official ComfyUI templates for that model. The model's
+reference-to-video graph needs another diffusion model and does not ship with
+the initial artifact set.
