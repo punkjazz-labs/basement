@@ -72,8 +72,6 @@ type Server struct {
 	closing   chan struct{}
 	closeOnce sync.Once
 
-	// nodeLease admits one delegated two-Spark job at a time (see node.go).
-	nodeLease workerLease
 	// nodeProgress carries the running delegated step's live receipt back to
 	// the head driving it (see node.go). In memory by design.
 	nodeProgress delegatedProgress
@@ -211,10 +209,14 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/fleet", server.withReadAuth(server.fleetMembershipSummary))
 	mux.HandleFunc("/api/v1/fleet/join-code", server.fleetJoinCode)
 	mux.HandleFunc("/api/v1/fleet/join", server.fleetJoin)
+	mux.HandleFunc("/api/v1/fleet/placements/plan", server.fleetPlacementPlan)
+	mux.HandleFunc("/api/v1/fleet/deployments", server.fleetDeployments)
+	mux.HandleFunc("/api/v1/fleet/deployments/", server.fleetDeploymentAction)
 	// Two-Spark serving: the head node drives this node's own rank through
 	// these, authenticated by fleet API key only (see withNodeAuth).
 	mux.HandleFunc("/api/v1/internal/node/fabric", server.withNodeAuth(server.nodeFabric))
 	mux.HandleFunc("/api/v1/internal/node/preflight", server.withNodeAuth(server.nodePreflight))
+	mux.HandleFunc("/api/v1/internal/node/reservation/renew", server.withNodeAuth(server.nodeRenewReservation))
 	mux.HandleFunc("/api/v1/internal/node/step", server.withNodeAuth(server.nodeStep))
 	mux.HandleFunc("/api/v1/internal/node/step/progress", server.withNodeAuth(server.nodeStepProgress))
 	mux.HandleFunc("/v1/", server.proxyModel)
@@ -250,7 +252,12 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 
 func (s *Server) Handler() http.Handler { return s.handler }
 
-func (s *Server) SetFleetManager(manager *fleet.Manager) { s.fleetManager = manager }
+func (s *Server) SetFleetManager(manager *fleet.Manager) {
+	s.fleetManager = manager
+	if manager != nil {
+		manager.SetIndependentRuntime(s)
+	}
+}
 
 // SetRecipes replaces the catalog and its version history in one call — see
 // the field comments on Server. Safe to call from any goroutine at any
@@ -401,11 +408,15 @@ func (s *Server) runPreflight(ctx context.Context, selected recipe.Recipe) prefl
 // rank that publishes no HTTP port skips verify_port, because there it would
 // fail on a condition that never mattered (see nodePreflight).
 func (s *Server) runPreflightSkipping(ctx context.Context, selected recipe.Recipe, skip map[string]bool) preflightResponse {
+	return s.runPreflightSkippingReservation(ctx, selected, skip, "")
+}
+
+func (s *Server) runPreflightSkippingReservation(ctx context.Context, selected recipe.Recipe, skip map[string]bool, reservationID string) preflightResponse {
 	response := preflightResponse{RecipeID: selected.ID, Ready: true, Secrets: map[string]bool{}}
 	// The advisory checks see other running installs' disk reservations,
 	// exactly like the real verify_disk step will, so the dialog and the
 	// job it starts cannot disagree while another download runs.
-	execution := operations.Execution{Kind: "preflight", ReservedBytes: s.engine.ReservedDiskBytes()}
+	execution := operations.Execution{Kind: "preflight", ReservationID: reservationID, ReservedBytes: s.engine.ReservedDiskBytesExcept(reservationID)}
 	checkedLiveMemory := false
 	for _, op := range selected.Operations {
 		if !strings.HasPrefix(op.Type, "verify_") {
@@ -640,6 +651,8 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 	} else if err := s.auth.AuthorizeMutation(r); err != nil {
 		writeError(w, http.StatusForbidden, err)
 		return
+	} else if s.refuseManagedMemberMutation(w, r) {
+		return
 	}
 	s.updateAdmissionMu.Lock()
 	defer s.updateAdmissionMu.Unlock()
@@ -774,6 +787,14 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, kind string, 
 		writeError(w, 500, err)
 		return
 	}
+	if kind == "install" || kind == "start" {
+		if err := s.engine.PrepareJob(r.Context(), job.ID); err != nil {
+			_ = s.store.UpdateJobState(r.Context(), job.ID, "failed", redact.String(err.Error()))
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		job, _ = s.store.GetJob(r.Context(), job.ID)
+	}
 	if created || job.State == "failed" || job.State == "interrupted" {
 		s.engine.Start(job.ID)
 	}
@@ -809,6 +830,9 @@ func (s *Server) jobAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 403, err)
 			return
 		}
+		if s.refuseManagedMemberMutation(w, r) {
+			return
+		}
 		if err := s.engine.Cancel(r.Context(), parts[0]); err != nil {
 			writeError(w, 409, err)
 			return
@@ -817,6 +841,19 @@ func (s *Server) jobAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	methodNotAllowed(w)
+}
+
+func (s *Server) refuseManagedMemberMutation(w http.ResponseWriter, r *http.Request) bool {
+	config, err := s.store.FleetConfig(r.Context())
+	if err != nil || config.Role != "member" {
+		return false
+	}
+	message := "this node is managed by its fleet controller; use the fleet dashboard for model changes"
+	if config.ControllerConsoleURL != "" {
+		message = "this node is managed by the fleet controller at " + config.ControllerConsoleURL + "; use that dashboard for model changes"
+	}
+	writeError(w, http.StatusConflict, errors.New(message))
+	return true
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request, jobID string) {

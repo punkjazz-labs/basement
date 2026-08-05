@@ -87,7 +87,7 @@ func main() {
 	fleetManager, err := fleet.NewManager(context.Background(), fleet.Options{
 		DataDir: cfg.DataDir, Database: db, Inventory: provider, Version: cfg.Version,
 		BuildIdentity: buildIdentity, DisplayName: hostname,
-		ConsoleURL: "http://" + cfg.Listen, NodeURL: "https://" + cfg.FleetListen, Recipes: cachedAll,
+		ConsoleURL: "http://" + cfg.Listen, NodeURL: "https://" + cfg.FleetListen, Recipes: cachedAll, EffectiveRecipes: cachedEffective,
 	})
 	if err != nil {
 		logger.Error("initialize fleet identity", "error", err)
@@ -115,6 +115,7 @@ func main() {
 	}
 	executor := operations.NewFleetExecutor(operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider), operations.NewPeerClient(worker))
 	jobEngine := engine.New(db, executor, recipes)
+	jobEngine.SetReservationAllocator(fleetManager.Allocator())
 
 	// No network was involved above. Fetching starts only in the background;
 	// the embedded recipes remain the permanent offline floor either way.
@@ -133,6 +134,10 @@ func main() {
 	// when that happens.
 	jobEngine.SetTokenSampler(api.CaptureFinalTokenUsage)
 
+	if err := jobEngine.ReconcileReservations(context.Background()); err != nil {
+		logger.Error("reconcile node reservations", "error", err)
+		exit(1)
+	}
 	if err := jobEngine.ResumeInterrupted(context.Background()); err != nil {
 		logger.Error("resume interrupted jobs", "error", err)
 		exit(1)
@@ -152,7 +157,7 @@ func main() {
 	go feed.Run(feedCtx, recipefeed.RefreshInterval, func(all, effective []recipe.Recipe) {
 		jobEngine.SetRecipes(all, effective)
 		api.SetRecipes(all, effective)
-		if err := fleetManager.SetRecipes(all); err != nil {
+		if err := fleetManager.SetRecipes(all, effective); err != nil {
 			logger.Error("refresh fleet catalogue digest", "error", err)
 		}
 	})
@@ -160,6 +165,13 @@ func main() {
 	fleetCtx, stopFleet := context.WithCancel(context.Background())
 	defer stopFleet()
 	go fleetManager.Run(fleetCtx)
+	// Driver renewal and orphan cleanup share the fleet heartbeat cadence. An
+	// initial synchronous pass stops an already-expired worker rank before the
+	// listeners can admit another runtime owner after restart.
+	if err := api.ReclaimExpiredDriverReservations(fleetCtx); err != nil {
+		logger.Error("reclaim expired driver reservations", "error", err)
+	}
+	go api.RunReservationMaintenance(fleetCtx)
 
 	countCtx, stopCounting := context.WithCancel(context.Background())
 	defer stopCounting()

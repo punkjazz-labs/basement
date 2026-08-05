@@ -30,10 +30,9 @@ type ModelSnapshot struct {
 	Active        bool   `json:"active"`
 }
 
-// AllocationSnapshot is deliberately empty in Phase B. It fixes the signed
-// heartbeat shape without creating the reservation allocator from Phase C.
-// A later phase may add versioned claim fields without letting this read-only
-// membership package allocate a runtime slot itself.
+// AllocationSnapshot projects durable local authority without exposing a
+// preparation token or controller grant. The signed heartbeat reports what
+// this node already admitted; it never allocates from the read path.
 type AllocationSnapshot struct {
 	DeploymentID string `json:"deployment_id"`
 	State        string `json:"state"`
@@ -135,10 +134,21 @@ func BuildHeartbeat(ctx context.Context, identity *Identity, database *store.Sto
 	for _, model := range models {
 		snapshots = append(snapshots, ModelSnapshot{RecipeID: model.RecipeID, RecipeVersion: model.RecipeVersion, Status: model.Status, Active: model.Active})
 	}
+	reservations, err := database.NodeReservations(ctx)
+	if err != nil {
+		return HeartbeatEnvelope{}, fmt.Errorf("read reservations for heartbeat: %w", err)
+	}
+	allocations := make([]AllocationSnapshot, 0, len(reservations))
+	for _, reservation := range reservations {
+		if reservation.State == "released" || reservation.State == "aborted" || reservation.State == "expired" {
+			continue
+		}
+		allocations = append(allocations, AllocationSnapshot{DeploymentID: reservation.DeploymentID, State: reservation.State})
+	}
 	return SignHeartbeat(identity, HeartbeatPayload{
 		Version: ProtocolVersion, FleetID: fleetID, NodeID: identity.NodeID,
 		ManagerVersion: managerVersion, ManagerBuildIdentity: buildIdentity,
 		Sequence: sequence, LocalTime: at.UTC().Format(time.RFC3339Nano), Inventory: system,
-		InstalledModels: snapshots, Allocations: []AllocationSnapshot{}, CatalogueDigest: catalogueDigest,
+		InstalledModels: snapshots, Allocations: allocations, CatalogueDigest: catalogueDigest,
 	})
 }

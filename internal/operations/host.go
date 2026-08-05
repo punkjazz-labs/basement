@@ -30,6 +30,11 @@ type HostExecutor struct {
 	retryDelays []time.Duration
 }
 
+// checkPort is the host socket seam. Production never reassigns it; tests
+// replace it so a port-rule test never binds a loopback listener or depends
+// on another process running on the test machine.
+var checkPort = inventory.CheckPort
+
 func NewHostExecutor(dataDir, dockerSocket string, provider inventory.Provider) *HostExecutor {
 	return &HostExecutor{dataDir: dataDir, inventory: provider, docker: NewDockerClient(dockerSocket), hf: NewHFClient(), http: &http.Client{Timeout: 30 * time.Second}, retryDelays: networkRetryDelays}
 }
@@ -163,7 +168,7 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 	case "verify_disk":
 		return h.verifyDisk(ctx, r, r.TotalArtifactBytes(), r.Runtime.ImageDiskBytes, execution.ReservedBytes)
 	case "verify_port":
-		if err := inventory.CheckPort(r.Service.DefaultHostPort); err != nil {
+		if err := checkPort(r.Service.DefaultHostPort); err != nil {
 			// Our own leftover container (a cancelled install, an old recipe
 			// version) is not a blocker: the start phase stops it. A foreign
 			// process is.
@@ -172,14 +177,18 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 					if !container.Running {
 						continue
 					}
-					if container.RecipeID == r.ID {
+					if container.RecipeID == r.ID && (container.HostPort == 0 || container.HostPort == r.Service.DefaultHostPort) {
 						return map[string]any{
 							"host_port": r.Service.DefaultHostPort, "occupied_by_previous_install": container.Name, "freed_during_start": true,
 						}, nil
 					}
-					// Every current recipe publishes the same host port; when
-					// multi-model serving lands this needs the holder's real
-					// port instead of assuming a conflict.
+					if container.HostPort != 0 && container.HostPort != r.Service.DefaultHostPort {
+						continue
+					}
+					// An older managed container may predate the host-port
+					// label. Unknown remains conservative because treating it
+					// as a different port could hide the process that made this
+					// exact bind fail.
 					return nil, fmt.Errorf("port %d is held by the container of another model (%s, recipe %s); stop that model first", r.Service.DefaultHostPort, container.Name, container.RecipeID)
 				}
 			}

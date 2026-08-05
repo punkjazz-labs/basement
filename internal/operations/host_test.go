@@ -176,6 +176,68 @@ func TestHostDiskGuardSubtractsOtherJobsReservation(t *testing.T) {
 	}
 }
 
+func TestVerifyPortConflictsWithSamePortOnSameNode(t *testing.T) {
+	previousCheck := checkPort
+	t.Cleanup(func() { checkPort = previousCheck })
+	checkPort = func(int) error { return errors.New("occupied") }
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := recipes[0]
+	holder := recipes[1]
+	holder.Service.DefaultHostPort = target.Service.DefaultHostPort
+	docker := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		if !strings.Contains(request.URL.Path, "/containers/json") {
+			t.Fatalf("unexpected Docker request: %s", request.URL)
+		}
+		payload := fmt.Sprintf(`[{"Names":["/holder"],"State":"running","Labels":{"%s":"true","%s":"%s","%s":"1","%s":"%d"}}]`,
+			labelManaged, labelRecipeID, holder.ID, labelRecipeVersion, labelHostPort, holder.Service.DefaultHostPort)
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(payload))}, nil
+	})}}
+	executor := &HostExecutor{docker: docker}
+	_, err = executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "verify_port"}, target, nil)
+	if err == nil || !strings.Contains(err.Error(), holder.ID) || !strings.Contains(err.Error(), fmt.Sprint(target.Service.DefaultHostPort)) {
+		t.Fatalf("same-node same-port conflict=%v", err)
+	}
+}
+
+func TestVerifyPortDoesNotShareConflictsAcrossNodes(t *testing.T) {
+	previousCheck := checkPort
+	t.Cleanup(func() { checkPort = previousCheck })
+	checks := 0
+	checkPort = func(int) error {
+		checks++
+		if checks == 1 {
+			return errors.New("occupied on the first node")
+		}
+		return nil
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := recipes[0]
+	holder := recipes[1]
+	holder.Service.DefaultHostPort = target.Service.DefaultHostPort
+	firstNodeDocker := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(*http.Request) (*http.Response, error) {
+		payload := fmt.Sprintf(`[{"Names":["/holder"],"State":"running","Labels":{"%s":"true","%s":"%s","%s":"1","%s":"%d"}}]`,
+			labelManaged, labelRecipeID, holder.ID, labelRecipeVersion, labelHostPort, holder.Service.DefaultHostPort)
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(payload))}, nil
+	})}}
+	if _, err := (&HostExecutor{docker: firstNodeDocker}).Execute(context.Background(), Execution{}, recipe.Operation{Type: "verify_port"}, target, nil); err == nil {
+		t.Fatal("the first node ignored its local same-port holder")
+	}
+	secondNodeDocker := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(*http.Request) (*http.Response, error) {
+		t.Fatal("a free port caused the second node to inspect another node's containers")
+		return nil, errors.New("unexpected Docker request")
+	})}}
+	receipt, err := (&HostExecutor{docker: secondNodeDocker}).Execute(context.Background(), Execution{}, recipe.Operation{Type: "verify_port"}, target, nil)
+	if err != nil || receipt["available"] != true {
+		t.Fatalf("the same port on a different node was treated as a conflict: receipt=%v err=%v", receipt, err)
+	}
+}
+
 // fakeVLLM serves a canned chat-completions response on 127.0.0.1 and returns
 // an executor plus a recipe whose service port points at it.
 func fakeVLLM(t *testing.T, response string) (*HostExecutor, recipe.Recipe) {

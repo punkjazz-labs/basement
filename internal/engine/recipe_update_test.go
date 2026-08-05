@@ -113,6 +113,51 @@ func bumpedVersion(r recipe.Recipe) recipe.Recipe {
 	return next
 }
 
+func TestPreparedInstallKeepsItsExactRecipeWhenCatalogueAdvances(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	embedded, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := singleSpark(embedded)
+	v2 := bumpedVersion(v1)
+	executor := &versionedExecutor{running: map[string]bool{}}
+	runner := New(database, executor, []recipe.Recipe{v1})
+	job, _, err := database.CreateJob(ctx, "install", v1.ID, "prepared-before-catalogue-advance", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.PrepareJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The prepared reservation is the durable planning boundary. A catalogue
+	// refresh after that point must not reinterpret completed or resumed work
+	// as an install of the newer recipe version.
+	runner.SetRecipes([]recipe.Recipe{v1, v2}, []recipe.Recipe{v2})
+	runner.Start(job.ID)
+	waitJob(t, database, job.ID, "ready")
+
+	model, err := database.Model(ctx, v1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.RecipeVersion != v1.Version {
+		t.Fatalf("prepared install recorded version %d, want %d", model.RecipeVersion, v1.Version)
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	for _, event := range executor.events {
+		if strings.Contains(event, versionKey(v2)) {
+			t.Fatalf("prepared install changed recipe after catalogue refresh: %v", executor.events)
+		}
+	}
+}
+
 func TestRecipeUpdateDoesNotChangeAlreadyInstalledModelResolution(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))

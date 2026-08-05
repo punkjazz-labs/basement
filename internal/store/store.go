@@ -265,11 +265,15 @@ CREATE TABLE IF NOT EXISTS generations (
 	if err := s.migrateGenerationProgress(); err != nil {
 		return err
 	}
-	return s.migrateFleetSchema()
+	if err := s.migrateFleetSchema(); err != nil {
+		return err
+	}
+	return s.migrateReservationOwnership()
 }
 
 const (
-	fleetSchemaVersion           = 2
+	fleetFoundationSchemaVersion = 2
+	fleetSchemaVersion           = 3
 	fleetMigrationStatementCount = 10
 )
 
@@ -288,7 +292,7 @@ func (s *Store) migrateFleetSchema() error {
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_meta`).Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	if version >= fleetSchemaVersion {
+	if version >= fleetFoundationSchemaVersion {
 		return nil
 	}
 	statements := []string{
@@ -423,6 +427,35 @@ func (s *Store) migrateFleetSchema() error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit fleet schema migration: %w", err)
+	}
+	return nil
+}
+
+// migrateReservationOwnership separates a committed grant's short protocol
+// deadline from the job that has started using it. A target writes job_id
+// before starting work, so restart reconciliation can keep an interrupted
+// download while expiring a controller that committed and then disappeared.
+func (s *Store) migrateReservationOwnership() error {
+	var version int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_meta`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version >= fleetSchemaVersion {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin reservation ownership migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`ALTER TABLE node_reservations ADD COLUMN job_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add reservation job ownership: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE schema_meta SET version=3`); err != nil {
+		return fmt.Errorf("advance reservation ownership schema: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit reservation ownership migration: %w", err)
 	}
 	return nil
 }
@@ -568,6 +601,21 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 	}
 	job.Steps = steps
 	return job, nil
+}
+
+func (s *Store) UpdateJobPayload(ctx context.Context, id string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode job payload: %w", err)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE jobs SET payload=?,updated_at=? WHERE id=?`, string(body), now(), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
 }
 
 func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {

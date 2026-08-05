@@ -15,6 +15,7 @@ import (
 
 	"github.com/punkjazz-labs/basement/internal/auth"
 	"github.com/punkjazz-labs/basement/internal/engine"
+	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/store"
@@ -77,6 +78,7 @@ type nodeFixture struct {
 	sglang    recipe.Recipe
 	single    recipe.Recipe
 	localExec *apiExecutor
+	api       *Server
 	post      func(t *testing.T, path, key string, body any) (int, map[string]any)
 }
 
@@ -113,7 +115,9 @@ func newNodeFixture(t *testing.T) nodeFixture {
 	local := &apiExecutor{done: map[string]bool{}}
 	executor := operations.NewFleetExecutor(local, refusingPeer{t: t})
 	runner := engine.New(database, executor, catalog)
-	server := httptest.NewServer(New("test-version", dataDir, authManager, database, readyInventory{}, executor, runner, catalog).Handler())
+	api := New("test-version", dataDir, authManager, database, readyInventory{}, executor, runner, catalog)
+	server := httptest.NewServer(api.Handler())
+	t.Cleanup(api.Close)
 	t.Cleanup(server.Close)
 	_, secret, err := database.CreateAPIKey(context.Background(), "other-spark")
 	if err != nil {
@@ -144,7 +148,7 @@ func newNodeFixture(t *testing.T) nodeFixture {
 		_ = json.Unmarshal(raw, &decoded)
 		return response.StatusCode, decoded
 	}
-	return nodeFixture{key: secret, distributed: distributed, sglang: sglang, single: single, localExec: local, post: post}
+	return nodeFixture{key: secret, distributed: distributed, sglang: sglang, single: single, localExec: local, api: api, post: post}
 }
 
 // executed reports whether the local executor actually ran an operation.
@@ -152,6 +156,12 @@ func (a *apiExecutor) executed(operation string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.done[operation]
+}
+
+func (a *apiExecutor) isRunning() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.running
 }
 
 func workerStep(operation, jobID string, r recipe.Recipe) map[string]any {
@@ -396,17 +406,133 @@ func TestWorkerAdmitsOneDelegatedJobAtATime(t *testing.T) {
 	}
 }
 
-func TestWorkerLeaseExpiresSoADeadHeadCannotWedgeThisSpark(t *testing.T) {
-	var lease workerLease
-	start := time.Now()
-	if err := lease.acquire("job-a", "some-recipe", start); err != nil {
+func TestWorkerReservationExpiresSoADeadHeadCannotWedgeThisSpark(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-dead"}); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("dead head preflight status=%d body=%#v", status, body)
+	}
+	if status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("start_container", "job-dead", fixture.distributed)); status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("dead head start status=%d body=%#v", status, body)
+	}
+	if !fixture.localExec.isRunning() {
+		t.Fatal("the worker container never started")
+	}
+	allocator := fixture.api.engine.Reservations()
+	reservationID := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-dead", fixture.distributed.ID, fixture.distributed.Version)
+	if err := allocator.Renew(ctx, reservationID, time.Now().Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := lease.acquire("job-b", "some-recipe", start); err == nil {
-		t.Fatal("a second job took a live lease")
+	if err := fixture.api.ReclaimExpiredDriverReservations(ctx); err != nil {
+		t.Fatal(err)
 	}
-	if err := lease.acquire("job-b", "some-recipe", start.Add(workerLeaseTTL+time.Second)); err != nil {
-		t.Fatalf("an expired lease still blocked another job: %v", err)
+	if fixture.localExec.isRunning() || !fixture.localExec.executed("stop_container") {
+		t.Fatal("the expired worker reservation was freed without stopping its container")
+	}
+	expired, err := allocator.Reservation(ctx, reservationID)
+	if err != nil || expired.State != "expired" {
+		t.Fatalf("dead head reservation=%+v err=%v", expired, err)
+	}
+
+	// A different driver can use the worker after cleanup, then hand it back
+	// so the worker's own local manager can claim the same runtime slot.
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-next"}); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("next driver preflight status=%d body=%#v", status, body)
+	}
+	if status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("stop_container", "job-next", fixture.distributed)); status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("next driver release status=%d body=%#v", status, body)
+	}
+	localID := fleet.ReservationID(fleet.ClaimKindLocalJob, "local-after-dead-head")
+	if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: localID, DeploymentID: "job:local-after-dead-head", DriverNodeID: allocator.NodeID(),
+		RecipeID: fixture.single.ID, RecipeVersion: fixture.single.Version,
+		Claims:       fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindLocalJob, Runtime: true},
+		PrepareToken: fleet.LocalPrepareToken(localID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Commit(ctx, localID, fleet.LocalPrepareToken(localID), []byte(`{"kind":"local-engine"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.Activate(ctx, localID, ""); err != nil {
+		t.Fatalf("local runtime remained wedged after dead head cleanup: %v", err)
+	}
+}
+
+func TestWorkerReservationRenewalKeepsAHealthyHeadActive(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-live"}); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("live head preflight status=%d body=%#v", status, body)
+	}
+	allocator := fixture.api.engine.Reservations()
+	reservationID := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-live", fixture.distributed.ID, fixture.distributed.Version)
+	if err := allocator.Renew(ctx, reservationID, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	status, body := fixture.post(t, "/api/v1/internal/node/reservation/renew", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-live"})
+	if status != http.StatusOK || body["expires_at"] == "" {
+		t.Fatalf("worker renewal status=%d body=%#v", status, body)
+	}
+	if err := fixture.api.ReclaimExpiredDriverReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	active, err := allocator.Reservation(ctx, reservationID)
+	if err != nil || active.State != "active" {
+		t.Fatalf("renewed worker reservation=%+v err=%v", active, err)
+	}
+}
+
+func TestWorkerReservationSurvivesRestartAndBlocksLocalRuntime(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	database, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := fleet.NewAllocator(database, "node-worker")
+	workerID := fleet.ReservationID(fleet.ClaimKindLegacyRank, "worker-job")
+	request := fleet.ReservationRequest{ReservationID: workerID, DeploymentID: "legacy-rank:worker-job", RecipeID: "worker-recipe", RecipeVersion: 1,
+		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindLegacyRank, Runtime: true}, PrepareToken: fleet.LocalPrepareToken(workerID), ExpiresAt: time.Now().Add(time.Hour)}
+	if _, _, err := worker.Prepare(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.Commit(ctx, workerID, fleet.LocalPrepareToken(workerID), []byte(`{"kind":"legacy-rank-compatibility"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Activate(ctx, workerID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	restarted := fleet.NewAllocator(database, "node-worker")
+	persisted, err := restarted.Reservation(ctx, workerID)
+	if err != nil || persisted.State != "active" {
+		t.Fatalf("worker reservation after restart=%+v err=%v", persisted, err)
+	}
+	localID := fleet.ReservationID(fleet.ClaimKindLocalJob, "local-job")
+	if _, _, err := restarted.Prepare(ctx, fleet.ReservationRequest{ReservationID: localID, DeploymentID: "job:local-job", RecipeID: "local-recipe", RecipeVersion: 1,
+		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindLocalJob, Runtime: true}, PrepareToken: fleet.LocalPrepareToken(localID)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.Commit(ctx, localID, fleet.LocalPrepareToken(localID), []byte(`{"kind":"local-engine"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Activate(ctx, localID, ""); !errors.Is(err, store.ErrReservationConflict) {
+		t.Fatalf("competing local runtime claim error=%v", err)
+	}
+	if err := restarted.Release(ctx, workerID); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Activate(ctx, localID, ""); err != nil {
+		t.Fatalf("local runtime remained blocked after worker release: %v", err)
 	}
 }
 

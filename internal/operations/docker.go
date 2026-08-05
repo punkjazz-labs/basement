@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,10 @@ const (
 	labelManaged       = "ai.basement.managed"
 	labelRecipeID      = "ai.basement.recipe-id"
 	labelRecipeVersion = "ai.basement.recipe-version"
+	// labelHostPort records the port this exact rank binds on this host. A
+	// recipe id alone cannot answer that once different recipes and ranks may
+	// use different ports on the same node.
+	labelHostPort = "ai.basement.host-port"
 	// labelNodeRole is set only on distributed containers, so a two-Spark
 	// worker container is distinguishable from a single-node one on sight.
 	labelNodeRole = "ai.basement.node-role"
@@ -338,6 +343,9 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 		hostConfig["Ulimits"] = []map[string]any{{"Name": "memlock", "Soft": -1, "Hard": -1}}
 	}
 	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: fmt.Sprint(r.Version)}
+	if hostPort, binds := RankBindsHostPort(r, placement); binds {
+		labels[labelHostPort] = strconv.Itoa(hostPort)
+	}
 	if placement.Distributed() {
 		labels[labelNodeRole] = placement.Role
 	}
@@ -387,6 +395,7 @@ type ManagedContainer struct {
 	Running  bool
 	RecipeID string
 	Version  string
+	HostPort int
 }
 
 // ManagedContainers lists every container carrying the managed label,
@@ -409,6 +418,10 @@ func (d *DockerClient) ManagedContainers(ctx context.Context) ([]ManagedContaine
 		Names  []string
 		State  string
 		Labels map[string]string
+		Ports  []struct {
+			PublicPort int
+			Type       string
+		}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil, err
@@ -427,11 +440,21 @@ func (d *DockerClient) ManagedContainers(ctx context.Context) ([]ManagedContaine
 		if version == "" {
 			version = entry.Labels[legacyLabelRecipeVersion]
 		}
+		hostPort, _ := strconv.Atoi(entry.Labels[labelHostPort])
+		if hostPort == 0 {
+			for _, binding := range entry.Ports {
+				if binding.Type == "tcp" && binding.PublicPort > 0 {
+					hostPort = binding.PublicPort
+					break
+				}
+			}
+		}
 		containers = append(containers, ManagedContainer{
 			Name:     name,
 			Running:  entry.State == "running",
 			RecipeID: recipeID,
 			Version:  version,
+			HostPort: hostPort,
 		})
 	}
 	return containers, nil

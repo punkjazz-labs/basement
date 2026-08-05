@@ -59,6 +59,7 @@ type fleetExecutor struct {
 	failRecipeOp string // "operation/recipe-id"
 	peerReady    bool
 	peerAsked    int
+	renewals     []string
 }
 
 type gatedFleetExecutor struct {
@@ -214,6 +215,13 @@ func (f *fleetExecutor) RuntimeImageBytes(context.Context, recipe.Recipe) (int64
 	return 0, false
 }
 
+func (f *fleetExecutor) RenewWorkerReservation(_ context.Context, jobID string, r recipe.Recipe) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.renewals = append(f.renewals, jobID+"@"+r.ID)
+	return nil
+}
+
 func (f *fleetExecutor) node(placement operations.Placement) string {
 	if !placement.Distributed() {
 		return "local"
@@ -282,6 +290,12 @@ func (f *fleetExecutor) recordedDetail() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string{}, f.detail...)
+}
+
+func (f *fleetExecutor) recordedRenewals() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.renewals...)
 }
 
 func indexOf(events []string, want string) int {
@@ -363,6 +377,25 @@ func TestTwoSparkInstallStagesBothNodesAndStartsTheWorkerFirst(t *testing.T) {
 	}
 	if nodes["spark-a"] == 0 || nodes["spark-b"] == 0 {
 		t.Fatalf("receipts do not cover both Sparks: %v", nodes)
+	}
+}
+
+func TestActiveTwoSparkInstallRenewsItsWorkerDriverLease(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, r := newTwoSparkEngine(t, fake)
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "renew-active-worker", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	waitJob(t, s, job.ID, "ready")
+	if err := runner.RenewDistributedReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	renewals := fake.recordedRenewals()
+	if len(renewals) != 1 || renewals[0] != job.ID+"@"+r.ID {
+		t.Fatalf("worker lease renewals=%v", renewals)
 	}
 }
 
