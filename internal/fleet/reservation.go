@@ -189,6 +189,25 @@ func (a *Allocator) Activate(ctx context.Context, reservationID, replaceRecipeID
 	return a.database.ActivateNodeReservation(ctx, reservationID, replaceRecipeID)
 }
 
+// ActivateMaintenance takes the allocator's durable admission latch without
+// displacing an already serving model. The manager restart leaves that model's
+// container alone, while every later runtime activation observes this claim
+// and waits until the update result is known.
+func (a *Allocator) ActivateMaintenance(ctx context.Context, reservationID string) error {
+	reservation, err := a.Reservation(ctx, reservationID)
+	if err != nil {
+		return err
+	}
+	if reservation.Claims.Kind != ClaimKindUpdate || !reservation.Claims.Runtime {
+		return errors.New("only a manager update can claim runtime maintenance")
+	}
+	return a.database.ActivateNodeMaintenanceReservation(ctx, reservationID)
+}
+
+func (a *Allocator) MaintenanceActive(ctx context.Context) (bool, error) {
+	return a.database.NodeMaintenanceReservationActive(ctx)
+}
+
 func (a *Allocator) Renew(ctx context.Context, reservationID string, expires time.Time) error {
 	return a.database.RenewNodeReservation(ctx, reservationID, expires)
 }

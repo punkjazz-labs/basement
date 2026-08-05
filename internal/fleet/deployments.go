@@ -137,6 +137,9 @@ func stablePlacementID(prefix, authority, key string) string {
 }
 
 func (m *Manager) CreateIndependentDeployment(ctx context.Context, request CreateDeploymentRequest) (Deployment, bool, error) {
+	if err := m.requireFleetMutationAllowed(ctx); err != nil {
+		return Deployment{}, false, err
+	}
 	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
 	if request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 {
 		return Deployment{}, false, errors.New("a valid idempotency key is required")
@@ -532,6 +535,9 @@ func (m *Manager) jobOnNode(ctx context.Context, target store.FleetNode, local b
 }
 
 func (m *Manager) ActionDeployment(ctx context.Context, deploymentID, action, idempotencyKey string, intent IndependentIntent) (store.Job, error) {
+	if err := m.requireFleetMutationAllowed(ctx); err != nil {
+		return store.Job{}, err
+	}
 	allowed := map[string]bool{"start": true, "stop": true, "remove": true, "cancel": true, "smoke-test": true, "benchmark": true}
 	if !allowed[action] {
 		return store.Job{}, errors.New("the deployment action is not supported")

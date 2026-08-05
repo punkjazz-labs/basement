@@ -754,6 +754,13 @@ func (s *Server) fleetAdopt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
+	if active, err := s.store.FleetUpgradeMaintenanceActive(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	} else if active {
+		writeError(w, http.StatusConflict, errors.New("fleet maintenance is active; wait until every node runs the target version before adding a machine"))
+		return
+	}
 	var request struct {
 		Address  string `json:"address"`
 		Username string `json:"username"`

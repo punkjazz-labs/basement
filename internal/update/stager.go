@@ -88,9 +88,23 @@ func (stager *Stager) Prepare(candidate Candidate, runningVersion string) (Attem
 	return status, nil
 }
 
-// StagePrepared downloads and hands off an update whose intent was already
-// persisted by Prepare.
+// StagePrepared preserves the local one-click behavior by composing the two
+// fleet-safe phases. Keeping this wrapper means a standalone installation
+// still downloads, verifies, and hands off exactly as it did before rolling
+// upgrades needed a barrier between verification and restart.
 func (stager *Stager) StagePrepared(ctx context.Context, candidate Candidate, status AttemptStatus) (AttemptStatus, error) {
+	staged, err := stager.StageOnly(ctx, candidate, status)
+	if err != nil {
+		return staged, err
+	}
+	return stager.ApplyStaged(staged)
+}
+
+// StageOnly downloads and independently verifies a release without creating
+// the root updater request. A fleet must prove every node has accepted the
+// signed release before the first manager restart, so handoff is deliberately
+// a separate durable action.
+func (stager *Stager) StageOnly(ctx context.Context, candidate Candidate, status AttemptStatus) (AttemptStatus, error) {
 	if stager == nil || status.SchemaVersion != 1 || !attemptIDPattern.MatchString(status.AttemptID) {
 		return AttemptStatus{}, errors.New("manager update attempt is invalid")
 	}
@@ -112,26 +126,33 @@ func (stager *Stager) StagePrepared(ctx context.Context, candidate Candidate, st
 		return status, cause
 	}
 	stagingRoot := filepath.Join(stager.DataDir, "updates", "staging")
-	pendingDir := filepath.Join(stagingRoot, "pending")
 	partialDir := filepath.Join(stagingRoot, "partial")
-	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
-		return fail(err)
-	}
+	preparedDir := filepath.Join(stagingRoot, "prepared", status.AttemptID)
 	if err := os.MkdirAll(partialDir, 0o750); err != nil {
 		return fail(err)
 	}
-	requestPath := filepath.Join(pendingDir, requestFileName)
-	if _, err := os.Stat(requestPath); err == nil {
-		return fail(errors.New("another manager update is waiting for the root updater"))
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := os.MkdirAll(preparedDir, 0o750); err != nil {
 		return fail(err)
 	}
+	preparedAsset := filepath.Join(preparedDir, managerFileName)
+	if status.State == "staged" {
+		if err := verifyAssetPath(preparedAsset, manifest); err == nil {
+			return status, nil
+		}
+	}
 	status.State = "downloading"
+	status.Failure = ""
 	status.UpdatedAt = journalNow(stager.Now)
 	if err := stager.writeStatus(status); err != nil {
 		return fail(err)
 	}
 	partialAsset := filepath.Join(partialDir, status.AttemptID+".basement")
+	// A process loss can leave an untrusted partial file behind. Starting the
+	// same durable attempt again must redownload it rather than treating those
+	// bytes as a resumable verification result.
+	if err := os.Remove(partialAsset); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fail(err)
+	}
 	if err := stager.download(ctx, candidate.AssetURL, partialAsset, manifest.AssetSize); err != nil {
 		return fail(err)
 	}
@@ -148,11 +169,80 @@ func (stager *Stager) StagePrepared(ctx context.Context, candidate Candidate, st
 		ManifestAssetName:  candidate.ManifestBytes,
 		SignatureAssetName: candidate.Signature,
 	} {
+		if err := writeBytesAtomic(filepath.Join(preparedDir, name), payload, 0o600); err != nil {
+			return fail(err)
+		}
+	}
+	if err := renameFileAtomic(partialAsset, preparedAsset, 0o700); err != nil {
+		return fail(err)
+	}
+	if err := verifyAssetPath(preparedAsset, manifest); err != nil {
+		return fail(err)
+	}
+	status.State = "staged"
+	status.UpdatedAt = journalNow(stager.Now)
+	if err := stager.writeStatus(status); err != nil {
+		return status, err
+	}
+	return status, nil
+}
+
+// ApplyStaged reopens and re-verifies every staged byte before it creates the
+// fixed request marker. The root updater still repeats the same verification
+// on its own copy and remains the security boundary.
+func (stager *Stager) ApplyStaged(status AttemptStatus) (AttemptStatus, error) {
+	if stager == nil || status.SchemaVersion != 1 || !attemptIDPattern.MatchString(status.AttemptID) || status.State != "staged" {
+		return AttemptStatus{}, errors.New("manager update is not durably staged")
+	}
+	fail := func(cause error) (AttemptStatus, error) {
+		status.State = "failed_before_handoff"
+		status.Failure = cleanFailure(cause)
+		status.UpdatedAt = journalNow(stager.Now)
+		_ = stager.writeStatus(status)
+		return status, cause
+	}
+	stagingRoot := filepath.Join(stager.DataDir, "updates", "staging")
+	preparedDir := filepath.Join(stagingRoot, "prepared", status.AttemptID)
+	manifestBytes, err := os.ReadFile(filepath.Join(preparedDir, ManifestAssetName))
+	if err != nil {
+		return fail(err)
+	}
+	signature, err := os.ReadFile(filepath.Join(preparedDir, SignatureAssetName))
+	if err != nil {
+		return fail(err)
+	}
+	manifest, err := VerifySignedManifest(manifestBytes, signature, stager.Keys)
+	if err != nil {
+		return fail(err)
+	}
+	if manifest.ReleaseVersion != status.TargetVersion || status.RunningVersion == "" {
+		return fail(errors.New("manager update attempt does not match the staged release"))
+	}
+	if err := ValidateCandidate(manifest, manifest.ReleaseVersion, status.RunningVersion); err != nil {
+		return fail(err)
+	}
+	preparedAsset := filepath.Join(preparedDir, managerFileName)
+	if err := verifyAssetPath(preparedAsset, manifest); err != nil {
+		return fail(err)
+	}
+	pendingDir := filepath.Join(stagingRoot, "pending")
+	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
+		return fail(err)
+	}
+	requestPath := filepath.Join(pendingDir, requestFileName)
+	if _, err := os.Stat(requestPath); err == nil {
+		return fail(errors.New("another manager update is waiting for the root updater"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fail(err)
+	}
+	for name, payload := range map[string][]byte{
+		ManifestAssetName: manifestBytes, SignatureAssetName: signature,
+	} {
 		if err := writeBytesAtomic(filepath.Join(pendingDir, name), payload, 0o600); err != nil {
 			return fail(err)
 		}
 	}
-	if err := renameFileAtomic(partialAsset, filepath.Join(pendingDir, managerFileName), 0o700); err != nil {
+	if err := copyFileAtomic(preparedAsset, filepath.Join(pendingDir, managerFileName), 0o700); err != nil {
 		return fail(err)
 	}
 	if err := verifyAssetPath(filepath.Join(pendingDir, managerFileName), manifest); err != nil {
@@ -160,7 +250,7 @@ func (stager *Stager) StagePrepared(ctx context.Context, candidate Candidate, st
 	}
 	request := ApplyRequest{
 		SchemaVersion: 1, AttemptID: status.AttemptID, RunningVersion: status.RunningVersion,
-		TargetVersion: manifest.ReleaseVersion, ManifestSHA256: ManifestDigest(candidate.ManifestBytes),
+		TargetVersion: manifest.ReleaseVersion, ManifestSHA256: ManifestDigest(manifestBytes),
 	}
 	if err := writeJSONFile(requestPath, request, 0o600); err != nil {
 		return fail(err)
@@ -381,6 +471,42 @@ func renameFileAtomic(source, destination string, mode os.FileMode) error {
 		return err
 	}
 	if err := os.Rename(source, destination); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(destination))
+}
+
+func copyFileAtomic(source, destination string, mode os.FileMode) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(destination), ".asset-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(mode); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := io.Copy(temporary, input); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, destination); err != nil {
 		return err
 	}
 	return syncDirectory(filepath.Dir(destination))

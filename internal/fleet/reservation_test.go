@@ -138,3 +138,47 @@ func TestActiveLegacyRankSurvivesRestartAndRejectsSameRecipeFromAnotherDriver(t 
 		t.Fatalf("first driver reservation=%+v err=%v", persisted, err)
 	}
 }
+
+func TestUpdateMaintenanceReservationBlocksNewRuntimeWithoutStoppingServingModel(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	allocator := NewAllocator(database, "node-test")
+	prepareRuntime := func(id, kind string) {
+		t.Helper()
+		if _, _, err := allocator.Prepare(ctx, ReservationRequest{ReservationID: id, DeploymentID: "deployment-" + id,
+			RecipeID: "recipe-" + id, RecipeVersion: 1, RecipeFingerprint: "fingerprint-" + id,
+			Claims: Claims{Version: ClaimsVersion, Kind: kind, Runtime: true, Ports: []int{}, FabricInterfaces: []string{}}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := allocator.Commit(ctx, id, LocalPrepareToken(id), []byte(`{"grant":true}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prepareRuntime("serving", ClaimKindRecovered)
+	if err := allocator.Activate(ctx, "serving", ""); err != nil {
+		t.Fatal(err)
+	}
+	prepareRuntime("update", ClaimKindUpdate)
+	if err := allocator.ActivateMaintenance(ctx, "update"); err != nil {
+		t.Fatal(err)
+	}
+	serving, err := allocator.Reservation(ctx, "serving")
+	if err != nil || serving.State != "active" {
+		t.Fatalf("serving reservation=%+v err=%v", serving, err)
+	}
+	if _, _, err := allocator.Prepare(ctx, ReservationRequest{ReservationID: "new-work", DeploymentID: "deployment-new",
+		RecipeID: "recipe-new", RecipeVersion: 1, Claims: Claims{Version: ClaimsVersion, Kind: ClaimKindLocalJob, Runtime: true, Ports: []int{}, FabricInterfaces: []string{}}}); !errors.Is(err, store.ErrReservationConflict) {
+		t.Fatalf("new runtime work entered maintenance: %v", err)
+	}
+	if err := allocator.Release(ctx, "update"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := allocator.Prepare(ctx, ReservationRequest{ReservationID: "after-update", DeploymentID: "deployment-after",
+		RecipeID: "recipe-after", RecipeVersion: 1, Claims: Claims{Version: ClaimsVersion, Kind: ClaimKindLocalJob, Runtime: true, Ports: []int{}, FabricInterfaces: []string{}}}); err != nil {
+		t.Fatalf("runtime admission stayed closed after update: %v", err)
+	}
+}

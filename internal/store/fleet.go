@@ -834,6 +834,14 @@ func (s *Store) PrepareNodeReservation(ctx context.Context, reservation NodeRese
 		return NodeReservation{}, false, err
 	}
 	defer tx.Rollback()
+	var maintenanceID string
+	err = tx.QueryRowContext(ctx, `SELECT reservation_id FROM node_reservations WHERE state='maintenance' AND reservation_id<>? LIMIT 1`, reservation.ReservationID).Scan(&maintenanceID)
+	if err == nil {
+		return NodeReservation{}, false, ErrReservationConflict
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return NodeReservation{}, false, err
+	}
 	timestamp := now()
 	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO node_reservations(reservation_id,deployment_id,fleet_id,controller_node_id,driver_node_id,recipe_id,recipe_version,recipe_fingerprint,state,claims_json,prepare_token_hash,grant_json,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'prepared',?,?, '',?,?,?)`,
 		reservation.ReservationID, reservation.DeploymentID, reservation.FleetID, reservation.ControllerNodeID,
@@ -965,6 +973,14 @@ func (s *Store) ActivateNodeReservation(ctx context.Context, reservationID, repl
 		return err
 	}
 	defer tx.Rollback()
+	var maintenanceID string
+	err = tx.QueryRowContext(ctx, `SELECT reservation_id FROM node_reservations WHERE state='maintenance' AND reservation_id<>? LIMIT 1`, reservationID).Scan(&maintenanceID)
+	if err == nil {
+		return ErrReservationConflict
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	var target NodeReservation
 	if err := scanNodeReservation(tx.QueryRowContext(ctx, nodeReservationSelect+` WHERE reservation_id=?`, reservationID), &target); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1016,6 +1032,55 @@ func (s *Store) ActivateNodeReservation(ctx context.Context, reservationID, repl
 		return ErrReservationConflict
 	}
 	return tx.Commit()
+}
+
+// ActivateNodeMaintenanceReservation closes runtime admission while allowing
+// the currently serving reservation to remain active. Update does not stop a
+// model container, but no prepared or future claim may become another runtime
+// owner until this maintenance row is released.
+func (s *Store) ActivateNodeMaintenanceReservation(ctx context.Context, reservationID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var state string
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM node_reservations WHERE reservation_id=?`, reservationID).Scan(&state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return os.ErrNotExist
+		}
+		return err
+	}
+	if state == "maintenance" {
+		return tx.Commit()
+	}
+	if state != "committed" {
+		return fmt.Errorf("reservation is %s and cannot claim runtime maintenance", state)
+	}
+	var other string
+	err = tx.QueryRowContext(ctx, `SELECT reservation_id FROM node_reservations WHERE state='maintenance' AND reservation_id<>? LIMIT 1`, reservationID).Scan(&other)
+	if err == nil {
+		return ErrReservationConflict
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE node_reservations SET state='maintenance',updated_at=? WHERE reservation_id=? AND state='committed'`, now(), reservationID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return ErrReservationConflict
+	}
+	return tx.Commit()
+}
+
+func (s *Store) NodeMaintenanceReservationActive(ctx context.Context) (bool, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM node_reservations WHERE state='maintenance'`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (s *Store) RenewNodeReservation(ctx context.Context, reservationID string, expires time.Time) error {
@@ -1090,7 +1155,7 @@ func (s *Store) AbortNodeReservation(ctx context.Context, reservationID string) 
 }
 
 func (s *Store) ReleaseNodeReservation(ctx context.Context, reservationID string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET state='released',updated_at=? WHERE reservation_id=? AND state IN ('prepared','committed','active','reclaiming')`, now(), reservationID)
+	result, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET state='released',updated_at=? WHERE reservation_id=? AND state IN ('prepared','committed','active','reclaiming','maintenance')`, now(), reservationID)
 	if err != nil {
 		return err
 	}

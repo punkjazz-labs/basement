@@ -27,6 +27,9 @@ type PlacementPlan struct {
 }
 
 func (m *Manager) PlanIndependent(ctx context.Context, recipeID string) (PlacementPlan, error) {
+	if err := m.requireFleetMutationAllowed(ctx); err != nil {
+		return PlacementPlan{}, err
+	}
 	selected, ok := recipe.Find(m.effectiveRecipes(), recipeID)
 	if !ok {
 		return PlacementPlan{}, errors.New("the model is not in this controller's current catalogue")

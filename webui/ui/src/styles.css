@@ -935,6 +935,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   font: 11.5px var(--mono);
 }
 .update-note { margin-top: 14px; color: var(--muted); font-size: 12.5px; }
+.update-member-copy { margin: 0; color: var(--muted); font-size: 12.5px; }
 
 @media (prefers-reduced-motion: reduce) {
   .update-progress-row.active .update-progress-dot { animation: none; }
