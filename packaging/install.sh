@@ -144,6 +144,20 @@ if [ -n "$listen" ]; then
   install -d -m 0755 /etc/systemd/system/basement.service.d
   printf '[Service]\nExecStart=\nExecStart=/usr/lib/basement/basement --data-dir /var/lib/basement --listen %s\n' "$listen" \
     > /etc/systemd/system/basement.service.d/listen.conf
+else
+  # Nobody chose an interface on this run, which is what happens on every
+  # unattended rerun and on the one-time manual upgrade to an updater-capable
+  # version. An existing drop-in still governs where the console binds, so read
+  # it back rather than assuming loopback. Without this the card below tells a
+  # machine that has been on the LAN for months that it is loopback only, hands
+  # out a 127.0.0.1 URL that does not work from the owner's laptop, and advises
+  # an SSH tunnel nobody needs. That lands on every existing user exactly once,
+  # during the upgrade that is already asking them to trust a new mechanism.
+  existing_listen=$(sed -n 's|^ExecStart=.*--listen \([^ ]*\).*|\1|p' \
+    /etc/systemd/system/basement.service.d/listen.conf 2>/dev/null | tail -n1 || true)
+  case "$existing_listen" in
+    *:*) listen="$existing_listen" ;;
+  esac
 fi
 
 systemctl daemon-reload
