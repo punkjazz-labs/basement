@@ -70,6 +70,17 @@ func TestComfyUIModelPathsFollowThePinnedFiles(t *testing.T) {
 	if document != want {
 		t.Fatalf("model paths document:\n%s\nwant:\n%s", document, want)
 	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3, ok := recipe.Find(recipes, "minimax-h3-comfyui-1s")
+	if !ok {
+		t.Fatal("MiniMax H3 recipe missing")
+	}
+	if document := comfyUIModelPaths(h3); document != want {
+		t.Fatalf("MiniMax H3 model paths document:\n%s\nwant:\n%s", document, want)
+	}
 	empty := recipetest.Copy(recipetest.Media())
 	empty.Artifacts[0].Files = nil
 	if got := comfyUIModelPaths(empty); got != "basement:\n" {
@@ -567,7 +578,7 @@ func TestFailingProgressSocketDoesNotFailTheGeneration(t *testing.T) {
 	})}}
 	outcome, err := RunGeneration(
 		context.Background(), client, []byte(`{"1":{"class_type":"Test"}}`),
-		outputRoot, filepath.Join(t.TempDir(), "generation"), time.Second,
+		outputRoot, filepath.Join(t.TempDir(), "generation"),
 		func(GenerationProgressUpdate) error { return nil },
 	)
 	if err != nil {

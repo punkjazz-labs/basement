@@ -80,6 +80,10 @@ the hardware.
 - `max_blocks`: 21 blocks, 362 frames, is proven to fit and to stay coherent.
   That is the top of the range the node itself documents as trained.
 - `min_blocks`: 7 blocks, 124 frames, is the bottom of that documented range.
-- The canvas: 1920 x 1088 is proven. A 2560 x 1440 run is outstanding.
+- The canvas: 1920 x 1088 and 2560 x 1440 are both proven, so the recipe
+  offers a 1440 short edge and a 2560 long edge. What is not measured is the
+  cross product of the largest canvas with the longest duration, which is why
+  the recipe carries no elapsed-time abort: a guess there could discard hours
+  of legitimate work.
 - Duration estimates in the console: still nothing. Three samples is not a
   model of generation time, and the console shows elapsed time only.

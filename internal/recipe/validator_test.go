@@ -11,8 +11,8 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recipes) != 8 {
-		t.Fatalf("got %d recipes, want 8", len(recipes))
+	if len(recipes) != 9 {
+		t.Fatalf("got %d recipes, want 9", len(recipes))
 	}
 	for _, r := range recipes {
 		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
@@ -53,6 +53,59 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if inkling.MemoryModel != nil {
 		t.Fatalf("a TP=2 recipe must not carry the flat single-node memory model: %#v", inkling.MemoryModel)
 	}
+	// The pack's first media recipe uses ComfyUI's own port and pins only the
+	// four files its text-to-video graph loads. It remains a candidate until
+	// the complete install lifecycle runs on hardware.
+	h3, ok := Find(recipes, "minimax-h3-comfyui-1s")
+	if !ok || h3.Runtime.Kind != "comfyui" || h3.Distributed() {
+		t.Fatalf("unexpected MiniMax H3 recipe: %#v", h3)
+	}
+	if h3.Runtime.Reference() != "ghcr.io/punkjazz-labs/basement-comfyui@sha256:8e6715f3e133c03b12f7730c4d66124554952bf9dae81263a153be05f96d23a9" {
+		t.Fatalf("MiniMax H3 runtime is not pinned: %#v", h3.Runtime)
+	}
+	if len(h3.Artifacts) != 1 || len(h3.Artifacts[0].Files) != 4 || h3.TotalArtifactBytes() != 42470585471 {
+		t.Fatalf("MiniMax H3 weights are not the four-file optimized set: %#v", h3.Artifacts)
+	}
+	wantFiles := []ArtifactFile{
+		{Name: "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", ExpectedBytes: 20970379616},
+		{Name: "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", ExpectedBytes: 15687142551},
+		{Name: "vae/minimax_h3_video_vae_fp16.safetensors", ExpectedBytes: 5207808496},
+		{Name: "vae/minimax_h3_audio_vae_fp32.safetensors", ExpectedBytes: 605254808},
+	}
+	for index, want := range wantFiles {
+		if got := h3.Artifacts[0].Files[index]; got != want {
+			t.Errorf("MiniMax H3 file %d=%#v, want %#v", index, got, want)
+		}
+	}
+	if h3.Runtime.ImageBytes != 5632799027 || h3.Runtime.ImageDiskBytes != 9246461463 {
+		t.Fatalf("MiniMax H3 image sizes are not the registry and Docker measurements: %#v", h3.Runtime)
+	}
+	if h3.RequiredBytes() != 71717046934 {
+		t.Fatalf("MiniMax H3 requires %d disk bytes, want artifact plus expanded image plus safety margin", h3.RequiredBytes())
+	}
+	if h3.Service.InternalPort != 8188 || h3.Service.DefaultHostPort != 8188 {
+		t.Fatalf("MiniMax H3 does not use ComfyUI's port: %#v", h3.Service)
+	}
+	config, media := h3.MediaGeneration()
+	if !media || len(config.Graphs) != 1 || config.Graphs[ModeTextToVideo] != "minimax-h3-t2v.json" {
+		t.Fatalf("MiniMax H3 does not expose only its reachable text-to-video graph: %#v", config.Graphs)
+	}
+	if config.DefaultShortEdge != 768 || config.MaxShortEdge != 1440 || config.MaxLongEdge != 2560 {
+		t.Fatalf("MiniMax H3 canvas=%#v, want the measured default and QHD cap", config)
+	}
+	if config.MinBlocks != 7 || config.DefaultBlocks != 7 || config.MaxBlocks != 21 || config.Frames(7) != 124 || config.Frames(21) != 362 {
+		t.Fatalf("MiniMax H3 duration grid=%#v", config)
+	}
+	if config.ConcurrentGenerations != 1 || h3.Topology.SparkCount != 1 {
+		t.Fatalf("MiniMax H3 concurrency or topology is not single-device: config=%#v topology=%#v", config, h3.Topology)
+	}
+	if h3.Runtime.StartTimeoutMinutes != 0 {
+		t.Fatalf("MiniMax H3 startup timeout=%d minutes, want the product's 20-minute health-wait default", h3.Runtime.StartTimeoutMinutes)
+	}
+	planned, ok := h3.PlannedMemoryBytes()
+	if !ok || planned != 99090000000 {
+		t.Fatalf("MiniMax H3 planned memory is %d,%v, want the measured 99.09 GB", planned, ok)
+	}
 	// The pack's first llama.cpp recipe, and the first artifact that pins
 	// individual files instead of a whole snapshot: one quantization out of a
 	// repository that publishes fourteen of them.
@@ -74,7 +127,7 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if flash3bit.Service.LlamaCpp.ModelFile != flash3bit.Artifacts[0].Files[0].Name {
 		t.Fatalf("DeepSeek 3-bit serves %q, which is not its first pinned shard", flash3bit.Service.LlamaCpp.ModelFile)
 	}
-	planned, ok := flash3bit.PlannedMemoryBytes()
+	planned, ok = flash3bit.PlannedMemoryBytes()
 	if !ok || planned+flash3bit.Requirements.MemoryReserveBytes > flash3bit.Requirements.MinimumMemoryBytes {
 		t.Fatalf("DeepSeek 3-bit plans %d bytes, which does not leave its own reserve", planned)
 	}
@@ -485,8 +538,7 @@ func TestValidateRejectsIncoherentArtifactFilePinning(t *testing.T) {
 }
 
 // An artifact that pins no files keeps meaning the whole snapshot, so every
-// recipe that shipped before per-file pinning existed still validates
-// untouched.
+// runtime that does not require a file selection still validates untouched.
 func TestWholeSnapshotArtifactsStayValidWithoutFilePinning(t *testing.T) {
 	recipes, err := Builtin()
 	if err != nil {
@@ -494,7 +546,7 @@ func TestWholeSnapshotArtifactsStayValidWithoutFilePinning(t *testing.T) {
 	}
 	for _, r := range recipes {
 		for _, artifact := range r.Artifacts {
-			if r.Runtime.Kind == "llamacpp" {
+			if r.Runtime.Kind == "llamacpp" || r.Runtime.Kind == "comfyui" {
 				continue
 			}
 			if len(artifact.Files) != 0 {

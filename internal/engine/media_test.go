@@ -115,14 +115,17 @@ func endsWith(job store.Job, operation string) bool {
 	return strings.HasPrefix(job.Steps[len(job.Steps)-1].Operation, operation)
 }
 
-// TestTextJobsStillVerifyByAsking is the other half: nothing that shipped
-// before this kind changed how it is proved.
+// TestTextJobsStillVerifyByAsking is the other half: every shipped text
+// recipe keeps the OpenAI inference check after a media recipe joins it.
 func TestTextJobsStillVerifyByAsking(t *testing.T) {
 	recipes, err := recipe.Builtin()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range recipes {
+		if _, media := r.MediaGeneration(); media {
+			continue
+		}
 		if got := recipe.InferenceVerification(r.Runtime.Kind); got != "verify_openai_inference" {
 			t.Fatalf("%s verifies with %s", r.ID, got)
 		}

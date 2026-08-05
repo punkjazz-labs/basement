@@ -403,8 +403,10 @@ func parseComfyUIProgress(message []byte, promptID string) (GenerationStepProgre
 // outputRoot is the host side of the container's output directory; ComfyUI
 // writes there under names of its own choosing, and this moves the results
 // into the per-generation directory afterwards rather than trying to make
-// ComfyUI name them.
-func RunGeneration(ctx context.Context, client *ComfyUIClient, graph []byte, outputRoot, destination string, deadline time.Duration, progress GenerationProgress) (GenerationOutcome, error) {
+// ComfyUI name them. There is deliberately no elapsed-time deadline here.
+// The recipe validates what may be requested, while explicit cancellation or
+// the caller's context decides when work must stop.
+func RunGeneration(ctx context.Context, client *ComfyUIClient, graph []byte, outputRoot, destination string, progress GenerationProgress) (GenerationOutcome, error) {
 	started := time.Now()
 	clientID := nextComfyUIClientID()
 	promptID, err := client.Submit(ctx, graph, clientID)
@@ -428,7 +430,6 @@ func RunGeneration(ctx context.Context, client *ComfyUIClient, graph []byte, out
 			<-progressDone
 		}
 	}()
-	expiry := started.Add(deadline)
 	for {
 		entry, err := client.History(ctx, promptID)
 		if err != nil {
@@ -448,9 +449,6 @@ func RunGeneration(ctx context.Context, client *ComfyUIClient, graph []byte, out
 			}
 			outcome.Duration = time.Since(started)
 			return outcome, nil
-		}
-		if time.Now().After(expiry) {
-			return GenerationOutcome{}, fmt.Errorf("the generation did not finish within %d minutes", int(deadline/time.Minute))
 		}
 		if progress != nil {
 			queue, _ := client.Queue(ctx)

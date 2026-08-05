@@ -15,13 +15,14 @@ import (
 //go:embed graphs
 var graphFiles embed.FS
 
-// GraphSource is where pinned workflow graphs are read from. Production never
-// reassigns it: it is the set embedded above, shipped with the binary, and a
-// recipe can only ever name a file that is already in it. It is a variable,
-// and exported, for one reason — a package outside this one that needs a
-// graph to drive a generation test cannot ship one into the product just to
-// have something to read. Tests save it, reassign it, and restore it.
-var GraphSource fs.FS = mustSubGraphs()
+var embeddedGraphSource = mustSubGraphs()
+
+// GraphSource is an overlay for workflow fixtures. Production never
+// reassigns it, so it reads the embedded set directly. Tests can replace it
+// with an in-memory filesystem without making the recipes shipped in the
+// binary lose access to their own embedded graphs: Graph falls back to the
+// immutable embedded set when the overlay does not contain a requested name.
+var GraphSource fs.FS = embeddedGraphSource
 
 func mustSubGraphs() fs.FS {
 	sub, err := fs.Sub(graphFiles, "graphs")
@@ -85,6 +86,9 @@ func Graph(name string) ([]byte, error) {
 		return nil, err
 	}
 	data, err := fs.ReadFile(GraphSource, name)
+	if errors.Is(err, fs.ErrNotExist) {
+		data, err = fs.ReadFile(embeddedGraphSource, name)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read workflow graph %s: %w", name, err)
 	}

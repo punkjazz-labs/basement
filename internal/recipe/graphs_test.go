@@ -139,6 +139,19 @@ func TestGraphRefusesUnsafeNames(t *testing.T) {
 	}
 }
 
+// TestFixtureGraphOverlayKeepsShippedGraphsResolvable reproduces the graph
+// lookup context used by the generation API tests. A fixture may add a small
+// graph, but it must not hide graphs that recipes in the binary declare.
+func TestFixtureGraphOverlayKeepsShippedGraphsResolvable(t *testing.T) {
+	recipetest.WithTextToVideoGraph(t)
+	if _, err := recipe.Builtin(); err != nil {
+		t.Fatalf("the built-in recipe pack lost an embedded graph behind a fixture overlay: %v", err)
+	}
+	if _, err := recipe.Graph("t2v.json"); err != nil {
+		t.Fatalf("the fixture graph stopped resolving: %v", err)
+	}
+}
+
 // TestShippedGraphsAreValidJSON holds every graph this binary carries to the
 // contract, whether or not a recipe names it yet. A graph that shipped broken
 // would only be discovered by the first person who installed the model.
@@ -275,5 +288,67 @@ func TestMiniMaxH3GraphsKeepPinnedTemplateSettings(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMiniMaxH3GraphLoadersResolveToPinnedArtifactFiles connects the two
+// independently pinned surfaces that ComfyUI joins at runtime: graph loaders
+// name bare files, while the artifact stores those files under model folders.
+// A mismatch here would only appear after the complete artifact downloaded.
+func TestMiniMaxH3GraphLoadersResolveToPinnedArtifactFiles(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3, ok := recipe.Find(recipes, "minimax-h3-comfyui-1s")
+	if !ok {
+		t.Fatal("MiniMax H3 recipe missing")
+	}
+	if len(h3.Artifacts) != 1 {
+		t.Fatalf("MiniMax H3 artifacts=%d, want one primary artifact", len(h3.Artifacts))
+	}
+	pinned := make(map[string]bool, len(h3.Artifacts[0].Files))
+	for _, file := range h3.Artifacts[0].Files {
+		pinned[file.Name] = true
+	}
+
+	raw, err := recipe.Graph(h3.Service.ComfyUI.Graphs[recipe.ModeTextToVideo])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]apiGraphNode
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	loaded := map[string]bool{}
+	for _, node := range document {
+		var folder, input string
+		switch node.ClassType {
+		case "UNETLoader":
+			folder, input = "diffusion_models", "unet_name"
+		case "CLIPLoader":
+			folder, input = "text_encoders", "clip_name"
+		case "VAELoader":
+			folder, input = "vae", "vae_name"
+		default:
+			continue
+		}
+		name, ok := node.Inputs[input].(string)
+		if !ok || name == "" {
+			t.Fatalf("%s has no string %s input: %#v", node.ClassType, input, node.Inputs[input])
+		}
+		path := folder + "/" + name
+		if !pinned[path] {
+			t.Errorf("%s asks for %s, which the recipe does not pin", node.ClassType, path)
+		}
+		loaded[path] = true
+	}
+	if len(loaded) != len(pinned) {
+		t.Fatalf("graph loads %d distinct files but the recipe pins %d: loaded=%v pinned=%v", len(loaded), len(pinned), loaded, pinned)
+	}
+	for path := range pinned {
+		if !loaded[path] {
+			t.Errorf("recipe pins %s, which the text-to-video graph does not load", path)
+		}
 	}
 }

@@ -869,7 +869,7 @@ func (h *HostExecutor) verifyMediaGeneration(ctx context.Context, r recipe.Recip
 		}
 		return progress(receipt)
 	}
-	outcome, err := RunGeneration(ctx, NewComfyUIClient(h.modelURL(r)), graph, h.GenerationRoot(r), destination, startTimeout(r), report)
+	outcome, err := RunGeneration(ctx, NewComfyUIClient(h.modelURL(r)), graph, h.GenerationRoot(r), destination, report)
 	if err != nil {
 		return nil, err
 	}

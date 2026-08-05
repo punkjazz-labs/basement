@@ -102,6 +102,54 @@ func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 	}
 }
 
+// TestMiniMaxH3ContainerPublishesComfyUIPortWithIsolatedIPC proves the first
+// non-8000 recipe reaches Docker as its own port and never falls into the
+// distributed host-IPC branch that would override its shared-memory policy.
+func TestMiniMaxH3ContainerPublishesComfyUIPortWithIsolatedIPC(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3, ok := recipe.Find(recipes, "minimax-h3-comfyui-1s")
+	if !ok {
+		t.Fatal("MiniMax H3 recipe missing")
+	}
+	var body map[string]any
+	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"container-id"}`))}, nil
+	})}}
+	writable := map[string]string{"/output": "/managed/output", "/input": "/managed/input"}
+	if _, err := client.Create(context.Background(), "minimax-h3", h3.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", writable, h3, Placement{}); err != nil {
+		t.Fatal(err)
+	}
+	host := body["HostConfig"].(map[string]any)
+	bindings := host["PortBindings"].(map[string]any)
+	binding, ok := bindings["8188/tcp"].([]any)
+	if !ok || len(binding) != 1 {
+		t.Fatalf("ComfyUI port binding=%#v", bindings)
+	}
+	target := binding[0].(map[string]any)
+	if target["HostIp"] != "127.0.0.1" || target["HostPort"] != "8188" {
+		t.Fatalf("ComfyUI binding=%#v, want loopback port 8188", target)
+	}
+	if _, exists := host["ShmSize"]; exists {
+		t.Fatalf("MiniMax H3 requested an unmeasured shared-memory allocation: %#v", host["ShmSize"])
+	}
+	if _, exists := host["IpcMode"]; exists {
+		t.Fatal("single-Spark MiniMax H3 requested the host IPC namespace")
+	}
+	if exposed := body["ExposedPorts"].(map[string]any); exposed["8188/tcp"] == nil {
+		t.Fatalf("ComfyUI exposed ports=%#v", exposed)
+	}
+	joined := strings.Join(toStrings(body["Cmd"].([]any)), " ")
+	if !strings.Contains(joined, "--port 8188") {
+		t.Fatalf("ComfyUI command does not bind port 8188: %s", joined)
+	}
+}
+
 func TestLagunaUsesSeparateReadOnlyDrafterMount(t *testing.T) {
 	recipes, err := recipe.Builtin()
 	if err != nil {
