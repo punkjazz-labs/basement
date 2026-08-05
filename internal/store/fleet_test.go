@@ -128,7 +128,8 @@ func TestLegacyPeerBecomesPendingWithoutChangingItsCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	self := testFleetNode("node_00000000000000000000000000000001", "https://192.168.99.10:7071")
-	if err := database.InitializeFleetMigration(ctx, self, nil); err != nil {
+	candidate := LegacyDeploymentCandidate{RecipeID: "distributed-model", RecipeVersion: 2, RecipeFingerprint: "recipe-fingerprint", TopologyCount: 2}
+	if err := database.InitializeFleetMigration(ctx, self, []LegacyDeploymentCandidate{candidate}); err != nil {
 		t.Fatal(err)
 	}
 	config, err := database.FleetConfig(ctx)
@@ -146,6 +147,15 @@ func TestLegacyPeerBecomesPendingWithoutChangingItsCredential(t *testing.T) {
 	_, credential, err := database.PeerCredentials(ctx, peer.ID)
 	if err != nil || credential != "legacy-secret" {
 		t.Fatalf("legacy credential changed: credential=%q err=%v", credential, err)
+	}
+	var state string
+	var topology int
+	if err := database.db.QueryRow(`SELECT state,topology_count FROM fleet_deployments WHERE recipe_id=?`, candidate.RecipeID).Scan(&state, &topology); err != nil || state != "legacy-candidate" || topology != 2 {
+		t.Fatalf("legacy deployment was asserted beyond available evidence: state=%q topology=%d err=%v", state, topology, err)
+	}
+	var ranks int
+	if err := database.db.QueryRow(`SELECT count(*) FROM fleet_deployment_nodes`).Scan(&ranks); err != nil || ranks != 2 {
+		t.Fatalf("legacy candidate node rows=%d err=%v", ranks, err)
 	}
 }
 

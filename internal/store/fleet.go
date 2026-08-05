@@ -131,7 +131,17 @@ func (s *Store) InitializeFleetMigration(ctx context.Context, self FleetNode, ca
 	if err := scanFleetConfig(tx.QueryRowContext(ctx, fleetConfigSelect), &config); err != nil {
 		return err
 	}
-	if config.Role == "member" || config.FleetID != "" {
+	if config.Role == "member" {
+		return tx.Commit()
+	}
+	if config.FleetID != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE fleet_config SET controller_console_url=?,controller_node_url=?,controller_certificate=? WHERE singleton=1 AND role='controller'`, self.ConsoleURL, self.NodeURL, self.Certificate); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE fleet_nodes SET display_name=?,console_url=?,node_url=?,certificate=?,manager_version=?,manager_build_identity=?,catalogue_digest=?,updated_at=? WHERE fleet_id=? AND node_id=?`,
+			self.DisplayName, self.ConsoleURL, self.NodeURL, self.Certificate, self.ManagerVersion, self.ManagerBuildIdentity, self.CatalogueDigest, now(), config.FleetID, self.NodeID); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT id,name,base_url,created_at FROM peers ORDER BY created_at`)
@@ -163,8 +173,8 @@ func (s *Store) InitializeFleetMigration(ctx context.Context, self FleetNode, ca
 			return err
 		}
 		timestamp := now()
-		if _, err := tx.ExecContext(ctx, `UPDATE fleet_config SET fleet_id=?,role='controller',controller_node_id=?,membership_epoch=1,joined_at=?,migration_state='legacy-pending' WHERE singleton=1`,
-			fleetID, self.NodeID, timestamp); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE fleet_config SET fleet_id=?,role='controller',controller_node_id=?,controller_console_url=?,controller_node_url=?,controller_certificate=?,membership_epoch=1,joined_at=?,migration_state='legacy-pending' WHERE singleton=1`,
+			fleetID, self.NodeID, self.ConsoleURL, self.NodeURL, self.Certificate, timestamp); err != nil {
 			return err
 		}
 		self.FleetID, self.MembershipState = fleetID, "active"
@@ -282,12 +292,20 @@ func (s *Store) EnsureFleetController(ctx context.Context, self FleetNode) (Flee
 		}
 		config.Role, config.ControllerNodeID, config.MembershipEpoch = "controller", self.NodeID, 1
 		config.JoinedAt, config.MigrationState = now(), "ready"
-		if _, err := tx.ExecContext(ctx, `UPDATE fleet_config SET fleet_id=?,role='controller',controller_node_id=?,membership_epoch=?,joined_at=?,migration_state='ready' WHERE singleton=1`,
-			config.FleetID, self.NodeID, config.MembershipEpoch, config.JoinedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE fleet_config SET fleet_id=?,role='controller',controller_node_id=?,controller_console_url=?,controller_node_url=?,controller_certificate=?,membership_epoch=?,joined_at=?,migration_state='ready' WHERE singleton=1`,
+			config.FleetID, self.NodeID, self.ConsoleURL, self.NodeURL, self.Certificate, config.MembershipEpoch, config.JoinedAt); err != nil {
 			return FleetConfig{}, err
 		}
 		self.FleetID, self.MembershipState = config.FleetID, "active"
 		if err := insertFleetNode(ctx, tx, self); err != nil {
+			return FleetConfig{}, err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `UPDATE fleet_config SET controller_console_url=?,controller_node_url=?,controller_certificate=? WHERE singleton=1 AND role='controller'`, self.ConsoleURL, self.NodeURL, self.Certificate); err != nil {
+			return FleetConfig{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE fleet_nodes SET display_name=?,console_url=?,node_url=?,certificate=?,manager_version=?,manager_build_identity=?,catalogue_digest=?,updated_at=? WHERE fleet_id=? AND node_id=?`,
+			self.DisplayName, self.ConsoleURL, self.NodeURL, self.Certificate, self.ManagerVersion, self.ManagerBuildIdentity, self.CatalogueDigest, now(), config.FleetID, self.NodeID); err != nil {
 			return FleetConfig{}, err
 		}
 	}
@@ -324,8 +342,8 @@ func (s *Store) PrepareFleetNode(ctx context.Context, self, node FleetNode) (str
 			return "", false, err
 		}
 		config.Role, config.ControllerNodeID, config.MembershipEpoch = "controller", self.NodeID, 1
-		if _, err := tx.ExecContext(ctx, `UPDATE fleet_config SET fleet_id=?,role='controller',controller_node_id=?,membership_epoch=?,joined_at=?,migration_state='ready' WHERE singleton=1`,
-			config.FleetID, self.NodeID, config.MembershipEpoch, now()); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE fleet_config SET fleet_id=?,role='controller',controller_node_id=?,controller_console_url=?,controller_node_url=?,controller_certificate=?,membership_epoch=?,joined_at=?,migration_state='ready' WHERE singleton=1`,
+			config.FleetID, self.NodeID, self.ConsoleURL, self.NodeURL, self.Certificate, config.MembershipEpoch, now()); err != nil {
 			return "", false, err
 		}
 		self.FleetID, self.MembershipState = config.FleetID, "active"

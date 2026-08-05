@@ -105,7 +105,10 @@ func (m *Manager) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Cookies and public API keys are different authorities and are never
 		// accepted on the manager transport. A compromised browser session or
-		// leaked inference key therefore cannot become fleet membership.
+		// leaked inference key therefore cannot become fleet membership. A
+		// compromised enrolled member can complete TLS to its controller, but
+		// this Phase B mux gives members no controller-side mutation to invoke:
+		// the controller pulls heartbeats, and placement does not exist here.
 		if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
 			writeFleetError(w, http.StatusUnauthorized, errors.New("fleet transport accepts mutual TLS identity only"))
 			return

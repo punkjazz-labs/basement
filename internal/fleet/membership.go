@@ -101,12 +101,16 @@ func BinaryBuildIdentity(version string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	payload, err := os.ReadFile(executable)
+	file, err := os.Open(executable)
 	if err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256(payload)
-	return version + ":" + hex.EncodeToString(digest[:]), nil
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return "", err
+	}
+	return version + ":" + hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func RecipeFingerprint(value recipe.Recipe) (string, error) {
