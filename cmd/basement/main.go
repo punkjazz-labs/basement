@@ -18,6 +18,7 @@ import (
 	"github.com/punkjazz-labs/basement/internal/auth"
 	"github.com/punkjazz-labs/basement/internal/config"
 	"github.com/punkjazz-labs/basement/internal/engine"
+	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/httpapi"
 	"github.com/punkjazz-labs/basement/internal/inventory"
 	"github.com/punkjazz-labs/basement/internal/operations"
@@ -71,6 +72,21 @@ func main() {
 		exit(1)
 	}
 	provider := inventory.Host{DataDir: cfg.DataDir, DockerSocket: "/var/run/docker.sock"}
+	buildIdentity, err := fleet.BinaryBuildIdentity(cfg.Version)
+	if err != nil {
+		logger.Error("identify manager build", "error", err)
+		exit(1)
+	}
+	hostname, _ := os.Hostname()
+	fleetManager, err := fleet.NewManager(context.Background(), fleet.Options{
+		DataDir: cfg.DataDir, Database: db, Inventory: provider, Version: cfg.Version,
+		BuildIdentity: buildIdentity, DisplayName: hostname,
+		ConsoleURL: "http://" + cfg.Listen, NodeURL: "https://" + cfg.FleetListen, Recipes: recipes,
+	})
+	if err != nil {
+		logger.Error("initialize fleet identity", "error", err)
+		exit(1)
+	}
 	// A two-Spark recipe needs exactly one configured peer to act as the
 	// worker node. Refusing to choose is deliberate: placement across a
 	// larger fleet is ADR 0005 work that does not exist yet.
@@ -103,6 +119,7 @@ func main() {
 	jobEngine.SetRecipes(cachedAll, cachedEffective)
 
 	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, cachedEffective)
+	api.SetFleetManager(fleetManager)
 	api.SetRecipes(cachedAll, cachedEffective)
 	// A Spark adopted from this console is installed to listen the same way
 	// this one does (ADR 0014), so the API needs to know how that is.
@@ -123,6 +140,7 @@ func main() {
 		exit(1)
 	}
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
+	fleetServer := &http.Server{Addr: cfg.FleetListen, Handler: fleetManager.Handler(), TLSConfig: fleetManager.TLSConfig(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
 	// Progress streams stay open indefinitely by design; without this hook a
 	// restart waits out the whole drain timeout whenever a console is open.
 	server.RegisterOnShutdown(api.Close)
@@ -132,7 +150,14 @@ func main() {
 	go feed.Run(feedCtx, recipefeed.RefreshInterval, func(all, effective []recipe.Recipe) {
 		jobEngine.SetRecipes(all, effective)
 		api.SetRecipes(all, effective)
+		if err := fleetManager.SetRecipes(all); err != nil {
+			logger.Error("refresh fleet catalogue digest", "error", err)
+		}
 	})
+
+	fleetCtx, stopFleet := context.WithCancel(context.Background())
+	defer stopFleet()
+	go fleetManager.Run(fleetCtx)
 
 	countCtx, stopCounting := context.WithCancel(context.Background())
 	defer stopCounting()
@@ -149,14 +174,25 @@ func main() {
 			exit(1)
 		}
 	}()
+	go func() {
+		logger.Info("fleet manager listening", "address", cfg.FleetListen, "version", cfg.Version)
+		if err := fleetServer.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("fleet TLS server failed", "error", err)
+			exit(1)
+		}
+	}()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	stopFeed()
+	stopFleet()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+	}
+	if err := fleetServer.Shutdown(ctx); err != nil {
+		logger.Error("fleet graceful shutdown failed", "error", err)
 	}
 	// Waited on, not just cancelled, and only after the drain above: the
 	// accounting loop takes one final token reading on its way out, and

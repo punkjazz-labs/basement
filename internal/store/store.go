@@ -262,7 +262,169 @@ CREATE TABLE IF NOT EXISTS generations (
 	if err := s.migratePeersSingleton(); err != nil {
 		return err
 	}
-	return s.migrateGenerationProgress()
+	if err := s.migrateGenerationProgress(); err != nil {
+		return err
+	}
+	return s.migrateFleetSchema()
+}
+
+const (
+	fleetSchemaVersion           = 2
+	fleetMigrationStatementCount = 10
+)
+
+// fleetMigrationStep is a failure-injection seam for the migration tests.
+// Production never reassigns it. The fleet tables form one authority boundary,
+// so every statement and the schema version advance belong to one transaction.
+var fleetMigrationStep = func(int) error { return nil }
+
+// migrateFleetSchema is the first migration that uses schema_meta. The older
+// manager seeded version 1 but never read it. Advancing it now records whether
+// this multi-table unit committed without making rollback depend on that value:
+// the previous manager ignores version 2 and continues to use its unchanged
+// tables, while this manager retries the whole transaction after any failure.
+func (s *Store) migrateFleetSchema() error {
+	var version int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_meta`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version >= fleetSchemaVersion {
+		return nil
+	}
+	statements := []string{
+		`CREATE TABLE node_identity (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  node_id TEXT NOT NULL UNIQUE,
+  public_key BLOB NOT NULL,
+  certificate_fingerprint TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`,
+		`CREATE TABLE fleet_config (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  fleet_id TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'standalone',
+  controller_node_id TEXT NOT NULL DEFAULT '',
+  controller_console_url TEXT NOT NULL DEFAULT '',
+  controller_node_url TEXT NOT NULL DEFAULT '',
+  controller_certificate BLOB NOT NULL DEFAULT '',
+  membership_epoch INTEGER NOT NULL DEFAULT 0,
+  joined_at TEXT NOT NULL DEFAULT '',
+  migration_state TEXT NOT NULL DEFAULT 'ready',
+  outbound_heartbeat_sequence INTEGER NOT NULL DEFAULT 0
+)`,
+		`CREATE TABLE fleet_nodes (
+  fleet_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  console_url TEXT NOT NULL,
+  node_url TEXT NOT NULL,
+  certificate BLOB NOT NULL,
+  manager_version TEXT NOT NULL DEFAULT '',
+  manager_build_identity TEXT NOT NULL DEFAULT '',
+  catalogue_digest TEXT NOT NULL DEFAULT '',
+  membership_state TEXT NOT NULL,
+  heartbeat_sequence INTEGER NOT NULL DEFAULT 0,
+  heartbeat_received_at TEXT NOT NULL DEFAULT '',
+  heartbeat_payload BLOB NOT NULL DEFAULT '',
+  heartbeat_signature BLOB NOT NULL DEFAULT '',
+  legacy_peer_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(fleet_id,node_id),
+  UNIQUE(fleet_id,node_url)
+)`,
+		`CREATE TABLE fleet_deployments (
+  deployment_id TEXT PRIMARY KEY,
+  recipe_id TEXT NOT NULL,
+  recipe_version INTEGER NOT NULL,
+  recipe_fingerprint TEXT NOT NULL,
+  topology_count INTEGER NOT NULL,
+  owner_node_id TEXT NOT NULL,
+  owner_job_id TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL,
+  last_observed_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`,
+		`CREATE TABLE fleet_deployment_nodes (
+  deployment_id TEXT NOT NULL REFERENCES fleet_deployments(deployment_id) ON DELETE CASCADE,
+  node_id TEXT NOT NULL,
+  node_role TEXT NOT NULL,
+  rank INTEGER NOT NULL,
+  reservation_id TEXT NOT NULL DEFAULT '',
+  fabric_interface TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(deployment_id,node_id)
+)`,
+		`CREATE TABLE node_reservations (
+  reservation_id TEXT PRIMARY KEY,
+  deployment_id TEXT NOT NULL,
+  fleet_id TEXT NOT NULL,
+  controller_node_id TEXT NOT NULL,
+  driver_node_id TEXT NOT NULL,
+  recipe_id TEXT NOT NULL,
+  recipe_version INTEGER NOT NULL,
+  recipe_fingerprint TEXT NOT NULL,
+  state TEXT NOT NULL,
+  claims_json BLOB NOT NULL,
+  prepare_token_hash TEXT NOT NULL,
+  grant_json BLOB NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`,
+		`CREATE TABLE distributed_ranks (
+  deployment_id TEXT PRIMARY KEY,
+  recipe_id TEXT NOT NULL,
+  recipe_version INTEGER NOT NULL,
+  recipe_fingerprint TEXT NOT NULL,
+  rank INTEGER NOT NULL,
+  driver_node_id TEXT NOT NULL,
+  placement_json BLOB NOT NULL,
+  container_id TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL,
+  driver_lease_expires_at TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+)`,
+		`CREATE TABLE fleet_join_codes (
+  code_hash TEXT PRIMARY KEY,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+)`,
+		`CREATE TABLE fleet_pending_joins (
+  prepare_token_hash TEXT PRIMARY KEY,
+  fleet_id TEXT NOT NULL,
+  controller_node_id TEXT NOT NULL,
+  controller_console_url TEXT NOT NULL,
+  controller_node_url TEXT NOT NULL,
+  controller_certificate BLOB NOT NULL,
+  controller_certificate_fingerprint TEXT NOT NULL,
+  membership_epoch INTEGER NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`,
+		`UPDATE schema_meta SET version=2`,
+	}
+	if len(statements) != fleetMigrationStatementCount {
+		return errors.New("fleet schema migration statement count is inconsistent")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin fleet schema migration: %w", err)
+	}
+	defer tx.Rollback()
+	for index, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("migrate fleet schema statement %d: %w", index+1, err)
+		}
+		if err := fleetMigrationStep(index + 1); err != nil {
+			return fmt.Errorf("migrate fleet schema statement %d: %w", index+1, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit fleet schema migration: %w", err)
+	}
+	return nil
 }
 
 // migratePeersSingleton brings a database created before this column up to
