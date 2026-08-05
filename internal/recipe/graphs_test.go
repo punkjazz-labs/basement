@@ -278,7 +278,12 @@ func TestMiniMaxH3GraphsKeepPinnedTemplateSettings(t *testing.T) {
 				{"24", "vae_name", "minimax_h3_audio_vae_fp32.safetensors"},
 				{"91", "fps", float64(24)},
 				{"91", "bit_depth", float64(8)},
-				{"92", "filename_prefix", "video/MiniMax_H3"},
+				// The one deliberate divergence from the pinned template,
+				// which writes "video/MiniMax_H3". ComfyUI creates the
+				// directory part as root inside the output directory
+				// basement mounts, and the manager can then never move the
+				// result out of it. Everything else here is the template's.
+				{"92", "filename_prefix", "MiniMax_H3"},
 				{"92", "format", "auto"},
 				{"92", "codec", "auto"},
 			}
@@ -350,5 +355,40 @@ func TestMiniMaxH3GraphLoadersResolveToPinnedArtifactFiles(t *testing.T) {
 		if !loaded[path] {
 			t.Errorf("recipe pins %s, which the text-to-video graph does not load", path)
 		}
+	}
+}
+
+// TestShippedGraphsSaveWithoutASubfolder is a regression from an install that
+// generated a real video and then could not file it. ComfyUI creates the
+// directory part of a filename_prefix as root inside the output directory
+// basement mounts, and removing a file needs write permission on the
+// directory holding it, so the manager could read the result and never move
+// it. The failure arrived after twenty minutes of generation; this makes it
+// arrive in the test run instead.
+func TestShippedGraphsSaveWithoutASubfolder(t *testing.T) {
+	entries, err := fs.ReadDir(recipe.GraphSource, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		raw, err := recipe.Graph(entry.Name())
+		if err != nil {
+			t.Fatalf("%s: %v", entry.Name(), err)
+		}
+		subfolders, err := recipe.GraphSaveSubfolders(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", entry.Name(), err)
+		}
+		if len(subfolders) > 0 {
+			t.Fatalf("%s saves into %v, which the manager cannot move results out of", entry.Name(), subfolders)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no shipped graphs were checked, so this proves nothing")
 	}
 }

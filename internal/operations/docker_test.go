@@ -969,24 +969,39 @@ func TestDockerNotFoundIsDistinguishableFromDaemonFailure(t *testing.T) {
 // rename still has containers created under it, and they are never
 // relabeled in place (docs/plans/10-rename-basement.md).
 func TestManagedContainersReadsBothLabelNamespaces(t *testing.T) {
-	var requestedFilters string
+	// This fake applies the filter the way Docker does, which is the whole
+	// point: it ANDs the values inside one label filter. A fake that ignores
+	// the filter and returns everything let a query for both namespaces at
+	// once pass here while matching nothing on a real machine.
+	currentJSON := `{"Names":["/basement-qwen-v1"],"State":"running","Labels":{"ai.basement.managed":"true","ai.basement.recipe-id":"qwen","ai.basement.recipe-version":"1","ai.basement.host-port":"8100"}}`
+	legacyJSON := `{"Names":["/runonspark-laguna-v3"],"State":"exited","Labels":{"ai.runonspark.managed":"true","ai.runonspark.recipe-id":"laguna","ai.runonspark.recipe-version":"3"}}`
+	requested := []string{}
 	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
 		if !strings.Contains(request.URL.Path, "/containers/json") {
 			t.Fatalf("unexpected Docker request: %s %s", request.Method, request.URL)
 		}
-		requestedFilters = request.URL.Query().Get("filters")
-		body := `[
-			{"Names":["/basement-qwen-v1"],"State":"running","Labels":{"ai.basement.managed":"true","ai.basement.recipe-id":"qwen","ai.basement.recipe-version":"1","ai.basement.host-port":"8100"}},
-			{"Names":["/runonspark-laguna-v3"],"State":"exited","Labels":{"ai.runonspark.managed":"true","ai.runonspark.recipe-id":"laguna","ai.runonspark.recipe-version":"3"}}
-		]`
+		filters := request.URL.Query().Get("filters")
+		requested = append(requested, filters)
+		matched := []string{}
+		wantsCurrent := strings.Contains(filters, "ai.basement.managed=true")
+		wantsLegacy := strings.Contains(filters, "ai.runonspark.managed=true")
+		if wantsCurrent && !wantsLegacy {
+			matched = append(matched, currentJSON)
+		}
+		if wantsLegacy && !wantsCurrent {
+			matched = append(matched, legacyJSON)
+		}
+		body := "[" + strings.Join(matched, ",") + "]"
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}}
 	containers, err := client.ManagedContainers(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(requestedFilters, "ai.basement.managed=true") || !strings.Contains(requestedFilters, "ai.runonspark.managed=true") {
-		t.Fatalf("filter did not request both label namespaces: %s", requestedFilters)
+	for _, filters := range requested {
+		if strings.Contains(filters, "ai.basement.managed=true") && strings.Contains(filters, "ai.runonspark.managed=true") {
+			t.Fatalf("one query asked for both label namespaces, which Docker ANDs and no container satisfies: %s", filters)
+		}
 	}
 	if len(containers) != 2 {
 		t.Fatalf("got %d containers, want 2: %#v", len(containers), containers)
