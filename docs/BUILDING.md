@@ -336,7 +336,22 @@ built for macOS and Windows only.
    Set `UPDATE_KEY_ID` to the matching key id and
    `UPDATE_KEYCHAIN_SERVICE` to the chosen Keychain service name. Set
    `UPDATE_KEYCHAIN_ACCOUNT` only when the Keychain item uses a different
-   account from the current macOS user. Then name every release that the new
+   account from the current macOS user.
+
+   The first release key was generated on 2026-08-05 and is already in place,
+   so the commands above are for rotation or for a second release machine, not
+   for the next release. The values in use are:
+
+   ```sh
+   export UPDATE_KEY_ID=basement-release-2026-08
+   export UPDATE_KEYCHAIN_SERVICE=basement-update-release
+   ```
+
+   `BASEMENT_UPDATE_PUBLIC_KEYS` holds the matching public half. The private
+   half exists only in that Keychain item on the release Mac. There is no
+   escrow copy: losing it means shipping a manager release carrying a new key
+   before any machine can be updated again, so back up the Keychain, not the
+   value. Then name every release that the new
    manager can safely roll back to:
 
    ```sh
@@ -407,8 +422,10 @@ always a deliberate choice. That drop-in is the reason you must never assume the
 committed unit describes a running machine.
 
 `/var/lib/basement` holds `manager.db` (SQLite: jobs, models, API keys, peers,
-token counters), `pairing-token` (the console pairing credential, read by
-`basement pairing-url`), `auth-signing-key`, downloaded model artifacts, and
+fleet membership and token counters), `pairing-token` (the console pairing
+credential, read by `basement pairing-url`), `auth-signing-key`,
+`fleet-identity.pem` (the address-independent Ed25519 node key and its
+self-signed certificate, mode 0600), downloaded model artifacts, and
 generated container configuration. A console update adds one signed manager
 slot, changes the `current` symlink, and restarts only the manager service. The
 fixed root updater, its units, and its embedded public key change only when the
