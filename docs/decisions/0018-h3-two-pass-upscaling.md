@@ -1,6 +1,49 @@
 # ADR 0018: Evaluate two-pass latent upscaling for MiniMax H3
 
-Date: 2026-08-05. Status: proposed. Evaluation only. Unproven.
+Date: 2026-08-05. Status: rejected. Measured on hardware, then rejected on quality.
+
+## Outcome, 2026-08-05: rejected
+
+Measured, then watched, then rejected. The speed was real and the picture was not.
+
+| Run | Wall time | Peak memory |
+|---|---|---|
+| native 1920 x 1088 | 3034 s | 96.1 GB |
+| two-pass 1920 x 1088 | 1753 s | 91.8 GB |
+
+Two-pass finished in 0.58 of native's time and used slightly less memory. The
+native run came in 0.4 percent from the 3021 s recorded independently in
+docs/H3-MEASUREMENTS.md, so the harness was measuring the same thing the
+original method measured.
+
+The owner watched both files and rejected it: visible artifacts in the video
+and in the audio. Not usable. The QHD leg was stopped rather than finished,
+because a faster route to an unusable picture does not become acceptable by
+being measured at a second resolution.
+
+Two findings worth keeping.
+
+First, the deciding measurement named at the top of this ADR was the wrong
+instrument. It assumed two-pass would produce the same video more cheaply, so a
+ratio would settle it. It does not. Sampling low, upscaling the latents,
+re-noising and sampling again is a different denoising trajectory, so the same
+seed produces a different scene: different composition, different light,
+different subject pose. There is no shared content to compare, which means the
+softness question this ADR was built to answer could not have been answered by
+that pairing at all. A ratio was never going to decide this. Watching it did.
+
+Second, a single frame is not enough to judge either. A still from the two-pass
+run looked better than the native one, sharper and better composed. The
+artifacts the owner rejected it for are temporal and audible, and neither
+survives into a screenshot. Any future evaluation of a generation shortcut has
+to be judged on played video with sound, by a person, not on frames or metrics.
+
+The candidate node was never vendored, which is what made stopping cheap. It
+was fetched at a pinned commit for the test and nothing depends on it. Its
+licence problem, no licence at all, turned out not to matter.
+
+NVIDIA Sol Engine remains watch-only for the reason recorded below: no released
+code as of 2026-08-05.
 
 ## Question
 
