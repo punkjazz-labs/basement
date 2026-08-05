@@ -91,11 +91,17 @@ a { color: var(--ink); }
    name always keeps the full sidebar width. */
 .foot-live .tps { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); flex-basis: 100%; padding-left: 12px; }
 .side-update {
-  display: inline-block; text-decoration: none; font-size: 11px;
+  display: inline-block; text-decoration: none; font-size: 11px; line-height: 1.6;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
   background: color-mix(in srgb, var(--accent) 9%, transparent);
   color: var(--accent-deep); border-radius: 999px; padding: 2px 9px; width: fit-content; font-weight: 550;
 }
+.side-update:hover { border-color: color-mix(in srgb, var(--accent) 70%, var(--line)); }
+.side-manager {
+  width: fit-content; padding: 0; border: 0; background: none; color: inherit;
+  font: inherit; line-height: inherit; text-align: left;
+}
+.side-manager:hover { color: var(--muted); }
 @keyframes breathe { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) {
   .foot-live .led { animation: none !important; }
@@ -814,6 +820,83 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .storage-row > code { overflow-wrap: anywhere; text-align: right; max-width: 72%; }
 .storage-row .bytes { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
+/* ---- Manager update ------------------------------------------------------ */
+
+.update-view { display: grid; gap: 14px; }
+.update-card { padding: 18px 20px; }
+.update-dialog-body { min-width: 0; }
+.update-dialog .update-card {
+  padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none;
+}
+.update-dialog-reconnecting {
+  margin-left: auto; padding: 3px 10px; border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line));
+  border-radius: 999px; color: var(--warn); font-size: 11.5px; font-weight: 550;
+}
+.update-state-head { display: flex; align-items: flex-start; gap: 14px; }
+.update-state-mark {
+  width: 28px; height: 28px; display: grid; flex: none; place-items: center;
+  border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted);
+  font: 650 12px var(--mono);
+}
+.update-state-mark.complete { border-color: color-mix(in srgb, var(--ink) 38%, var(--line)); color: var(--ink); }
+.update-state-mark.warn { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); color: var(--warn); }
+.update-state-mark.fail { border-color: color-mix(in srgb, var(--fail) 55%, var(--line)); color: var(--fail); }
+.update-state-copy { min-width: 0; }
+.update-state-copy h2 { font-size: 16px; }
+.update-state-copy p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.update-signed {
+  display: flex; align-items: center; gap: 6px; margin-left: auto;
+  color: var(--muted); font-size: 11.5px; white-space: nowrap;
+}
+.update-signed::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ink); }
+.update-facts { display: grid; grid-template-columns: 150px 1fr; gap: 8px 14px; margin: 18px 0 0; }
+.update-facts dt { color: var(--muted); }
+.update-facts dd { margin: 0; font-family: var(--mono); }
+.update-actions { display: flex; align-items: center; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+.update-card > .error-note { margin-top: 16px; }
+.update-progress-list { display: grid; margin-top: 17px; }
+.update-progress-row {
+  display: grid; grid-template-columns: 16px 1fr auto; gap: 10px; align-items: center;
+  min-height: 38px; border-top: 1px solid var(--line); color: var(--faint);
+}
+.update-progress-row:first-child { border-top: 0; }
+.update-progress-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
+.update-progress-row.done { color: var(--muted); }
+.update-progress-row.done .update-progress-dot { background: var(--ink); }
+.update-progress-row.active { color: var(--ink); font-weight: 550; }
+.update-progress-row.active .update-progress-dot {
+  border: 2px solid var(--warn); background: transparent; animation: breathe 1.4s ease-in-out infinite;
+}
+.update-progress-row .value { color: var(--faint); font: 11.5px var(--mono); }
+.update-notice {
+  padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--warn) 38%, var(--line));
+  border-radius: 10px; background: color-mix(in srgb, var(--warn) 6%, var(--surface)); color: var(--muted);
+}
+.update-notice strong { display: block; color: var(--ink); }
+.update-notice.fail {
+  border-color: color-mix(in srgb, var(--fail) 38%, var(--line));
+  background: color-mix(in srgb, var(--fail) 6%, var(--surface));
+}
+.update-blocker {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center;
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+.update-blocker p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.update-blocker code { color: var(--faint); }
+.update-diagnostics {
+  margin-top: 14px; padding: 11px 14px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--panel); color: var(--muted); overflow-wrap: anywhere;
+}
+.update-version-returned {
+  display: inline-block; margin: 14px 0 0 42px; color: var(--muted);
+  font: 11.5px var(--mono);
+}
+.update-note { margin-top: 14px; color: var(--muted); font-size: 12.5px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .update-progress-row.active .update-progress-dot { animation: none; }
+}
+
 /* ---- Activity ------------------------------------------------------------- */
 
 .job-day { padding-top: 10px; padding-bottom: 6px; }
@@ -870,4 +953,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   .side-foot { display: none; }
   .content-head { padding: 18px 16px 0; }
   main { padding: 14px 16px 70px; }
+  .update-facts { grid-template-columns: 1fr; }
+  .update-signed { display: none; }
+  .update-blocker { grid-template-columns: 1fr; }
 }

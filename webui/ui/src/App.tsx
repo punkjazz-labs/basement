@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   api, setCSRF, terminal, formatBytes, OfflineError,
   type SystemInfo, type Recipe, type InstalledModel, type Job, type Peer, type Telemetry, type UpdateInfo,
@@ -13,8 +13,10 @@ import Monitor from './views/Monitor'
 import Fleet from './views/Fleet'
 import Storage from './views/Storage'
 import Activity from './views/Activity'
+import ManagerUpdateDialog, { ManagerUpdateSidebar } from './views/ManagerUpdate'
 import DeploymentDialog from './views/Deployment'
 import { ConfirmHost } from './confirm'
+import { initialManagerUpdateDialogState, managerUpdateDialogReducer } from './managerUpdate'
 
 const TABS = ['Models', 'Roles', 'Playground', 'Generate', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
 type Tab = (typeof TABS)[number]
@@ -60,6 +62,10 @@ export default function App() {
   const [connected, setConnected] = useState(true)
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null)
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
+  const [updateDialog, dispatchUpdateDialog] = useReducer(
+    managerUpdateDialogReducer,
+    initialManagerUpdateDialogState,
+  )
   const [selectedJobID, setSelectedJobID] = useState('')
   const streams = useRef(new Map<string, EventSource>())
   const tokenRate = useRef<{ at: number; total: number } | null>(null)
@@ -103,6 +109,23 @@ export default function App() {
       // that never got a response means the rail should read Disconnected.
       if (problem instanceof OfflineError) setConnected(false)
     }
+  }, [])
+
+  const refreshAfterManagerUpdate = useCallback(() => {
+    void refresh()
+    void api<UpdateInfo>('/api/v1/update').then(setUpdate).catch(() => {})
+  }, [refresh])
+
+  const openManagerUpdate = useCallback(() => {
+    dispatchUpdateDialog({ type: 'open_from_sidebar' })
+  }, [])
+
+  const closeManagerUpdate = useCallback(() => {
+    dispatchUpdateDialog({ type: 'close' })
+  }, [])
+
+  const setManagerUpdateReconnecting = useCallback((value: boolean) => {
+    dispatchUpdateDialog({ type: 'reconnecting', value })
   }, [])
 
   // Boot: check the session, then load everything.
@@ -288,19 +311,14 @@ export default function App() {
           <span>{system?.hostname ?? '…'}
             {system && system.memory_available_bytes > 0 && ` · ${formatBytes(system.memory_available_bytes)} free`}
           </span>
-          <span>manager {system?.manager_version ?? ''}</span>
-          {update?.update_available && update.release_url && (
-            <a className="side-update" href={update.release_url} target="_blank" rel="noreferrer">
-              Update {update.latest_version} available
-            </a>
-          )}
+          <ManagerUpdateSidebar info={update} managerVersion={system?.manager_version} onOpen={openManagerUpdate} />
         </div>
       </aside>
       <div className="content">
         <header className="content-head">
           <div className="head-row">
             <h1>{tab}</h1>
-            {!connected && <span className="offline" role="status">Disconnected</span>}
+            {!connected && !updateDialog.reconnecting && <span className="offline" role="status">Disconnected</span>}
           </div>
           <p className="desc">{DESC[tab]}</p>
         </header>
@@ -327,6 +345,27 @@ export default function App() {
           {tab === 'Activity' && <Activity {...state} />}
         </main>
       </div>
+      <ManagerUpdateDialog
+        open={updateDialog.open}
+        reconnecting={updateDialog.reconnecting}
+        info={update}
+        onInfoChange={setUpdate}
+        onReconnectingChange={setManagerUpdateReconnecting}
+        onManagerReady={refreshAfterManagerUpdate}
+        onClose={closeManagerUpdate}
+        onOpenModels={() => {
+          closeManagerUpdate()
+          setTab('Models')
+        }}
+        onOpenActivity={() => {
+          closeManagerUpdate()
+          setTab('Activity')
+        }}
+        onOpenGeneration={() => {
+          closeManagerUpdate()
+          setTab('Generate')
+        }}
+      />
       <DeploymentDialog
         job={selectedJob}
         recipes={recipes}

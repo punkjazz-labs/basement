@@ -387,10 +387,34 @@ export function modelStateWord(model: InstalledModel): string {
 export interface UpdateInfo {
   current_version: string
   latest_version?: string
+  target_version?: string
   update_available: boolean
   checked: boolean
+  signed: boolean
+  compatible: boolean
+  installable: boolean
   release_url?: string
   note?: string
+  reason?: string
+  manual_bootstrap_required?: boolean
+  manual_upgrade_required?: boolean
+  checked_at?: string
+}
+
+export interface UpdateApplyResult {
+  accepted: boolean
+  attempt_id: string
+  state: string
+}
+
+export interface UpdateAttemptStatus {
+  schema_version: number
+  attempt_id: string
+  state: string
+  running_version: string
+  target_version: string
+  failure?: string
+  updated_at: string
 }
 
 let csrf = ''
