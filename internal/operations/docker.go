@@ -437,8 +437,39 @@ type ManagedContainer struct {
 // (repeated "label" filter values are ORed by the Docker API), so a
 // container created before the rename is still recognized as ours; it is
 // never relabeled in place.
+// ManagedContainers lists every container basement owns, under the current
+// label namespace and the pre-rename one (spec 10).
+//
+// It asks once per namespace and merges. Docker ANDs the values inside a
+// label filter, so a single query naming both matched only a container
+// carrying both at once, which is none of them: this returned an empty list
+// on every machine. What that cost was not visible, because nothing here
+// fails when the list is empty. It just silently stopped being true. The port
+// check could no longer tell a leftover container of the same model from a
+// foreign process holding the port, so reinstalling a model whose container
+// was still up failed with a raw bind error, and the message naming which
+// other model holds the port could never be produced at all.
 func (d *DockerClient) ManagedContainers(ctx context.Context) ([]ManagedContainer, error) {
-	filters := url.QueryEscape(`{"label":["` + labelManaged + `=true","` + legacyLabelManaged + `=true"]}`)
+	containers := make([]ManagedContainer, 0)
+	seen := make(map[string]bool)
+	for _, label := range []string{labelManaged, legacyLabelManaged} {
+		batch, err := d.managedContainersLabelled(ctx, label)
+		if err != nil {
+			return nil, err
+		}
+		for _, container := range batch {
+			if seen[container.Name] {
+				continue
+			}
+			seen[container.Name] = true
+			containers = append(containers, container)
+		}
+	}
+	return containers, nil
+}
+
+func (d *DockerClient) managedContainersLabelled(ctx context.Context, label string) ([]ManagedContainer, error) {
+	filters := url.QueryEscape(`{"label":["` + label + `=true"]}`)
 	resp, err := d.request(ctx, http.MethodGet, "/containers/json?all=1&filters="+filters, nil)
 	if err != nil {
 		return nil, err

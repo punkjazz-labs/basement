@@ -849,6 +849,14 @@ func comfyUIGraphProblems(c ComfyUIConfig) []string {
 		if strings.Join(tokens, " ") != strings.Join(required, " ") {
 			problems = append(problems, fmt.Sprintf("comfyui graph %s carries %s but %s requires exactly %s", name, joinOrNone(tokens), mode, strings.Join(required, " ")))
 		}
+		subfolders, err := GraphSaveSubfolders(raw)
+		if err != nil {
+			problems = append(problems, "comfyui graph "+name+": "+err.Error())
+			continue
+		}
+		for _, prefix := range subfolders {
+			problems = append(problems, fmt.Sprintf("comfyui graph %s saves into %q; a filename_prefix must not name a subfolder, because the runtime creates it as root inside the output directory and the manager can then never move the result out", name, prefix))
+		}
 	}
 	return problems
 }

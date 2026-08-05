@@ -176,6 +176,54 @@ func GraphTokens(raw []byte) ([]string, error) {
 	return tokens, nil
 }
 
+// GraphSaveSubfolders reports every filename_prefix in a graph that names a
+// subfolder, so the validator can refuse one before it ships.
+//
+// ComfyUI treats the part of a filename_prefix before the last slash as a
+// directory and creates it, as root, inside the output directory basement
+// mounts. Removing a file needs write permission on the directory holding it,
+// not on the file, so a root-owned subdirectory inside a mount the manager
+// owns is one the manager can read from and never move anything out of. The
+// install that found this generated a real video and then failed to file it.
+//
+// Written as a check on the pinned graph rather than a repair at collection
+// time because the graph is ours: the cost of getting it wrong is a failure
+// that arrives after a generation has already run for twenty minutes, and
+// this turns it into a test failure instead.
+func GraphSaveSubfolders(raw []byte) ([]string, error) {
+	document, err := decodeGraph(raw)
+	if err != nil {
+		return nil, err
+	}
+	found := map[string]bool{}
+	collectGraphSaveSubfolders(document, found)
+	prefixes := make([]string, 0, len(found))
+	for prefix := range found {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+	return prefixes, nil
+}
+
+func collectGraphSaveSubfolders(node any, found map[string]bool) {
+	switch typed := node.(type) {
+	case map[string]any:
+		for key, value := range typed {
+			if key == "filename_prefix" {
+				if prefix, ok := value.(string); ok && strings.Contains(prefix, "/") {
+					found[prefix] = true
+				}
+				continue
+			}
+			collectGraphSaveSubfolders(value, found)
+		}
+	case []any:
+		for _, value := range typed {
+			collectGraphSaveSubfolders(value, found)
+		}
+	}
+}
+
 // graphTokenSet is every token this package knows how to substitute. A string
 // shaped like a token but not in this set is ordinary text and is left alone,
 // which is why the validator's check is against this set rather than against
