@@ -490,7 +490,11 @@ func (s *Server) runOneGeneration(id string) {
 		s.generations.setLive(id, live)
 		return nil
 	}
-	outcome, err := operations.RunGeneration(ctx, client, graph, root, filepath.Join(root, id), generationTimeout(target), progress)
+	// An allowed generation has no elapsed-time abort. H3's measured points
+	// do not bound every canvas and duration combination the recipe permits,
+	// so a finite prediction here could discard hours of legitimate work.
+	// The user can still cancel explicitly, and server shutdown cancels too.
+	outcome, err := operations.RunGeneration(ctx, client, graph, root, filepath.Join(root, id), progress)
 	if err != nil {
 		if ctx.Err() != nil {
 			// A cancelled generation asks the runtime to stop too, on a
@@ -498,7 +502,7 @@ func (s *Server) runOneGeneration(id string) {
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			_ = client.Interrupt(stopCtx)
 			stopCancel()
-			fail("cancelled", "this generation was cancelled")
+			fail("cancelled", "this generation was cancelled; no result was saved and any partial work was lost")
 			return
 		}
 		fail("failed", err.Error())
@@ -511,18 +515,6 @@ func (s *Server) runOneGeneration(id string) {
 	if s.store.CompleteGeneration(completeCtx, id, outcome.Files[0], outcome.Bytes) == nil {
 		s.generations.changed()
 	}
-}
-
-// generationTimeout bounds one generation. It reuses the recipe's own start
-// timeout because that is the one place a recipe states how patient this
-// machine should be with it, and a media recipe's figure is measured at
-// qualification against a real generation.
-func generationTimeout(r recipe.Recipe) time.Duration {
-	minutes := r.Runtime.StartTimeoutMinutes
-	if minutes <= 0 {
-		minutes = 20
-	}
-	return time.Duration(minutes) * time.Minute
 }
 
 // listGenerations is GET /api/v1/generations: the gallery, newest first.

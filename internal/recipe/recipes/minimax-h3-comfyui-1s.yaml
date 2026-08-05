@@ -1,0 +1,128 @@
+schema_version: 1
+id: minimax-h3-comfyui-1s
+# MiniMax H3 served through the pinned basement ComfyUI image. The four
+# files below are the optimized text-to-video set read from the pinned
+# Hugging Face tree on 2026-08-05. Their exact byte counts sum to the
+# measured 42,470,585,471-byte artifact total.
+#
+# Only text_to_video ships in this version. The image_to_video graph is
+# already pinned in the binary, and the prompt composer design includes an
+# optional starting image, but the generation API does not stage a source
+# image into ComfyUI yet. Declaring that graph here would offer a mode the
+# backend explicitly refuses.
+version: 1
+display_name: MiniMax H3
+publisher: MiniMax + Comfy-Org
+model_by: MiniMax
+recipe_by: basement
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://huggingface.co/Comfy-Org/MiniMax-H3
+  revision: 0543966fbdce5ba05709a8f2031c94bdba629b4a
+topology:
+  spark_count: 1
+runtime:
+  kind: comfyui
+  # ComfyUI v0.30.0 at commit
+  # b1693ecba9f5b65f8c80ab36b195ab963ec92413. image_bytes is the
+  # compressed manifest total. image_disk_bytes is Docker's measured Size
+  # after a real pull on GB10 hardware, both read on 2026-08-05.
+  image: ghcr.io/punkjazz-labs/basement-comfyui
+  digest: sha256:8e6715f3e133c03b12f7730c4d66124554952bf9dae81263a153be05f96d23a9
+  image_bytes: 5632799027
+  image_disk_bytes: 9246461463
+  environment: {}
+  # No startup override. The health wait probes the idle server before a
+  # graph loads the model, so generation wall time is not a startup measure.
+  # This is one local ComfyUI process. Docker keeps its isolated IPC
+  # namespace and no explicit shared-memory allocation is requested.
+  shm_bytes: 0
+  memory_lock: false
+  ipc_lock: false
+artifacts:
+  - role: primary
+    repository: Comfy-Org/MiniMax-H3
+    revision: 0543966fbdce5ba05709a8f2031c94bdba629b4a
+    expected_bytes: 42470585471
+    files:
+      # LFS sha256 e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a.
+      - name: diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+        expected_bytes: 20970379616
+      # LFS sha256 35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6.
+      - name: text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+        expected_bytes: 15687142551
+      # LFS sha256 7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522.
+      - name: vae/minimax_h3_video_vae_fp16.safetensors
+        expected_bytes: 5207808496
+      # LFS sha256 8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48.
+      - name: vae/minimax_h3_audio_vae_fp32.safetensors
+        expected_bytes: 605254808
+    licence: MiniMax H3 Community License Agreement
+    licence_url: https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/fa9c8ab1eaa21c8ae25e7e40b83b2e6002f340af/LICENSE
+    licence_repository: MiniMaxAI/MiniMax-H3
+    licence_revision: fa9c8ab1eaa21c8ae25e7e40b83b2e6002f340af
+    licence_territory_exclusions:
+      - European Union
+      - United Kingdom
+      - Republic of Korea
+      - United States of America
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 16000000000
+  safety_margin_bytes: 20000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8188
+  default_host_port: 8188
+  served_model_id: Comfy-Org/MiniMax-H3
+  comfyui:
+    graphs:
+      text_to_video: minimax-h3-t2v.json
+    output_directory: /output
+    input_directory: /input
+    default_short_edge: 768
+    max_short_edge: 1440
+    max_long_edge: 2560
+    # QHD at 7 blocks and the default canvas at 21 blocks were measured.
+    # Their unmeasured cross-product remains allowed without an elapsed-time
+    # abort; explicit cancellation is the only user generation time limit.
+    frame_block: 17
+    frame_offset: 5
+    frames_per_second: 24
+    min_blocks: 7
+    max_blocks: 21
+    default_blocks: 7
+    concurrent_generations: 1
+# 99.09 GB is the worst measured total across the four successful runs. The
+# overhead is that total minus the exact 42,470,585,471-byte weight set.
+memory_model:
+  weights_bytes: 42470585471
+  kv_bytes_per_token: 0
+  runtime_overhead_bytes: 56619414529
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_memory_capacity
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: verify_memory
+  - type: start_container
+  - type: wait_http
+  - type: verify_media_generation
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared

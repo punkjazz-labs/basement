@@ -202,6 +202,31 @@ func TestVerifyPortConflictsWithSamePortOnSameNode(t *testing.T) {
 	}
 }
 
+func TestVerifyPortChecksMiniMaxH3PortInsteadOfTheTextPort(t *testing.T) {
+	previousCheck := checkPort
+	t.Cleanup(func() { checkPort = previousCheck })
+	checked := 0
+	checkPort = func(port int) error {
+		checked = port
+		return nil
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3, ok := recipe.Find(recipes, "minimax-h3-comfyui-1s")
+	if !ok {
+		t.Fatal("MiniMax H3 recipe missing")
+	}
+	receipt, err := (&HostExecutor{}).Execute(context.Background(), Execution{}, recipe.Operation{Type: "verify_port"}, h3, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked != 8188 || receipt["host_port"] != 8188 || receipt["available"] != true {
+		t.Fatalf("checked port %d with receipt %#v, want available port 8188", checked, receipt)
+	}
+}
+
 func TestVerifyPortDoesNotShareConflictsAcrossNodes(t *testing.T) {
 	previousCheck := checkPort
 	t.Cleanup(func() { checkPort = previousCheck })
@@ -871,7 +896,7 @@ func legacyLabels(r recipe.Recipe) map[string]string {
 // adopted across the rename (spec 10) has its files moved out from under a
 // container still pointed at the pre-rename data directory, and Docker fills
 // a bind source that no longer exists with an empty directory rather than
-// refusing to start — so the container comes back up with an empty /model and
+// refusing to start, so the container comes back up with an empty /model and
 // the runtime rejects the chat template path before it loads a single weight.
 // Such a container has to be rebuilt, not started.
 func TestStartContainerRebuildsAContainerLeftAtAMovedPath(t *testing.T) {
@@ -950,8 +975,8 @@ func TestStartContainerRebuildsAContainerLeftAtAMovedPath(t *testing.T) {
 	}
 }
 
-// A container removed outside this manager — docker rm by hand, say while a
-// machine was being repaired — leaves the stored install still naming it, so
+// A container removed outside this manager, by hand while a machine was being
+// repaired, leaves the stored install still naming it, so
 // the start job takes the short plan and never creates anything. Before this
 // the job died on a raw Docker 404 from the start call. The manager holds the
 // recipe and every input, so it builds the container again exactly as a create

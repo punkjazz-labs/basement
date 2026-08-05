@@ -112,6 +112,12 @@ func (m *mediaRuntime) order() []string {
 	return append([]string(nil), m.prompts...)
 }
 
+func (m *mediaRuntime) interruptCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.interrupts
+}
+
 // mediaConsole is a paired console with one media model installed, active and
 // ready, and a fake runtime behind it.
 type mediaConsole struct {
@@ -581,6 +587,27 @@ func TestQueuedGenerationCanBeCancelledBeforeItStarts(t *testing.T) {
 	console.awaitStatus(t, runningID, "completed", "failed")
 	if got := strings.Join(console.runtime.order(), " "); got != "first" {
 		t.Fatalf("a cancelled generation still reached the runtime: %q", got)
+	}
+}
+
+func TestRunningGenerationCancellationSaysPartialWorkWasLost(t *testing.T) {
+	console := newMediaConsole(t)
+	console.runtime.hold(true)
+	_, accepted := console.generate(t, goodRequest)
+	id := accepted["generation_id"].(string)
+	console.awaitStatus(t, id, "running")
+
+	response := doRequest(t, http.MethodPost, console.server.URL+"/api/v1/generations/"+id+"/cancel", "", console.cookies, console.headers)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("cancel status=%d", response.StatusCode)
+	}
+	view := console.awaitStatus(t, id, "cancelled", "failed")
+	if view["status"] != "cancelled" || !strings.Contains(view["error"].(string), "any partial work was lost") {
+		t.Fatalf("cancelled view=%#v", view)
+	}
+	if got := console.runtime.interruptCount(); got != 1 {
+		t.Fatalf("runtime interrupts=%d, want 1", got)
 	}
 }
 

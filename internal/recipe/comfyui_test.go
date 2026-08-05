@@ -114,26 +114,37 @@ func TestMediaRecipeRejections(t *testing.T) {
 	}
 }
 
-// TestTextRecipesKeepTheirOwnPortAndVerification proves the two kind-aware
-// rules did not change what already shipped.
-func TestTextRecipesKeepTheirOwnPortAndVerification(t *testing.T) {
+// TestShippedRecipesUseTheirRuntimePortAndVerification proves the first media
+// recipe keeps its own endpoint without changing any text recipe.
+func TestShippedRecipesUseTheirRuntimePortAndVerification(t *testing.T) {
 	recipes, err := recipe.Builtin()
 	if err != nil {
 		t.Fatal(err)
 	}
+	mediaRecipes := 0
 	for _, r := range recipes {
+		if config, media := r.MediaGeneration(); media {
+			mediaRecipes++
+			if r.Service.InternalPort != 8188 || r.Service.DefaultHostPort != 8188 {
+				t.Fatalf("%s serves on %d/%d, want ComfyUI on 8188", r.ID, r.Service.InternalPort, r.Service.DefaultHostPort)
+			}
+			if got := recipe.InferenceVerification(r.Runtime.Kind); got != "verify_media_generation" {
+				t.Fatalf("%s (%s) verifies with %s", r.ID, r.Runtime.Kind, got)
+			}
+			if _, available := config.Graphs[recipe.ModeImageToVideo]; available {
+				t.Fatalf("%s offers image_to_video before source-image staging exists", r.ID)
+			}
+			continue
+		}
 		if r.Service.InternalPort != 8000 {
 			t.Fatalf("%s serves on %d, want 8000", r.ID, r.Service.InternalPort)
 		}
 		if got := recipe.InferenceVerification(r.Runtime.Kind); got != "verify_openai_inference" {
 			t.Fatalf("%s (%s) verifies with %s", r.ID, r.Runtime.Kind, got)
 		}
-		if _, media := r.MediaGeneration(); media {
-			t.Fatalf("%s reports itself as a media model", r.ID)
-		}
 	}
-	if got := recipe.InferenceVerification("comfyui"); got != "verify_media_generation" {
-		t.Fatalf("InferenceVerification(comfyui)=%s", got)
+	if mediaRecipes != 1 {
+		t.Fatalf("shipped media recipes=%d, want 1", mediaRecipes)
 	}
 }
 
