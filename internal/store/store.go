@@ -268,12 +268,16 @@ CREATE TABLE IF NOT EXISTS generations (
 	if err := s.migrateFleetSchema(); err != nil {
 		return err
 	}
-	return s.migrateReservationOwnership()
+	if err := s.migrateReservationOwnership(); err != nil {
+		return err
+	}
+	return s.migrateFleetUpgradeSchema()
 }
 
 const (
 	fleetFoundationSchemaVersion = 2
-	fleetSchemaVersion           = 3
+	reservationSchemaVersion     = 3
+	fleetSchemaVersion           = 4
 	fleetMigrationStatementCount = 10
 )
 
@@ -440,7 +444,7 @@ func (s *Store) migrateReservationOwnership() error {
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_meta`).Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	if version >= fleetSchemaVersion {
+	if version >= reservationSchemaVersion {
 		return nil
 	}
 	tx, err := s.db.Begin()
@@ -456,6 +460,67 @@ func (s *Store) migrateReservationOwnership() error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit reservation ownership migration: %w", err)
+	}
+	return nil
+}
+
+// migrateFleetUpgradeSchema adds only new tables so the immediately previous
+// manager can still read and write every pre-existing row after a local
+// updater rollback. The controller journal must survive its own restart, so
+// the signed public release inputs and every node transition are committed in
+// the same database that already owns fleet membership.
+func (s *Store) migrateFleetUpgradeSchema() error {
+	var version int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_meta`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version >= fleetSchemaVersion {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin fleet upgrade migration: %w", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS fleet_upgrade_runs (
+  run_id TEXT PRIMARY KEY,
+  fleet_id TEXT NOT NULL,
+  controller_node_id TEXT NOT NULL,
+  release_tag TEXT NOT NULL,
+  target_version TEXT NOT NULL,
+  manifest_sha256 TEXT NOT NULL,
+  manifest_bytes BLOB NOT NULL,
+  signature_bytes BLOB NOT NULL,
+  asset_url TEXT NOT NULL,
+  state TEXT NOT NULL,
+  failure TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`,
+		`CREATE TABLE IF NOT EXISTS fleet_upgrade_nodes (
+  run_id TEXT NOT NULL REFERENCES fleet_upgrade_runs(run_id) ON DELETE CASCADE,
+  node_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  state TEXT NOT NULL,
+  running_version TEXT NOT NULL,
+  target_version TEXT NOT NULL,
+  attempt_id TEXT NOT NULL DEFAULT '',
+  failure TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(run_id,node_id),
+  UNIQUE(run_id,sequence)
+)`,
+		`UPDATE schema_meta SET version=4`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("migrate fleet upgrade schema: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit fleet upgrade migration: %w", err)
 	}
 	return nil
 }

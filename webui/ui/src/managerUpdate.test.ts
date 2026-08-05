@@ -3,12 +3,16 @@ import { Children, isValidElement, type ReactElement } from 'react'
 import { OfflineError, type UpdateAttemptStatus, type UpdateInfo } from './api'
 import { ManagerUpdateSidebar } from './views/ManagerUpdate'
 import {
-  followManagerUpdate, initialManagerUpdateDialogState, isInstallableManagerUpdate,
-  managerUpdateDialogReducer, updateRefusal, type UpdatePollEvent,
+  fleetUpgradeRowState, fleetUpgradeStateWord, followManagerUpdate,
+  initialManagerUpdateDialogState, isInstallableManagerUpdate, managerUpdateCard,
+  managerUpdateDialogReducer, orderedFleetUpgradeNodes, updateRefusal, type UpdatePollEvent,
 } from './managerUpdate'
+import type { FleetUpgradeNode } from './api'
 
 const availableUpdate = (overrides: Partial<UpdateInfo> = {}): UpdateInfo => ({
   current_version: 'v1.9.9',
+  fleet_role: 'standalone',
+  fleet_node_count: 0,
   latest_version: '1.10.0',
   target_version: 'v1.10.0',
   checked: true,
@@ -36,6 +40,49 @@ describe('manager update availability', () => {
       latest_version: '1.12.9',
       target_version: 'v1.12.9',
     }))).toBe(false)
+  })
+})
+
+describe('fleet update cards', () => {
+  it('selects the local, controller, and member cards from the reported role', () => {
+    expect(managerUpdateCard(availableUpdate())).toBe('standalone')
+    expect(managerUpdateCard(availableUpdate({ fleet_role: 'controller', fleet_node_count: 3 }))).toBe('controller')
+    expect(managerUpdateCard(availableUpdate({ fleet_role: 'member', fleet_node_count: 3 }))).toBe('member')
+  })
+})
+
+describe('fleet update progress', () => {
+  const node = (displayName: string, sequence: number, state: string): FleetUpgradeNode => ({
+    run_id: 'fleet-upgrade-test',
+    node_id: `node-${sequence}`,
+    display_name: displayName,
+    sequence,
+    role: sequence === 2 ? 'controller' : 'member',
+    state,
+    running_version: state === 'succeeded' ? 'v2.0.0' : 'v1.0.0',
+    target_version: 'v2.0.0',
+    updated_at: '2026-08-05T00:00:00Z',
+  })
+
+  it('uses only the specified plain words for node states', () => {
+    expect([
+      'pending', 'waiting_for_idle', 'staging', 'staged', 'applying',
+      'checking_health', 'succeeded', 'failed', 'rolled_back',
+    ].map(fleetUpgradeStateWord)).toEqual([
+      'Waiting', 'Waiting for work to finish', 'Downloading', 'Downloading',
+      'Restarting', 'Restarting', 'Done', 'Failed', 'Rolled back',
+    ])
+  })
+
+  it('renders nodes in the run sequence without mutating the response', () => {
+    const response = [node('spark-head', 2, 'pending'), node('spark-worker', 0, 'succeeded'), node('spark-mid', 1, 'applying')]
+    expect(orderedFleetUpgradeNodes(response).map(item => item.display_name)).toEqual(['spark-worker', 'spark-mid', 'spark-head'])
+    expect(response.map(item => item.display_name)).toEqual(['spark-head', 'spark-worker', 'spark-mid'])
+  })
+
+  it('marks completed rows done and only the first unfinished row active', () => {
+    const ordered = [node('spark-worker', 0, 'succeeded'), node('spark-mid', 1, 'checking_health'), node('spark-head', 2, 'pending')]
+    expect(ordered.map((_, index) => fleetUpgradeRowState(ordered, index))).toEqual(['done', 'active', ''])
   })
 })
 

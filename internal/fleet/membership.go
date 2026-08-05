@@ -65,6 +65,17 @@ type Manager struct {
 	runtime         IndependentRuntime
 	placementMu     sync.Mutex
 	placementLocks  map[string]*sync.Mutex
+	upgradeRuntime  UpgradeRuntime
+	upgradeMu       sync.Mutex
+	upgradeRunning  bool
+	upgradeRetry    time.Duration
+	// These calls are seams for deterministic rolling-upgrade tests. Production
+	// assigns the mutual TLS and local-runtime implementations once in
+	// NewManager and never reassigns them.
+	upgradeStageCall  func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) (LocalUpgradeStatus, error)
+	upgradeApplyCall  func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) (LocalUpgradeStatus, error)
+	upgradeStatusCall func(context.Context, store.FleetUpgradeNode) (LocalUpgradeStatus, error)
+	upgradeFinishCall func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) error
 }
 
 func NewManager(ctx context.Context, options Options) (*Manager, error) {
@@ -98,11 +109,16 @@ func NewManager(ctx context.Context, options Options) (*Manager, error) {
 		catalogue:      append([]recipe.Recipe(nil), options.Recipes...),
 		effective:      append([]recipe.Recipe(nil), options.EffectiveRecipes...),
 		placementLocks: make(map[string]*sync.Mutex),
+		upgradeRetry:   time.Second,
 	}
 	if len(manager.effective) == 0 {
 		manager.effective = append([]recipe.Recipe(nil), options.Recipes...)
 	}
 	manager.newClient = manager.clientForFingerprint
+	manager.upgradeStageCall = manager.stageUpgradeNode
+	manager.upgradeApplyCall = manager.applyUpgradeNode
+	manager.upgradeStatusCall = manager.statusUpgradeNode
+	manager.upgradeFinishCall = manager.finishUpgradeNode
 	if err := manager.initializeLegacyState(ctx, options.Recipes); err != nil {
 		return nil, err
 	}
@@ -181,6 +197,18 @@ func (m *Manager) SetIndependentRuntime(runtime IndependentRuntime) {
 	m.catalogueMu.Unlock()
 }
 
+func (m *Manager) SetUpgradeRuntime(runtime UpgradeRuntime) {
+	m.catalogueMu.Lock()
+	m.upgradeRuntime = runtime
+	m.catalogueMu.Unlock()
+}
+
+func (m *Manager) upgradeRuntimeValue() UpgradeRuntime {
+	m.catalogueMu.RLock()
+	defer m.catalogueMu.RUnlock()
+	return m.upgradeRuntime
+}
+
 func (m *Manager) independentRuntime() IndependentRuntime {
 	m.catalogueMu.RLock()
 	defer m.catalogueMu.RUnlock()
@@ -219,6 +247,9 @@ type JoinCode struct {
 }
 
 func (m *Manager) CreateJoinCode(ctx context.Context) (JoinCode, error) {
+	if err := m.requireFleetMutationAllowed(ctx); err != nil {
+		return JoinCode{}, err
+	}
 	secret, err := randomSecret(24)
 	if err != nil {
 		return JoinCode{}, err
@@ -242,6 +273,9 @@ type AdoptResult struct {
 }
 
 func (m *Manager) Adopt(ctx context.Context, request AdoptRequest) (AdoptResult, error) {
+	if err := m.requireFleetMutationAllowed(ctx); err != nil {
+		return AdoptResult{}, err
+	}
 	displayName := strings.TrimSpace(request.DisplayName)
 	if displayName == "" || len(displayName) > 64 {
 		return AdoptResult{}, errors.New("a node name between 1 and 64 characters is required")

@@ -80,6 +80,7 @@ func membershipTestServer(t *testing.T) (*Server, *fleet.Manager, *auth.Manager)
 	}
 	executor := &apiExecutor{done: map[string]bool{}}
 	server := New("test", dataDir, authManager, database, readyInventory{}, executor, engine.New(database, executor, recipes), recipes)
+	t.Cleanup(server.Close)
 	manager, err := fleet.NewManager(context.Background(), fleet.Options{
 		DataDir: dataDir, Database: database, Inventory: readyInventory{}, Version: "test", BuildIdentity: "test-build",
 		DisplayName: "spark-head", ConsoleURL: "http://192.168.99.10:7070", NodeURL: "https://192.168.99.10:7071", Recipes: recipes,

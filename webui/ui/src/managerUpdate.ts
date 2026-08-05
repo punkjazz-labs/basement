@@ -1,9 +1,10 @@
-import type { UpdateAttemptStatus, UpdateInfo } from './api'
+import type { FleetUpgradeNode, FleetUpgradeRun, UpdateAttemptStatus, UpdateInfo } from './api'
 
 const UPDATE_STATES = new Set([
   'checking_signature',
   'downloading',
   'verifying',
+  'staged',
   'waiting_for_root',
   'restarting',
   'checking_health',
@@ -75,6 +76,48 @@ export const isInstallableManagerUpdate = (info: UpdateInfo | null): boolean => 
   info.target_version &&
   isNewerManagerVersion(info.current_version, info.target_version),
 )
+
+export type ManagerUpdateCard = 'standalone' | 'controller' | 'member'
+
+export const managerUpdateCard = (info: UpdateInfo | null): ManagerUpdateCard => {
+  if (info?.fleet_role === 'controller') return 'controller'
+  if (info?.fleet_role === 'member') return 'member'
+  return 'standalone'
+}
+
+const FLEET_UPGRADE_WORDS: Record<string, string> = {
+  pending: 'Waiting',
+  waiting_for_idle: 'Waiting for work to finish',
+  staging: 'Downloading',
+  staged: 'Downloading',
+  applying: 'Restarting',
+  checking_health: 'Restarting',
+  succeeded: 'Done',
+  failed: 'Failed',
+  rolled_back: 'Rolled back',
+}
+
+export const fleetUpgradeStateWord = (state: string): string => FLEET_UPGRADE_WORDS[state] ?? state
+
+export const orderedFleetUpgradeNodes = (nodes: FleetUpgradeNode[]): FleetUpgradeNode[] =>
+  [...nodes].sort((left, right) => left.sequence - right.sequence)
+
+export const fleetUpgradeRowState = (
+  nodes: FleetUpgradeNode[],
+  index: number,
+): 'done' | 'active' | '' => {
+  if (nodes[index]?.state === 'succeeded') return 'done'
+  return index === nodes.findIndex(node => node.state !== 'succeeded') ? 'active' : ''
+}
+
+export const fleetUpgradeTerminal = (state: string): boolean => state === 'succeeded' || state === 'failed'
+
+export function isFleetUpgradeRun(value: unknown): value is FleetUpgradeRun {
+  if (typeof value !== 'object' || value === null) return false
+  const run = value as Record<string, unknown>
+  return typeof run.run_id === 'string' && run.run_id.length > 0 &&
+    typeof run.target_version === 'string' && typeof run.state === 'string' && Array.isArray(run.nodes)
+}
 
 export interface ManagerUpdateDialogState {
   open: boolean
