@@ -71,6 +71,12 @@ func main() {
 		logger.Error("load recipes", "error", err)
 		exit(1)
 	}
+	// The recipe feed seeds from the embedded set plus whatever verified
+	// cache exists on disk. Fleet migration needs that same history so an
+	// active distributed recipe from the cache is not missed as a legacy
+	// candidate merely because it was not in the original embedded set.
+	feed := recipefeed.NewFetcher(recipes, cfg.DataDir, logger)
+	cachedAll, cachedEffective := feed.Snapshot()
 	provider := inventory.Host{DataDir: cfg.DataDir, DockerSocket: "/var/run/docker.sock"}
 	buildIdentity, err := fleet.BinaryBuildIdentity(cfg.Version)
 	if err != nil {
@@ -81,7 +87,7 @@ func main() {
 	fleetManager, err := fleet.NewManager(context.Background(), fleet.Options{
 		DataDir: cfg.DataDir, Database: db, Inventory: provider, Version: cfg.Version,
 		BuildIdentity: buildIdentity, DisplayName: hostname,
-		ConsoleURL: "http://" + cfg.Listen, NodeURL: "https://" + cfg.FleetListen, Recipes: recipes,
+		ConsoleURL: "http://" + cfg.Listen, NodeURL: "https://" + cfg.FleetListen, Recipes: cachedAll,
 	})
 	if err != nil {
 		logger.Error("initialize fleet identity", "error", err)
@@ -110,12 +116,8 @@ func main() {
 	executor := operations.NewFleetExecutor(operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider), operations.NewPeerClient(worker))
 	jobEngine := engine.New(db, executor, recipes)
 
-	// The recipe feed seeds from the embedded set plus whatever verified
-	// cache exists on disk (no network involved, so this never blocks or
-	// fails startup) and only then starts fetching in the background: the
-	// embedded recipes remain the permanent offline floor either way.
-	feed := recipefeed.NewFetcher(recipes, cfg.DataDir, logger)
-	cachedAll, cachedEffective := feed.Snapshot()
+	// No network was involved above. Fetching starts only in the background;
+	// the embedded recipes remain the permanent offline floor either way.
 	jobEngine.SetRecipes(cachedAll, cachedEffective)
 
 	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, cachedEffective)

@@ -211,6 +211,11 @@ var connectTarget = func(ctx context.Context, ui WizardUI, target, sshUser strin
 	return runner, func() { runner.Close() }, nil
 }
 
+// enrolInstalledFleet is a network seam for setup tests. Production keeps
+// the real console exchange. Tests return a fixed outcome without contacting
+// the addresses carried by their fake install results.
+var enrolInstalledFleet = EnrollInstalledFleet
+
 // InstallMore continues a run that already installed on first: it offers the
 // other GB10-class machines discovery found, one at a time, and installs on
 // the ones the operator accepts — same username prompt, same SSH connection
@@ -244,10 +249,37 @@ func InstallMore(ctx context.Context, ui WizardUI, first Machine, offer []string
 		}
 		installed = append(installed, Machine{Target: target, Result: result})
 	}
+	if len(installed) > 1 && everyInstallHasFleetBootstrap(installed) {
+		if err := enrolInstalledFleet(ctx, installed); err == nil {
+			ui.NextSteps(FleetReadySteps(installed))
+			return installed
+		} else {
+			ui.Progress("Fleet enrollment did not finish: " + err.Error())
+		}
+	}
 	if steps := PairingSteps(installed, pending); len(steps) > 0 {
 		ui.NextSteps(steps)
 	}
 	return installed
+}
+
+func everyInstallHasFleetBootstrap(installed []Machine) bool {
+	for _, machine := range installed {
+		if machine.Result.Token == "" || machine.Result.Loopback {
+			return false
+		}
+	}
+	return true
+}
+
+func FleetReadySteps(installed []Machine) []string {
+	if len(installed) < 2 {
+		return nil
+	}
+	return []string{
+		"Fleet enrollment is complete.",
+		"Open " + installed[0].Result.ConsoleURL + " to manage all installed nodes.",
+	}
 }
 
 // installOne runs the whole per-machine tail for an additional machine:

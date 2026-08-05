@@ -86,10 +86,11 @@ func createIdentityFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	createdAt := time.Now().UTC()
 	template := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: nodeID},
-		NotBefore:             time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC),
+		NotBefore:             createdAt.Add(-5 * time.Minute),
 		NotAfter:              time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},

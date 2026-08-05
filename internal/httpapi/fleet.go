@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/punkjazz-labs/basement/internal/discovery"
+	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/redact"
 	"github.com/punkjazz-labs/basement/internal/setup"
 	"github.com/punkjazz-labs/basement/internal/store"
@@ -418,15 +419,16 @@ var adoptionPlan = []adoptionStep{
 	{Key: "verify", Label: "Confirm it is a GB10 machine"},
 	{Key: "install", Label: "Install basement on it"},
 	{Key: "start", Label: "Wait for its console"},
-	{Key: "pair", Label: "Pair and create a fleet key"},
+	{Key: "pair", Label: "Pair managers securely"},
 	{Key: "peer", Label: "Add it to the fleet"},
 }
 
 // adoptionResult is what the console shows when it worked.
 type adoptionResult struct {
-	Peer       peerView `json:"peer"`
-	ConsoleURL string   `json:"console_url"`
-	AltURL     string   `json:"alt_url,omitempty"`
+	Peer       peerView         `json:"peer"`
+	Node       *store.FleetNode `json:"node,omitempty"`
+	ConsoleURL string           `json:"console_url"`
+	AltURL     string           `json:"alt_url,omitempty"`
 	// OwnerPairingURL is the new console, and OwnerPairingToken is the
 	// pairing token to type into it. Pairing does not consume the token
 	// (internal/auth: it is a file-backed shared secret compared on every
@@ -786,15 +788,16 @@ func (s *Server) fleetAdopt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	// One peer, per the ADR 0005 deferral: cmd/basement/main.go refuses to
-	// pick a worker when more than one is configured, so a second peer would
-	// be a row that breaks every two-Spark model rather than a fleet.
+	// A manager without Phase B membership still has the one-peer limit. A
+	// fleet-capable controller admits additional machines through fleet_nodes
+	// while leaving peers as the designated compatibility worker for the
+	// existing two-node executor.
 	peers, err := s.store.Peers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if len(peers) > 0 {
+	if len(peers) > 0 && s.fleetManager == nil {
 		writeError(w, http.StatusConflict, errors.New("another Spark is already in the fleet, so remove it under Fleet before adopting a different one"))
 		return
 	}
@@ -1007,8 +1010,39 @@ func (s *Server) runAdoption(ctx context.Context, run *adoptionRun, address stri
 
 	run.begin("pair")
 	if strings.TrimSpace(result.Token) == "" {
-		run.fail("pair", fmt.Sprintf("%s did not produce a pairing token, so this Spark cannot get a key from it", address), nil)
+		run.fail("pair", fmt.Sprintf("%s did not produce a pairing token, so this Spark cannot pair with it", address), nil)
 		return
+	}
+	var adoptedNode *store.FleetNode
+	if s.fleetManager != nil {
+		joinCode, err := s.newSparkJoinCode(ctx, consoleURL, result.Token)
+		if err != nil {
+			run.fail("pair", fmt.Sprintf("could not create a fleet join code on %s", consoleURL), err)
+			return
+		}
+		nodeURL, err := adjacentFleetNodeURL(consoleURL)
+		if err != nil {
+			run.fail("pair", fmt.Sprintf("could not derive the fleet address for %s", consoleURL), err)
+			return
+		}
+		adopted, err := s.fleetManager.Adopt(ctx, fleet.AdoptRequest{DisplayName: name, ConsoleURL: consoleURL, NodeURL: nodeURL, JoinCode: joinCode.Code})
+		if err != nil {
+			run.fail("pair", fmt.Sprintf("could not adopt the manager on %s", consoleURL), err)
+			return
+		}
+		adoptedNode = &adopted.Node
+		run.done("pair", "manager identity pinned for "+name)
+		peers, err := s.store.Peers(ctx)
+		if err != nil {
+			run.fail("peer", "could not read this Spark's compatibility worker", err)
+			return
+		}
+		if len(peers) > 0 {
+			run.begin("peer")
+			run.done("peer", name+" added as a read-only fleet member")
+			run.succeed(adoptionResult{Node: adoptedNode, ConsoleURL: consoleURL, AltURL: altURL, OwnerPairingURL: consoleURL, OwnerPairingToken: result.Token})
+			return
+		}
 	}
 	key, err := s.mintFleetKey(ctx, consoleURL, result.Token)
 	if err != nil {
@@ -1026,7 +1060,9 @@ func (s *Server) runAdoption(ctx context.Context, run *adoptionRun, address stri
 		run.fail("pair", message, err)
 		return
 	}
-	run.done("pair", "fleet key created on "+name)
+	if adoptedNode == nil {
+		run.done("pair", "fleet key created on "+name)
+	}
 
 	// From here a fleet key exists on the other machine. Every failure below
 	// hands it back rather than leaving a credential behind that nobody can
@@ -1052,11 +1088,64 @@ func (s *Server) runAdoption(ctx context.Context, run *adoptionRun, address stri
 	run.done("peer", peer.Name)
 	run.succeed(adoptionResult{
 		Peer:              peerView{ID: peer.ID, Name: peer.Name, BaseURL: peer.BaseURL},
+		Node:              adoptedNode,
 		ConsoleURL:        consoleURL,
 		AltURL:            altURL,
 		OwnerPairingURL:   consoleURL,
 		OwnerPairingToken: result.Token,
 	})
+}
+
+func (s *Server) newSparkJoinCode(ctx context.Context, baseURL, token string) (fleet.JoinCode, error) {
+	body, err := json.Marshal(map[string]string{"token": token})
+	if err != nil {
+		return fleet.JoinCode{}, err
+	}
+	response, err := s.callNewSpark(ctx, http.MethodPost, baseURL, "/api/v1/auth/pair", body, nil)
+	if err != nil {
+		return fleet.JoinCode{}, err
+	}
+	var paired struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(response.body, &paired); err != nil || paired.CSRF == "" {
+		return fleet.JoinCode{}, errors.New("the installed manager did not accept its pairing token")
+	}
+	pairs := make([]string, 0, len(response.cookies))
+	for _, cookie := range response.cookies {
+		pairs = append(pairs, cookie.Name+"="+cookie.Value)
+	}
+	session := strings.Join(pairs, "; ")
+	if session == "" {
+		return fleet.JoinCode{}, errors.New("the installed manager did not open a console session")
+	}
+	response, err = s.callNewSpark(ctx, http.MethodPost, baseURL, "/api/v1/fleet/join-code", nil, map[string]string{
+		"Cookie": session, "X-CSRF-Token": paired.CSRF,
+	})
+	if err != nil {
+		return fleet.JoinCode{}, err
+	}
+	var code fleet.JoinCode
+	if err := json.Unmarshal(response.body, &code); err != nil || code.Code == "" {
+		return fleet.JoinCode{}, errors.New("the installed manager returned an unreadable fleet join code")
+	}
+	return code, nil
+}
+
+func adjacentFleetNodeURL(consoleURL string) (string, error) {
+	parsed, err := url.Parse(consoleURL)
+	if err != nil || parsed.Host == "" {
+		return "", errors.New("the installed manager console URL is invalid")
+	}
+	host, portText, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		return "", errors.New("the installed manager console URL has no explicit port")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port >= 65535 {
+		return "", errors.New("the installed manager console port cannot address its fleet listener")
+	}
+	return "https://" + net.JoinHostPort(host, strconv.Itoa(port+1)), nil
 }
 
 // waitForConsole polls the newly started manager's health endpoint until it

@@ -36,6 +36,9 @@ func TestIdentitySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.EnsureFleetController(ctx, first.selfNode("")); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +68,9 @@ func TestIdentitySurvivesAddressChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.EnsureFleetController(ctx, first.selfNode("")); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +85,10 @@ func TestIdentitySurvivesAddressChange(t *testing.T) {
 	}
 	if first.identity.NodeID != second.identity.NodeID || first.identity.CertificateFingerprint != second.identity.CertificateFingerprint {
 		t.Fatalf("address change replaced identity: first=%s second=%s", first.identity.NodeID, second.identity.NodeID)
+	}
+	config, err := database.FleetConfig(ctx)
+	if err != nil || config.ControllerNodeURL != "https://192.168.99.42:7071" {
+		t.Fatalf("address changed identity instead of its route: config=%+v err=%v", config, err)
 	}
 }
 
@@ -318,6 +328,50 @@ func TestOwnerInitiatedAdoptionBuildsFourNodeFleet(t *testing.T) {
 	}
 }
 
+func TestFleetSummaryUsesReceiptFreshnessAndReportsClockSkew(t *testing.T) {
+	ctx := context.Background()
+	controller, controllerStore := newTestManager(t, "controller", "192.168.99.10")
+	member, _ := newTestManager(t, "member", "192.168.99.20")
+	config, err := controllerStore.EnsureFleetController(ctx, controller.selfNode(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := controllerStore.PrepareFleetNode(ctx, controller.selfNode(config.FleetID), member.selfNode("")); err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerStore.CommitFleetNode(ctx, config.FleetID, member.identity.NodeID); err != nil {
+		t.Fatal(err)
+	}
+	payload := testHeartbeatPayload(config.FleetID, member.identity.NodeID, 1)
+	payload.LocalTime = "2026-08-05T09:55:00Z"
+	envelope, err := SignHeartbeat(member.identity, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, _ := envelope.signedBytes()
+	if err := controllerStore.AcceptHeartbeat(ctx, config.FleetID, member.identity.NodeID, 1, "2026-08-05T10:00:00Z", canonical, envelope.Signature, "test", "test-build", "catalogue"); err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return time.Date(2026, 8, 5, 10, 0, 20, 0, time.UTC) }
+	summary, err := controller.Summary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberSummary := findNodeSummary(t, summary, member.identity.NodeID)
+	if memberSummary.Status != "fresh" || !memberSummary.ClockSkew {
+		t.Fatalf("fresh skewed member summary=%+v", memberSummary)
+	}
+	controller.now = func() time.Time { return time.Date(2026, 8, 5, 10, 1, 0, 0, time.UTC) }
+	summary, err = controller.Summary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberSummary = findNodeSummary(t, summary, member.identity.NodeID)
+	if memberSummary.Status != "stale" {
+		t.Fatalf("old controller receipt was not stale: %+v", memberSummary)
+	}
+}
+
 func newTestManager(t *testing.T, name, address string) (*Manager, *store.Store) {
 	t.Helper()
 	directory := t.TempDir()
@@ -352,8 +406,22 @@ func testHeartbeatPayload(fleetID, nodeID string, sequence int64) HeartbeatPaylo
 	}
 }
 
+func findNodeSummary(t *testing.T, summary Summary, nodeID string) FleetNodeSummary {
+	t.Helper()
+	for _, node := range summary.Nodes {
+		if node.NodeID == nodeID {
+			return node
+		}
+	}
+	t.Fatalf("summary has no node %s: %+v", nodeID, summary)
+	return FleetNodeSummary{}
+}
+
 func handshakePair(serverConfig, clientConfig *tls.Config) (error, error) {
 	serverSide, clientSide := net.Pipe()
+	deadline := time.Now().Add(time.Second)
+	_ = serverSide.SetDeadline(deadline)
+	_ = clientSide.SetDeadline(deadline)
 	serverResult := make(chan error, 1)
 	clientResult := make(chan error, 1)
 	go func() {
