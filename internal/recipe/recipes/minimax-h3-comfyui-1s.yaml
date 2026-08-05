@@ -10,7 +10,11 @@ id: minimax-h3-comfyui-1s
 # optional starting image, but the generation API does not stage a source
 # image into ComfyUI yet. Declaring that graph here would offer a mode the
 # backend explicitly refuses.
-version: 1
+# Version 2 splits the sampler step count in two: a generation still runs 20,
+# and the install and start proof runs 1. Version 1 proved itself with a
+# full-quality generation, which cost about eighteen minutes of waiting every
+# time the model was installed or started.
+version: 2
 display_name: MiniMax H3
 publisher: MiniMax + Comfy-Org
 model_by: MiniMax
@@ -98,6 +102,13 @@ service:
     min_blocks: 7
     max_blocks: 21
     default_blocks: 7
+    # 20 steps is what every measured run in docs/H3-MEASUREMENTS.md used, at
+    # roughly 46 seconds a step. The install and start proof runs one: it has
+    # to show the weights loaded and the graph saved a file, and 19 more steps
+    # of picture quality prove neither while costing a quarter of an hour that
+    # the owner spends watching a progress bar before they can use anything.
+    sampler_steps: 20
+    verification_sampler_steps: 1
     concurrent_generations: 1
 # 99.09 GB is the worst measured total across the four successful runs. The
 # overhead is that total minus the exact 42,470,585,471-byte weight set.

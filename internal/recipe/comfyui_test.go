@@ -87,6 +87,14 @@ func TestMediaRecipeRejections(t *testing.T) {
 		{"no frame rate", func(r *recipe.Recipe) { r.Service.ComfyUI.FramesPerSecond = 0 }, "frames_per_second"},
 		{"blocks inverted", func(r *recipe.Recipe) { r.Service.ComfyUI.MinBlocks = 30 }, "min_blocks <= max_blocks"},
 		{"default outside the block range", func(r *recipe.Recipe) { r.Service.ComfyUI.DefaultBlocks = 40 }, "default_blocks must be between"},
+		{"no sampler steps", func(r *recipe.Recipe) { r.Service.ComfyUI.SamplerSteps = 0 }, "sampler_steps must be between 1 and 200"},
+		{"no verification sampler steps", func(r *recipe.Recipe) { r.Service.ComfyUI.VerificationSamplerSteps = 0 }, "verification_sampler_steps must be between 1 and 200"},
+		// The rule that keeps the install proof cheap. Without it a recipe can
+		// go back to spending a full-quality generation on every install and
+		// every start by writing one number, and nothing would fail.
+		{"verification as expensive as a generation", func(r *recipe.Recipe) {
+			r.Service.ComfyUI.VerificationSamplerSteps = r.Service.ComfyUI.SamplerSteps + 1
+		}, "verification_sampler_steps must not exceed sampler_steps"},
 		{"more than one generation at a time", func(r *recipe.Recipe) { r.Service.ComfyUI.ConcurrentGenerations = 2 }, "concurrent_generations must be 1"},
 		{"whole snapshot download", func(r *recipe.Recipe) { r.Artifacts[0].Files = nil }, "pin its weights file by file"},
 		{"weights outside a model folder", func(r *recipe.Recipe) {
@@ -216,6 +224,8 @@ service:
     min_blocks: 1
     max_blocks: 21
     default_blocks: 7
+    sampler_steps: 20
+    verification_sampler_steps: 1
     concurrent_generations: 1
 memory_model:
   weights_bytes: 30000000000

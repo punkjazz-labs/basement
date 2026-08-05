@@ -37,6 +37,7 @@ export interface MediaGenerationConfig {
   max_blocks: number
   default_blocks: number
   concurrent_generations: number
+  max_prompt_length: number
 }
 
 export interface Recipe {

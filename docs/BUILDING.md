@@ -237,9 +237,14 @@ The schema is `internal/recipe/types.go`; the rules are
   is pinned; the validator requires the complete install lifecycle and the
   complete uninstall lifecycle, in sequence, ending in the verification that
   fits the kind: `verify_openai_inference` for a text model,
-  `verify_media_generation` for `comfyui`, which generates the smallest clip
-  the recipe allows and requires a non-empty file on disk. `run_shell` is rejected by name in
-  addition to being absent from the allowlist.
+  `verify_media_generation` for `comfyui`, which runs the recipe's own graph
+  at its minimum duration, its default short edge and its
+  `verification_sampler_steps`, and requires a non-empty file on disk. It has
+  to execute the graph rather than health-check the runtime, because ComfyUI
+  answers `/queue` before it has loaded a weight; it does not have to execute
+  it at full quality, which is why the step count is its own recipe field.
+  `run_shell` is rejected by name in addition to being absent from the
+  allowlist.
 - **memory_model** — optional for the kinds that claim a share of the device,
   required for `llamacpp` and `comfyui`, which claim an absolute number of
   bytes instead and have nothing else to bound them with. Absent means "no

@@ -305,7 +305,12 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   const selectedSize = sizes.find(option => option.value === size)
   const textMode = config.modes.includes('text_to_video')
   const imageMode = config.modes.includes('image_to_video')
-  const canSubmit = textMode && Boolean(prompt.trim()) && Boolean(selectedSize) && blocks > 0 && !submitting
+  // Counted in code points so this agrees with the server, which counts
+  // runes. prompt.length would count UTF-16 units and disagree the moment
+  // anyone writes an emoji.
+  const promptLength = [...prompt.trim()].length
+  const promptTooLong = promptLength > config.max_prompt_length
+  const canSubmit = textMode && Boolean(prompt.trim()) && !promptTooLong && Boolean(selectedSize) && blocks > 0 && !submitting
   const quantization = recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant : undefined
 
   const submit = async (event: React.FormEvent) => {
@@ -410,16 +415,35 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
               {imageMode && <p className="gen-mode-note">Image to video is not available yet.</p>}
             </div>
 
-            <div className="composer">
+            <div className="composer gen-composer">
+              {/*
+                No maxLength. The browser enforces it by silently dropping
+                whatever does not fit, so pasting a long shot-by-shot prompt
+                left one that looked complete, ended mid-sentence, and
+                generated from the half that survived. Over the limit the
+                text stays exactly as written and Generate is what refuses.
+              */}
               <textarea
                 rows={3}
-                maxLength={2000}
                 aria-label="Prompt"
+                aria-invalid={promptTooLong}
                 placeholder="Describe the clip"
                 value={prompt}
                 onChange={event => setPrompt(event.target.value)}
               />
             </div>
+            {/*
+              Shown from three quarters of the way, not always: a counter on
+              an empty field is noise, and one that appears only at the
+              moment of refusal is a surprise.
+            */}
+            {promptLength > config.max_prompt_length * 0.75 && (
+              <p className={promptTooLong ? 'error-text prompt-count' : 'faint prompt-count'}>
+                {promptTooLong
+                  ? `${promptLength.toLocaleString()} of ${config.max_prompt_length.toLocaleString()} characters. Remove ${(promptLength - config.max_prompt_length).toLocaleString()} to generate.`
+                  : `${promptLength.toLocaleString()} of ${config.max_prompt_length.toLocaleString()} characters`}
+              </p>
+            )}
 
             <div className="gen-controls">
               <div className="field">

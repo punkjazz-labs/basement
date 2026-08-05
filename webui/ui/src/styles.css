@@ -638,6 +638,11 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   display: grid; grid-template-columns: minmax(0, 1fr) 380px;
   gap: 20px; align-items: start;
 }
+/* Video prompts run long: a shot list with per-subject definitions, timings
+   and dialogue is thousands of characters, and reading it back in a
+   three-line box is how a mistake stays hidden until the clip arrives. */
+.gen-composer textarea { max-height: 320px; }
+.prompt-count { margin: 6px 2px 0; text-align: right; font-size: 11.5px; }
 .gen-left { min-width: 0; }
 .gen-context { align-items: center; gap: 12px; }
 .gen-context .glyph {

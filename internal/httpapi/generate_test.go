@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -233,6 +234,45 @@ func (c *mediaConsole) awaitStatus(t *testing.T, id string, states ...string) ma
 
 const goodRequest = `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"a quiet room","blocks":1,"width":1152,"height":768}`
 
+// TestGenerateAcceptsAFullVideoPrompt is the limit measured against what a
+// video prompt actually looks like. A shot-by-shot description with
+// per-subject definitions, timings, dialogue and a soundscape runs to several
+// thousand characters; the first limit here was 2000, and the console
+// enforced it with a textarea maxLength, so pasting one of those left a
+// prompt that looked complete, ended mid-sentence, and generated from the
+// half that survived. Nothing anywhere said so.
+func TestGenerateAcceptsAFullVideoPrompt(t *testing.T) {
+	console := newMediaConsole(t)
+	request := func(t *testing.T, prompt string) (int, map[string]any) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"model_id": "media-test-1s", "mode": "text_to_video",
+			"prompt": prompt, "blocks": 1, "width": 1152, "height": 768,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return console.generate(t, string(body))
+	}
+	t.Run("a shot-by-shot prompt", func(t *testing.T) {
+		prompt := strings.Repeat("Shot 1: a slow pan across a quiet room, natural light. ", 80)
+		if len(prompt) < 4000 {
+			t.Fatalf("the fixture is only %d characters, which does not exercise the case", len(prompt))
+		}
+		if status, body := request(t, prompt); status != http.StatusAccepted {
+			t.Fatalf("a %d-character prompt was refused: status=%d body=%#v", len(prompt), status, body)
+		}
+	})
+	// Counted in characters, not bytes. Curly quotes and accents are ordinary
+	// in a written prompt, and a limit that shrinks when you use them is one
+	// nobody can write to.
+	t.Run("counted in characters rather than bytes", func(t *testing.T) {
+		if status, body := request(t, strings.Repeat("é", MaxPromptLength)); status != http.StatusAccepted {
+			t.Fatalf("a prompt of exactly %d characters was refused for its byte length: status=%d body=%#v", MaxPromptLength, status, body)
+		}
+	})
+}
+
 func TestGenerateValidatesAgainstTheRecipe(t *testing.T) {
 	console := newMediaConsole(t)
 	tests := []struct {
@@ -241,7 +281,7 @@ func TestGenerateValidatesAgainstTheRecipe(t *testing.T) {
 		want string
 	}{
 		{"no prompt", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"   ","blocks":1,"width":1152,"height":768}`, "a prompt is required"},
-		{"prompt too long", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"` + strings.Repeat("x", 2001) + `","blocks":1,"width":1152,"height":768}`, "at most 2000 characters"},
+		{"prompt too long", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"` + strings.Repeat("x", MaxPromptLength+1) + `","blocks":1,"width":1152,"height":768}`, fmt.Sprintf("at most %d characters", MaxPromptLength)},
 		{"unknown mode", `{"model_id":"media-test-1s","mode":"text_to_music","prompt":"x","blocks":1,"width":1152,"height":768}`, "mode must be one of: text_to_video"},
 		{"source image mode", `{"model_id":"media-test-1s","mode":"image_to_video","prompt":"x","blocks":1,"width":1152,"height":768}`, "mode must be one of: text_to_video"},
 		{"blocks below the minimum", `{"model_id":"media-test-1s","mode":"text_to_video","prompt":"x","blocks":0,"width":1152,"height":768}`, "between 1 and 21 blocks"},

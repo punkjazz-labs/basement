@@ -825,16 +825,24 @@ func (h *HostExecutor) verifyInference(ctx context.Context, r recipe.Recipe) (ma
 const mediaVerificationSeed = 1
 
 // verifyMediaGeneration is the media counterpart of verify_openai_inference:
-// the cheapest honest proof that the thing actually works. It generates the
-// smallest clip the recipe admits — its minimum duration at its default short
-// edge — and requires a non-empty file on disk afterwards. Nothing weaker
-// would do: a workflow that validates upstream and then writes nothing is
-// exactly the failure this step exists to catch, and it is the first thing an
-// owner would hit rather than the last.
+// the cheapest honest proof that the thing actually works. It runs the
+// recipe's own graph at its minimum duration, its default short edge and its
+// verification step count, and requires a non-empty file on disk afterwards.
+// Nothing weaker would do: ComfyUI answers /queue as soon as its server
+// process is up and before any weights are loaded, so the health check ahead
+// of this one would report a working model that failed the moment anybody
+// asked it for anything.
 //
-// It is expensive, and honestly so. The wait is the recipe's own start
-// timeout, so a recipe that knows how long its smallest generation takes says
-// so in one place and both the health wait and this step honour it.
+// What it deliberately does not do is generate a good clip. The proof has to
+// show that 42 GB of weights loaded and that the graph reached its save node;
+// quality is not evidence of either, and paying for it meant twenty sampler
+// steps at roughly forty-six seconds each on every install and every start.
+// The step count is the recipe's VerificationSamplerSteps instead, so what is
+// left is the weight load, which is real and unavoidable, plus one step.
+//
+// The wait is the recipe's own start timeout, so a recipe that knows how long
+// its smallest generation takes says so in one place and both the health wait
+// and this step honour it.
 func (h *HostExecutor) verifyMediaGeneration(ctx context.Context, r recipe.Recipe, progress Progress) (map[string]any, error) {
 	c, ok := r.MediaGeneration()
 	if !ok {
@@ -855,6 +863,7 @@ func (h *HostExecutor) verifyMediaGeneration(ctx context.Context, r recipe.Recip
 		Frames: frames,
 		Width:  c.DefaultShortEdge,
 		Height: c.DefaultShortEdge,
+		Steps:  c.VerificationSamplerSteps,
 	})
 	if err != nil {
 		return nil, err
@@ -891,7 +900,8 @@ func (h *HostExecutor) verifyMediaGeneration(ctx context.Context, r recipe.Recip
 	return map[string]any{
 		"mode": recipe.ModeTextToVideo, "prompt_id": outcome.PromptID,
 		"frames": frames, "blocks": c.MinBlocks, "width": c.DefaultShortEdge, "height": c.DefaultShortEdge,
-		"seed": mediaVerificationSeed, "output_files": outcome.Files, "bytes": outcome.Bytes,
+		"steps": c.VerificationSamplerSteps,
+		"seed":  mediaVerificationSeed, "output_files": outcome.Files, "bytes": outcome.Bytes,
 		"duration_seconds": math.Round(outcome.Duration.Seconds()*10) / 10,
 	}, nil
 }

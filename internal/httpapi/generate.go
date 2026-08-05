@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
@@ -26,10 +27,18 @@ import (
 // of its own rather than borrowing the job engine's transactional machinery
 // for something that neither installs nor removes anything.
 
-// maxPromptLength bounds the prompt a request may carry. It is generous for
-// prose and small enough that the field cannot be used to write megabytes
-// into the database one request at a time.
-const maxPromptLength = 2000
+// MaxPromptLength bounds the prompt a request may carry. It is small enough
+// that the field cannot be used to write megabytes into the database one
+// request at a time, and large enough for the prompts video models are
+// actually written for: a shot-by-shot description with per-subject
+// definitions, timings and dialogue runs to several thousand characters, and
+// the first limit here was 2000, which cut one in half.
+//
+// It is exported because the console reads it from the generation config and
+// counts against it. A second copy of the number in the browser is a copy
+// that can disagree with this one, and the way it disagrees is a prompt the
+// field accepts and the server then refuses.
+const MaxPromptLength = 8000
 
 // maxSeed is the largest seed a request may name. It is the largest integer
 // JSON carries exactly, so a seed recorded in the gallery is the seed that
@@ -249,8 +258,12 @@ func (s *Server) generateHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("a prompt is required"))
 		return
 	}
-	if len(prompt) > maxPromptLength {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("a prompt is at most %d characters, and this one is %d", maxPromptLength, len(prompt)))
+	// Counted in characters, not bytes, because that is what the message
+	// says and what the console counts. A prompt of accented text or curly
+	// quotes is longer in bytes than anything the user can see, and a limit
+	// that moves with the encoding is one nobody can write to.
+	if length := utf8.RuneCountInString(prompt); length > MaxPromptLength {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("a prompt is at most %d characters, and this one is %d", MaxPromptLength, length))
 		return
 	}
 	if err := validateMode(request.Mode, config); err != nil {
@@ -468,7 +481,7 @@ func (s *Server) runOneGeneration(id string) {
 	}
 	graph, err := recipe.RenderGraph(raw, recipe.GraphInputs{
 		Prompt: record.Prompt, Seed: record.Seed, Frames: record.Frames,
-		Width: record.Width, Height: record.Height,
+		Width: record.Width, Height: record.Height, Steps: config.SamplerSteps,
 	})
 	if err != nil {
 		fail("failed", err.Error())

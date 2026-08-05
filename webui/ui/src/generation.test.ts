@@ -21,6 +21,7 @@ const config = (overrides: Partial<MediaGenerationConfig> = {}): MediaGeneration
   max_blocks: 21,
   default_blocks: 7,
   concurrent_generations: 1,
+  max_prompt_length: 8000,
   ...overrides,
 })
 
