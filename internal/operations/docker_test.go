@@ -785,6 +785,63 @@ func TestStaleImageNoticesAContainerLeftOnTheOldDigest(t *testing.T) {
 	}
 }
 
+// A recipe's serve settings can change without its version changing, just as
+// its pinned image can. Docker keeps the old Config.Cmd until the container is
+// rebuilt, so reconciliation has to name the changed flag rather than accept
+// labels that still happen to match.
+func TestStaleCommandNoticesAChangedServeArgument(t *testing.T) {
+	r := twoSparkRecipe(t)
+	placement := Placement{Role: RoleHead, NodeName: "spark-head", NodeCount: 2, MasterAddress: "192.168.99.20", MasterPort: 29501}
+	previous := r
+	previousVLLM := *r.Service.VLLM
+	previousVLLM.GPUMemoryUtil = "0.81"
+	previous.Service.VLLM = &previousVLLM
+
+	drift := staleCommand(ContainerState{Command: vllmArgs(previous, placement)}, r, placement)
+	if len(drift) != 1 || drift[0].Flag != "--gpu-memory-utilization" || drift[0].Actual != "0.81" || drift[0].Expected != r.Service.VLLM.GPUMemoryUtil {
+		t.Fatalf("drift=%#v, want the changed memory-utilization flag", drift)
+	}
+	receipt := commandMismatchReceipt(drift)
+	if len(receipt) != 1 || receipt[0]["flag"] != "--gpu-memory-utilization" || receipt[0]["was"] != "0.81" || receipt[0]["now"] != r.Service.VLLM.GPUMemoryUtil {
+		t.Fatalf("receipt=%#v, want the changed flag and both values", receipt)
+	}
+	if drift := staleCommand(ContainerState{Command: vllmArgs(r, placement)}, r, placement); len(drift) != 0 {
+		t.Fatalf("the expected serve command was called stale: %#v", drift)
+	}
+
+	// There is no semantic argv normalization in this package. The builders
+	// guarantee one order and Docker preserves it, so even an equivalent
+	// reordering is drift rather than a new compatibility promise.
+	reordered := append([]string(nil), vllmArgs(r, placement)...)
+	reordered[2], reordered[4] = reordered[4], reordered[2]
+	reordered[3], reordered[5] = reordered[5], reordered[3]
+	if drift := staleCommand(ContainerState{Command: reordered}, r, placement); len(drift) == 0 {
+		t.Fatal("a reordered command was silently normalized")
+	}
+}
+
+// The full command comparison delegates placement-resolved flags to
+// staleLaunch. Repeating reconciliation with the same live fabric address
+// must therefore leave both vLLM ranks alone instead of rebuilding forever.
+func TestCommandReconciliationDoesNotFlapWithResolvedFabricAddress(t *testing.T) {
+	r := twoSparkRecipe(t)
+	placements := []Placement{
+		{Role: RoleHead, NodeName: "spark-head", NodeCount: 2, MasterAddress: "192.168.99.20", MasterPort: 29501},
+		{Role: RoleWorker, NodeName: "spark-worker", NodeCount: 2, MasterAddress: "192.168.99.20", MasterPort: 29501},
+	}
+	for _, placement := range placements {
+		state := ContainerState{Command: vllmArgs(r, placement)}
+		for reconciliation := 0; reconciliation < 3; reconciliation++ {
+			if drift := staleCommand(state, r, placement); len(drift) != 0 {
+				t.Fatalf("%s command drift on reconciliation %d: %#v", placement.Role, reconciliation, drift)
+			}
+			if drift := staleLaunch(state, r, placement); len(drift) != 0 {
+				t.Fatalf("%s rendezvous drift on reconciliation %d: %#v", placement.Role, reconciliation, drift)
+			}
+		}
+	}
+}
+
 func toStrings(values []any) []string {
 	result := make([]string, len(values))
 	for index, value := range values {

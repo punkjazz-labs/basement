@@ -1032,6 +1032,114 @@ func imageMismatchReceipt(drift imageMismatch) map[string]any {
 	return map[string]any{"was": drift.Actual, "now": drift.Expected}
 }
 
+// commandMismatch is the first argument at which an existing container's
+// command differs from the command this recipe and placement produce now.
+// Flag names are retained separately so a receipt can name the recipe knob
+// that changed instead of reducing the repair to a bare stale-container event.
+type commandMismatch struct {
+	Position int
+	Flag     string
+	Actual   string
+	Expected string
+}
+
+// staleCommand reports an existing container whose serve command no longer
+// matches the recipe. Docker fixes Config.Cmd when the container is created,
+// so changing a serve setting under the same recipe version does not affect a
+// container that is merely started again. Comparison is deliberately exact:
+// the command builders produce one deterministic order and this package has
+// never promised that reordered flags or differently formatted values are
+// equivalent.
+//
+// The distributed rendezvous arguments are removed from this generic pass and
+// remain the responsibility of staleLaunch. For vLLM those are --node-rank,
+// --master-addr and --master-port; for SGLang they are --node-rank and
+// --dist-init-addr. Their values come from placement rather than the recipe,
+// and staleLaunch knows which values were resolved strongly enough to compare.
+// Keeping that one authority means an unresolved live address is silence while
+// a resolved address change still rebuilds the container.
+func staleCommand(state ContainerState, r recipe.Recipe, placement Placement) []commandMismatch {
+	if len(state.Command) == 0 {
+		return nil
+	}
+	_, expected, err := runtimeCommand(r, placement)
+	if err != nil || len(expected) == 0 {
+		return nil
+	}
+	actual := commandWithoutLaunchFlags(state.Command, r)
+	expected = commandWithoutLaunchFlags(expected, r)
+	limit := len(actual)
+	if len(expected) < limit {
+		limit = len(expected)
+	}
+	for position := 0; position < limit; position++ {
+		if actual[position] != expected[position] {
+			return []commandMismatch{describeCommandMismatch(actual, expected, position)}
+		}
+	}
+	if len(actual) == len(expected) {
+		return nil
+	}
+	return []commandMismatch{describeCommandMismatch(actual, expected, limit)}
+}
+
+func commandWithoutLaunchFlags(command []string, r recipe.Recipe) []string {
+	excluded := launchFlagNames(r)
+	if len(excluded) == 0 {
+		return command
+	}
+	comparable := make([]string, 0, len(command))
+	for position := 0; position < len(command); position++ {
+		argument := command[position]
+		if !excluded[argument] {
+			comparable = append(comparable, argument)
+			continue
+		}
+		// Every rendezvous argument has one value. A truncated Config.Cmd is
+		// still diagnosed by staleLaunch when the resolved value is present;
+		// when it is not, there is no live value safe to compare against.
+		if position+1 < len(command) {
+			position++
+		}
+	}
+	return comparable
+}
+
+func describeCommandMismatch(actual, expected []string, position int) commandMismatch {
+	drift := commandMismatch{Position: position, Flag: fmt.Sprintf("argv[%d]", position)}
+	if position < len(actual) {
+		drift.Actual = actual[position]
+	}
+	if position < len(expected) {
+		drift.Expected = expected[position]
+	}
+	if position > 0 && position < len(actual) && position < len(expected) &&
+		actual[position-1] == expected[position-1] && strings.HasPrefix(expected[position-1], "--") {
+		drift.Flag = expected[position-1]
+		return drift
+	}
+	if position < len(expected) && strings.HasPrefix(expected[position], "--") {
+		drift.Flag = expected[position]
+	} else if position < len(actual) && strings.HasPrefix(actual[position], "--") {
+		drift.Flag = actual[position]
+	}
+	return drift
+}
+
+// commandMismatchReceipt renders command drift in the same flag, was and now
+// shape as rendezvous drift, with the argv position retained for positional or
+// ordering changes.
+func commandMismatchReceipt(drift []commandMismatch) []map[string]any {
+	entries := make([]map[string]any, 0, len(drift))
+	for _, mismatch := range drift {
+		entries = append(entries, map[string]any{
+			"flag": mismatch.Flag, "position": mismatch.Position,
+			"was": mismatch.Actual, "now": mismatch.Expected,
+		})
+	}
+	return entries
+}
+
 // launchMismatch is a launch flag whose value was fixed into an existing
 // container and no longer matches what this job resolved.
 type launchMismatch struct {
@@ -1098,6 +1206,26 @@ func launchFlags(r recipe.Recipe, placement Placement) map[string]string {
 		if placement.MasterAddress != "" && placement.MasterPort > 0 {
 			flags["--dist-init-addr"] = net.JoinHostPort(placement.MasterAddress, fmt.Sprint(placement.MasterPort))
 		}
+	}
+	return flags
+}
+
+// launchFlagNames is the complete set of placement-resolved arguments for a
+// runtime, including values launchFlags may deliberately omit when placement
+// is unresolved. staleCommand needs the complete names so an absent live
+// address cannot leak back into generic argv comparison and cause a rebuild
+// that staleLaunch correctly refused to infer.
+func launchFlagNames(r recipe.Recipe) map[string]bool {
+	if !r.Distributed() {
+		return nil
+	}
+	flags := map[string]bool{"--node-rank": true}
+	switch r.Runtime.Kind {
+	case "vllm":
+		flags["--master-addr"] = true
+		flags["--master-port"] = true
+	case "sglang":
+		flags["--dist-init-addr"] = true
 	}
 	return flags
 }
