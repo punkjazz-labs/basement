@@ -248,18 +248,15 @@
       margin-bottom: 14px;
     }
     .gen-context .glyph {
-      display: grid;
+      display: block;
       width: 34px;
       height: 34px;
-      place-items: center;
       flex: none;
       border: 1px solid var(--line-strong);
       border-radius: 9px;
       background: var(--surface-2);
-      color: var(--muted);
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 700;
+      object-fit: contain;
+      aspect-ratio: 1;
     }
     .gen-context strong { display: block; font-size: 14px; font-weight: 600; }
     .gen-context .faint { font-size: 12px; }
@@ -325,7 +322,6 @@
       background: var(--panel);
     }
     .optional-row strong { display: block; font-size: 12.5px; font-weight: 600; }
-    .optional-row .meta { color: var(--faint); font-size: 11px; }
     .image-name {
       max-width: 220px;
       overflow: hidden;
@@ -342,6 +338,57 @@
       gap: 18px;
       align-items: start;
     }
+    .aspect-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 5px;
+    }
+    .aspect-grid button {
+      min-width: 0;
+      padding: 6px 5px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 11.5px;
+      font-weight: 550;
+      white-space: nowrap;
+    }
+    .aspect-grid button[aria-pressed="true"] {
+      border-color: var(--ink);
+      background: var(--ink);
+      color: var(--bg);
+    }
+    .size-preset-row {
+      display: block;
+      margin-top: 8px;
+    }
+    button.exact-size-toggle {
+      display: block;
+      width: 100%;
+      margin-top: 8px;
+      padding: 7px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--muted);
+      text-align: left;
+      font-size: 12px;
+      font-weight: 550;
+    }
+    button.exact-size-toggle:hover,
+    button.exact-size-toggle[aria-expanded="true"] {
+      border-color: var(--faint);
+      color: var(--ink);
+    }
+    .exact-size {
+      margin-top: 8px;
+      padding: 9px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+    }
+    .exact-size[hidden] { display: none; }
     .number-pair {
       display: grid;
       grid-template-columns: 1fr auto 1fr;
@@ -359,6 +406,50 @@
       font-size: 11.5px;
       transform: translateY(-50%);
       pointer-events: none;
+    }
+    .duration-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 104px;
+      gap: 10px;
+      align-items: center;
+    }
+    .duration-row .unit-input { min-width: 0; }
+    .duration-row .unit-input input {
+      min-width: 0;
+      padding-right: 28px;
+      overflow: visible;
+      font-variant-numeric: tabular-nums;
+    }
+    .duration-slider {
+      display: grid;
+      gap: 3px;
+    }
+    input[type="range"] {
+      width: 100%;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+    .duration-scale {
+      display: flex;
+      justify-content: space-between;
+      color: var(--faint);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+    .duration-meta {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 4px;
+      flex-wrap: wrap;
+    }
+    .duration-current {
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 11.5px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
     }
     .setting-title {
       display: flex;
@@ -402,33 +493,48 @@
     }
     .shot-row {
       display: grid;
-      grid-template-columns: 82px minmax(0, 1.25fr) minmax(230px, 0.85fr);
-      gap: 12px;
-      padding: 13px;
+      grid-template-columns: 116px minmax(0, 1fr);
+      gap: 14px;
+      padding: 14px;
       background: var(--surface);
     }
     .shot-row + .shot-row { border-top: 1px solid var(--line); }
-    .shot-id strong { display: block; font-size: 12px; font-weight: 600; }
-    .shot-id code {
+    .shot-heading {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .shot-heading strong { font-size: 12px; font-weight: 600; }
+    .shot-heading button { margin-left: auto; padding: 2px 6px; font-size: 10.5px; }
+    .shot-start {
       display: block;
-      margin-top: 3px;
+      margin: 2px 0 9px;
       color: var(--muted);
       font-size: 10.5px;
       font-variant-numeric: tabular-nums;
     }
+    .shot-duration .unit-input input { padding-right: 24px; }
     .shot-fields { display: grid; gap: 8px; }
     .camera-grid {
       display: grid;
-      grid-template-columns: 1.2fr 0.8fr 0.8fr;
+      grid-template-columns: minmax(190px, 1.35fr) minmax(110px, 0.75fr) minmax(110px, 0.75fr);
       gap: 7px;
+    }
+    .camera-grid select {
+      min-width: 0;
+      overflow: visible;
+      text-overflow: clip;
+      white-space: nowrap;
     }
     .timeline-actions {
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
       margin-top: 9px;
     }
-    .timeline-actions .hint { margin-left: auto; }
+    .timeline-actions #shot-count { margin-left: auto; }
+    .timeline-match { color: var(--muted); }
 
     .advanced-fields {
       display: grid;
@@ -522,7 +628,7 @@
     }
     .basic-check[hidden] { display: none; }
 
-    @media (max-width: 1100px) {
+    @media (max-width: 1320px) {
       body[data-mode="advanced"] .composer-layout { grid-template-columns: 1fr; }
       .prompt-panel { position: static; }
       .prompt-output { min-height: 280px; }
@@ -557,6 +663,7 @@
       .cost-item + .cost-item { border-top: 1px solid var(--line); border-left: 0; }
       .camera-grid,
       .advanced-fields { grid-template-columns: 1fr; }
+      .aspect-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .advanced-fields .dialogue-words { grid-column: auto; }
       .optional-row { align-items: flex-start; flex-wrap: wrap; }
       .image-name { max-width: 160px; }
@@ -587,12 +694,12 @@
     <div class="content">
       <header class="content-head">
         <h1>Generate</h1>
-        <p class="desc">Create a video on the model that is running.</p>
+        <div class="desc">Create a video on the model that is running.</div>
       </header>
 
       <main id="main">
         <div class="gen-context">
-          <div class="glyph" aria-hidden="true">MH</div>
+          <img class="glyph" src="data:image/webp;base64,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" alt="MiniMax logo" width="34" height="34">
           <div>
             <strong>MiniMax H3</strong>
             <div class="faint">Serving on this Spark</div>
@@ -614,6 +721,17 @@
 
               <hr class="rule">
 
+              <div class="optional-row">
+                <div>
+                  <strong>Starting image <span class="tag quiet">Optional</span></strong>
+                </div>
+                <span class="spacer"></span>
+                <span class="image-name" id="image-name" hidden></span>
+                <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp">
+                <button class="ghost" id="choose-image" type="button">Choose image</button>
+                <button class="quiet" id="remove-image" type="button" hidden>Remove</button>
+              </div>
+
               <section id="basic-panel" class="basic-only" role="tabpanel" aria-labelledby="basic-tab">
                 <label class="field description-field">
                   <span id="composer-title">Describe your video</span>
@@ -625,137 +743,17 @@
                 <div class="section-head">
                   <h2>Shots</h2>
                   <span class="spacer"></span>
-                  <span class="tag quiet" id="timeline-frames">124 frames</span>
+                  <span class="tag quiet" id="timeline-total">5.2 s total</span>
                 </div>
 
-                <div class="shot-list">
-                  <div class="shot-row">
-                    <div class="shot-id">
-                      <strong>Shot 1</strong>
-                      <code>00:00.000</code>
-                    </div>
-                    <label class="field">
-                      <span>What happens?</span>
-                      <textarea id="shot-one" rows="3" placeholder="The dog runs through shallow water as spray catches the sunrise."></textarea>
-                    </label>
-                    <div class="camera-grid">
-                      <label class="field">
-                        <span>Camera</span>
-                        <select id="camera-one">
-                          <option>Zoom In</option>
-                          <option>Zoom Out</option>
-                          <option>Push In</option>
-                          <option>Pull Out</option>
-                          <option>Pan Left</option>
-                          <option>Pan Right</option>
-                          <option>Truck Left</option>
-                          <option>Truck Right</option>
-                          <option>Tilt Up</option>
-                          <option>Tilt Down</option>
-                          <option>Pedestal Up</option>
-                          <option>Pedestal Down</option>
-                          <option>Arc Shot</option>
-                          <option selected>Tracking Shot</option>
-                          <option>Static Shot</option>
-                          <option>Shake Slightly</option>
-                          <option>Shake Strongly</option>
-                          <option>POV</option>
-                          <option>Roll Clockwise</option>
-                          <option>Roll Counterclockwise</option>
-                        </select>
-                      </label>
-                      <label class="field">
-                        <span>Range</span>
-                        <select id="range-one">
-                          <option selected>Normal</option>
-                          <option>Small</option>
-                          <option>Large</option>
-                        </select>
-                      </label>
-                      <label class="field">
-                        <span>Speed</span>
-                        <select id="speed-one">
-                          <option selected>Normal</option>
-                          <option>Slow</option>
-                          <option>Fast</option>
-                        </select>
-                      </label>
-                    </div>
-                  </div>
-
-                  <div class="shot-row" id="shot-two-row" hidden>
-                    <div class="shot-id">
-                      <strong>Shot 2</strong>
-                      <code id="shot-two-time">00:02.583</code>
-                    </div>
-                    <label class="field">
-                      <span>What new detail appears?</span>
-                      <textarea id="shot-two" rows="3" placeholder="A close view shows water flying from the dog's paws."></textarea>
-                    </label>
-                    <div class="camera-grid">
-                      <label class="field">
-                        <span>Camera</span>
-                        <select id="camera-two">
-                          <option>Zoom In</option>
-                          <option>Zoom Out</option>
-                          <option>Push In</option>
-                          <option>Pull Out</option>
-                          <option>Pan Left</option>
-                          <option>Pan Right</option>
-                          <option>Truck Left</option>
-                          <option>Truck Right</option>
-                          <option>Tilt Up</option>
-                          <option>Tilt Down</option>
-                          <option>Pedestal Up</option>
-                          <option>Pedestal Down</option>
-                          <option>Arc Shot</option>
-                          <option>Tracking Shot</option>
-                          <option selected>Static Shot</option>
-                          <option>Shake Slightly</option>
-                          <option>Shake Strongly</option>
-                          <option>POV</option>
-                          <option>Roll Clockwise</option>
-                          <option>Roll Counterclockwise</option>
-                        </select>
-                      </label>
-                      <label class="field">
-                        <span>Range</span>
-                        <select id="range-two">
-                          <option selected>Normal</option>
-                          <option>Small</option>
-                          <option>Large</option>
-                        </select>
-                      </label>
-                      <label class="field">
-                        <span>Speed</span>
-                        <select id="speed-two">
-                          <option selected>Normal</option>
-                          <option>Slow</option>
-                          <option>Fast</option>
-                        </select>
-                      </label>
-                    </div>
-                  </div>
-                </div>
+                <div class="shot-list" id="shot-list"></div>
 
                 <div class="timeline-actions">
-                  <button class="ghost" id="add-cut" type="button">Add cut</button>
-                  <button class="quiet" id="remove-cut" type="button" hidden>Remove cut</button>
-                  <span class="hint" id="cut-count">One continuous shot</span>
+                  <button class="ghost" id="add-shot" type="button">Add shot</button>
+                  <span class="hint timeline-match" id="timeline-match">Timeline matches 5.2 s</span>
+                  <span class="hint" id="shot-count">1 of 8 shots</span>
                 </div>
               </section>
-
-              <div class="optional-row">
-                <div>
-                  <strong>Starting image <span class="tag quiet">Optional</span></strong>
-                  <div class="meta" id="generation-mode">Text to video</div>
-                </div>
-                <span class="spacer"></span>
-                <span class="image-name" id="image-name" hidden></span>
-                <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp">
-                <button class="ghost" id="choose-image" type="button">Choose image</button>
-                <button class="quiet" id="remove-image" type="button" hidden>Remove</button>
-              </div>
 
               <section class="advanced-only">
                 <div class="section-head">
@@ -809,21 +807,53 @@
                 </div>
                 <div class="settings-grid">
                   <div>
-                    <div class="setting-title"><span>Size</span></div>
-                    <div class="number-pair">
-                      <input id="width" type="number" min="32" step="32" value="1344" aria-label="Video width">
-                      <span aria-hidden="true">x</span>
-                      <input id="height" type="number" min="32" step="32" value="768" aria-label="Video height">
+                    <div class="setting-title"><span>Aspect ratio</span></div>
+                    <div class="aspect-grid" role="group" aria-label="Video aspect ratio">
+                      <button type="button" data-ratio="16:9" aria-pressed="true">16:9</button>
+                      <button type="button" data-ratio="9:16" aria-pressed="false">9:16</button>
+                      <button type="button" data-ratio="1:1" aria-pressed="false">1:1</button>
+                      <button type="button" data-ratio="4:3" aria-pressed="false">4:3</button>
+                      <button type="button" data-ratio="3:4" aria-pressed="false">3:4</button>
                     </div>
-                    <div class="hint">32-pixel grid</div>
+                    <div class="size-preset-row">
+                      <label class="field">
+                        <span>Size</span>
+                        <select id="size-preset" aria-label="Video size"></select>
+                      </label>
+                    </div>
+                    <button class="exact-size-toggle" id="exact-size-toggle" type="button" aria-expanded="false" aria-controls="exact-size">Show exact size fields</button>
+                    <div class="exact-size" id="exact-size" hidden>
+                      <div class="number-pair">
+                        <input id="width" type="number" min="32" step="32" value="1536" aria-label="Exact video width">
+                        <span aria-hidden="true">x</span>
+                        <input id="height" type="number" min="32" step="32" value="864" aria-label="Exact video height">
+                      </div>
+                      <div class="hint">32-pixel grid</div>
+                    </div>
                   </div>
                   <div>
                     <div class="setting-title"><span>Length</span></div>
-                    <div class="unit-input">
-                      <input id="length" type="text" inputmode="decimal" pattern="[0-9]+([.][0-9]+)?" value="5.17" aria-label="Video length in seconds">
-                      <span>seconds</span>
+                    <div class="duration-row">
+                      <div class="duration-slider">
+                        <input id="length-slider" type="range" min="7" max="21" step="1" value="7" list="length-stops" aria-label="Video length">
+                        <datalist id="length-stops">
+                          <option value="7"></option><option value="8"></option><option value="9"></option>
+                          <option value="10"></option><option value="11"></option><option value="12"></option>
+                          <option value="13"></option><option value="14"></option><option value="15"></option>
+                          <option value="16"></option><option value="17"></option><option value="18"></option>
+                          <option value="19"></option><option value="20"></option><option value="21"></option>
+                        </datalist>
+                        <div class="duration-scale"><span>5.2 s</span><span>15.1 s</span></div>
+                      </div>
+                      <div class="unit-input">
+                        <input id="length" type="text" inputmode="decimal" role="spinbutton" value="5.2" aria-label="Video length in seconds" aria-valuemin="5.2" aria-valuemax="15.1" aria-valuenow="5.2">
+                        <span>s</span>
+                      </div>
                     </div>
-                    <div class="hint" id="frame-count">5.17 seconds, 124 frames</div>
+                    <div class="duration-meta">
+                      <output class="duration-current" id="length-current" for="length-slider length">5.2 s selected</output>
+                      <span class="hint" id="length-step">15 valid model steps</span>
+                    </div>
                   </div>
                 </div>
               </section>
@@ -839,7 +869,7 @@
                 <div class="cost-strip" aria-live="polite">
                   <div class="cost-item">
                     <span>Estimated generation time</span>
-                    <strong id="time-estimate">About 18 min</strong>
+                    <strong id="time-estimate">About 26 min</strong>
                   </div>
                   <div class="cost-item">
                     <span>2560 x 1440 at this length</span>
@@ -885,9 +915,9 @@
               <dt>Structure</dt>
               <dd id="check-structure">3 fields in order</dd>
               <dt>Timing</dt>
-              <dd id="check-timing">124 frames, Shot 1 valid</dd>
+              <dd id="check-timing">5.2 seconds, 1 shot</dd>
               <dt>Request</dt>
-              <dd id="check-request">1344 x 768, 5.17 seconds</dd>
+              <dd id="check-request">1536 x 864, 5.2 seconds</dd>
             </dl>
 
             <div class="generate-row">
@@ -906,23 +936,24 @@
       var basicTab = document.getElementById('basic-tab');
       var advancedTab = document.getElementById('advanced-tab');
       var basicDescription = document.getElementById('basic-description');
-      var shotOne = document.getElementById('shot-one');
-      var shotTwo = document.getElementById('shot-two');
-      var shotTwoRow = document.getElementById('shot-two-row');
-      var shotTwoTime = document.getElementById('shot-two-time');
-      var addCut = document.getElementById('add-cut');
-      var removeCut = document.getElementById('remove-cut');
-      var cutCount = document.getElementById('cut-count');
+      var shotList = document.getElementById('shot-list');
+      var addShot = document.getElementById('add-shot');
+      var shotCount = document.getElementById('shot-count');
+      var timelineTotal = document.getElementById('timeline-total');
+      var timelineMatch = document.getElementById('timeline-match');
       var imageInput = document.getElementById('image-input');
       var chooseImage = document.getElementById('choose-image');
       var removeImage = document.getElementById('remove-image');
       var imageName = document.getElementById('image-name');
-      var generationMode = document.getElementById('generation-mode');
+      var ratioButtons = Array.prototype.slice.call(document.querySelectorAll('[data-ratio]'));
+      var sizePreset = document.getElementById('size-preset');
+      var exactSizeToggle = document.getElementById('exact-size-toggle');
+      var exactSize = document.getElementById('exact-size');
       var widthInput = document.getElementById('width');
       var heightInput = document.getElementById('height');
+      var lengthSlider = document.getElementById('length-slider');
       var lengthInput = document.getElementById('length');
-      var frameCount = document.getElementById('frame-count');
-      var timelineFrames = document.getElementById('timeline-frames');
+      var lengthCurrent = document.getElementById('length-current');
       var recommendedTag = document.getElementById('recommended-tag');
       var timeEstimate = document.getElementById('time-estimate');
       var qhdEstimate = document.getElementById('qhd-estimate');
@@ -936,8 +967,49 @@
       var basicGenerate = document.getElementById('basic-generate');
       var generate = document.getElementById('generate-video');
       var copy = document.getElementById('copy-prompt');
-      var hasSecondShot = false;
       var hasImage = false;
+      var selectedRatio = '16:9';
+      var selectedPreset = 'recommended';
+      var customSize = false;
+      var durationBlocks = 7;
+      var MAX_SHOTS = 8;
+      var MIN_SHOT_FRAMES = 3;
+
+      var sizePresets = {
+        '16:9': [
+          { value: 'compact', name: 'Compact', width: 1024, height: 576 },
+          { value: 'recommended', name: 'Recommended', width: 1536, height: 864 },
+          { value: 'large', name: 'QHD', width: 2560, height: 1440 }
+        ],
+        '9:16': [
+          { value: 'compact', name: 'Compact', width: 576, height: 1024 },
+          { value: 'recommended', name: 'Recommended', width: 864, height: 1536 },
+          { value: 'large', name: 'QHD portrait', width: 1440, height: 2560 }
+        ],
+        '1:1': [
+          { value: 'compact', name: 'Compact', width: 576, height: 576 },
+          { value: 'recommended', name: 'Recommended', width: 864, height: 864 },
+          { value: 'large', name: 'Large', width: 1440, height: 1440 }
+        ],
+        '4:3': [
+          { value: 'compact', name: 'Compact', width: 768, height: 576 },
+          { value: 'recommended', name: 'Recommended', width: 1152, height: 864 },
+          { value: 'large', name: 'Large', width: 1920, height: 1440 }
+        ],
+        '3:4': [
+          { value: 'compact', name: 'Compact', width: 576, height: 768 },
+          { value: 'recommended', name: 'Recommended', width: 864, height: 1152 },
+          { value: 'large', name: 'Large', width: 1440, height: 1920 }
+        ]
+      };
+
+      var shots = [{
+        action: '',
+        camera: 'Tracking Shot',
+        range: 'Normal',
+        speed: 'Normal',
+        frames: 124
+      }];
 
       var cameraExpressions = {
         'Zoom In': 'zooms in',
@@ -963,11 +1035,12 @@
       };
 
       function setMode(mode) {
-        if (mode === 'advanced' && !shotOne.value.trim() && basicDescription.value.trim()) {
-          shotOne.value = basicDescription.value.trim();
+        if (mode === 'advanced' && !shots[0].action.trim() && basicDescription.value.trim()) {
+          shots[0].action = basicDescription.value.trim();
+          renderShots();
         }
-        if (mode === 'basic' && !basicDescription.value.trim() && shotOne.value.trim()) {
-          basicDescription.value = shotOne.value.trim();
+        if (mode === 'basic' && !basicDescription.value.trim() && shots[0].action.trim()) {
+          basicDescription.value = shots[0].action.trim();
         }
         body.dataset.mode = mode;
         basicTab.setAttribute('aria-selected', String(mode === 'basic'));
@@ -975,9 +1048,7 @@
         update();
       }
 
-      function framesForSeconds(seconds) {
-        if (!Number.isFinite(seconds) || seconds <= 0) return null;
-        var blocks = Math.max(1, Math.round((seconds * 24 - 5) / 17));
+      function framesForBlocks(blocks) {
         return 17 * blocks + 5;
       }
 
@@ -988,7 +1059,7 @@
       }
 
       function formatDuration(seconds) {
-        return seconds.toFixed(2);
+        return (Math.round(seconds * 10) / 10).toFixed(1);
       }
 
       function formatTimestamp(frame) {
@@ -996,6 +1067,181 @@
         var minutes = Math.floor(seconds / 60);
         var remainder = seconds - minutes * 60;
         return String(minutes).padStart(2, '0') + ':' + remainder.toFixed(3).padStart(6, '0');
+      }
+
+      function escapeHTML(value) {
+        return String(value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      }
+
+      function totalFrames() {
+        return framesForBlocks(durationBlocks);
+      }
+
+      function currentSizePreset() {
+        var options = sizePresets[selectedRatio];
+        return options.find(function (option) { return option.value === selectedPreset; }) || options[1];
+      }
+
+      function renderSizeControl() {
+        var options = sizePresets[selectedRatio];
+        sizePreset.innerHTML = options.map(function (option) {
+          var selected = option.value === selectedPreset ? ' selected' : '';
+          return '<option value="' + option.value + '"' + selected + '>' + option.name + ' · ' + option.width + ' x ' + option.height + '</option>';
+        }).join('');
+
+        ratioButtons.forEach(function (button) {
+          button.setAttribute('aria-pressed', String(button.dataset.ratio === selectedRatio));
+        });
+
+        if (!customSize) {
+          var preset = currentSizePreset();
+          widthInput.value = String(preset.width);
+          heightInput.value = String(preset.height);
+        }
+
+        sizePreset.disabled = customSize;
+        exactSize.hidden = !customSize;
+        exactSizeToggle.setAttribute('aria-expanded', String(customSize));
+        exactSizeToggle.textContent = customSize ? 'Hide exact size fields' : 'Show exact size fields';
+      }
+
+      function nearestDurationBlocks(seconds) {
+        var nearest = 7;
+        var distance = Infinity;
+        for (var blocks = 7; blocks <= 21; blocks += 1) {
+          var candidate = framesForBlocks(blocks) / 24;
+          var candidateDistance = Math.abs(candidate - seconds);
+          if (candidateDistance < distance) {
+            distance = candidateDistance;
+            nearest = blocks;
+          }
+        }
+        return nearest;
+      }
+
+      function reconcileShots(frames) {
+        if (shots.length === 1) {
+          shots[0].frames = frames;
+          return;
+        }
+        var oldTotal = shots.reduce(function (sum, shot) { return sum + shot.frames; }, 0) || shots.length;
+        var available = frames - MIN_SHOT_FRAMES * shots.length;
+        var allocations = shots.map(function (shot) {
+          return MIN_SHOT_FRAMES + Math.floor(available * shot.frames / oldTotal);
+        });
+        var allocated = allocations.reduce(function (sum, value) { return sum + value; }, 0);
+        var remainder = frames - allocated;
+        for (var index = 0; remainder > 0; index = (index + 1) % allocations.length) {
+          allocations[index] += 1;
+          remainder -= 1;
+        }
+        shots.forEach(function (shot, index) { shot.frames = allocations[index]; });
+      }
+
+      function setDurationBlocks(blocks) {
+        durationBlocks = Math.min(21, Math.max(7, Math.round(blocks)));
+        lengthSlider.value = String(durationBlocks);
+        reconcileShots(totalFrames());
+        renderShots();
+        update();
+      }
+
+      function commitLengthInput() {
+        var seconds = parseDecimal(lengthInput.value);
+        if (!Number.isFinite(seconds)) {
+          lengthInput.value = formatDuration(totalFrames() / 24);
+          return;
+        }
+        setDurationBlocks(nearestDurationBlocks(seconds));
+      }
+
+      function cameraOptions(selected) {
+        return Object.keys(cameraExpressions).map(function (camera) {
+          return '<option' + (camera === selected ? ' selected' : '') + '>' + escapeHTML(camera) + '</option>';
+        }).join('');
+      }
+
+      function simpleOptions(values, selected) {
+        return values.map(function (value) {
+          return '<option' + (value === selected ? ' selected' : '') + '>' + value + '</option>';
+        }).join('');
+      }
+
+      function visibleShotTenths() {
+        var values = shots.map(function (shot, index) {
+          var exact = shot.frames * 10 / 24;
+          return { index: index, tenths: Math.floor(exact), remainder: exact - Math.floor(exact) };
+        });
+        var wanted = Math.round(totalFrames() * 10 / 24);
+        var assigned = values.reduce(function (sum, value) { return sum + value.tenths; }, 0);
+        values.slice().sort(function (left, right) {
+          return right.remainder - left.remainder || left.index - right.index;
+        }).slice(0, wanted - assigned).forEach(function (value) {
+          values[value.index].tenths += 1;
+        });
+        return values.map(function (value) { return value.tenths; });
+      }
+
+      function renderShots() {
+        var durations = visibleShotTenths();
+        var startTenths = 0;
+        shotList.innerHTML = shots.map(function (shot, index) {
+          var number = index + 1;
+          var start = (startTenths / 10).toFixed(1);
+          var duration = (durations[index] / 10).toFixed(1);
+          startTenths += durations[index];
+          var remove = shots.length > 1
+            ? '<button class="quiet remove-shot" type="button" data-index="' + index + '">Remove</button>'
+            : '';
+          return '<div class="shot-row" data-index="' + index + '">' +
+            '<div class="shot-id">' +
+              '<div class="shot-heading"><strong>Shot ' + number + '</strong>' + remove + '</div>' +
+              '<span class="shot-start">Starts ' + start + ' s</span>' +
+              '<label class="field shot-duration"><span>Duration</span><div class="unit-input">' +
+                '<input class="shot-duration-input" type="text" inputmode="decimal" role="spinbutton" value="' + duration + '" aria-label="Shot ' + number + ' duration in seconds" aria-valuemin="0.1" aria-valuenow="' + duration + '">' +
+                '<span>s</span></div></label>' +
+            '</div>' +
+            '<div class="shot-fields">' +
+              '<label class="field"><span>What happens?</span>' +
+                '<textarea class="shot-action" rows="3" placeholder="Describe this shot.">' + escapeHTML(shot.action) + '</textarea></label>' +
+              '<div class="camera-grid">' +
+                '<label class="field"><span>Camera</span><select class="shot-camera">' + cameraOptions(shot.camera) + '</select></label>' +
+                '<label class="field"><span>Range</span><select class="shot-range">' + simpleOptions(['Normal', 'Small', 'Large'], shot.range) + '</select></label>' +
+                '<label class="field"><span>Speed</span><select class="shot-speed">' + simpleOptions(['Normal', 'Slow', 'Fast'], shot.speed) + '</select></label>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+      }
+
+      function adjustShotDuration(index, requestedSeconds) {
+        var frames = totalFrames();
+        var maxFrames = frames - MIN_SHOT_FRAMES * (shots.length - 1);
+        var target = Math.min(maxFrames, Math.max(MIN_SHOT_FRAMES, Math.round(requestedSeconds * 24)));
+        var delta = target - shots[index].frames;
+        if (delta > 0) {
+          for (var offset = 1; offset < shots.length && delta > 0; offset += 1) {
+            var donorIndex = (index + offset) % shots.length;
+            var available = shots[donorIndex].frames - MIN_SHOT_FRAMES;
+            var taken = Math.min(delta, available);
+            shots[donorIndex].frames -= taken;
+            delta -= taken;
+          }
+        } else if (delta < 0) {
+          var receiver = index === shots.length - 1 ? index - 1 : index + 1;
+          shots[receiver].frames += -delta;
+          delta = 0;
+        }
+        shots[index].frames = frames - shots.reduce(function (sum, shot, shotIndex) {
+          return shotIndex === index ? sum : sum + shot.frames;
+        }, 0);
+        renderShots();
+        update();
       }
 
       function estimateSeconds(width, height, frames) {
@@ -1013,10 +1259,10 @@
         return 'About ' + hours + ' h' + (minutes ? ' ' + minutes + ' min' : '');
       }
 
-      function cameraSentence(cameraID, rangeID, speedID) {
-        var movement = cameraExpressions[document.getElementById(cameraID).value];
-        var range = document.getElementById(rangeID).value;
-        var speed = document.getElementById(speedID).value;
+      function cameraSentence(shot) {
+        var movement = cameraExpressions[shot.camera];
+        var range = shot.range;
+        var speed = shot.speed;
         var phrase = 'The camera ' + movement;
         if (range !== 'Normal') phrase += ' with ' + range.toLowerCase() + ' amplitude';
         if (speed !== 'Normal') phrase += ' at ' + speed.toLowerCase() + ' speed';
@@ -1025,28 +1271,33 @@
 
       function buildDescription(frames) {
         var mode = body.dataset.mode;
-        var firstAction = mode === 'advanced' ? shotOne.value.trim() : basicDescription.value.trim();
-        var description = '[Shot 1] ';
-        if (hasImage) {
-          description += 'The video begins from <Picture 1>, preserving its visible subjects, composition, setting, and visual style. ';
+        if (mode !== 'advanced') {
+          var basic = '[Shot 1] ';
+          if (hasImage) basic += 'The video begins from <Picture 1>, preserving its visible subjects, composition, setting, and visual style. ';
+          return basic + (basicDescription.value.trim() || '[Describe the video.]');
         }
-        description += firstAction || '[Describe the video.]';
 
-        if (mode === 'advanced') {
-          description += ' ' + cameraSentence('camera-one', 'range-one', 'speed-one');
-          var dialogue = document.getElementById('dialogue').value.trim();
-          if (dialogue) {
-            var speaker = document.getElementById('speaker').value.trim() || 'The speaker';
-            var language = document.getElementById('language').value;
-            description += ' ' + speaker + ' (S1) says: <d>[' + language + '] ' + dialogue + '</d>';
+        var description = '';
+        var startFrame = 0;
+        shots.forEach(function (shot, index) {
+          if (index === 0) {
+            description += '[Shot 1] ';
+            if (hasImage) description += 'The video begins from <Picture 1>, preserving its visible subjects, composition, setting, and visual style. ';
+          } else {
+            description += ' [Shot ' + (index + 1) + '] At ' + formatTimestamp(startFrame) + ', the camera cuts to a new view. ';
           }
-          if (hasSecondShot) {
-            var cutFrame = Math.max(1, Math.floor(frames / 2));
-            description += ' [Shot 2] At ' + formatTimestamp(cutFrame) + ', the camera cuts to a new view. ';
-            description += shotTwo.value.trim() || '[Describe the new detail.]';
-            description += ' ' + cameraSentence('camera-two', 'range-two', 'speed-two');
+          description += shot.action.trim() || '[Describe this shot.]';
+          description += ' ' + cameraSentence(shot);
+          if (index === 0) {
+            var dialogue = document.getElementById('dialogue').value.trim();
+            if (dialogue) {
+              var speaker = document.getElementById('speaker').value.trim() || 'The speaker';
+              var language = document.getElementById('language').value;
+              description += ' ' + speaker + ' (S1) says: <d>[' + language + '] ' + dialogue + '</d>';
+            }
           }
-        }
+          startFrame += shot.frames;
+        });
         return description;
       }
 
@@ -1070,36 +1321,40 @@
       function update() {
         var width = Number(widthInput.value);
         var height = Number(heightInput.value);
-        var requestedSeconds = parseDecimal(lengthInput.value);
-        var frames = framesForSeconds(requestedSeconds);
-        var actualSeconds = frames ? frames / 24 : 0;
+        var frames = totalFrames();
+        var actualSeconds = frames / 24;
         var sizeValid = Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0 && width % 32 === 0 && height % 32 === 0;
-        var lengthValid = Boolean(frames);
-        var firstAction = body.dataset.mode === 'advanced' ? shotOne.value.trim() : basicDescription.value.trim();
-        var secondActionValid = !hasSecondShot || Boolean(shotTwo.value.trim());
+        var lengthValid = durationBlocks >= 7 && durationBlocks <= 21;
+        var firstAction = body.dataset.mode === 'advanced' ? shots[0].action.trim() : basicDescription.value.trim();
+        var missingShot = body.dataset.mode === 'advanced'
+          ? shots.findIndex(function (shot) { return !shot.action.trim(); })
+          : -1;
+        var timelineValid = shots.reduce(function (sum, shot) { return sum + shot.frames; }, 0) === frames;
         var soundValid = body.dataset.mode !== 'advanced' || Boolean(document.getElementById('soundscape').value.trim());
         var musicValid = body.dataset.mode !== 'advanced' || Boolean(document.getElementById('music').value.trim());
 
-        if (frames) {
-          frameCount.textContent = formatDuration(actualSeconds) + ' seconds, ' + frames + ' frames';
-          timelineFrames.textContent = frames + ' frames';
-          shotTwoTime.textContent = formatTimestamp(Math.max(1, Math.floor(frames / 2)));
-        } else {
-          frameCount.textContent = 'Enter a positive length';
-          timelineFrames.textContent = 'No length';
-        }
+        var durationText = formatDuration(actualSeconds);
+        lengthInput.value = durationText;
+        lengthInput.setAttribute('aria-valuenow', durationText);
+        lengthCurrent.value = durationText + ' s selected';
+        timelineTotal.textContent = durationText + ' s total';
+        timelineMatch.textContent = 'Timeline matches ' + durationText + ' s';
+        shotCount.textContent = shots.length + ' of ' + MAX_SHOTS + ' shots';
+        addShot.disabled = shots.length >= MAX_SHOTS;
+        addShot.textContent = shots.length >= MAX_SHOTS ? '8 shots maximum' : 'Add shot';
 
-        recommendedTag.hidden = !(width === 1344 && height === 768 && frames === 124);
+        recommendedTag.hidden = customSize || selectedRatio !== '16:9' || selectedPreset !== 'recommended' || durationBlocks !== 7;
         timeEstimate.textContent = formatEstimate(estimateSeconds(width, height, frames));
         qhdEstimate.textContent = formatEstimate(estimateSeconds(2560, 1440, frames));
-        promptOutput.textContent = assembledPrompt(frames || 124);
+        promptOutput.textContent = assembledPrompt(frames);
 
-        var ready = Boolean(firstAction) && secondActionValid && sizeValid && lengthValid && soundValid && musicValid;
+        var ready = Boolean(firstAction) && missingShot === -1 && sizeValid && lengthValid && timelineValid && soundValid && musicValid;
         var failure = '';
         if (!firstAction) failure = body.dataset.mode === 'advanced' ? 'Describe Shot 1' : 'Describe the video';
-        else if (!secondActionValid) failure = 'Describe Shot 2';
+        else if (missingShot !== -1) failure = 'Describe Shot ' + (missingShot + 1);
         else if (!sizeValid) failure = 'Use 32-pixel size steps';
-        else if (!lengthValid) failure = lengthInput.value.indexOf(',') !== -1 ? 'Use a decimal point for length' : 'Enter a positive length';
+        else if (!lengthValid) failure = 'Choose a valid length';
+        else if (!timelineValid) failure = 'Match shot times to video length';
         else if (!soundValid) failure = 'Add scene sound';
         else if (!musicValid) failure = 'Add music or N/A';
 
@@ -1108,15 +1363,12 @@
         var basicFailure = '';
         if (body.dataset.mode === 'basic') {
           if (!sizeValid && (widthInput.value.trim() || heightInput.value.trim())) basicFailure = 'Use 32-pixel size steps';
-          else if (!lengthValid && lengthInput.value.trim()) basicFailure = lengthInput.value.indexOf(',') !== -1 ? 'Use a decimal point for length' : 'Enter a positive length';
         }
         basicCheck.textContent = basicFailure;
         basicCheck.hidden = !basicFailure;
         checkMode.textContent = hasImage ? 'Image to video' : 'Text to video';
-        checkTiming.textContent = frames
-          ? frames + ' frames, ' + (hasSecondShot && body.dataset.mode === 'advanced' ? '2 valid shots' : 'Shot 1 valid')
-          : 'Length needed';
-        checkRequest.textContent = sizeValid && frames
+        checkTiming.textContent = durationText + ' seconds, ' + shots.length + (shots.length === 1 ? ' shot' : ' shots');
+        checkRequest.textContent = sizeValid
           ? width + ' x ' + height + ', ' + formatDuration(actualSeconds) + ' seconds'
           : 'Check size and length';
         promptFormat.textContent = hasImage ? 'I2VA format' : 'T2VA format';
@@ -1127,21 +1379,100 @@
       basicTab.addEventListener('click', function () { setMode('basic'); });
       advancedTab.addEventListener('click', function () { setMode('advanced'); });
 
-      addCut.addEventListener('click', function () {
-        hasSecondShot = true;
-        shotTwoRow.hidden = false;
-        addCut.hidden = true;
-        removeCut.hidden = false;
-        cutCount.textContent = 'One frame-derived cut';
+      ratioButtons.forEach(function (button) {
+        button.addEventListener('click', function () {
+          selectedRatio = button.dataset.ratio;
+          selectedPreset = 'recommended';
+          customSize = false;
+          renderSizeControl();
+          update();
+        });
+      });
+
+      sizePreset.addEventListener('change', function () {
+        selectedPreset = sizePreset.value;
+        customSize = false;
+        renderSizeControl();
         update();
       });
 
-      removeCut.addEventListener('click', function () {
-        hasSecondShot = false;
-        shotTwoRow.hidden = true;
-        addCut.hidden = false;
-        removeCut.hidden = true;
-        cutCount.textContent = 'One continuous shot';
+      exactSizeToggle.addEventListener('click', function () {
+        customSize = !customSize;
+        renderSizeControl();
+        update();
+      });
+
+      widthInput.addEventListener('input', function () {
+        update();
+      });
+      heightInput.addEventListener('input', function () {
+        update();
+      });
+
+      lengthSlider.addEventListener('input', function () { setDurationBlocks(Number(lengthSlider.value)); });
+      lengthInput.addEventListener('change', commitLengthInput);
+      lengthInput.addEventListener('blur', commitLengthInput);
+      lengthInput.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commitLengthInput();
+        } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+          event.preventDefault();
+          setDurationBlocks(durationBlocks + (event.key === 'ArrowUp' ? 1 : -1));
+        }
+      });
+
+      addShot.addEventListener('click', function () {
+        if (shots.length >= MAX_SHOTS) return;
+        var longestIndex = 0;
+        shots.forEach(function (shot, index) {
+          if (shot.frames > shots[longestIndex].frames) longestIndex = index;
+        });
+        var split = Math.floor(shots[longestIndex].frames / 2);
+        shots[longestIndex].frames -= split;
+        shots.splice(longestIndex + 1, 0, {
+          action: '',
+          camera: 'Static Shot',
+          range: 'Normal',
+          speed: 'Normal',
+          frames: split
+        });
+        renderShots();
+        update();
+      });
+
+      shotList.addEventListener('input', function (event) {
+        var row = event.target.closest('.shot-row');
+        if (!row) return;
+        var index = Number(row.dataset.index);
+        if (event.target.classList.contains('shot-action')) shots[index].action = event.target.value;
+        update();
+      });
+
+      shotList.addEventListener('change', function (event) {
+        var row = event.target.closest('.shot-row');
+        if (!row) return;
+        var index = Number(row.dataset.index);
+        if (event.target.classList.contains('shot-camera')) shots[index].camera = event.target.value;
+        if (event.target.classList.contains('shot-range')) shots[index].range = event.target.value;
+        if (event.target.classList.contains('shot-speed')) shots[index].speed = event.target.value;
+        if (event.target.classList.contains('shot-duration-input')) {
+          var seconds = parseDecimal(event.target.value);
+          if (Number.isFinite(seconds) && seconds > 0) adjustShotDuration(index, seconds);
+          else renderShots();
+        }
+        update();
+      });
+
+      shotList.addEventListener('click', function (event) {
+        var button = event.target.closest('.remove-shot');
+        if (!button || shots.length === 1) return;
+        var index = Number(button.dataset.index);
+        var removedFrames = shots[index].frames;
+        shots.splice(index, 1);
+        var receiver = Math.max(0, index - 1);
+        shots[receiver].frames += removedFrames;
+        renderShots();
         update();
       });
 
@@ -1155,7 +1486,6 @@
         imageName.hidden = false;
         removeImage.hidden = false;
         chooseImage.textContent = 'Replace image';
-        generationMode.textContent = 'Image to video';
         update();
       });
 
@@ -1167,12 +1497,11 @@
         imageName.hidden = true;
         removeImage.hidden = true;
         chooseImage.textContent = 'Choose image';
-        generationMode.textContent = 'Text to video';
         update();
       });
 
       Array.prototype.forEach.call(
-        document.querySelectorAll('input:not([type="file"]), textarea, select'),
+        document.querySelectorAll('#basic-description, #speaker, #language, #dialogue, #soundscape, #music, #seed'),
         function (control) {
           control.addEventListener('input', update);
           control.addEventListener('change', update);
@@ -1190,6 +1519,8 @@
         });
       });
 
+      renderSizeControl();
+      renderShots();
       update();
     }());
   </script>

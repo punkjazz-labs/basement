@@ -8,8 +8,8 @@ Basement will make text-to-video the default H3 generation mode.
 
 The default Basic mode has one path:
 
-1. Describe the video.
-2. Choose or accept a size and length.
+1. Choose or skip a starting image, then describe the video.
+2. Choose or accept an aspect ratio, size, and valid length.
 3. Review the estimated time.
 4. Generate.
 
@@ -26,10 +26,10 @@ Both modes use a deterministic composer. No rewriting model sits between the
 user and the final prompt. A local prompt check must pass before an expensive
 run can start. The assembled prompt is visible in Advanced only.
 
-Size and length are free numeric choices, not preset lists. The composer offers
-1344 x 768 and 5.17 seconds as the recommended defaults, but neither value is
-locked. It enforces only graph and recipe validity, such as the canvas grid,
-the frame grid, and declared operational bounds.
+Size uses common aspect ratios and named size settings as the primary path.
+The resolved pixel dimensions are always visible. Exact width and height stay
+behind `Exact size`. Length uses every duration the node accepts, with no
+arbitrary product preset or fixed clip-length control.
 
 ## What the graphs support
 
@@ -62,6 +62,44 @@ The product mapping is therefore direct:
 | Starting image added | `minimax-h3-i2v.json` | I2VA |
 
 An image is an input option, not a prerequisite.
+
+The embedded model mark is the verified MiniMax organisation avatar recorded in [`LOGO-PROVENANCE.md`](../reference/h3/LOGO-PROVENANCE.md).
+
+## Length contract
+
+The MiniMax prompt guides define prompt syntax and timestamp rules. They do
+not define the generation node's duration input.
+
+The pinned graph supplies `length` to node 104 and creates the result at 24
+fps in node 91. The official
+[ComfyUI H3 tutorial](https://docs.comfy.org/tutorials/video/minimax/minimax-h3)
+documents the 17-frame-per-block `17k+5` grid at 24 fps. The pinned runtime
+contract recorded in [`H3-MEASUREMENTS.md`](../H3-MEASUREMENTS.md) identifies
+7 blocks as the node's documented trained minimum and 21 blocks as its
+documented trained maximum. The console's recipe contract therefore derives
+encoded length as:
+
+```text
+frames = 17 * blocks + 5
+blocks = 7, 8, 9, ..., 21
+```
+
+The real accepted duration control is therefore quantized. It has 15 stops:
+
+```text
+124, 141, 158, 175, 192, 209, 226, 243,
+260, 277, 294, 311, 328, 345, 362 frames
+```
+
+At 24 fps these run from 5.1667 to 15.0833 seconds. Basic shows them as 5.2
+through 15.1 seconds, rounded to one decimal for selection. The estimate and
+serializer retain the exact encoded length. A slider moves one block per
+detent. The adjacent numeric field snaps a typed value to the nearest valid
+stop, so an invalid duration cannot reach generation.
+
+Duration labels use explicit decimal-point formatting equivalent to
+`toFixed(1)`. They never use locale-dependent number formatting. Prompt
+timestamps continue to use exact frame-derived `MM:SS.mmm` values.
 
 ## Prompt formats
 
@@ -107,34 +145,51 @@ is present.
 
 Basic is the landing state. It contains:
 
-- one `Describe your video` field;
 - one optional `Starting image` control;
-- numeric width and height fields;
-- one numeric length field in seconds;
+- one `Describe your video` field;
+- aspect ratio and size controls with resolved pixel dimensions;
+- a detented length slider and numeric seconds field;
 - the live time estimate;
 - the prompt check and Generate action.
 
 There are no starter templates, step numbers, camera terms, sound forms, or
 dialogue fields in Basic.
 
-The width and height fields start at 1344 and 768. They accept any valid values
-rather than choosing from a curated list. The UI marks the default combination
-as Recommended and validates the recipe's canvas multiple and bounds.
+### Size pattern
 
-The length field starts at 5.17 seconds. The user types a length rather than
-selecting a fixed duration. Internally, the composer converts seconds to the
-nearest valid frame count on the recipe's frame grid and shows the actual
-seconds and frames before generation. It never hides a rounded or adjusted
-request. The field and derived labels use an ASCII decimal point with explicit
-fixed-point formatting, never locale-dependent number formatting.
+The selected pattern combines the two controls mature generation and export
+interfaces use most often: aspect-ratio buttons first, then a named size
+setting with resolved pixel dimensions. Exact width and height are a secondary
+`Exact size` disclosure. This fits the console because the primary choices are
+recognizable, every click has a visible time cost, and nobody has to calculate
+a canvas.
+
+The default is `16:9` plus `Recommended`, resolving to 1536 x 864. Both are
+preselected and the combination carries the Recommended marker. Basic exposes
+16:9, 9:16, 1:1, 4:3, and 3:4 without typing.
+
+| Aspect ratio | Compact | Recommended | Large |
+| --- | --- | --- | --- |
+| 16:9 | 1024 x 576 | 1536 x 864 | QHD, 2560 x 1440 |
+| 9:16 | 576 x 1024 | 864 x 1536 | 1440 x 2560 |
+| 1:1 | 576 x 576 | 864 x 864 | 1440 x 1440 |
+| 4:3 | 768 x 576 | 1152 x 864 | 1920 x 1440 |
+| 3:4 | 576 x 768 | 864 x 1152 | 1440 x 1920 |
+
+Every offered dimension is divisible by 32. `Exact size` accepts any positive
+width and height on the same 32-pixel grid and keeps the estimate live.
+
+Length starts at the first valid stop, displayed as 5.2 seconds. Basic never
+shows the encoded frame count.
 
 ## Advanced mode
 
-Advanced keeps the same optional image, size, length, estimate, assembled
-prompt, prompt check, and Generate action. It replaces the single description
-field with compact controls for:
+Advanced keeps the same image, size, length, estimate, assembled prompt,
+prompt check, and Generate action. Starting image remains the first choice. It
+replaces the single description field with compact controls for:
 
-- shots and cuts;
+- addable and removable shots;
+- duration for every shot;
 - action in each shot;
 - camera movement, amplitude, and speed;
 - spoken language and exact dialogue;
@@ -142,11 +197,34 @@ field with compact controls for:
 - background music;
 - an optional seed.
 
-Shot 1 has no timestamp. Every later shot has a strictly increasing cut time
-inside the requested frame count. Cut positions are stored as frame indexes,
-then displayed as `MM:SS.mmm` from the recipe's frames-per-second value. A
-length change recalculates the display and makes an invalid cut a blocking
-check failure.
+Advanced allows 1 through 8 shots. Eight is a product usability bound, not a
+MiniMax limit. It comes from the guide's instruction that a cut should
+introduce new information, combined with the 15.1-second maximum: eight shots
+already allows roughly one new shot every two seconds at the longest length.
+
+Every shot has a duration in seconds. Durations are stored as frame counts so
+their sum equals the encoded total exactly. The interface shows each shot's
+start time and duration, the video total, and `Timeline matches N.N s`.
+One-decimal shot labels use largest-remainder allocation, so the displayed
+shot durations also add to the displayed total instead of exposing a rounding
+mismatch.
+
+The timeline self-corrects:
+
+- adding a shot splits the longest shot;
+- removing a shot gives its time to the preceding shot;
+- changing a shot takes time from the following shots, then earlier shots if
+  needed;
+- changing total length scales the shot durations proportionally and assigns
+  rounding remainders deterministically.
+
+No edit can leave a silent mismatch. Shot 1 has no prompt timestamp. Every
+later shot starts at the exact cumulative duration of the preceding shots and
+uses the frame-derived `MM:SS.mmm` timestamp required by the guide. Interface
+timing is expressed in seconds. Raw frame counts do not appear.
+
+The camera selector reserves enough width for the longest vocabulary item and
+does not clip or ellipsize selected text.
 
 The camera selector is closed to MiniMax's documented vocabulary:
 
@@ -266,7 +344,7 @@ This decision deletes:
 - the three starting structures;
 - the six-step interaction;
 - the prompt-insurance layer and terminology;
-- fixed size presets and fixed duration choices;
+- preset-only size entry and arbitrary duration entry;
 - the long worked prompt;
 - manual prompt mode and its duplicate state management;
 - local draft behavior specific to that manual mode;
@@ -278,7 +356,7 @@ in Advanced.
 
 ## Consequences
 
-- First use is one text field, optional image, size, length, and Generate.
+- First use is optional image, one text field, size, length, and Generate.
 - Text-to-video uses the graph and prompt format already measured.
 - Image-to-video remains available without controlling the default path.
 - Users see the time consequence of larger or longer requests before starting.
@@ -296,5 +374,6 @@ in Advanced.
 - Estimate tests reproduce the formula at all four measured points and verify
   coarse display rounding.
 - Browser checks cover Basic first use, Advanced, optional image selection,
-  free size and length input, invalid values, responsive layout, keyboard
-  order, and screen-reader labels.
+  every aspect and size combination, exact size, every duration detent,
+  add/remove shot behavior, timeline reconciliation, responsive layout,
+  keyboard order, and screen-reader labels.
