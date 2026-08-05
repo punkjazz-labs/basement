@@ -297,6 +297,9 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if len(drift.Command) > 0 {
 			receipt["recreated_for_command_change"] = commandMismatchReceipt(drift.Command)
 		}
+		if len(drift.Environment) > 0 {
+			receipt["recreated_for_environment_change"] = environmentMismatchReceipt(drift.Environment)
+		}
 		if len(drift.Launch) > 0 {
 			receipt["recreated_after_address_change"] = launchMismatchReceipt(drift.Launch)
 		}
@@ -368,6 +371,14 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		// is visible rather than reading as an unexplained rebuild.
 		if len(drift.Command) > 0 {
 			receipt["recreated_for_command_change"] = commandMismatchReceipt(drift.Command)
+		}
+		// The environment is fixed at creation too, and a manager that learns
+		// to set a variable changes nothing about a container that already
+		// exists. The comfyui cache redirects are exactly that, so without
+		// this a failed install would be retried against the same broken
+		// container forever.
+		if len(drift.Environment) > 0 {
+			receipt["recreated_for_environment_change"] = environmentMismatchReceipt(drift.Environment)
 		}
 		// A two-Spark model meets at an address the kernel assigns to the
 		// cabled port, and that address can differ after a reboot. The
@@ -627,15 +638,19 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 		// they say nothing about where it reads the model from, what it is
 		// allowed to write, which image it runs, or which serve arguments it
 		// carries. A recipe version is not a container's contents: the digest,
-		// writable paths and serve command can all change under a version that
-		// stays put. One that disagrees on any of them is
+		// writable paths, serve command and environment can all change under a
+		// version that stays put. One that disagrees on any of them is
 		// not "already created" — it has to be built again (see staleMounts,
-		// staleTmpfs, staleImage, staleCommand and staleLaunch).
+		// staleTmpfs, staleImage, staleCommand, staleEnvironment and
+		// staleLaunch). This list has to stay in step with the one
+		// replaceStaleContainer builds, because a container this call accepts
+		// is never offered to that one.
 		return err == nil && containerLabelsMatch(state.Labels, r) &&
 			len(staleMounts(state, h.expectedMounts(r))) == 0 &&
 			len(staleTmpfs(state, containerTmpfs(r))) == 0 &&
 			staleImage(state, r) == nil &&
 			len(staleCommand(state, r, execution.Placement)) == 0 &&
+			len(staleEnvironment(state, containerEnvironment(r, execution.Placement))) == 0 &&
 			len(staleLaunch(state, r, execution.Placement)) == 0
 	case "start_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
@@ -1214,15 +1229,16 @@ func (h *HostExecutor) writeComfyUIRuntimeState(r recipe.Recipe, cachePath strin
 // longer matches what creating it today would produce. Each kind is a
 // different story and the receipt tells them apart.
 type containerDrift struct {
-	Mounts   []mountMismatch
-	Writable []mountMismatch
-	Command  []commandMismatch
-	Launch   []launchMismatch
-	Image    *imageMismatch
+	Mounts      []mountMismatch
+	Writable    []mountMismatch
+	Command     []commandMismatch
+	Launch      []launchMismatch
+	Environment []environmentMismatch
+	Image       *imageMismatch
 }
 
 func (d containerDrift) found() bool {
-	return len(d.Mounts) > 0 || len(d.Writable) > 0 || len(d.Command) > 0 || len(d.Launch) > 0 || d.Image != nil
+	return len(d.Mounts) > 0 || len(d.Writable) > 0 || len(d.Command) > 0 || len(d.Launch) > 0 || len(d.Environment) > 0 || d.Image != nil
 }
 
 // replaceStaleContainer removes a container of ours that no longer matches
@@ -1243,11 +1259,12 @@ func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recip
 		return containerDrift{}, nil
 	}
 	drift := containerDrift{
-		Mounts:   staleMounts(state, h.expectedMounts(r)),
-		Writable: staleTmpfs(state, containerTmpfs(r)),
-		Command:  staleCommand(state, r, placement),
-		Launch:   staleLaunch(state, r, placement),
-		Image:    staleImage(state, r),
+		Mounts:      staleMounts(state, h.expectedMounts(r)),
+		Writable:    staleTmpfs(state, containerTmpfs(r)),
+		Command:     staleCommand(state, r, placement),
+		Launch:      staleLaunch(state, r, placement),
+		Environment: staleEnvironment(state, containerEnvironment(r, placement)),
+		Image:       staleImage(state, r),
 	}
 	if !drift.found() {
 		return containerDrift{}, nil
@@ -1262,6 +1279,8 @@ func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recip
 		reason = "the writable paths this recipe declares"
 	case len(drift.Command) > 0:
 		reason = "the serve arguments this recipe declares"
+	case len(drift.Environment) > 0:
+		reason = "the environment this runtime needs"
 	}
 	if err := h.docker.Stop(ctx, name); err != nil {
 		return containerDrift{}, fmt.Errorf("stop the model container so it can be rebuilt against %s: %w", reason, err)
