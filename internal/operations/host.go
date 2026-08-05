@@ -285,6 +285,9 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		if len(drift.Writable) > 0 {
 			receipt["recreated_for_writable_paths"] = mountMismatchReceipt(drift.Writable)
 		}
+		if len(drift.Command) > 0 {
+			receipt["recreated_for_command_change"] = commandMismatchReceipt(drift.Command)
+		}
 		if len(drift.Launch) > 0 {
 			receipt["recreated_after_address_change"] = launchMismatchReceipt(drift.Launch)
 		}
@@ -350,6 +353,12 @@ func (h *HostExecutor) Execute(ctx context.Context, execution Execution, operati
 		// discovers only after loading the weights.
 		if len(drift.Writable) > 0 {
 			receipt["recreated_for_writable_paths"] = mountMismatchReceipt(drift.Writable)
+		}
+		// Serve arguments are fixed at container creation just like the image
+		// and mounts. The receipt names the first changed flag so a recipe edit
+		// is visible rather than reading as an unexplained rebuild.
+		if len(drift.Command) > 0 {
+			receipt["recreated_for_command_change"] = commandMismatchReceipt(drift.Command)
 		}
 		// A two-Spark model meets at an address the kernel assigns to the
 		// cabled port, and that address can differ after a reboot. The
@@ -607,15 +616,18 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		// Labels alone say the container is ours and for this recipe version;
 		// they say nothing about where it reads the model from, what it is
-		// allowed to write, or which image it runs. A recipe version is not a
-		// container's contents: the digest and the writable paths both change
-		// under a version that stays put. One that disagrees on any of them is
+		// allowed to write, which image it runs, or which serve arguments it
+		// carries. A recipe version is not a container's contents: the digest,
+		// writable paths and serve command can all change under a version that
+		// stays put. One that disagrees on any of them is
 		// not "already created" — it has to be built again (see staleMounts,
-		// staleTmpfs and staleImage).
+		// staleTmpfs, staleImage, staleCommand and staleLaunch).
 		return err == nil && containerLabelsMatch(state.Labels, r) &&
 			len(staleMounts(state, h.expectedMounts(r))) == 0 &&
 			len(staleTmpfs(state, containerTmpfs(r))) == 0 &&
-			staleImage(state, r) == nil
+			staleImage(state, r) == nil &&
+			len(staleCommand(state, r, execution.Placement)) == 0 &&
+			len(staleLaunch(state, r, execution.Placement)) == 0
 	case "start_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
 		return err == nil && state.Running
@@ -1195,12 +1207,13 @@ func (h *HostExecutor) writeComfyUIRuntimeState(r recipe.Recipe, cachePath strin
 type containerDrift struct {
 	Mounts   []mountMismatch
 	Writable []mountMismatch
+	Command  []commandMismatch
 	Launch   []launchMismatch
 	Image    *imageMismatch
 }
 
 func (d containerDrift) found() bool {
-	return len(d.Mounts) > 0 || len(d.Writable) > 0 || len(d.Launch) > 0 || d.Image != nil
+	return len(d.Mounts) > 0 || len(d.Writable) > 0 || len(d.Command) > 0 || len(d.Launch) > 0 || d.Image != nil
 }
 
 // replaceStaleContainer removes a container of ours that no longer matches
@@ -1209,10 +1222,11 @@ func (d containerDrift) found() bool {
 // case that produced this, its container holding binds under the pre-rename
 // data directory long after the files moved), one built before its recipe
 // declared a writable path, one still running the image digest the recipe
-// pinned before this one, or, on a two-Spark model, one still holding the
-// fabric address the other rank had during an earlier deployment. It returns
-// what disagreed, so the caller can create the container again and the receipt
-// can say why. Nothing is touched unless something positively disagrees.
+// pinned before this one, one carrying serve arguments the recipe no longer
+// declares, or, on a two-Spark model, one still holding the fabric address the
+// other rank had during an earlier deployment. It returns what disagreed, so
+// the caller can create the container again and the receipt can say why.
+// Nothing is touched unless something positively disagrees.
 func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recipe, placement Placement) (containerDrift, error) {
 	name := h.resolveContainerName(ctx, r)
 	state, err := h.docker.Container(ctx, name)
@@ -1222,6 +1236,7 @@ func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recip
 	drift := containerDrift{
 		Mounts:   staleMounts(state, h.expectedMounts(r)),
 		Writable: staleTmpfs(state, containerTmpfs(r)),
+		Command:  staleCommand(state, r, placement),
 		Launch:   staleLaunch(state, r, placement),
 		Image:    staleImage(state, r),
 	}
@@ -1236,6 +1251,8 @@ func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recip
 		reason = drift.Image.Expected
 	case len(drift.Writable) > 0:
 		reason = "the writable paths this recipe declares"
+	case len(drift.Command) > 0:
+		reason = "the serve arguments this recipe declares"
 	}
 	if err := h.docker.Stop(ctx, name); err != nil {
 		return containerDrift{}, fmt.Errorf("stop the model container so it can be rebuilt against %s: %w", reason, err)

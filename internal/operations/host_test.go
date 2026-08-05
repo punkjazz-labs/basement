@@ -1247,6 +1247,70 @@ func TestCreateContainerReplacesAContainerOnTheSupersededImage(t *testing.T) {
 	}
 }
 
+// A same-version recipe update must replace a container whose serve command
+// still holds the old value. Labels alone cannot make that container current,
+// and the receipt must identify the flag that caused the rebuild.
+func TestStartContainerRebuildsWhenAServeArgumentChanged(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+	previous := r
+	previousVLLM := *r.Service.VLLM
+	previousVLLM.GPUMemoryUtil = "0.81"
+	previous.Service.VLLM = &previousVLLM
+	old := containerFixture{
+		ID: "old-id", Labels: labels, Mounts: executor.expectedMounts(r), Tmpfs: containerTmpfs(r),
+		Image: r.Runtime.Reference(), Command: vllmArgs(previous, Placement{}),
+	}
+	created, started, stopped, removed := false, false, false, false
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		path := request.URL.Path
+		switch {
+		case request.Method == http.MethodPost && strings.HasPrefix(path, "/containers/create"):
+			created = true
+			return dockerFixtureResponse(http.StatusCreated, `{"ID":"rebuilt-id"}`), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			stopped = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodDelete:
+			removed = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+			started = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case containerFromPath(path) == legacyContainerName(r):
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		case created:
+			current := containerFixture{
+				ID: "rebuilt-id", Running: started, Labels: labels, Mounts: executor.expectedMounts(r),
+				Tmpfs: containerTmpfs(r), Image: r.Runtime.Reference(), Command: vllmArgs(r, Placement{}),
+			}
+			return dockerFixtureResponse(http.StatusOK, current.JSON()), nil
+		default:
+			return dockerFixtureResponse(http.StatusOK, old.JSON()), nil
+		}
+	})}}
+
+	if executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Fatal("a container carrying the previous serve arguments was accepted as current")
+	}
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if !stopped || !removed || !created || !started {
+		t.Fatalf("stopped=%v removed=%v created=%v started=%v, want the stale command rebuilt", stopped, removed, created, started)
+	}
+	drift, ok := receipt["recreated_for_command_change"].([]map[string]any)
+	if !ok || len(drift) != 1 {
+		t.Fatalf("receipt does not report the serve argument change: %#v", receipt["recreated_for_command_change"])
+	}
+	if drift[0]["flag"] != "--gpu-memory-utilization" || drift[0]["was"] != "0.81" || drift[0]["now"] != r.Service.VLLM.GPUMemoryUtil {
+		t.Fatalf("receipt command detail = %#v", drift[0])
+	}
+}
+
 // A container already on the pinned digest is left exactly as it is: every
 // start would otherwise throw away a loaded model to build the same container
 // again.
@@ -1312,6 +1376,8 @@ func TestStartContainerLeavesAContainerWithNoReportedImageAlone(t *testing.T) {
 // come back up telling its rank to meet at an address that no longer exists,
 // and the model would hang with nothing to show for it. The address is
 // re-resolved for every job; this is the container being rebuilt against it.
+// The generic command comparison leaves the rendezvous flags to staleLaunch,
+// whose established behavior is to rebuild on this positive disagreement.
 func TestStartContainerRebuildsWhenTheFabricAddressChanged(t *testing.T) {
 	r := twoSparkRecipe(t)
 	executor := &HostExecutor{dataDir: t.TempDir()}
@@ -1322,7 +1388,10 @@ func TestStartContainerRebuildsWhenTheFabricAddressChanged(t *testing.T) {
 	}
 	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version), labelNodeRole: RoleWorker}
 	// What the last deployment baked in: the head's address as it was then.
-	yesterday := []string{"serve", "/model", "--node-rank", "1", "--master-addr", "169.254.205.1", "--master-port", "29501"}
+	yesterdayPlacement := Placement{Role: RoleWorker, NodeName: "spark-worker", NodeCount: 2, MasterAddress: "169.254.205.1", MasterPort: 29501}
+	yesterday := vllmArgs(r, yesterdayPlacement)
+	// Today's address, resolved live by this job.
+	worker := Placement{Role: RoleWorker, NodeName: "spark-worker", NodeCount: 2, MasterAddress: "169.254.37.9", MasterPort: 29501}
 	created, started, stopped, removed := false, false, false, false
 	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
 		path := request.URL.Path
@@ -1342,14 +1411,12 @@ func TestStartContainerRebuildsWhenTheFabricAddressChanged(t *testing.T) {
 		case containerFromPath(path) == legacyContainerName(r):
 			return dockerFixtureResponse(http.StatusNotFound, ""), nil
 		case created:
-			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("rebuilt-id", started, labels, executor.expectedMounts(r), "serve", "/model", "--node-rank", "1", "--master-addr", "169.254.37.9", "--master-port", "29501")), nil
+			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("rebuilt-id", started, labels, executor.expectedMounts(r), vllmArgs(r, worker)...)), nil
 		default:
 			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("stale-id", false, labels, executor.expectedMounts(r), yesterday...)), nil
 		}
 	})}}
 
-	// Today's address, resolved live by this job.
-	worker := Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.37.9", MasterPort: 29501}
 	receipt, err := executor.Execute(context.Background(), Execution{Placement: worker}, recipe.Operation{Type: "start_container"}, r, nil)
 	if err != nil {
 		t.Fatalf("start_container: %v", err)
@@ -1369,8 +1436,9 @@ func TestStartContainerRebuildsWhenTheFabricAddressChanged(t *testing.T) {
 	}
 }
 
-// A container already holding this job's address is left exactly as it is:
-// re-resolving live must not mean rebuilding every start.
+// A container already holding this job's full command and resolved address is
+// left exactly as it is. Re-resolving live must not mean rebuilding every
+// start, including when reconciliation repeats for the same placement.
 func TestStartContainerLeavesAnUnchangedFabricAddressAlone(t *testing.T) {
 	r := twoSparkRecipe(t)
 	executor := &HostExecutor{dataDir: t.TempDir()}
@@ -1380,10 +1448,13 @@ func TestStartContainerLeavesAnUnchangedFabricAddressAlone(t *testing.T) {
 		}
 	}
 	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version), labelNodeRole: RoleWorker}
-	command := []string{"serve", "/model", "--node-rank", "1", "--master-addr", "169.254.205.1", "--master-port", "29501"}
+	worker := Placement{Role: RoleWorker, NodeName: "spark-worker", NodeCount: 2, MasterAddress: "169.254.205.1", MasterPort: 29501}
+	command := vllmArgs(r, worker)
+	starts := 0
 	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
 		switch {
 		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/start"):
+			starts++
 			return dockerFixtureResponse(http.StatusNoContent, ""), nil
 		case request.Method == http.MethodGet && containerFromPath(request.URL.Path) == containerName(r):
 			return dockerFixtureResponse(http.StatusOK, containerFixtureJSON("live-id", true, labels, executor.expectedMounts(r), command...)), nil
@@ -1393,13 +1464,20 @@ func TestStartContainerLeavesAnUnchangedFabricAddressAlone(t *testing.T) {
 		}
 	})}}
 
-	worker := Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.205.1", MasterPort: 29501}
-	receipt, err := executor.Execute(context.Background(), Execution{Placement: worker}, recipe.Operation{Type: "start_container"}, r, nil)
-	if err != nil {
-		t.Fatalf("start_container: %v", err)
+	for reconciliation := 0; reconciliation < 2; reconciliation++ {
+		receipt, err := executor.Execute(context.Background(), Execution{Placement: worker}, recipe.Operation{Type: "start_container"}, r, nil)
+		if err != nil {
+			t.Fatalf("start_container reconciliation %d: %v", reconciliation, err)
+		}
+		if _, rebuilt := receipt["recreated_after_address_change"]; rebuilt {
+			t.Errorf("an unchanged address was reported as drift: %#v", receipt)
+		}
+		if _, rebuilt := receipt["recreated_for_command_change"]; rebuilt {
+			t.Errorf("an unchanged command was reported as drift: %#v", receipt)
+		}
 	}
-	if _, rebuilt := receipt["recreated_after_address_change"]; rebuilt {
-		t.Errorf("an unchanged address was reported as drift: %#v", receipt)
+	if starts != 2 {
+		t.Fatalf("start calls=%d, want one undisturbed start per reconciliation", starts)
 	}
 }
 
@@ -1421,7 +1499,7 @@ func TestStartContainerRebuildsAnSGLangRankWhenTheFabricAddressChanged(t *testin
 	// What the last deployment baked in: the head's address as it was then.
 	yesterday := sglangArgs(r, Placement{Role: RoleWorker, NodeCount: 2, MasterAddress: "169.254.205.1", MasterPort: 29501})
 	// Today's address, resolved live by this job.
-	worker := Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2, MasterAddress: "169.254.37.9", MasterPort: 29501}
+	worker := Placement{Role: RoleWorker, NodeName: "spark-worker", NodeCount: 2, MasterAddress: "169.254.37.9", MasterPort: 29501}
 	created, started, stopped, removed := false, false, false, false
 	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
 		path := request.URL.Path
