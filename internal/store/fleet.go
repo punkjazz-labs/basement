@@ -13,8 +13,10 @@ import (
 const MaxFleetNodes = 4
 
 var (
-	ErrFleetFull       = errors.New("this fleet already has four nodes")
-	ErrHeartbeatReplay = errors.New("heartbeat sequence was already received")
+	ErrFleetFull                = errors.New("this fleet already has four nodes")
+	ErrHeartbeatReplay          = errors.New("heartbeat sequence was already received")
+	ErrReservationConflict      = errors.New("this node's requested resources are already reserved")
+	ErrReservationRetryConflict = errors.New("the reservation id was retried with different details")
 )
 
 type NodeIdentity struct {
@@ -64,6 +66,30 @@ type LegacyDeploymentCandidate struct {
 	TopologyCount     int
 }
 
+type FleetDeployment struct {
+	DeploymentID      string                `json:"deployment_id"`
+	RecipeID          string                `json:"recipe_id"`
+	RecipeVersion     int                   `json:"recipe_version"`
+	RecipeFingerprint string                `json:"recipe_fingerprint"`
+	TopologyCount     int                   `json:"topology_count"`
+	OwnerNodeID       string                `json:"owner_node_id"`
+	OwnerJobID        string                `json:"owner_job_id"`
+	State             string                `json:"state"`
+	LastObservedAt    string                `json:"last_observed_at"`
+	CreatedAt         string                `json:"created_at"`
+	UpdatedAt         string                `json:"updated_at"`
+	Nodes             []FleetDeploymentNode `json:"nodes"`
+}
+
+type FleetDeploymentNode struct {
+	DeploymentID    string `json:"deployment_id"`
+	NodeID          string `json:"node_id"`
+	NodeRole        string `json:"node_role"`
+	Rank            int    `json:"rank"`
+	ReservationID   string `json:"reservation_id"`
+	FabricInterface string `json:"fabric_interface,omitempty"`
+}
+
 type PendingFleetJoin struct {
 	PrepareTokenHash                 string
 	FleetID                          string
@@ -74,6 +100,29 @@ type PendingFleetJoin struct {
 	ControllerCertificateFingerprint string
 	MembershipEpoch                  int64
 	ExpiresAt                        string
+}
+
+// NodeReservation is one node's durable admission record. ClaimsJSON and
+// GrantJSON stay opaque in the store because their versioned wire structs
+// belong to internal/fleet. The store owns transition atomicity and exact
+// retry comparison without interpreting a controller-signed document.
+type NodeReservation struct {
+	ReservationID     string
+	DeploymentID      string
+	FleetID           string
+	ControllerNodeID  string
+	DriverNodeID      string
+	RecipeID          string
+	RecipeVersion     int
+	RecipeFingerprint string
+	State             string
+	JobID             string
+	ClaimsJSON        []byte
+	PrepareTokenHash  string
+	GrantJSON         []byte
+	ExpiresAt         string
+	CreatedAt         string
+	UpdatedAt         string
 }
 
 // EnsureNodeIdentity couples the protected key file to its public database
@@ -594,4 +643,483 @@ func (s *Store) UpdateLocalFleetNode(ctx context.Context, node FleetNode, payloa
 		return os.ErrNotExist
 	}
 	return nil
+}
+
+const fleetDeploymentSelect = `SELECT deployment_id,recipe_id,recipe_version,recipe_fingerprint,topology_count,owner_node_id,owner_job_id,state,last_observed_at,created_at,updated_at FROM fleet_deployments`
+
+func scanFleetDeployment(row rowScanner, deployment *FleetDeployment) error {
+	return row.Scan(&deployment.DeploymentID, &deployment.RecipeID, &deployment.RecipeVersion,
+		&deployment.RecipeFingerprint, &deployment.TopologyCount, &deployment.OwnerNodeID,
+		&deployment.OwnerJobID, &deployment.State, &deployment.LastObservedAt,
+		&deployment.CreatedAt, &deployment.UpdatedAt)
+}
+
+func (s *Store) CreateFleetDeployment(ctx context.Context, deployment FleetDeployment, node FleetDeploymentNode) (FleetDeployment, bool, error) {
+	if deployment.DeploymentID == "" || deployment.RecipeID == "" || deployment.RecipeVersion <= 0 || deployment.TopologyCount != 1 || deployment.OwnerNodeID == "" {
+		return FleetDeployment{}, false, errors.New("an independent deployment requires an id, exact recipe, and owner node")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FleetDeployment{}, false, err
+	}
+	defer tx.Rollback()
+	timestamp := now()
+	state := deployment.State
+	if state == "" {
+		state = "preparing"
+	}
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO fleet_deployments(deployment_id,recipe_id,recipe_version,recipe_fingerprint,topology_count,owner_node_id,owner_job_id,state,last_observed_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		deployment.DeploymentID, deployment.RecipeID, deployment.RecipeVersion, deployment.RecipeFingerprint,
+		deployment.TopologyCount, deployment.OwnerNodeID, deployment.OwnerJobID, state, deployment.LastObservedAt, timestamp, timestamp)
+	if err != nil {
+		return FleetDeployment{}, false, err
+	}
+	count, _ := result.RowsAffected()
+	var stored FleetDeployment
+	if err := scanFleetDeployment(tx.QueryRowContext(ctx, fleetDeploymentSelect+` WHERE deployment_id=?`, deployment.DeploymentID), &stored); err != nil {
+		return FleetDeployment{}, false, err
+	}
+	if count == 0 && (stored.RecipeID != deployment.RecipeID || stored.RecipeVersion != deployment.RecipeVersion ||
+		stored.RecipeFingerprint != deployment.RecipeFingerprint || stored.TopologyCount != deployment.TopologyCount ||
+		stored.OwnerNodeID != deployment.OwnerNodeID) {
+		return FleetDeployment{}, false, errors.New("the deployment id was retried with different placement details")
+	}
+	if count == 1 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO fleet_deployment_nodes(deployment_id,node_id,node_role,rank,reservation_id,fabric_interface) VALUES(?,?, 'independent',0,?, '')`, deployment.DeploymentID, node.NodeID, node.ReservationID); err != nil {
+			return FleetDeployment{}, false, err
+		}
+	} else {
+		var storedNodeID, storedReservationID string
+		if err := tx.QueryRowContext(ctx, `SELECT node_id,reservation_id FROM fleet_deployment_nodes WHERE deployment_id=? AND node_role='independent' AND rank=0`, deployment.DeploymentID).
+			Scan(&storedNodeID, &storedReservationID); err != nil {
+			return FleetDeployment{}, false, err
+		}
+		if storedNodeID != node.NodeID || storedReservationID != node.ReservationID {
+			return FleetDeployment{}, false, errors.New("the deployment id was retried with a different reservation")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return FleetDeployment{}, false, err
+	}
+	stored.Nodes = []FleetDeploymentNode{{DeploymentID: stored.DeploymentID, NodeID: node.NodeID, NodeRole: "independent", Rank: 0, ReservationID: node.ReservationID}}
+	return stored, count == 1, nil
+}
+
+func (s *Store) SetFleetDeploymentJob(ctx context.Context, deploymentID, ownerJobID, state, observedAt string) error {
+	if ownerJobID == "" {
+		return errors.New("the deployment owner job id is required")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET owner_job_id=CASE WHEN owner_job_id='' THEN ? ELSE owner_job_id END,state=?,last_observed_at=?,updated_at=? WHERE deployment_id=? AND (owner_job_id='' OR owner_job_id=?)`,
+		ownerJobID, state, observedAt, now(), deploymentID, ownerJobID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return errors.New("the deployment already points to a different owner job")
+	}
+	return nil
+}
+
+// AdvanceFleetDeploymentJob moves the controller projection from one
+// target-owned lifecycle job to its next one. The expected id keeps two
+// browser actions from silently overwriting each other's remote progress.
+func (s *Store) AdvanceFleetDeploymentJob(ctx context.Context, deploymentID, expectedJobID, ownerJobID, state, observedAt string) error {
+	if deploymentID == "" || expectedJobID == "" || ownerJobID == "" {
+		return errors.New("deployment and expected target job ids are required")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET owner_job_id=?,state=?,last_observed_at=?,updated_at=? WHERE deployment_id=? AND owner_job_id=?`,
+		ownerJobID, state, observedAt, now(), deploymentID, expectedJobID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return errors.New("the deployment target job changed before this action was recorded")
+	}
+	return nil
+}
+
+func (s *Store) ObserveFleetDeployment(ctx context.Context, deploymentID, state, observedAt string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET state=?,last_observed_at=?,updated_at=? WHERE deployment_id=?`, state, observedAt, now(), deploymentID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+func (s *Store) FleetDeployment(ctx context.Context, deploymentID string) (FleetDeployment, error) {
+	var deployment FleetDeployment
+	if err := scanFleetDeployment(s.db.QueryRowContext(ctx, fleetDeploymentSelect+` WHERE deployment_id=?`, deploymentID), &deployment); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return FleetDeployment{}, os.ErrNotExist
+		}
+		return FleetDeployment{}, err
+	}
+	nodes, err := s.fleetDeploymentNodes(ctx, deploymentID)
+	if err != nil {
+		return FleetDeployment{}, err
+	}
+	deployment.Nodes = nodes
+	return deployment, nil
+}
+
+func (s *Store) FleetDeployments(ctx context.Context) ([]FleetDeployment, error) {
+	rows, err := s.db.QueryContext(ctx, fleetDeploymentSelect+` ORDER BY created_at DESC,deployment_id`)
+	if err != nil {
+		return nil, err
+	}
+	result := []FleetDeployment{}
+	for rows.Next() {
+		var deployment FleetDeployment
+		if err := scanFleetDeployment(rows, &deployment); err != nil {
+			return nil, err
+		}
+		result = append(result, deployment)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range result {
+		result[index].Nodes, err = s.fleetDeploymentNodes(ctx, result[index].DeploymentID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) fleetDeploymentNodes(ctx context.Context, deploymentID string) ([]FleetDeploymentNode, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT deployment_id,node_id,node_role,rank,reservation_id,fabric_interface FROM fleet_deployment_nodes WHERE deployment_id=? ORDER BY rank,node_id`, deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []FleetDeploymentNode{}
+	for rows.Next() {
+		var node FleetDeploymentNode
+		if err := rows.Scan(&node.DeploymentID, &node.NodeID, &node.NodeRole, &node.Rank, &node.ReservationID, &node.FabricInterface); err != nil {
+			return nil, err
+		}
+		result = append(result, node)
+	}
+	return result, rows.Err()
+}
+
+const nodeReservationSelect = `SELECT reservation_id,deployment_id,fleet_id,controller_node_id,driver_node_id,recipe_id,recipe_version,recipe_fingerprint,state,job_id,claims_json,prepare_token_hash,grant_json,expires_at,created_at,updated_at FROM node_reservations`
+
+func scanNodeReservation(row rowScanner, reservation *NodeReservation) error {
+	return row.Scan(&reservation.ReservationID, &reservation.DeploymentID, &reservation.FleetID,
+		&reservation.ControllerNodeID, &reservation.DriverNodeID, &reservation.RecipeID,
+		&reservation.RecipeVersion, &reservation.RecipeFingerprint, &reservation.State,
+		&reservation.JobID, &reservation.ClaimsJSON, &reservation.PrepareTokenHash, &reservation.GrantJSON,
+		&reservation.ExpiresAt, &reservation.CreatedAt, &reservation.UpdatedAt)
+}
+
+// PrepareNodeReservation writes admission before a caller can acknowledge it.
+// A repeated byte-identical request returns the existing row in any state so
+// the protocol can answer a lost response without creating a second claim.
+// Reusing the id for different authority or resources is always a conflict.
+func (s *Store) PrepareNodeReservation(ctx context.Context, reservation NodeReservation) (NodeReservation, bool, error) {
+	if reservation.ReservationID == "" || reservation.DeploymentID == "" || reservation.RecipeID == "" || reservation.PrepareTokenHash == "" || len(reservation.ClaimsJSON) == 0 {
+		return NodeReservation{}, false, errors.New("reservation identity, recipe, claims, and preparation token are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return NodeReservation{}, false, err
+	}
+	defer tx.Rollback()
+	timestamp := now()
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO node_reservations(reservation_id,deployment_id,fleet_id,controller_node_id,driver_node_id,recipe_id,recipe_version,recipe_fingerprint,state,claims_json,prepare_token_hash,grant_json,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'prepared',?,?, '',?,?,?)`,
+		reservation.ReservationID, reservation.DeploymentID, reservation.FleetID, reservation.ControllerNodeID,
+		reservation.DriverNodeID, reservation.RecipeID, reservation.RecipeVersion, reservation.RecipeFingerprint,
+		reservation.ClaimsJSON, reservation.PrepareTokenHash, reservation.ExpiresAt, timestamp, timestamp)
+	if err != nil {
+		return NodeReservation{}, false, err
+	}
+	count, _ := result.RowsAffected()
+	var stored NodeReservation
+	if err := scanNodeReservation(tx.QueryRowContext(ctx, nodeReservationSelect+` WHERE reservation_id=?`, reservation.ReservationID), &stored); err != nil {
+		return NodeReservation{}, false, err
+	}
+	if count == 0 && (stored.DeploymentID != reservation.DeploymentID || stored.FleetID != reservation.FleetID ||
+		stored.ControllerNodeID != reservation.ControllerNodeID || stored.DriverNodeID != reservation.DriverNodeID ||
+		stored.RecipeID != reservation.RecipeID || stored.RecipeVersion != reservation.RecipeVersion ||
+		stored.RecipeFingerprint != reservation.RecipeFingerprint || !bytes.Equal(stored.ClaimsJSON, reservation.ClaimsJSON) ||
+		stored.PrepareTokenHash != reservation.PrepareTokenHash || stored.ExpiresAt != reservation.ExpiresAt) {
+		return NodeReservation{}, false, ErrReservationRetryConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return NodeReservation{}, false, err
+	}
+	return stored, count == 1, nil
+}
+
+func (s *Store) NodeReservation(ctx context.Context, reservationID string) (NodeReservation, error) {
+	var reservation NodeReservation
+	err := scanNodeReservation(s.db.QueryRowContext(ctx, nodeReservationSelect+` WHERE reservation_id=?`, reservationID), &reservation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NodeReservation{}, os.ErrNotExist
+	}
+	return reservation, err
+}
+
+func (s *Store) NodeReservations(ctx context.Context) ([]NodeReservation, error) {
+	rows, err := s.db.QueryContext(ctx, nodeReservationSelect+` ORDER BY created_at,reservation_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []NodeReservation{}
+	for rows.Next() {
+		var reservation NodeReservation
+		if err := scanNodeReservation(rows, &reservation); err != nil {
+			return nil, err
+		}
+		result = append(result, reservation)
+	}
+	return result, rows.Err()
+}
+
+// CommitNodeReservation records the exact grant without executing recipe
+// work. Losing the response is safe because the same grant is idempotent and
+// different bytes cannot replace authority that was already committed.
+func (s *Store) CommitNodeReservation(ctx context.Context, reservationID, prepareTokenHash string, grant []byte) (NodeReservation, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return NodeReservation{}, err
+	}
+	defer tx.Rollback()
+	var reservation NodeReservation
+	if err := scanNodeReservation(tx.QueryRowContext(ctx, nodeReservationSelect+` WHERE reservation_id=?`, reservationID), &reservation); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return NodeReservation{}, os.ErrNotExist
+		}
+		return NodeReservation{}, err
+	}
+	if reservation.PrepareTokenHash != prepareTokenHash {
+		return NodeReservation{}, errors.New("the reservation preparation token does not match")
+	}
+	switch reservation.State {
+	case "prepared":
+		if _, err := tx.ExecContext(ctx, `UPDATE node_reservations SET state='committed',grant_json=?,updated_at=? WHERE reservation_id=? AND state='prepared'`, grant, now(), reservationID); err != nil {
+			return NodeReservation{}, err
+		}
+		reservation.State, reservation.GrantJSON = "committed", append([]byte(nil), grant...)
+	case "committed", "active":
+		if !bytes.Equal(reservation.GrantJSON, grant) {
+			return NodeReservation{}, ErrReservationRetryConflict
+		}
+	case "released", "aborted", "expired":
+		return NodeReservation{}, fmt.Errorf("reservation is %s and cannot be committed", reservation.State)
+	default:
+		return NodeReservation{}, fmt.Errorf("reservation has unknown state %s", reservation.State)
+	}
+	if err := tx.Commit(); err != nil {
+		return NodeReservation{}, err
+	}
+	return reservation, nil
+}
+
+// AttachNodeReservationJob is the boundary between a short-lived committed
+// grant and work that must survive restart. The exact job is immutable after
+// the first successful write, which keeps a retry from adopting another
+// job's capacity claim.
+func (s *Store) AttachNodeReservationJob(ctx context.Context, reservationID, jobID string) error {
+	if reservationID == "" || jobID == "" {
+		return errors.New("reservation and job ids are required")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET job_id=CASE WHEN job_id='' THEN ? ELSE job_id END,updated_at=? WHERE reservation_id=? AND state IN ('committed','active') AND (job_id='' OR job_id=?)`, jobID, now(), reservationID, jobID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 1 {
+		return nil
+	}
+	reservation, err := s.NodeReservation(ctx, reservationID)
+	if err != nil {
+		return err
+	}
+	if reservation.JobID != "" && reservation.JobID != jobID {
+		return ErrReservationRetryConflict
+	}
+	if reservation.JobID == jobID && (reservation.State == "committed" || reservation.State == "active") {
+		return nil
+	}
+	return fmt.Errorf("reservation is %s and cannot be attached to a job", reservation.State)
+}
+
+// ActivateNodeReservation transfers this node's one runtime slot to the
+// committed claim. replaceRecipeID is the predecessor observed under the
+// engine's runtime lock. An empty predecessor grants no replacement authority,
+// even when the active claim names the same recipe, because two remote drivers
+// can legitimately request the same recipe and must not displace each other.
+func (s *Store) ActivateNodeReservation(ctx context.Context, reservationID, replaceRecipeID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var target NodeReservation
+	if err := scanNodeReservation(tx.QueryRowContext(ctx, nodeReservationSelect+` WHERE reservation_id=?`, reservationID), &target); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return os.ErrNotExist
+		}
+		return err
+	}
+	if target.State == "active" {
+		return tx.Commit()
+	}
+	if target.State != "committed" {
+		return fmt.Errorf("reservation is %s and cannot claim the runtime slot", target.State)
+	}
+	rows, err := tx.QueryContext(ctx, nodeReservationSelect+` WHERE state IN ('active','reclaiming') AND reservation_id<>?`, reservationID)
+	if err != nil {
+		return err
+	}
+	var active []NodeReservation
+	for rows.Next() {
+		var current NodeReservation
+		if err := scanNodeReservation(rows, &current); err != nil {
+			rows.Close()
+			return err
+		}
+		active = append(active, current)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, current := range active {
+		// A reclaiming reservation still owns the runtime until its container
+		// has stopped. Letting a replacement release it here would make the
+		// bookkeeping free before the process using the port and GPU is gone.
+		if current.State == "reclaiming" {
+			return ErrReservationConflict
+		}
+		if replaceRecipeID == "" || current.RecipeID != replaceRecipeID {
+			return ErrReservationConflict
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE node_reservations SET state='released',updated_at=? WHERE state='active' AND reservation_id<>?`, now(), reservationID); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE node_reservations SET state='active',updated_at=? WHERE reservation_id=? AND state='committed'`, now(), reservationID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return ErrReservationConflict
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RenewNodeReservation(ctx context.Context, reservationID string, expires time.Time) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET expires_at=?,updated_at=? WHERE reservation_id=? AND state IN ('prepared','committed','active')`, expires.UTC().Format(time.RFC3339Nano), now(), reservationID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return errors.New("only a prepared, committed, or active reservation can be renewed")
+	}
+	return nil
+}
+
+// BeginNodeReservationReclaim takes ownership of stopping one expired active
+// driver rank. The reclaiming state remains a runtime conflict, so another
+// claimant cannot enter between this transition and the container stop.
+func (s *Store) BeginNodeReservationReclaim(ctx context.Context, reservationID string, at time.Time) (NodeReservation, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET state='reclaiming',updated_at=? WHERE reservation_id=? AND state='active' AND expires_at<>'' AND expires_at<=?`, now(), reservationID, at.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return NodeReservation{}, err
+	}
+	reservation, err := s.NodeReservation(ctx, reservationID)
+	if err != nil {
+		return NodeReservation{}, err
+	}
+	if count, _ := result.RowsAffected(); count == 1 || reservation.State == "reclaiming" {
+		return reservation, nil
+	}
+	if reservation.State == "active" {
+		return NodeReservation{}, errors.New("the active reservation was renewed before reclaim began")
+	}
+	return NodeReservation{}, fmt.Errorf("reservation is %s and cannot begin reclaim", reservation.State)
+}
+
+// FinishNodeReservationReclaim frees authority only after the caller has
+// stopped the process that held it. A failed stop leaves the row reclaiming
+// and blocking, so a later sweep can retry without admitting overlapping work.
+func (s *Store) FinishNodeReservationReclaim(ctx context.Context, reservationID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET state='expired',updated_at=? WHERE reservation_id=? AND state='reclaiming'`, now(), reservationID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 1 {
+		return nil
+	}
+	reservation, err := s.NodeReservation(ctx, reservationID)
+	if err != nil {
+		return err
+	}
+	if reservation.State == "expired" {
+		return nil
+	}
+	return fmt.Errorf("reservation is %s and cannot finish reclaim", reservation.State)
+}
+
+func (s *Store) AbortNodeReservation(ctx context.Context, reservationID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET state='aborted',updated_at=? WHERE reservation_id=? AND state IN ('prepared','committed')`, now(), reservationID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 1 {
+		return nil
+	}
+	reservation, err := s.NodeReservation(ctx, reservationID)
+	if err != nil {
+		return err
+	}
+	if reservation.State == "aborted" {
+		return nil
+	}
+	return fmt.Errorf("reservation is %s and cannot be aborted", reservation.State)
+}
+
+func (s *Store) ReleaseNodeReservation(ctx context.Context, reservationID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET state='released',updated_at=? WHERE reservation_id=? AND state IN ('prepared','committed','active','reclaiming')`, now(), reservationID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 1 {
+		return nil
+	}
+	reservation, err := s.NodeReservation(ctx, reservationID)
+	if err != nil {
+		return err
+	}
+	if reservation.State == "released" {
+		return nil
+	}
+	return fmt.Errorf("reservation is %s and cannot be released", reservation.State)
+}
+
+func (s *Store) ReleaseActiveRecipeReservations(ctx context.Context, recipeID, exceptReservationID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET state='released',updated_at=? WHERE state='active' AND recipe_id=? AND reservation_id<>?`, now(), recipeID, exceptReservationID)
+	return err
+}
+
+// ExpireNodeReservations releases only claims that have not started. A job
+// attachment proves that execution crossed its durable ownership boundary,
+// while an active independent model can keep serving through either manager
+// or controller restart. Neither is governed by the prepare deadline.
+func (s *Store) ExpireNodeReservations(ctx context.Context, at time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET state='expired',updated_at=? WHERE state IN ('prepared','committed') AND job_id='' AND expires_at<>'' AND expires_at<=?`, now(), at.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

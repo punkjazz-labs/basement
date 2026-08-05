@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/store"
@@ -1193,7 +1194,10 @@ func TestReservationReleasedOnCompletionFailureAndCancellation(t *testing.T) {
 	}
 	completed.Start(completeJob.ID)
 	waitJob(t, s, completeJob.ID, "ready")
-	waitReservationReleased(t, completed, completeJob.ID)
+	active, err := completed.Reservations().Reservation(ctx, fleet.ReservationID(fleet.ClaimKindLocalJob, completeJob.ID))
+	if err != nil || active.State != "active" || completed.ReservedDiskBytes() != 0 {
+		t.Fatalf("completed serving claim=%+v reserved_disk=%d err=%v", active, completed.ReservedDiskBytes(), err)
+	}
 
 	failing := New(s, &fakeExecutor{failPull: true}, recipes)
 	failJob, _, err := s.CreateJob(ctx, "install", recipes[1].ID, "reserve-fail", map[string]any{"confirmed": true})
@@ -1220,10 +1224,8 @@ func TestReservationReleasedOnCompletionFailureAndCancellation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("install never reached the cancellation gate")
 	}
-	cancelling.mu.Lock()
-	_, heldWhileRunning := cancelling.reserved[cancelJob.ID]
-	cancelling.mu.Unlock()
-	if !heldWhileRunning {
+	held, err := cancelling.Reservations().Reservation(ctx, fleet.ReservationID(fleet.ClaimKindLocalJob, cancelJob.ID))
+	if err != nil || (held.State != "committed" && held.State != "active") {
 		t.Fatal("reservation should be held while the install is paused mid-run")
 	}
 	if err := cancelling.Cancel(ctx, cancelJob.ID); err != nil {
@@ -1250,9 +1252,11 @@ type retryProbeExecutor struct {
 func (e *retryProbeExecutor) Execute(ctx context.Context, execution operations.Execution, op recipe.Operation, r recipe.Recipe, progress operations.Progress) (map[string]any, error) {
 	if op.Type == "download_artifact" {
 		for attempt := 0; attempt < 4; attempt++ {
-			e.runner.mu.Lock()
-			reserved := e.runner.reserved[e.jobID]
-			e.runner.mu.Unlock()
+			reservation, err := e.runner.Reservations().Reservation(ctx, fleet.ReservationID(fleet.ClaimKindLocalJob, e.jobID))
+			reserved := int64(-1)
+			if err == nil {
+				reserved = reservation.Claims.DiskBytes
+			}
 			e.mu.Lock()
 			e.observed = append(e.observed, reserved)
 			e.mu.Unlock()
@@ -1296,14 +1300,150 @@ func TestRetriesWithinAStepNeverDoubleTheReservation(t *testing.T) {
 	}
 }
 
+func TestInstallReservationSurvivesRestartAndReleasesDiskAfterResume(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	database, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, _ := recipe.Builtin()
+	selected := singleSpark(recipes)
+	job, _, err := database.CreateJob(ctx, "install", selected.ID, "restart-reservation", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocator := fleet.NewAllocator(database, "local")
+	reservationID := fleet.ReservationID(fleet.ClaimKindLocalJob, job.ID)
+	fingerprint, err := fleet.RecipeFingerprint(selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: reservationID, DeploymentID: "job:" + job.ID, DriverNodeID: "local",
+		RecipeID: selected.ID, RecipeVersion: selected.Version, RecipeFingerprint: fingerprint,
+		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindLocalJob, JobID: job.ID,
+			DiskBytes: selected.RequiredBytes(), MemoryBytes: fleet.RecipeMemoryClaim(selected), Runtime: true,
+			Ports: []int{selected.Service.DefaultHostPort}, FabricInterfaces: []string{}},
+		PrepareToken: fleet.LocalPrepareToken(reservationID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Commit(ctx, reservationID, fleet.LocalPrepareToken(reservationID), []byte(`{"kind":"local-engine"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.AttachJob(ctx, reservationID, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.Renew(ctx, reservationID, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	runner := New(database, &fakeExecutor{}, recipes)
+	if err := runner.ReconcileReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if reserved := runner.ReservedDiskBytes(); reserved != selected.RequiredBytes() {
+		t.Fatalf("restart reserved disk=%d want=%d", reserved, selected.RequiredBytes())
+	}
+	if err := runner.ResumeInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitJob(t, database, job.ID, "ready")
+	if reserved := runner.ReservedDiskBytes(); reserved != 0 {
+		t.Fatalf("resumed job leaked %d reserved disk bytes", reserved)
+	}
+	reservation, err := runner.Reservations().Reservation(ctx, reservationID)
+	if err != nil || reservation.State != "active" {
+		t.Fatalf("resumed serving reservation=%+v err=%v", reservation, err)
+	}
+}
+
+func TestInterruptedLocalJobThatCannotResumeReleasesItsReservation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	database, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := singleSpark(recipes)
+	job, _, err := database.CreateJob(ctx, "install", selected.ID, "missing-recipe-after-restart", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := New(database, &fakeExecutor{}, recipes)
+	if err := runner.PrepareJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	reservationID := fleet.ReservationID(fleet.ClaimKindLocalJob, job.ID)
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	runner = New(database, &fakeExecutor{}, nil)
+	if err := runner.ReconcileReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.ResumeInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitJob(t, database, job.ID, "failed")
+	reservation, err := runner.Reservations().Reservation(ctx, reservationID)
+	if err != nil || reservation.State != "released" {
+		t.Fatalf("unresumable local reservation=%+v err=%v", reservation, err)
+	}
+}
+
+func TestPrepareJobPersistsReservationBeforeStartingAnyOperation(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	recipes, _ := recipe.Builtin()
+	selected := singleSpark(recipes)
+	job, _, err := database.CreateJob(ctx, "install", selected.ID, "prepare-before-ack", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := New(database, &fakeExecutor{}, recipes)
+	if err := runner.PrepareJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := runner.Reservations().Reservation(ctx, fleet.ReservationID(fleet.ClaimKindLocalJob, job.ID))
+	if err != nil || reservation.State != "committed" || reservation.JobID != job.ID || reservation.Claims.DiskBytes != selected.RequiredBytes() || reservation.Claims.MemoryBytes != fleet.RecipeMemoryClaim(selected) {
+		t.Fatalf("prepared reservation=%+v err=%v", reservation, err)
+	}
+	stored, err := database.GetJob(ctx, job.ID)
+	if err != nil || len(stored.Steps) != 0 || stored.State != "queued" {
+		t.Fatalf("prepare executed recipe work: job=%+v err=%v", stored, err)
+	}
+}
+
 func waitReservationReleased(t *testing.T, runner *Engine, jobID string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		runner.mu.Lock()
-		_, held := runner.reserved[jobID]
-		runner.mu.Unlock()
-		if !held {
+		reservation, err := runner.Reservations().Reservation(context.Background(), fleet.ReservationID(fleet.ClaimKindLocalJob, jobID))
+		if err == nil && reservation.State == "released" {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

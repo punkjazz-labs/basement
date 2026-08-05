@@ -68,6 +68,13 @@ type PeerRunner interface {
 	Step(ctx context.Context, target PeerTarget, execution Execution, op recipe.Operation, r recipe.Recipe, progress Progress) (map[string]any, error)
 }
 
+// DriverLeaseRenewer is the narrow background seam used after a distributed
+// install finishes. The head proves continued ownership without replaying a
+// recipe operation, while executors without a worker remain unaffected.
+type DriverLeaseRenewer interface {
+	RenewWorkerReservation(context.Context, string, recipe.Recipe) error
+}
+
 // FleetExecutor routes each step to the node its placement names: head (and
 // every single-node recipe) runs locally, worker runs through the peer
 // manager's API. Every receipt it returns names the node that produced it.
@@ -198,6 +205,20 @@ func (f *FleetExecutor) RuntimeImageBytes(ctx context.Context, r recipe.Recipe) 
 	return f.local.RuntimeImageBytes(ctx, r)
 }
 
+func (f *FleetExecutor) RenewWorkerReservation(ctx context.Context, jobID string, r recipe.Recipe) error {
+	target, err := f.peer.Target(ctx)
+	if err != nil {
+		return err
+	}
+	renewer, ok := f.peer.(interface {
+		Renew(context.Context, PeerTarget, string, recipe.Recipe) error
+	})
+	if !ok {
+		return errors.New("the worker transport cannot renew a driver reservation")
+	}
+	return renewer.Renew(ctx, target, jobID, r)
+}
+
 func (f *FleetExecutor) Execute(ctx context.Context, execution Execution, op recipe.Operation, r recipe.Recipe, progress Progress) (map[string]any, error) {
 	if op.Type == VerifyFabric || op.Type == VerifyPeerNode || execution.Placement.Role == RoleWorker {
 		target, err := pinnedPeer(execution)
@@ -289,6 +310,21 @@ func NewPeerClient(directory PeerDirectory) *PeerClient {
 }
 
 func (p *PeerClient) Target(ctx context.Context) (PeerTarget, error) { return p.directory(ctx) }
+
+func (p *PeerClient) Renew(ctx context.Context, target PeerTarget, jobID string, r recipe.Recipe) error {
+	callCtx, cancel := context.WithTimeout(ctx, peerProgressTimeout)
+	defer cancel()
+	var response struct {
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := p.post(callCtx, target, "/api/v1/internal/node/reservation/renew", map[string]any{"recipe": r, "job_id": jobID}, &response); err != nil {
+		return fmt.Errorf("renew the worker reservation: %w", err)
+	}
+	if response.ExpiresAt == "" {
+		return errors.New("the worker did not return its renewed reservation deadline")
+	}
+	return nil
+}
 
 func (p *PeerClient) Preflight(ctx context.Context, target PeerTarget, execution Execution, r recipe.Recipe) (map[string]any, error) {
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)

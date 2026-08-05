@@ -8,7 +8,11 @@ import (
 )
 
 type Execution struct {
-	JobID           string
+	JobID string
+	// ReservationID excludes this job's own persistent disk claim from the
+	// other-work total handed to verify_disk. It is process-local execution
+	// context and is never sent to Docker or serialized into a receipt.
+	ReservationID   string
 	Kind            string
 	RemoveArtifacts bool
 	// SharedArtifacts holds artifact keys (repository@revision) and artifact

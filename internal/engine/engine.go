@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/redact"
@@ -39,11 +41,11 @@ type Engine struct {
 	// downloads and preflight run outside it so a long install cannot block
 	// stopping an unrelated model.
 	runtime chan struct{}
-	// reserved holds each running install job's conservative disk footprint
-	// (recipe.Recipe.RequiredBytes), keyed by job ID and guarded by mu. It
-	// lets two concurrent installs see each other's claim on free space
-	// instead of each checking disk in isolation.
-	reserved map[string]int64
+	// reservations is this node's persistent disk, runtime, and port
+	// authority. The runtime channel still serializes execution inside this
+	// process, but only the allocator decides whether local or remote work may
+	// own the node across a manager restart.
+	reservations *fleet.Allocator
 	// tokenSampler is called just before a local container is stopped; see
 	// SetTokenSampler. Held atomically because it is installed after the
 	// engine may already be resuming interrupted jobs.
@@ -76,7 +78,9 @@ type RemovePayload struct {
 // means true, so jobs created before this field existed keep installing and
 // serving immediately.
 type InstallPayload struct {
-	Activate *bool `json:"activate,omitempty"`
+	Activate      *bool  `json:"activate,omitempty"`
+	ReservationID string `json:"reservation_id,omitempty"`
+	DeploymentID  string `json:"deployment_id,omitempty"`
 }
 
 func (p InstallPayload) activate() bool {
@@ -99,10 +103,22 @@ type plannedOperation struct {
 // overlaid yet. SetRecipes takes over both from the first background
 // recipe-index refresh onward.
 func New(s *store.Store, executor operations.Executor, recipes []recipe.Recipe) *Engine {
-	e := &Engine{store: s, executor: executor, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1), reserved: map[string]int64{}}
+	e := &Engine{store: s, executor: executor, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1), reservations: fleet.NewAllocator(s, "local")}
 	e.SetRecipes(recipes, recipes)
 	return e
 }
+
+// SetReservationAllocator installs the allocator coupled to this manager's
+// durable node identity. New provides a local default so single-node callers
+// and tests keep the same construction path, while production replaces it
+// before any job starts.
+func (e *Engine) SetReservationAllocator(allocator *fleet.Allocator) {
+	if allocator != nil {
+		e.reservations = allocator
+	}
+}
+
+func (e *Engine) Reservations() *fleet.Allocator { return e.reservations }
 
 // SetRecipes replaces the recipe catalog and history. all must be
 // monotonically growing (never drop a version some installed model may
@@ -152,19 +168,224 @@ func (e *Engine) recipeFor(ctx context.Context, kind, recipeID string) (recipe.R
 	return recipe.Find(effective, recipeID)
 }
 
-// reserveDisk records jobID's conservative disk footprint so concurrent
-// installs see it. Only install jobs call this; every other kind leaves
-// shared disk budget alone.
-func (e *Engine) reserveDisk(jobID string, bytes int64) {
-	e.mu.Lock()
-	e.reserved[jobID] = bytes
-	e.mu.Unlock()
+// recipeForJob keeps a prepared job on the exact recipe that its durable
+// reservation admitted. A catalogue refresh can advance the effective recipe
+// while the manager is down, but resuming that job with the newer recipe would
+// change both its resource meaning and the bytes its completed steps describe.
+func (e *Engine) recipeForJob(ctx context.Context, job store.Job) (recipe.Recipe, bool) {
+	if job.Kind != "install" && job.Kind != "start" {
+		return e.recipeFor(ctx, job.Kind, job.RecipeID)
+	}
+	var payload reservationPayload
+	_ = json.Unmarshal(job.Payload, &payload)
+	reservationID := payload.ReservationID
+	if reservationID == "" {
+		reservationID = fleet.ReservationID(fleet.ClaimKindLocalJob, job.ID)
+	}
+	reservation, err := e.reservations.Reservation(ctx, reservationID)
+	if errors.Is(err, os.ErrNotExist) {
+		return e.recipeFor(ctx, job.Kind, job.RecipeID)
+	}
+	if err != nil || reservation.RecipeID != job.RecipeID {
+		return recipe.Recipe{}, false
+	}
+	pinned, ok := recipe.FindVersion(e.allRecipes(), reservation.RecipeID, reservation.RecipeVersion)
+	if !ok {
+		return recipe.Recipe{}, false
+	}
+	fingerprint, err := fleet.RecipeFingerprint(pinned)
+	if err != nil || fingerprint != reservation.RecipeFingerprint {
+		return recipe.Recipe{}, false
+	}
+	return pinned, true
 }
 
-func (e *Engine) releaseDisk(jobID string) {
-	e.mu.Lock()
-	delete(e.reserved, jobID)
-	e.mu.Unlock()
+type reservationPayload struct {
+	ReservationID string `json:"reservation_id,omitempty"`
+	DeploymentID  string `json:"deployment_id,omitempty"`
+}
+
+func (e *Engine) prepareJobReservation(ctx context.Context, job store.Job, selected recipe.Recipe) (string, bool, error) {
+	if job.Kind != "install" && job.Kind != "start" {
+		return "", false, nil
+	}
+	var payload reservationPayload
+	_ = json.Unmarshal(job.Payload, &payload)
+	reservationID := payload.ReservationID
+	if reservationID == "" {
+		reservationID = fleet.ReservationID(fleet.ClaimKindLocalJob, job.ID)
+		if err := e.recordJobReservationID(ctx, job, reservationID); err != nil {
+			return "", false, err
+		}
+	} else if payload.DeploymentID == "" {
+		if existing, err := e.reservations.Reservation(ctx, reservationID); err == nil && reservationStateTerminal(existing.State) {
+			reservationID = fleet.ReservationID(fleet.ClaimKindLocalJob, job.ID+":"+job.UpdatedAt+":"+fmt.Sprint(time.Now().UnixNano()))
+			if err := e.recordJobReservationID(ctx, job, reservationID); err != nil {
+				return "", false, err
+			}
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", false, err
+		}
+	}
+	activate := job.Kind == "start"
+	if job.Kind == "install" {
+		var install InstallPayload
+		_ = json.Unmarshal(job.Payload, &install)
+		activate = install.activate()
+	}
+	kind := fleet.ClaimKindLocalJob
+	if payload.DeploymentID != "" {
+		kind = fleet.ClaimKindIndependent
+	}
+	claimJobID := ""
+	if kind == fleet.ClaimKindLocalJob {
+		claimJobID = job.ID
+	}
+	claims := fleet.ClaimsForRecipe(selected, fleet.RecipeClaimOptions{
+		Kind: kind, JobID: claimJobID, ReserveDisk: job.Kind == "install", Runtime: activate,
+	})
+	fingerprint, err := fleet.RecipeFingerprint(selected)
+	if err != nil {
+		return "", false, err
+	}
+	if existing, err := e.reservations.Reservation(ctx, reservationID); err == nil {
+		if existing.RecipeID != selected.ID || existing.RecipeVersion != selected.Version || existing.RecipeFingerprint != fingerprint ||
+			existing.Claims.Kind != claims.Kind || existing.Claims.JobID != claims.JobID || existing.Claims.DiskBytes != claims.DiskBytes ||
+			existing.Claims.MemoryBytes != claims.MemoryBytes || existing.Claims.Runtime != claims.Runtime ||
+			!samePorts(existing.Claims.Ports, claims.Ports) || !sameStrings(existing.Claims.FabricInterfaces, claims.FabricInterfaces) {
+			return "", false, store.ErrReservationRetryConflict
+		}
+		if existing.State != "committed" && existing.State != "active" {
+			return "", false, fmt.Errorf("reservation is %s and cannot run job %s", existing.State, job.ID)
+		}
+		if err := e.reservations.AttachJob(ctx, reservationID, job.ID); err != nil {
+			return "", false, err
+		}
+		return reservationID, true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	deploymentID := payload.DeploymentID
+	if deploymentID == "" {
+		deploymentID = "job:" + job.ID
+	}
+	prepared, _, err := e.reservations.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: reservationID, DeploymentID: deploymentID, DriverNodeID: e.reservations.NodeID(),
+		RecipeID: selected.ID, RecipeVersion: selected.Version, RecipeFingerprint: fingerprint, Claims: claims,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if prepared.State == "prepared" {
+		if _, err := e.reservations.Commit(ctx, reservationID, fleet.LocalPrepareToken(reservationID), []byte(`{"kind":"local-engine"}`)); err != nil {
+			return "", false, err
+		}
+	}
+	if err := e.reservations.AttachJob(ctx, reservationID, job.ID); err != nil {
+		return "", false, err
+	}
+	return reservationID, true, nil
+}
+
+func (e *Engine) recordJobReservationID(ctx context.Context, job store.Job, reservationID string) error {
+	payload := map[string]any{}
+	if len(job.Payload) > 0 {
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return fmt.Errorf("decode job payload before reserving resources: %w", err)
+		}
+	}
+	payload["reservation_id"] = reservationID
+	return e.store.UpdateJobPayload(ctx, job.ID, payload)
+}
+
+func reservationStateTerminal(state string) bool {
+	switch state {
+	case "released", "aborted", "expired":
+		return true
+	}
+	return false
+}
+
+func samePorts(left, right []int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// ReconcileReservations restores persistent admission before startup resumes
+// jobs or health-checks a serving model. It is separate from New because the
+// caller must surface a database or catalogue inconsistency rather than hide
+// it inside a constructor that historically cannot fail.
+func (e *Engine) ReconcileReservations(ctx context.Context) error {
+	return e.reservations.Reconcile(ctx, e.allRecipes())
+}
+
+// RenewDistributedReservations proves that this manager still owns every
+// worker rank supporting one of its active local jobs. The job id and exact
+// recipe come from the durable local reservation, so restart does not depend
+// on an in-memory lease or whichever recipe is currently effective.
+func (e *Engine) RenewDistributedReservations(ctx context.Context) error {
+	renewer, ok := e.executor.(operations.DriverLeaseRenewer)
+	if !ok {
+		return nil
+	}
+	reservations, err := e.reservations.AllReservations(ctx)
+	if err != nil {
+		return err
+	}
+	var joined error
+	for _, reservation := range reservations {
+		if reservation.State != "active" || reservation.Claims.Kind != fleet.ClaimKindLocalJob || reservation.Claims.JobID == "" {
+			continue
+		}
+		selected, ok := recipe.FindVersion(e.allRecipes(), reservation.RecipeID, reservation.RecipeVersion)
+		if !ok || !selected.Distributed() {
+			continue
+		}
+		fingerprint, fingerprintErr := fleet.RecipeFingerprint(selected)
+		if fingerprintErr != nil || fingerprint != reservation.RecipeFingerprint {
+			joined = errors.Join(joined, fmt.Errorf("resolve worker reservation recipe %s version %d", reservation.RecipeID, reservation.RecipeVersion))
+			continue
+		}
+		if err := renewer.RenewWorkerReservation(ctx, reservation.Claims.JobID, selected); err != nil {
+			joined = errors.Join(joined, err)
+		}
+	}
+	return joined
+}
+
+// PrepareJob makes local API acknowledgement follow durable admission. Start
+// still repeats the same idempotent check because jobs may also be created by
+// startup recovery or package-level callers that do not use the HTTP layer.
+func (e *Engine) PrepareJob(ctx context.Context, jobID string) error {
+	job, err := e.store.GetJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	selected, ok := e.recipeForJob(ctx, job)
+	if !ok {
+		return errors.New("recipe is no longer available")
+	}
+	_, _, err = e.prepareJobReservation(ctx, job, selected)
+	return err
 }
 
 // ReservedDiskBytes reports the total disk currently reserved by running
@@ -175,16 +396,18 @@ func (e *Engine) ReservedDiskBytes() int64 {
 	return e.reservedByOthers("")
 }
 
+func (e *Engine) ReservedDiskBytesExcept(reservationID string) int64 {
+	return e.reservedByOthers(reservationID)
+}
+
 // reservedByOthers sums every other job's disk reservation, excluding
 // jobID's own, so a job never counts its own bytes against itself.
-func (e *Engine) reservedByOthers(jobID string) int64 {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	var total int64
-	for id, bytes := range e.reserved {
-		if id != jobID {
-			total += bytes
-		}
+func (e *Engine) reservedByOthers(reservationID string) int64 {
+	total, err := e.reservations.ReservedDiskBytes(context.Background(), reservationID)
+	if err != nil {
+		// Understating a reservation after a database error could admit two
+		// downloads that do not fit. MaxInt64 makes verify_disk fail closed.
+		return math.MaxInt64
 	}
 	return total
 }
@@ -409,21 +632,41 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 	if err != nil {
 		return
 	}
-	r, ok := e.recipeFor(ctx, job.Kind, job.RecipeID)
+	r, ok := e.recipeForJob(ctx, job)
 	if !ok {
+		var payload reservationPayload
+		_ = json.Unmarshal(job.Payload, &payload)
+		reservationID := payload.ReservationID
+		if reservationID == "" && (job.Kind == "install" || job.Kind == "start") {
+			reservationID = fleet.ReservationID(fleet.ClaimKindLocalJob, job.ID)
+		}
+		if reservationID != "" {
+			_ = e.reservations.Release(context.Background(), reservationID)
+		}
 		_ = e.store.UpdateJobState(ctx, jobID, "failed", "recipe is no longer available")
 		return
 	}
+	reservationID, hasReservation, err := e.prepareJobReservation(ctx, job, r)
+	if err != nil {
+		_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(err.Error()))
+		return
+	}
+	keepReservation := false
+	defer func() {
+		if !hasReservation || keepReservation {
+			return
+		}
+		_ = e.reservations.Release(context.Background(), reservationID)
+		// A failed switch may have transferred the allocation before its
+		// durable model transaction completed. Re-reading installed_models
+		// restores the predecessor's claim and releases the failed target.
+		_ = e.reservations.Reconcile(context.Background(), e.allRecipes())
+	}()
 	lock := e.recipeLock(r.ID)
 	lock.Lock()
 	defer lock.Unlock()
-	if job.Kind == "install" {
-		// A download-only install (activate: false) still writes the same
-		// bytes to disk as one that switches, so it reserves the same way.
-		e.reserveDisk(jobID, r.RequiredBytes())
-		defer e.releaseDisk(jobID)
-	}
 	runtimeHeld := false
+	runtimeClaimed := false
 	defer func() {
 		if runtimeHeld {
 			e.releaseRuntime()
@@ -431,7 +674,7 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 	}()
 	switchHeld := func() {}
 	defer func() { switchHeld() }()
-	execution := operations.Execution{JobID: job.ID, Kind: job.Kind}
+	execution := operations.Execution{JobID: job.ID, ReservationID: reservationID, Kind: job.Kind}
 	if job.Kind == "remove" {
 		var payload RemovePayload
 		_ = json.Unmarshal(job.Payload, &payload)
@@ -517,6 +760,18 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 					plans, previous = planned.plans, planned.previous
 					plan = plans[index]
 				}
+				if hasReservation && !runtimeClaimed {
+					replaceRecipeID, err := e.reservationPredecessor(ctx, r, previous)
+					if err != nil {
+						abort(index, fmt.Errorf("resolve this node's runtime reservation predecessor: %w", err))
+						return
+					}
+					if err := e.reservations.Activate(ctx, reservationID, replaceRecipeID); err != nil {
+						abort(index, fmt.Errorf("claim this node's runtime slot: %w", err))
+						return
+					}
+					runtimeClaimed = true
+				}
 			}
 		}
 		if plan.BeginSwitch {
@@ -584,7 +839,7 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		progress := func(value any) error { return e.store.UpdateStepReceipt(ctx, jobID, index, redact.JSON(value)) }
 		// Recomputed per step, not once for the whole job: a long download
 		// spans other installs starting and finishing around it.
-		execution.ReservedBytes = e.reservedByOthers(jobID)
+		execution.ReservedBytes = e.reservedByOthers(reservationID)
 		// The token counters live inside the container this is about to
 		// stop, so the last reading has to be taken now. A worker rank runs
 		// on the other Spark, which counts its own.
@@ -618,6 +873,46 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		abort(len(plans)-1, err)
 		return
 	}
+	if hasReservation && jobActivates(job) {
+		keepReservation = true
+	}
+	if job.Kind == "stop" || job.Kind == "remove" {
+		_ = e.reservations.ReleaseRecipe(context.Background(), r.ID, "")
+	}
+}
+
+func jobActivates(job store.Job) bool {
+	if job.Kind == "start" {
+		return true
+	}
+	if job.Kind != "install" {
+		return false
+	}
+	var payload InstallPayload
+	_ = json.Unmarshal(job.Payload, &payload)
+	return payload.activate()
+}
+
+// reservationPredecessor names only a model that the local engine is allowed
+// to replace under its runtime lock. activeRecipe omits the exact target
+// version because no container switch is needed, but a fresh local job still
+// has to transfer that model's persistent reservation. A worker rank is not
+// an installed local model, so it never gains replacement authority here.
+func (e *Engine) reservationPredecessor(ctx context.Context, target recipe.Recipe, previous *recipe.Recipe) (string, error) {
+	if previous != nil {
+		return previous.ID, nil
+	}
+	model, err := e.store.Model(ctx, target.ID)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if model.Active && model.RecipeVersion == target.Version {
+		return target.ID, nil
+	}
+	return "", nil
 }
 
 // A distributed plan has exactly one head and one worker today. Keeping this
@@ -659,7 +954,7 @@ func (e *Engine) executeConcurrentDownloads(ctx context.Context, base operations
 		execution := base
 		execution.Placement = plan.Placement
 		execution.Peer = peerFor(plan, deployment, previous, previousDeployment)
-		execution.ReservedBytes = e.reservedByOthers(base.JobID)
+		execution.ReservedBytes = e.reservedByOthers(base.ReservationID)
 		previousStep, exists, err := e.store.Step(ctx, base.JobID, index)
 		if err != nil {
 			return index, err

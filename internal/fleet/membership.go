@@ -30,20 +30,22 @@ const (
 )
 
 type Options struct {
-	DataDir       string
-	Database      *store.Store
-	Inventory     inventory.Provider
-	Version       string
-	BuildIdentity string
-	DisplayName   string
-	ConsoleURL    string
-	NodeURL       string
-	Recipes       []recipe.Recipe
+	DataDir          string
+	Database         *store.Store
+	Inventory        inventory.Provider
+	Version          string
+	BuildIdentity    string
+	DisplayName      string
+	ConsoleURL       string
+	NodeURL          string
+	Recipes          []recipe.Recipe
+	EffectiveRecipes []recipe.Recipe
 }
 
 type Manager struct {
 	identity      *Identity
 	database      *store.Store
+	allocator     *Allocator
 	inventory     inventory.Provider
 	version       string
 	buildIdentity string
@@ -58,6 +60,11 @@ type Manager struct {
 
 	catalogueMu     sync.RWMutex
 	catalogueDigest string
+	catalogue       []recipe.Recipe
+	effective       []recipe.Recipe
+	runtime         IndependentRuntime
+	placementMu     sync.Mutex
+	placementLocks  map[string]*sync.Mutex
 }
 
 func NewManager(ctx context.Context, options Options) (*Manager, error) {
@@ -85,9 +92,15 @@ func NewManager(ctx context.Context, options Options) (*Manager, error) {
 		displayName = "this node"
 	}
 	manager := &Manager{
-		identity: identity, database: options.Database, inventory: options.Inventory,
+		identity: identity, database: options.Database, allocator: NewAllocator(options.Database, identity.NodeID), inventory: options.Inventory,
 		version: options.Version, buildIdentity: options.BuildIdentity, displayName: displayName,
 		consoleURL: consoleURL, nodeURL: nodeURL, now: time.Now, catalogueDigest: digest,
+		catalogue:      append([]recipe.Recipe(nil), options.Recipes...),
+		effective:      append([]recipe.Recipe(nil), options.EffectiveRecipes...),
+		placementLocks: make(map[string]*sync.Mutex),
+	}
+	if len(manager.effective) == 0 {
+		manager.effective = append([]recipe.Recipe(nil), options.Recipes...)
 	}
 	manager.newClient = manager.clientForFingerprint
 	if err := manager.initializeLegacyState(ctx, options.Recipes); err != nil {
@@ -147,15 +160,43 @@ func (m *Manager) initializeLegacyState(ctx context.Context, recipes []recipe.Re
 
 func (m *Manager) Identity() *Identity { return m.identity }
 
-func (m *Manager) SetRecipes(recipes []recipe.Recipe) error {
-	digest, err := CatalogueDigest(recipes)
+func (m *Manager) Allocator() *Allocator { return m.allocator }
+
+func (m *Manager) SetRecipes(all, effective []recipe.Recipe) error {
+	digest, err := CatalogueDigest(all)
 	if err != nil {
 		return err
 	}
 	m.catalogueMu.Lock()
 	m.catalogueDigest = digest
+	m.catalogue = append([]recipe.Recipe(nil), all...)
+	m.effective = append([]recipe.Recipe(nil), effective...)
 	m.catalogueMu.Unlock()
 	return nil
+}
+
+func (m *Manager) SetIndependentRuntime(runtime IndependentRuntime) {
+	m.catalogueMu.Lock()
+	m.runtime = runtime
+	m.catalogueMu.Unlock()
+}
+
+func (m *Manager) independentRuntime() IndependentRuntime {
+	m.catalogueMu.RLock()
+	defer m.catalogueMu.RUnlock()
+	return m.runtime
+}
+
+func (m *Manager) recipes() []recipe.Recipe {
+	m.catalogueMu.RLock()
+	defer m.catalogueMu.RUnlock()
+	return append([]recipe.Recipe(nil), m.catalogue...)
+}
+
+func (m *Manager) effectiveRecipes() []recipe.Recipe {
+	m.catalogueMu.RLock()
+	defer m.catalogueMu.RUnlock()
+	return append([]recipe.Recipe(nil), m.effective...)
 }
 
 func (m *Manager) digest() string {
@@ -350,7 +391,19 @@ func (m *Manager) Summary(ctx context.Context) (Summary, error) {
 	result := Summary{FleetID: config.FleetID, Role: config.Role, ControllerNodeID: config.ControllerNodeID,
 		ControllerConsoleURL: config.ControllerConsoleURL, MigrationState: config.MigrationState}
 	if config.Role == "standalone" {
-		result.Nodes = []FleetNodeSummary{{NodeID: m.identity.NodeID, DisplayName: m.displayName, Role: "standalone", Status: "fresh", ConsoleURL: m.consoleURL, NodeURL: m.nodeURL, ManagerVersion: m.version, ManagerBuildIdentity: m.buildIdentity, CatalogueDigest: m.digest(), InstalledModels: []ModelSnapshot{}}}
+		models, modelErr := m.database.Models(ctx)
+		if modelErr != nil {
+			return Summary{}, modelErr
+		}
+		snapshots := make([]ModelSnapshot, 0, len(models))
+		for _, model := range models {
+			snapshots = append(snapshots, ModelSnapshot{RecipeID: model.RecipeID, RecipeVersion: model.RecipeVersion, Status: model.Status, Active: model.Active})
+		}
+		system, inspectErr := m.inventory.Inspect(ctx)
+		if inspectErr != nil {
+			return Summary{}, inspectErr
+		}
+		result.Nodes = []FleetNodeSummary{{NodeID: m.identity.NodeID, DisplayName: m.displayName, Role: "standalone", Status: "fresh", ConsoleURL: m.consoleURL, NodeURL: m.nodeURL, ManagerVersion: m.version, ManagerBuildIdentity: m.buildIdentity, CatalogueDigest: m.digest(), InstalledModels: snapshots, Inventory: &system}}
 		return result, nil
 	}
 	nodes, err := m.database.FleetNodes(ctx)

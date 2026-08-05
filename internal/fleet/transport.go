@@ -102,13 +102,18 @@ func (m *Manager) Handler() http.Handler {
 	mux.HandleFunc("/internal/fleet/v1/join/commit", m.joinCommit)
 	mux.HandleFunc("/internal/fleet/v1/join/abort", m.joinAbort)
 	mux.HandleFunc("/internal/fleet/v1/heartbeat", m.heartbeat)
+	mux.HandleFunc("/internal/fleet/v1/reservations/prepare", m.reservationPrepare)
+	mux.HandleFunc("/internal/fleet/v1/reservations/commit", m.reservationCommit)
+	mux.HandleFunc("/internal/fleet/v1/reservations/abort", m.reservationAbort)
+	mux.HandleFunc("/internal/fleet/v1/deployments/independent", m.independentDeployment)
+	mux.HandleFunc("/internal/fleet/v1/jobs/", m.independentJob)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Cookies and public API keys are different authorities and are never
 		// accepted on the manager transport. A compromised browser session or
 		// leaked inference key therefore cannot become fleet membership. A
 		// compromised enrolled member can complete TLS to its controller, but
-		// this Phase B mux gives members no controller-side mutation to invoke:
-		// the controller pulls heartbeats, and placement does not exist here.
+		// placement handlers separately require the caller to be the adopted
+		// controller. Membership alone never grants scheduling authority.
 		if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
 			writeFleetError(w, http.StatusUnauthorized, errors.New("fleet transport accepts mutual TLS identity only"))
 			return

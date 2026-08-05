@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/redact"
@@ -28,44 +29,20 @@ var workerOperations = map[string]bool{
 	"stop_container": true, "remove_container": true, "remove_artifact_if_unshared": true,
 }
 
-// releasingOperations end this node's part in a delegated deployment, so the
-// single-flight lease is handed back once one of them runs.
+// releasingOperations end this node's part in a delegated deployment, so its
+// persistent runtime reservation is handed back once one of them runs.
 var releasingOperations = map[string]bool{"stop_container": true, "remove_container": true, "remove_artifact_if_unshared": true}
 
-// workerLeaseTTL bounds how long a head Spark may hold this node without
-// saying anything. A head that dies mid-job must not wedge this Spark
-// forever, and a real two-node step (a weight download) can be long.
-const workerLeaseTTL = 45 * time.Minute
-
-// workerLease is a coarse single-flight guard: one head Spark drives this
-// node at a time. Delegated steps run outside this manager's own engine, so
-// they take neither its runtime lock nor its disk reservation; without this,
-// two heads (or a head and a local install) could both pass preflight and
-// then fight over the same GPU. Proper engine integration is deferred.
-type workerLease struct {
-	mu       sync.Mutex
-	jobID    string
-	recipeID string
-	expires  time.Time
-}
-
-func (l *workerLease) acquire(jobID, recipeID string, now time.Time) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.jobID != "" && l.jobID != jobID && now.Before(l.expires) {
-		return fmt.Errorf("this Spark is already working as the second node for %s, so wait for that to finish", l.recipeID)
-	}
-	l.jobID, l.recipeID, l.expires = jobID, recipeID, now.Add(workerLeaseTTL)
-	return nil
-}
-
-func (l *workerLease) release(jobID string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.jobID == jobID {
-		l.jobID, l.recipeID, l.expires = "", "", time.Time{}
-	}
-}
+// The preparation window covers long preflight and download staging before a
+// rank is active. Once active, the head renews every fleet heartbeat interval
+// and the worker allows nine missed renewals before reclaiming the rank. That
+// is three times HeartbeatFreshness, so one stale heartbeat or a brief network
+// interruption cannot tear down a model that is still serving.
+const (
+	legacyRankPrepareTTL       = 45 * time.Minute
+	legacyDriverLeaseTTL       = 9 * fleet.HeartbeatInterval
+	legacyReservationSweepRate = fleet.HeartbeatInterval
+)
 
 // delegatedProgress holds the latest receipt of the step this node is
 // currently running for a head Spark. A delegated step runs outside this
@@ -150,6 +127,63 @@ func (s *Server) localExecutor() operations.Executor {
 	return s.executor
 }
 
+func (s *Server) prepareLegacyRankReservation(ctx context.Context, jobID string, selected recipe.Recipe) (string, error) {
+	if strings.TrimSpace(jobID) == "" {
+		return "", errors.New("the worker job id is required")
+	}
+	placement := operations.Placement{Role: operations.RoleWorker, NodeCount: selected.Topology.SparkCount}
+	fingerprint, err := fleet.RecipeFingerprint(selected)
+	if err != nil {
+		return "", err
+	}
+	// A reservation ID is an idempotency key for one exact claim. The legacy
+	// job ID alone is insufficient because a retried preflight can present a
+	// different locally trusted recipe. The pinned identity is stable across a
+	// manager restart, while the stored fingerprint still verifies its body.
+	reservationID := fleet.ExactRecipeReservationID(
+		fleet.ClaimKindLegacyRank, s.engine.Reservations().NodeID(), jobID, selected.ID, selected.Version,
+	)
+	prepared, _, err := s.engine.Reservations().Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: reservationID, DeploymentID: "legacy-rank:" + jobID,
+		DriverNodeID: "legacy-head", RecipeID: selected.ID, RecipeVersion: selected.Version,
+		RecipeFingerprint: fingerprint,
+		Claims: fleet.ClaimsForRecipe(selected, fleet.RecipeClaimOptions{
+			Kind: fleet.ClaimKindLegacyRank, JobID: jobID, ReserveDisk: true, Runtime: true, Placement: placement,
+		}),
+		PrepareToken: fleet.LocalPrepareToken(reservationID), ExpiresAt: time.Now().Add(legacyRankPrepareTTL),
+	})
+	if err != nil {
+		return "", err
+	}
+	if prepared.State == "prepared" {
+		if _, err := s.engine.Reservations().Commit(ctx, reservationID, fleet.LocalPrepareToken(reservationID), []byte(`{"kind":"legacy-rank-compatibility"}`)); err != nil {
+			return "", err
+		}
+	}
+	return reservationID, nil
+}
+
+func (s *Server) renewLegacyRankReservation(ctx context.Context, reservationID string) (time.Time, error) {
+	expires := time.Now().Add(legacyDriverLeaseTTL)
+	if err := s.engine.Reservations().Renew(ctx, reservationID, expires); err != nil {
+		return time.Time{}, err
+	}
+	return expires, nil
+}
+
+func (s *Server) renewActiveLegacyJob(ctx context.Context, jobID string) (time.Time, error) {
+	reservations, err := s.engine.Reservations().AllReservations(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	for _, reservation := range reservations {
+		if reservation.State == "active" && reservation.Claims.Kind == fleet.ClaimKindLegacyRank && reservation.Claims.JobID == jobID {
+			return s.renewLegacyRankReservation(ctx, reservation.ReservationID)
+		}
+	}
+	return time.Time{}, errors.New("the delegated job does not own an active worker reservation")
+}
+
 // nodeFabric reports where on the cable this node can be met, and starts
 // listening there for exactly one connection from the head. It takes no lease
 // and runs no operation: it detects a port, opens an ephemeral socket bound
@@ -194,7 +228,8 @@ func (s *Server) nodePreflight(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.nodeLease.acquire(request.JobID, trusted.ID, time.Now()); err != nil {
+	reservationID, err := s.prepareLegacyRankReservation(r.Context(), request.JobID, trusted)
+	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
@@ -209,7 +244,53 @@ func (s *Server) nodePreflight(w http.ResponseWriter, r *http.Request) {
 	if _, binds := operations.RankBindsHostPort(trusted, operations.Placement{Role: operations.RoleWorker, NodeCount: trusted.Topology.SparkCount}); !binds {
 		skip["verify_port"] = true
 	}
-	writeJSON(w, http.StatusOK, s.runPreflightSkipping(r.Context(), trusted, skip))
+	preflight := s.runPreflightSkippingReservation(r.Context(), trusted, skip, reservationID)
+	if !preflight.Ready {
+		_ = s.engine.Reservations().Abort(r.Context(), reservationID)
+		writeJSON(w, http.StatusOK, preflight)
+		return
+	}
+	if err := s.engine.Reservations().Activate(r.Context(), reservationID, ""); err != nil {
+		_ = s.engine.Reservations().Abort(r.Context(), reservationID)
+		writeError(w, http.StatusConflict, fmt.Errorf("this node's runtime is already reserved by another deployment: %w", err))
+		return
+	}
+	if _, err := s.renewLegacyRankReservation(r.Context(), reservationID); err != nil {
+		_ = s.engine.Reservations().Release(r.Context(), reservationID)
+		writeError(w, http.StatusConflict, fmt.Errorf("renew this node's delegated runtime reservation: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, preflight)
+}
+
+func (s *Server) nodeRenewReservation(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Recipe recipe.Recipe `json:"recipe"`
+		JobID  string        `json:"job_id"`
+	}
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	trusted, err := s.trustedWorkerRecipe(request.Recipe)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	reservationID := fleet.ExactRecipeReservationID(
+		fleet.ClaimKindLegacyRank, s.engine.Reservations().NodeID(), request.JobID, trusted.ID, trusted.Version,
+	)
+	reservation, err := s.engine.Reservations().Reservation(r.Context(), reservationID)
+	if err != nil || reservation.State != "active" || reservation.Claims.Kind != fleet.ClaimKindLegacyRank || reservation.Claims.JobID != request.JobID {
+		writeError(w, http.StatusConflict, errors.New("the delegated job does not own an active worker reservation"))
+		return
+	}
+	expires, err := s.renewLegacyRankReservation(r.Context(), reservationID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"expires_at": expires.UTC().Format(time.RFC3339Nano)})
 }
 
 // nodeStep runs exactly one typed operation on this node on behalf of the
@@ -241,14 +322,23 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("this Spark can only be driven as a worker node"))
 		return
 	}
-	if err := s.nodeLease.acquire(request.JobID, trusted.ID, time.Now()); err != nil {
+	reservationID, err := s.prepareLegacyRankReservation(r.Context(), request.JobID, trusted)
+	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	if releasingOperations[request.Operation] {
-		defer s.nodeLease.release(request.JobID)
+	if err := s.engine.Reservations().Activate(r.Context(), reservationID, ""); err != nil {
+		writeError(w, http.StatusConflict, fmt.Errorf("this node's runtime is already reserved by another deployment: %w", err))
+		return
 	}
-	execution := operations.Execution{Kind: "worker", RemoveArtifacts: request.RemoveArtifacts, Placement: request.Placement}
+	if _, err := s.renewLegacyRankReservation(r.Context(), reservationID); err != nil {
+		writeError(w, http.StatusConflict, fmt.Errorf("renew this node's delegated runtime reservation: %w", err))
+		return
+	}
+	if releasingOperations[request.Operation] {
+		defer s.engine.Reservations().Release(context.Background(), reservationID)
+	}
+	execution := operations.Execution{ReservationID: reservationID, Kind: "worker", RemoveArtifacts: request.RemoveArtifacts, Placement: request.Placement}
 	if request.RemoveArtifacts {
 		shared, err := s.sharedArtifacts(r.Context(), trusted.ID)
 		if err != nil {
@@ -288,7 +378,74 @@ func (s *Server) nodeStepProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	operation, receipt, running := s.nodeProgress.snapshot(request.JobID)
+	if running {
+		if _, err := s.renewActiveLegacyJob(r.Context(), request.JobID); err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"operation": operation, "running": running, "receipt": receipt})
+}
+
+// ReclaimExpiredDriverReservations stops an orphan worker rank before freeing
+// its reservation. The intermediate reclaiming state remains an admission
+// conflict, so a replacement cannot overlap the old container even if stop
+// needs several maintenance passes to succeed.
+func (s *Server) ReclaimExpiredDriverReservations(ctx context.Context) error {
+	if s.engine == nil {
+		return nil
+	}
+	now := time.Now()
+	due, err := s.engine.Reservations().LegacyRanksDueForReclaim(ctx, now)
+	if err != nil {
+		return err
+	}
+	var joined error
+	for _, candidate := range due {
+		reservation, err := s.engine.Reservations().BeginReclaim(ctx, candidate.ReservationID, now)
+		if err != nil {
+			joined = errors.Join(joined, err)
+			continue
+		}
+		selected, ok := recipe.FindVersion(s.allRecipes(), reservation.RecipeID, reservation.RecipeVersion)
+		if !ok {
+			joined = errors.Join(joined, fmt.Errorf("the expired worker recipe %s version %d is unavailable", reservation.RecipeID, reservation.RecipeVersion))
+			continue
+		}
+		fingerprint, err := fleet.RecipeFingerprint(selected)
+		if err != nil || fingerprint != reservation.RecipeFingerprint {
+			joined = errors.Join(joined, fmt.Errorf("the expired worker recipe %s version %d no longer matches its reservation", reservation.RecipeID, reservation.RecipeVersion))
+			continue
+		}
+		placement := operations.Placement{Role: operations.RoleWorker, NodeCount: selected.Topology.SparkCount}
+		execution := operations.Execution{JobID: reservation.Claims.JobID, ReservationID: reservation.ReservationID, Kind: "worker", Placement: placement}
+		if _, err := s.localExecutor().Execute(ctx, execution, recipe.Operation{Type: "stop_container"}, selected, nil); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("stop expired worker rank: %w", err))
+			continue
+		}
+		if err := s.engine.Reservations().FinishReclaim(ctx, reservation.ReservationID); err != nil {
+			joined = errors.Join(joined, err)
+		}
+	}
+	return joined
+}
+
+func (s *Server) RunReservationMaintenance(ctx context.Context) {
+	ticker := time.NewTicker(legacyReservationSweepRate)
+	defer ticker.Stop()
+	for {
+		if s.engine != nil {
+			_ = s.engine.RenewDistributedReservations(ctx)
+		}
+		_ = s.ReclaimExpiredDriverReservations(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.closing:
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // trustedWorkerRecipe resolves what this node will actually run. The caller

@@ -72,6 +72,10 @@ func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 	if body["Image"] != r.Runtime.Reference() {
 		t.Fatalf("image is not digest pinned: %#v", body["Image"])
 	}
+	labels := body["Labels"].(map[string]any)
+	if labels[labelHostPort] != fmt.Sprint(r.Service.DefaultHostPort) {
+		t.Fatalf("container host-port label=%#v", labels[labelHostPort])
+	}
 	if _, ok := body["Entrypoint"].([]any); !ok {
 		t.Fatalf("entrypoint is not structured argv: %#v", body["Entrypoint"])
 	}
@@ -872,7 +876,7 @@ func TestManagedContainersReadsBothLabelNamespaces(t *testing.T) {
 		}
 		requestedFilters = request.URL.Query().Get("filters")
 		body := `[
-			{"Names":["/basement-qwen-v1"],"State":"running","Labels":{"ai.basement.managed":"true","ai.basement.recipe-id":"qwen","ai.basement.recipe-version":"1"}},
+			{"Names":["/basement-qwen-v1"],"State":"running","Labels":{"ai.basement.managed":"true","ai.basement.recipe-id":"qwen","ai.basement.recipe-version":"1","ai.basement.host-port":"8100"}},
 			{"Names":["/runonspark-laguna-v3"],"State":"exited","Labels":{"ai.runonspark.managed":"true","ai.runonspark.recipe-id":"laguna","ai.runonspark.recipe-version":"3"}}
 		]`
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
@@ -892,7 +896,7 @@ func TestManagedContainersReadsBothLabelNamespaces(t *testing.T) {
 		byName[c.Name] = c
 	}
 	current, ok := byName["basement-qwen-v1"]
-	if !ok || current.RecipeID != "qwen" || current.Version != "1" || !current.Running {
+	if !ok || current.RecipeID != "qwen" || current.Version != "1" || !current.Running || current.HostPort != 8100 {
 		t.Errorf("current-namespace container = %#v", current)
 	}
 	legacy, ok := byName["runonspark-laguna-v3"]
