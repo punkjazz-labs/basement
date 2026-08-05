@@ -18,7 +18,7 @@ type apiGraphNode struct {
 
 func TestRenderGraphSubstitutesTypedValues(t *testing.T) {
 	rendered, err := recipe.RenderGraph([]byte(recipetest.TextToVideoGraph), recipe.GraphInputs{
-		Prompt: "a cat", Seed: 4242, Frames: 22, Width: 768, Height: 768,
+		Prompt: "a cat", Seed: 4242, Frames: 22, Width: 768, Height: 768, Steps: 20,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -39,9 +39,12 @@ func TestRenderGraphSubstitutesTypedValues(t *testing.T) {
 	if text := document["4"]["inputs"].(map[string]any)["text"]; text != "a cat" {
 		t.Fatalf("prompt=%#v", text)
 	}
-	// Everything the graph pinned is still there, unchanged.
+	// The step count substitutes as a number like the rest. It is the one
+	// input no request supplies: the driver passes the recipe's sampler_steps
+	// and the install proof passes its verification_sampler_steps, which is
+	// how one pinned graph serves both without a second copy of itself.
 	if steps := document["5"]["inputs"].(map[string]any)["steps"]; steps != float64(20) {
-		t.Fatalf("a pinned setting was lost: %#v", steps)
+		t.Fatalf("steps=%#v, want the number 20", steps)
 	}
 	if strings.Contains(string(rendered), "{{") {
 		t.Fatalf("a token survived rendering: %s", rendered)
@@ -111,7 +114,8 @@ func TestGraphTokensReportsWhatAGraphCarries(t *testing.T) {
 	}
 	want := strings.Join([]string{
 		recipe.GraphFramesToken, recipe.GraphHeightToken, recipe.GraphImageToken,
-		recipe.GraphPromptToken, recipe.GraphSeedToken, recipe.GraphWidthToken,
+		recipe.GraphPromptToken, recipe.GraphSeedToken, recipe.GraphStepsToken,
+		recipe.GraphWidthToken,
 	}, " ")
 	if got := strings.Join(tokens, " "); got != want {
 		t.Fatalf("tokens=%s, want %s", got, want)
@@ -268,7 +272,16 @@ func TestMiniMaxH3GraphsKeepPinnedTemplateSettings(t *testing.T) {
 				{"6", "unet_name", "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
 				{"6", "weight_dtype", "default"},
 				{"9", "scheduler", "simple"},
-				{"9", "steps", float64(20)},
+				// The second deliberate divergence from the pinned template,
+				// which hard-codes 20. It is a token so the install and start
+				// proof can run this exact graph at one step: at roughly 46
+				// seconds a step, proving that the weights load and the graph
+				// reaches its save node cost a quarter of an hour of picture
+				// quality nobody would ever see. The recipe supplies both
+				// numbers, sampler_steps for a real generation and
+				// verification_sampler_steps for the proof, so there is never
+				// a second near-identical graph to drift out of step.
+				{"9", "steps", recipe.GraphStepsToken},
 				{"9", "denoise", float64(1)},
 				{"11", "vae_name", "minimax_h3_video_vae_fp16.safetensors"},
 				{"13", "clip_name", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"},

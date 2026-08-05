@@ -785,6 +785,12 @@ const maxComfyUICanvasEdge = 4096
 // one of them is minutes of wall clock on this hardware.
 const maxComfyUIBlocks = 256
 
+// maxComfyUISamplerSteps bounds the denoising step count, on the same
+// reasoning again: a step on this hardware is tens of seconds, and a recipe
+// that asked for a thousand of them would be a generation nobody could sit
+// through and nothing in the product would interrupt.
+const maxComfyUISamplerSteps = 200
+
 // comfyUIProblems validates the media block against the whole recipe. Like
 // llama.cpp it is checked against more than itself: the graphs it names have
 // to be files this binary actually ships, the directories it claims have to
@@ -940,6 +946,28 @@ func comfyUIDurationProblems(c ComfyUIConfig) []string {
 	}
 	if c.DefaultBlocks < c.MinBlocks || c.DefaultBlocks > c.MaxBlocks {
 		problems = append(problems, "comfyui default_blocks must be between min_blocks and max_blocks")
+	}
+	return append(problems, comfyUISamplerProblems(c)...)
+}
+
+// comfyUISamplerProblems keeps the install proof cheaper than the thing it
+// proves. The upper bound is the point of the field: a recipe that verifies
+// with as many steps as it generates with has quietly gone back to spending a
+// full generation on every install and every start, which is the cost this
+// pair of numbers exists to remove.
+func comfyUISamplerProblems(c ComfyUIConfig) []string {
+	var problems []string
+	if c.SamplerSteps < 1 || c.SamplerSteps > maxComfyUISamplerSteps {
+		problems = append(problems, fmt.Sprintf("comfyui sampler_steps must be between 1 and %d", maxComfyUISamplerSteps))
+	}
+	if c.VerificationSamplerSteps < 1 || c.VerificationSamplerSteps > maxComfyUISamplerSteps {
+		problems = append(problems, fmt.Sprintf("comfyui verification_sampler_steps must be between 1 and %d", maxComfyUISamplerSteps))
+	}
+	if len(problems) > 0 {
+		return problems
+	}
+	if c.VerificationSamplerSteps > c.SamplerSteps {
+		problems = append(problems, "comfyui verification_sampler_steps must not exceed sampler_steps; the install proof exists to be cheaper than a real generation, not slower than one")
 	}
 	return problems
 }

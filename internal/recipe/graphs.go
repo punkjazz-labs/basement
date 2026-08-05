@@ -64,6 +64,12 @@ const (
 	GraphWidthToken  = "{{WIDTH}}"
 	GraphHeightToken = "{{HEIGHT}}"
 	GraphImageToken  = "{{IMAGE}}"
+	// GraphStepsToken is the one token no request supplies. It is here so the
+	// install proof can run the recipe's own graph at one sampler step instead
+	// of shipping a second, near-identical copy of it: a copy would drift, and
+	// a proof that runs a different graph from the one a generation runs is
+	// not a proof of anything a user will do. See ComfyUIConfig.SamplerSteps.
+	GraphStepsToken = "{{STEPS}}"
 )
 
 // RequiredGraphTokens is the exact token set a mode's graph must carry —
@@ -71,7 +77,7 @@ const (
 // reads; an extra one is a placeholder nothing replaces, which would reach
 // ComfyUI as the literal text "{{IMAGE}}".
 func RequiredGraphTokens(mode string) []string {
-	base := []string{GraphPromptToken, GraphSeedToken, GraphFramesToken, GraphWidthToken, GraphHeightToken}
+	base := []string{GraphPromptToken, GraphSeedToken, GraphFramesToken, GraphWidthToken, GraphHeightToken, GraphStepsToken}
 	if mode == ModeImageToVideo {
 		return append(base, GraphImageToken)
 	}
@@ -121,6 +127,12 @@ type GraphInputs struct {
 	Frames int
 	Width  int
 	Height int
+	// Steps is the sampler step count. Unlike every other field here it never
+	// comes from a request: the generation driver passes the recipe's
+	// SamplerSteps and the install proof passes its VerificationSamplerSteps,
+	// so quality stays a property of the model rather than a dial a caller
+	// turns.
+	Steps int
 	// Image is the staged source file name inside the container's input
 	// directory. It is used by image_to_video only and must be empty
 	// otherwise, so a text-to-video graph cannot be handed a file name.
@@ -147,6 +159,7 @@ func RenderGraph(raw []byte, inputs GraphInputs) ([]byte, error) {
 		GraphFramesToken: inputs.Frames,
 		GraphWidthToken:  inputs.Width,
 		GraphHeightToken: inputs.Height,
+		GraphStepsToken:  inputs.Steps,
 	}
 	if inputs.Image != "" {
 		replacements[GraphImageToken] = inputs.Image
@@ -231,6 +244,7 @@ func collectGraphSaveSubfolders(node any, found map[string]bool) {
 var graphTokenSet = map[string]bool{
 	GraphPromptToken: true, GraphSeedToken: true, GraphFramesToken: true,
 	GraphWidthToken: true, GraphHeightToken: true, GraphImageToken: true,
+	GraphStepsToken: true,
 }
 
 func decodeGraph(raw []byte) (any, error) {

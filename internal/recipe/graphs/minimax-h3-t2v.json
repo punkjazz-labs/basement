@@ -11,7 +11,7 @@
     "inputs": {
       "model": ["6", 0],
       "scheduler": "simple",
-      "steps": 20,
+      "steps": "{{STEPS}}",
       "denoise": 1
     }
   },

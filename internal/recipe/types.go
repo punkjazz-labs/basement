@@ -245,6 +245,20 @@ type ComfyUIConfig struct {
 	MinBlocks       int `yaml:"min_blocks" json:"min_blocks"`
 	MaxBlocks       int `yaml:"max_blocks" json:"max_blocks"`
 	DefaultBlocks   int `yaml:"default_blocks" json:"default_blocks"`
+	// SamplerSteps is how many denoising steps a real generation runs, and
+	// VerificationSamplerSteps is how many the install and start proof runs.
+	// They are separate numbers because they answer different questions. A
+	// generation is asked for a good clip; the proof is asked only whether the
+	// weights loaded and the graph produced a file, and on H3 a step costs
+	// about forty-six seconds, so proving that at full quality spent a quarter
+	// of an hour making a video nobody would ever see.
+	//
+	// Both substitute into the same pinned graph through GraphStepsToken, so
+	// the proof walks the same loaders, samplers, VAEs and save node a
+	// generation does. That is the whole point: a cheaper proof that skipped
+	// part of the path would stop being evidence for the part it skipped.
+	SamplerSteps             int `yaml:"sampler_steps" json:"sampler_steps"`
+	VerificationSamplerSteps int `yaml:"verification_sampler_steps" json:"verification_sampler_steps"`
 	// ConcurrentGenerations is how many generations may run at once. It is
 	// pinned at 1 (see validateComfyUI): a generation on a GB10 holds the
 	// whole device for minutes at a time, and nothing has qualified a second

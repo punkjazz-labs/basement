@@ -22,7 +22,7 @@ import (
 const TextToVideoGraph = `{
   "3": {"class_type": "EmptyLatentVideo", "inputs": {"width": "{{WIDTH}}", "height": "{{HEIGHT}}", "length": "{{FRAMES}}"}},
   "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "{{PROMPT}}"}},
-  "5": {"class_type": "KSampler", "inputs": {"seed": "{{SEED}}", "steps": 20, "latent": ["3", 0]}},
+  "5": {"class_type": "KSampler", "inputs": {"seed": "{{SEED}}", "steps": "{{STEPS}}", "latent": ["3", 0]}},
   "6": {"class_type": "SaveVideo", "inputs": {"filename_prefix": "basement", "video": ["5", 0]}}
 }`
 
@@ -33,7 +33,7 @@ const ImageToVideoGraph = `{
   "1": {"class_type": "LoadImage", "inputs": {"image": "{{IMAGE}}"}},
   "3": {"class_type": "EmptyLatentVideo", "inputs": {"width": "{{WIDTH}}", "height": "{{HEIGHT}}", "length": "{{FRAMES}}"}},
   "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "{{PROMPT}}"}},
-  "5": {"class_type": "KSampler", "inputs": {"seed": "{{SEED}}", "latent": ["3", 0]}}
+  "5": {"class_type": "KSampler", "inputs": {"seed": "{{SEED}}", "steps": "{{STEPS}}", "latent": ["3", 0]}}
 }`
 
 // WithGraphs points recipe.GraphSource at an in-memory set for one test,
@@ -101,19 +101,21 @@ func Media() recipe.Recipe {
 		Service: recipe.Service{
 			InternalPort: 8188, DefaultHostPort: 8188, ServedModelID: "Comfy-Org/Media-Test",
 			ComfyUI: &recipe.ComfyUIConfig{
-				Graphs:                map[string]string{recipe.ModeTextToVideo: "t2v.json"},
-				OutputDirectory:       "/output",
-				InputDirectory:        "/input",
-				DefaultShortEdge:      768,
-				MaxShortEdge:          768,
-				MaxLongEdge:           1344,
-				FrameBlock:            17,
-				FrameOffset:           5,
-				FramesPerSecond:       24,
-				MinBlocks:             1,
-				MaxBlocks:             21,
-				DefaultBlocks:         7,
-				ConcurrentGenerations: 1,
+				Graphs:                   map[string]string{recipe.ModeTextToVideo: "t2v.json"},
+				OutputDirectory:          "/output",
+				InputDirectory:           "/input",
+				DefaultShortEdge:         768,
+				MaxShortEdge:             768,
+				MaxLongEdge:              1344,
+				FrameBlock:               17,
+				FrameOffset:              5,
+				FramesPerSecond:          24,
+				MinBlocks:                1,
+				MaxBlocks:                21,
+				DefaultBlocks:            7,
+				SamplerSteps:             20,
+				VerificationSamplerSteps: 1,
+				ConcurrentGenerations:    1,
 			},
 		},
 		MemoryModel: &recipe.MemoryModel{WeightsBytes: 30_000_000_000, KVBytesPerToken: 0, RuntimeOverheadBytes: 20_000_000_000},

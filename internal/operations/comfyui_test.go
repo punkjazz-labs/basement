@@ -283,6 +283,58 @@ func TestVerifyMediaGenerationProducesAFile(t *testing.T) {
 	}
 }
 
+// TestVerifyMediaGenerationRunsTheGraphAtItsVerificationStepCount is the cost
+// of installing a media model. The proof has to execute the graph rather than
+// health-check the runtime, because ComfyUI answers /queue before it has
+// loaded a single weight — but it does not have to execute it at full
+// quality. On H3 a sampler step is roughly 46 seconds, so 20 of them meant
+// every install and every start spent about a quarter of an hour rendering a
+// video that was deleted, and the owner watched a progress bar the whole way.
+//
+// The assertion is on the submitted document rather than on elapsed time,
+// because it is what would silently regress: this graph is the recipe's own,
+// so anything that dropped the substitution would go back to the template's
+// pinned 20 and nothing but a stopwatch would notice.
+func TestVerifyMediaGenerationRunsTheGraphAtItsVerificationStepCount(t *testing.T) {
+	previous := GenerationPollInterval
+	t.Cleanup(func() { GenerationPollInterval = previous })
+	GenerationPollInterval = time.Millisecond
+
+	executor, r, fake := mediaExecutor(t)
+	fake.writes["basement_00001_.mp4"] = "video bytes"
+	fake.reports = []string{"basement_00001_.mp4"}
+	config, _ := r.MediaGeneration()
+
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "verify_media_generation"}, r, nil)
+	if err != nil {
+		t.Fatalf("verify_media_generation: %v", err)
+	}
+	if receipt["steps"] != config.VerificationSamplerSteps {
+		t.Fatalf("receipt steps=%#v, want the recipe's verification_sampler_steps %d", receipt["steps"], config.VerificationSamplerSteps)
+	}
+	if len(fake.submitted) != 1 {
+		t.Fatalf("submitted %d graphs, want exactly 1", len(fake.submitted))
+	}
+	var document map[string]struct {
+		Inputs map[string]any `json:"inputs"`
+	}
+	if err := json.Unmarshal(fake.submitted[0], &document); err != nil {
+		t.Fatal(err)
+	}
+	steps := document["5"].Inputs["steps"]
+	if steps != float64(config.VerificationSamplerSteps) {
+		t.Fatalf("the submitted graph samples %#v times, want the recipe's verification_sampler_steps %d", steps, config.VerificationSamplerSteps)
+	}
+	if steps == float64(config.SamplerSteps) {
+		t.Fatal("verification is sampling as many times as a real generation, which is the cost this step exists to avoid")
+	}
+	// Same graph, not a cheaper stand-in: the save node the collection step
+	// reads from has to be the one a real generation writes through.
+	if _, ok := document["6"].Inputs["filename_prefix"]; !ok {
+		t.Fatalf("verification submitted a graph without the recipe's save node: %s", fake.submitted[0])
+	}
+}
+
 func TestVerifyMediaGenerationFailsWhenTheRuntimeReportsAnError(t *testing.T) {
 	previous := GenerationPollInterval
 	t.Cleanup(func() { GenerationPollInterval = previous })

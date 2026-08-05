@@ -551,6 +551,7 @@ func (s *Server) listRecipes(w http.ResponseWriter, r *http.Request) {
 		MaxBlocks             int      `json:"max_blocks"`
 		DefaultBlocks         int      `json:"default_blocks"`
 		ConcurrentGenerations int      `json:"concurrent_generations"`
+		MaxPromptLength       int      `json:"max_prompt_length"`
 	}
 	type view struct {
 		recipe.Recipe
@@ -575,6 +576,7 @@ func (s *Server) listRecipes(w http.ResponseWriter, r *http.Request) {
 				FrameOffset: config.FrameOffset, FramesPerSecond: config.FramesPerSecond,
 				MinBlocks: config.MinBlocks, MaxBlocks: config.MaxBlocks,
 				DefaultBlocks: config.DefaultBlocks, ConcurrentGenerations: config.ConcurrentGenerations,
+				MaxPromptLength: MaxPromptLength,
 			}
 		}
 		result = append(result, response)
