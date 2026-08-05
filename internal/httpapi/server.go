@@ -24,6 +24,7 @@ import (
 
 	"github.com/punkjazz-labs/basement/internal/auth"
 	"github.com/punkjazz-labs/basement/internal/engine"
+	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/inventory"
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
@@ -117,6 +118,12 @@ type Server struct {
 	// store after a newer one already did, and tokenDelta would read the drop
 	// as the runtime having restarted and re-add it.
 	tokenMu sync.Mutex
+
+	// fleetManager owns the separate mutual TLS transport and signed
+	// membership projection. It is set once before either listener starts.
+	// Keeping it out of New preserves the existing single-node construction
+	// used by tests and by callers that never enable membership.
+	fleetManager *fleet.Manager
 }
 
 // peerDelegationTimeout bounds a delegated placement call. The peer answers
@@ -201,6 +208,9 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/fleet/discover", server.fleetDiscover)
 	mux.HandleFunc("/api/v1/fleet/adopt", server.fleetAdopt)
 	mux.HandleFunc("/api/v1/fleet/adopt/status", server.withReadAuth(server.fleetAdoptStatus))
+	mux.HandleFunc("/api/v1/fleet", server.withReadAuth(server.fleetMembershipSummary))
+	mux.HandleFunc("/api/v1/fleet/join-code", server.fleetJoinCode)
+	mux.HandleFunc("/api/v1/fleet/join", server.fleetJoin)
 	// Two-Spark serving: the head node drives this node's own rank through
 	// these, authenticated by fleet API key only (see withNodeAuth).
 	mux.HandleFunc("/api/v1/internal/node/fabric", server.withNodeAuth(server.nodeFabric))
@@ -239,6 +249,8 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
+
+func (s *Server) SetFleetManager(manager *fleet.Manager) { s.fleetManager = manager }
 
 // SetRecipes replaces the catalog and its version history in one call — see
 // the field comments on Server. Safe to call from any goroutine at any
