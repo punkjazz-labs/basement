@@ -150,6 +150,58 @@ func TestMiniMaxH3ContainerPublishesComfyUIPortWithIsolatedIPC(t *testing.T) {
 	}
 }
 
+// TestComfyUICachesLandInTheWritableMount is a regression from a real install
+// failure. The comfyui image points TMPDIR and every library cache at
+// /root/comfyui-temp and its home at /root/comfyui-user, both of which sit on
+// the read-only root filesystem. torch._dynamo creates its inductor cache
+// while it is still being imported, so the container exited before ComfyUI
+// ever bound a port and the install failed at the health wait. Every path
+// below has to be inside the one writable persistent mount.
+func TestComfyUICachesLandInTheWritableMount(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3, ok := recipe.Find(recipes, "minimax-h3-comfyui-1s")
+	if !ok {
+		t.Fatal("MiniMax H3 recipe missing")
+	}
+	var body map[string]any
+	client := &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ID":"container-id"}`))}, nil
+	})}}
+	if _, err := client.Create(context.Background(), "minimax-h3", h3.Runtime.Reference(), []string{"/managed/model"}, "/managed/cache", nil, h3, Placement{}); err != nil {
+		t.Fatal(err)
+	}
+	environment := map[string]string{}
+	for _, entry := range toStrings(body["Env"].([]any)) {
+		name, value, found := strings.Cut(entry, "=")
+		if !found {
+			t.Fatalf("container environment entry is not a name=value pair: %q", entry)
+		}
+		if previous, duplicated := environment[name]; duplicated {
+			t.Fatalf("%s is set twice, as %q and %q, so which one applies depends on Docker", name, previous, value)
+		}
+		environment[name] = value
+	}
+	for _, name := range []string{
+		"TMPDIR", "XDG_CACHE_HOME", "CUDA_CACHE_PATH", "HF_HOME", "NUMBA_CACHE_DIR",
+		"TORCH_HOME", "TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR",
+		"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+	} {
+		value := environment[name]
+		if value == "" {
+			t.Fatalf("%s is unset, so the image's own read-only default applies", name)
+		}
+		if !strings.HasPrefix(value, recipe.CacheMountPath+"/") {
+			t.Fatalf("%s=%s is not inside the writable mount %s", name, value, recipe.CacheMountPath)
+		}
+	}
+}
+
 func TestLagunaUsesSeparateReadOnlyDrafterMount(t *testing.T) {
 	recipes, err := recipe.Builtin()
 	if err != nil {

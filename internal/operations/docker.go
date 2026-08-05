@@ -78,6 +78,10 @@ type ContainerState struct {
 	// bind sources), so it is the only way to tell that a container predates
 	// its recipe declaring a writable path.
 	Tmpfs map[string]string
+	// Environment is the container's environment as Docker reports it: what
+	// basement set when it created the container, merged over whatever the
+	// image bakes in. Only the names basement sets are compared against it.
+	Environment []string
 	// Image is the image reference the container was created from, as Docker
 	// recorded it in the container's configuration. Every container this
 	// manager creates is created from a repo@sha256 reference, so for ours
@@ -258,6 +262,7 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 			Labels map[string]string
 			Cmd    []string
 			Image  string
+			Env    []string
 		}
 		HostConfig struct {
 			Tmpfs map[string]string
@@ -276,7 +281,48 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 			mounts[mount.Destination] = mount.Source
 		}
 	}
-	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels, Mounts: mounts, Command: body.Config.Cmd, Tmpfs: body.HostConfig.Tmpfs, Image: body.Config.Image}, nil
+	return ContainerState{ID: body.ID, Running: body.State.Running, Status: body.State.Status, Labels: body.Config.Labels, Mounts: mounts, Command: body.Config.Cmd, Tmpfs: body.HostConfig.Tmpfs, Image: body.Config.Image, Environment: body.Config.Env}, nil
+}
+
+// containerEnvironment is every variable basement sets on a container for r,
+// sorted so the same recipe on the same machine always produces the same
+// definition. It is one function rather than inline assembly because the
+// drift check has to ask the same question creation answers: an existing
+// container whose environment no longer matches this has to be rebuilt, and
+// two copies of this logic would drift apart exactly where it matters.
+//
+// The image's own ENV is not in here. Docker merges it underneath, and only
+// the names below are basement's to decide.
+func containerEnvironment(r recipe.Recipe, placement Placement) []string {
+	values := make(map[string]string, len(r.Runtime.Environment)+1)
+	for name, value := range r.Runtime.Environment {
+		values[name] = value
+	}
+	for name, value := range interconnectEnvironment(r, placement) {
+		values[name] = value
+	}
+	// The root filesystem is read-only and /root/.cache is the one writable
+	// mount; Triton defaults to /root/.triton and crashes the engine on a
+	// read-only rootfs, so steer it into the persistent cache.
+	defaults := map[string]string{"TRITON_CACHE_DIR": "/root/.cache/triton"}
+	// The comfyui image bakes its own cache and home paths onto the read-only
+	// root filesystem, so they have to be redirected before the runtime can
+	// start at all. See comfyUIEnvironment.
+	if r.Runtime.Kind == "comfyui" {
+		for name, value := range comfyUIEnvironment() {
+			defaults[name] = value
+		}
+	}
+	for name, value := range defaults {
+		if _, overridden := r.Runtime.Environment[name]; !overridden {
+			values[name] = value
+		}
+	}
+	environment := make([]string, 0, len(values))
+	for _, name := range sortedKeys(values) {
+		environment = append(environment, name+"="+values[name])
+	}
+	return environment
 }
 
 // Create builds the container for r. writablePaths are extra read-write bind
@@ -298,20 +344,7 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 	for _, mountPoint := range sortedKeys(writablePaths) {
 		binds = append(binds, writablePaths[mountPoint]+":"+mountPoint+":rw")
 	}
-	environment := make([]string, 0, len(r.Runtime.Environment)+1)
-	for name, value := range r.Runtime.Environment {
-		environment = append(environment, name+"="+value)
-	}
-	for name, value := range interconnectEnvironment(r, placement) {
-		environment = append(environment, name+"="+value)
-	}
-	// The root filesystem is read-only and /root/.cache is the one writable
-	// mount; Triton defaults to /root/.triton and crashes the engine on a
-	// read-only rootfs, so steer it into the persistent cache.
-	if _, overridden := r.Runtime.Environment["TRITON_CACHE_DIR"]; !overridden {
-		environment = append(environment, "TRITON_CACHE_DIR=/root/.cache/triton")
-	}
-	sort.Strings(environment)
+	environment := containerEnvironment(r, placement)
 	// The model endpoint is loopback-only; the manager's authenticated /v1
 	// proxy is the sole network path to it (ADR 0007).
 	hostConfig := map[string]any{
@@ -1022,6 +1055,50 @@ func staleTmpfs(state ContainerState, expected map[string]string) []mountMismatc
 	return drift
 }
 
+// environmentMismatch is one variable basement sets whose value an existing
+// container does not carry.
+type environmentMismatch struct {
+	Name     string
+	Actual   string
+	Expected string
+}
+
+// staleEnvironment reports an existing container whose environment no longer
+// matches what creating it today would set. Docker fixes a container's
+// environment at creation, so a manager that learns to set a variable, or to
+// set it differently, changes nothing about a container that already exists.
+// That is not cosmetic: the comfyui image points its caches at the read-only
+// root filesystem, and the redirect that makes it start at all is exactly
+// such a variable. Without this check a failed install could be retried
+// forever and fail identically every time, because the retry would keep
+// reusing the container built before the fix.
+//
+// Only names basement sets are compared. Everything else in the list is the
+// image's own environment, which is not basement's to have an opinion about.
+func staleEnvironment(state ContainerState, expected []string) []environmentMismatch {
+	if len(state.Environment) == 0 {
+		return nil
+	}
+	actual := make(map[string]string, len(state.Environment))
+	for _, entry := range state.Environment {
+		if name, value, found := strings.Cut(entry, "="); found {
+			actual[name] = value
+		}
+	}
+	drift := make([]environmentMismatch, 0, len(expected))
+	for _, entry := range expected {
+		name, want, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		if have, set := actual[name]; !set || have != want {
+			drift = append(drift, environmentMismatch{Name: name, Actual: have, Expected: want})
+		}
+	}
+	sort.Slice(drift, func(i, j int) bool { return drift[i].Name < drift[j].Name })
+	return drift
+}
+
 // imageMismatch is the pinned image an existing container was built from,
 // when the recipe now pins a different one.
 type imageMismatch struct {
@@ -1274,6 +1351,14 @@ func launchMismatchReceipt(drift []launchMismatch) []map[string]any {
 
 // mountMismatchReceipt renders mismatches for a job receipt, so an operator
 // reading the log can see exactly which directory moved.
+func environmentMismatchReceipt(drift []environmentMismatch) []map[string]any {
+	entries := make([]map[string]any, 0, len(drift))
+	for _, mismatch := range drift {
+		entries = append(entries, map[string]any{"variable": mismatch.Name, "was": mismatch.Actual, "now": mismatch.Expected})
+	}
+	return entries
+}
+
 func mountMismatchReceipt(stale []mountMismatch) []map[string]any {
 	entries := make([]map[string]any, 0, len(stale))
 	for _, mismatch := range stale {

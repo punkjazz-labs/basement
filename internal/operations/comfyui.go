@@ -516,6 +516,38 @@ const comfyUIModelPathsFile = recipe.CacheMountPath + "/comfyui-model-paths.yaml
 // sees.
 const comfyUIUserDirectory = recipe.CacheMountPath + "/comfyui-user"
 
+// comfyUIEnvironment steers the image's own cache and home directories into
+// the one writable persistent mount. The image points TMPDIR and every
+// library cache at /root/comfyui-temp and its home at /root/comfyui-user,
+// and both sit on the read-only root filesystem basement creates. That is not
+// a slow path that degrades: torch._dynamo creates its inductor cache while
+// the module is still being imported, so the container exits before ComfyUI
+// binds a port at all, and the install fails at the health wait with a stack
+// trace instead of a reason.
+//
+// A tmpfs would also satisfy the writes, but these are compilation caches for
+// a twenty gigabyte model on a machine whose unified memory is already the
+// scarce resource. Sending them to the persistent cache costs no memory and
+// lets a second start reuse what the first one compiled.
+//
+// TRITON_CACHE_DIR is deliberately absent: every runtime kind already gets
+// the same redirect for it, and one rule for one cache is easier to keep true
+// than two. A recipe that names any of these itself still wins.
+func comfyUIEnvironment() map[string]string {
+	return map[string]string{
+		"TMPDIR":                  recipe.CacheMountPath + "/comfyui-temp",
+		"XDG_CACHE_HOME":          recipe.CacheMountPath + "/comfyui-temp/cache",
+		"CUDA_CACHE_PATH":         recipe.CacheMountPath + "/comfyui-temp/cuda-cache",
+		"HF_HOME":                 recipe.CacheMountPath + "/comfyui-temp/huggingface",
+		"NUMBA_CACHE_DIR":         recipe.CacheMountPath + "/comfyui-temp/numba-cache",
+		"TORCH_HOME":              recipe.CacheMountPath + "/comfyui-temp/torch",
+		"TORCHINDUCTOR_CACHE_DIR": recipe.CacheMountPath + "/comfyui-temp/torchinductor",
+		"HOME":                    comfyUIUserDirectory,
+		"XDG_CONFIG_HOME":         comfyUIUserDirectory + "/config",
+		"XDG_DATA_HOME":           comfyUIUserDirectory + "/data",
+	}
+}
+
 // comfyUIModelPaths renders the extra model paths document for r: one entry
 // per model folder the primary artifact pins, each pointing at that folder
 // inside the read-only artifact mount. The folders come from the pinned file

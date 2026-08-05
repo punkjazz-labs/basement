@@ -836,13 +836,14 @@ func containerFixtureWithTmpfs(id string, running bool, labels, mounts, tmpfs ma
 // describe a daemon that reports neither, which the drift checks read as
 // silence rather than disagreement.
 type containerFixture struct {
-	ID      string
-	Running bool
-	Labels  map[string]string
-	Mounts  map[string]string
-	Tmpfs   map[string]string
-	Image   string
-	Command []string
+	ID          string
+	Running     bool
+	Labels      map[string]string
+	Mounts      map[string]string
+	Tmpfs       map[string]string
+	Image       string
+	Command     []string
+	Environment []string
 }
 
 func (f containerFixture) JSON() string {
@@ -857,7 +858,7 @@ func (f containerFixture) JSON() string {
 	encoded, err := json.Marshal(map[string]any{
 		"ID":         f.ID,
 		"State":      map[string]any{"Running": f.Running, "Status": status},
-		"Config":     map[string]any{"Labels": f.Labels, "Cmd": f.Command, "Image": f.Image},
+		"Config":     map[string]any{"Labels": f.Labels, "Cmd": f.Command, "Image": f.Image, "Env": f.Environment},
 		"HostConfig": map[string]any{"Tmpfs": f.Tmpfs},
 		"Mounts":     entries,
 	})
@@ -1337,6 +1338,81 @@ func TestCreateContainerReplacesAContainerOnTheSupersededImage(t *testing.T) {
 // A same-version recipe update must replace a container whose serve command
 // still holds the old value. Labels alone cannot make that container current,
 // and the receipt must identify the flag that caused the rebuild.
+// TestStartContainerRebuildsWhenTheEnvironmentChanged comes from a real
+// install failure. Docker fixes a container's environment at creation, so a
+// manager that learns to redirect a cache directory changes nothing about a
+// container that already exists. The install that failed for want of that
+// redirect was retried and failed identically, because the retry reused the
+// container built before the fix rather than rebuilding it.
+func TestStartContainerRebuildsWhenTheEnvironmentChanged(t *testing.T) {
+	r := chatTemplateRecipe(t)
+	executor := &HostExecutor{dataDir: t.TempDir()}
+	writeArtifactFixture(t, executor, r)
+	labels := map[string]string{labelManaged: "true", labelRecipeID: r.ID, labelRecipeVersion: strconv.Itoa(r.Version)}
+	// Everything this manager would set today, except that the container was
+	// built when Triton still went to its own default on the read-only root
+	// filesystem. One variable differs, so one is what the receipt must name.
+	previousEnvironment := []string{"PATH=/usr/bin"}
+	for _, entry := range containerEnvironment(r, Placement{}) {
+		if strings.HasPrefix(entry, "TRITON_CACHE_DIR=") {
+			entry = "TRITON_CACHE_DIR=/root/.triton"
+		}
+		previousEnvironment = append(previousEnvironment, entry)
+	}
+	old := containerFixture{
+		ID: "old-id", Labels: labels, Mounts: executor.expectedMounts(r), Tmpfs: containerTmpfs(r),
+		Image: r.Runtime.Reference(), Command: vllmArgs(r, Placement{}),
+		Environment: previousEnvironment,
+	}
+	created, started, stopped, removed := false, false, false, false
+	executor.docker = &DockerClient{client: &http.Client{Transport: withoutNegotiation(func(request *http.Request) (*http.Response, error) {
+		path := request.URL.Path
+		switch {
+		case request.Method == http.MethodPost && strings.HasPrefix(path, "/containers/create"):
+			created = true
+			return dockerFixtureResponse(http.StatusCreated, `{"ID":"rebuilt-id"}`), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			stopped = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodDelete:
+			removed = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+			started = true
+			return dockerFixtureResponse(http.StatusNoContent, ""), nil
+		case containerFromPath(path) == legacyContainerName(r):
+			return dockerFixtureResponse(http.StatusNotFound, ""), nil
+		case created:
+			current := containerFixture{
+				ID: "rebuilt-id", Running: started, Labels: labels, Mounts: executor.expectedMounts(r),
+				Tmpfs: containerTmpfs(r), Image: r.Runtime.Reference(), Command: vllmArgs(r, Placement{}),
+				Environment: append([]string{"PATH=/usr/bin"}, containerEnvironment(r, Placement{})...),
+			}
+			return dockerFixtureResponse(http.StatusOK, current.JSON()), nil
+		default:
+			return dockerFixtureResponse(http.StatusOK, old.JSON()), nil
+		}
+	})}}
+
+	if executor.Completed(context.Background(), Execution{}, recipe.Operation{Type: "create_container"}, r, nil) {
+		t.Fatal("a container carrying the previous environment was accepted as current")
+	}
+	receipt, err := executor.Execute(context.Background(), Execution{}, recipe.Operation{Type: "start_container"}, r, nil)
+	if err != nil {
+		t.Fatalf("start_container: %v", err)
+	}
+	if !stopped || !removed || !created || !started {
+		t.Fatalf("stopped=%v removed=%v created=%v started=%v, want the stale environment rebuilt", stopped, removed, created, started)
+	}
+	drift, ok := receipt["recreated_for_environment_change"].([]map[string]any)
+	if !ok || len(drift) != 1 {
+		t.Fatalf("receipt does not report the environment change: %#v", receipt["recreated_for_environment_change"])
+	}
+	if drift[0]["variable"] != "TRITON_CACHE_DIR" || drift[0]["was"] != "/root/.triton" || drift[0]["now"] != "/root/.cache/triton" {
+		t.Fatalf("receipt environment detail = %#v", drift[0])
+	}
+}
+
 func TestStartContainerRebuildsWhenAServeArgumentChanged(t *testing.T) {
 	r := chatTemplateRecipe(t)
 	executor := &HostExecutor{dataDir: t.TempDir()}
