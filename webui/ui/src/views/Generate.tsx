@@ -4,8 +4,9 @@ import {
   type GenerateResponse, type Generation, type Recipe,
 } from '../api'
 import {
-  canvasOptions, durationOptions, formatElapsed, generationActive, generationElapsedSeconds,
-  generationMode, generationState, generationTerminal,
+  canvasShapes, canvasSizes, defaultCanvasTier, durationOptions, formatElapsed,
+  generationActive, generationElapsedSeconds, generationMode, generationState, generationTerminal,
+  type CanvasShape,
 } from '../generation'
 import { readableWeights } from '../catalog'
 import { confirmBox, noticeBox } from '../confirm'
@@ -209,10 +210,11 @@ function GenerationCard({ generation, recipe, busy, selected, onSelect, onCancel
 
 export default function Generate({ recipe, recipes }: GenerateProps) {
   const config = recipe.media_generation
-  const sizes = useMemo(() => config ? canvasOptions(config) : [], [config])
+  const [shape, setShape] = useState<CanvasShape>('horizontal')
+  const sizes = useMemo(() => config ? canvasSizes(config, shape) : [], [config, shape])
   const durations = useMemo(() => config ? durationOptions(config) : [], [config])
   const [prompt, setPrompt] = useState('')
-  const [size, setSize] = useState('')
+  const [shortEdge, setShortEdge] = useState(0)
   const [blocks, setBlocks] = useState(0)
   const [seed, setSeed] = useState('')
   const [generations, setGenerations] = useState<Generation[]>([])
@@ -224,10 +226,13 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   const [selectedVideoID, setSelectedVideoID] = useState('')
   const [streamAvailable, setStreamAvailable] = useState(true)
 
+  // The tier survives a change of shape, because turning a clip on its side is
+  // not a decision about how big it is.
   useEffect(() => {
-    const preferred = sizes[1] ?? sizes[0]
-    setSize(current => sizes.some(option => option.value === current) ? current : preferred?.value ?? '')
-  }, [sizes])
+    if (!config) return
+    const preferred = defaultCanvasTier(config)
+    setShortEdge(current => sizes.some(option => option.shortEdge === current) ? current : preferred)
+  }, [sizes, config])
 
   useEffect(() => {
     const preferred = durations.find(option => option.blocks === config?.default_blocks) ?? durations[0]
@@ -302,7 +307,11 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
 
   if (!config) return null
 
-  const selectedSize = sizes.find(option => option.value === size)
+  const selectedSize = sizes.find(option => option.shortEdge === shortEdge)
+  // Render time on this class of model tracks pixel count, and the largest
+  // canvas is hours rather than minutes, so each rung says what it costs
+  // against the smallest one on offer instead of leaving that to be found out.
+  const basePixels = sizes[0] ? sizes[0].width * sizes[0].height : 0
   const textMode = config.modes.includes('text_to_video')
   const imageMode = config.modes.includes('image_to_video')
   // Counted in code points so this agrees with the server, which counts
@@ -446,25 +455,51 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
             )}
 
             <div className="gen-controls">
-              <div className="field">
-                <span>Size</span>
-                <div className="pill-group" role="radiogroup" aria-label="Size">
-                  {sizes.map(option => (
-                    <label key={option.value}>
-                      <input
-                        type="radio"
-                        name="gen-size"
-                        value={option.value}
-                        checked={size === option.value}
-                        onChange={() => setSize(option.value)}
-                      />
-                      {option.label}
-                    </label>
-                  ))}
+              <div className="gen-canvas">
+                <div className="field">
+                  <span>Shape</span>
+                  <div className="pill-group gen-shape-pills" role="radiogroup" aria-label="Shape">
+                    {canvasShapes().map(option => (
+                      <label key={option.shape}>
+                        <input
+                          type="radio"
+                          name="gen-shape"
+                          value={option.shape}
+                          checked={shape === option.shape}
+                          onChange={() => setShape(option.shape)}
+                        />
+                        <span className={`shape-glyph ${option.shape}`} aria-hidden="true" />
+                        {option.label}
+                        <span className="shape-ratio">{option.ratio}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
-                <span className="hint">
-                  Short edge up to {config.max_short_edge}px, long edge up to {config.max_long_edge}px. Width and height must be multiples of {config.canvas_multiple}.
-                </span>
+                <div className="field">
+                  <span>Size</span>
+                  <div className="size-group" role="radiogroup" aria-label="Size">
+                    {sizes.map(option => (
+                      <label key={option.value} className="size-option">
+                        <input
+                          type="radio"
+                          name="gen-size"
+                          value={option.value}
+                          checked={shortEdge === option.shortEdge}
+                          onChange={() => setShortEdge(option.shortEdge)}
+                        />
+                        <span className="size-px">{option.label}</span>
+                        {basePixels > 0 && (
+                          <span className="size-cost">
+                            {(option.width * option.height / basePixels).toFixed(2).replace(/\.?0+$/, '')}× the pixels
+                          </span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                  <span className="hint">
+                    Compared with {sizes[0]?.label ?? 'the smallest size'}. Render time grows faster than pixel count, so the largest canvas is hours rather than minutes.
+                  </span>
+                </div>
               </div>
               <div className="field">
                 <span>Duration</span>
@@ -498,7 +533,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
               </label>
             </div>
 
-            {sizes.length === 0 && <p className="error-text">This recipe does not provide a canvas that fits the approved size presets.</p>}
+            {sizes.length === 0 && <p className="error-text">This recipe declares no canvas that fits a 16:9 shape on its own pixel grid.</p>}
             {!textMode && <p className="error-text">Text to video is not available for this model.</p>}
             {formError && <div className="error-note" role="alert"><p>{formError}</p></div>}
 

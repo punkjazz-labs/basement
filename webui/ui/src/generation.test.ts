@@ -2,8 +2,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
-  canvasOptions, durationOptions, generationElapsedSeconds, generationState, generationTerminal,
-  type CanvasOption,
+  canvasSizes, canvasTiers, defaultCanvasTier, durationOptions, generationElapsedSeconds,
+  generationState, generationTerminal,
 } from './generation'
 import type { Generation, MediaGenerationConfig } from './api'
 import { GenerationProgress } from './views/Generate'
@@ -25,19 +25,35 @@ const config = (overrides: Partial<MediaGenerationConfig> = {}): MediaGeneration
   ...overrides,
 })
 
-describe('canvasOptions', () => {
-  it('derives the approved shapes from the recipe canvas', () => {
-    expect(canvasOptions(config()).map((option: CanvasOption) => option.value)).toEqual([
-      '768x768',
-      '768x1152',
-      '544x960',
-      '768x1344',
+// The canvas the shipped MiniMax H3 recipe declares.
+const h3 = config({ default_short_edge: 768, max_short_edge: 1440, max_long_edge: 2560 })
+
+describe('canvasSizes', () => {
+  it('offers a horizontal canvas, which the shape presets it replaced never could', () => {
+    const horizontal = canvasSizes(h3, 'horizontal')
+    expect(horizontal.length).toBeGreaterThan(0)
+    for (const option of horizontal) expect(option.width).toBeGreaterThan(option.height)
+  })
+
+  it('turns a clip on its side without changing what it costs to render', () => {
+    const pixels = (shape: 'horizontal' | 'vertical' | 'square') =>
+      canvasSizes(h3, shape).map(option => option.width * option.height)
+    expect(pixels('vertical')).toEqual(pixels('horizontal'))
+    expect(canvasSizes(h3, 'vertical').map(option => option.value)).toEqual([
+      '576x1024', '864x1536', '1152x2048', '1440x2560',
+    ])
+    expect(canvasSizes(h3, 'horizontal').map(option => option.value)).toEqual([
+      '1024x576', '1536x864', '2048x1152', '2560x1440',
     ])
   })
 
-  it('keeps every offered dimension on the declared grid and inside both bounds', () => {
-    const recipe = config({ default_short_edge: 384, max_short_edge: 512, max_long_edge: 768, canvas_multiple: 16 })
-    const options = canvasOptions(recipe)
+  it('keeps a square square', () => {
+    for (const option of canvasSizes(h3, 'square')) expect(option.width).toBe(option.height)
+  })
+
+  it('holds every offered edge to the recipe grid and both declared bounds', () => {
+    const recipe = config({ default_short_edge: 384, max_short_edge: 720, max_long_edge: 1280, canvas_multiple: 16 })
+    const options = (['horizontal', 'vertical', 'square'] as const).flatMap(shape => canvasSizes(recipe, shape))
     expect(options.length).toBeGreaterThan(0)
     for (const option of options) {
       expect(option.width % recipe.canvas_multiple).toBe(0)
@@ -47,20 +63,25 @@ describe('canvasOptions', () => {
     }
   })
 
-  it('omits a preset the recipe canvas excludes instead of clamping it', () => {
-    expect(canvasOptions(config({ max_long_edge: 1200 })).map(option => option.value)).toEqual([
-      '768x768',
-      '768x1152',
-      '544x960',
-    ])
+  it('drops a rung the long edge cannot hold rather than clamping it to fit', () => {
+    expect(canvasTiers(h3)).toEqual([576, 864, 1152, 1440])
+    expect(canvasTiers(config({ ...h3, max_long_edge: 1600 }))).toEqual([576, 864])
   })
 
-  it('omits relative shapes that do not land exactly on the recipe grid', () => {
-    expect(canvasOptions(config({ default_short_edge: 640, max_short_edge: 640, max_long_edge: 1120 }))).toEqual([
-      { width: 640, height: 640, value: '640x640', label: '640 × 640' },
-      { width: 640, height: 960, value: '640x960', label: '640 × 960' },
-      { width: 640, height: 1120, value: '640x1120', label: '640 × 1120' },
-    ])
+  it('never offers a canvas far below the one the recipe was written for', () => {
+    // 288 x 512 is on the grid and inside both bounds, and is still not a
+    // faster version of a 768-pixel canvas.
+    expect(canvasTiers(h3)).not.toContain(288)
+  })
+
+  it('starts on the rung nearest the recipe default, not the cheapest one', () => {
+    expect(defaultCanvasTier(h3)).toBe(864)
+    expect(defaultCanvasTier(config({ ...h3, default_short_edge: 1200 }))).toBe(1152)
+  })
+
+  it('offers nothing rather than an approximation when the grid excludes 16:9', () => {
+    expect(canvasTiers(config({ max_short_edge: 200, max_long_edge: 400 }))).toEqual([])
+    expect(canvasSizes(config({ max_short_edge: 200, max_long_edge: 400 }), 'horizontal')).toEqual([])
   })
 })
 

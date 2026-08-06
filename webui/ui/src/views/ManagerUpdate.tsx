@@ -31,18 +31,41 @@ export function ManagerUpdateSidebar({ info, managerVersion, onOpen }: {
   managerVersion?: string
   onOpen: () => void
 }) {
-  const available = isInstallableManagerUpdate(info) ||
-    Boolean(info?.manual_upgrade_required || info?.manual_bootstrap_required)
+  const installable = isInstallableManagerUpdate(info)
+  const manual = Boolean(info?.manual_upgrade_required || info?.manual_bootstrap_required)
   const updateVersion = (info?.target_version ?? info?.latest_version ?? '').replace(/^v/, '')
+  // A newer release the console cannot install by itself, and a check that
+  // never got an answer, both used to show nothing at all. That looked exactly
+  // like being up to date, so the only way to tell any of them apart was to
+  // open the dialog and read it. Every state now says which one it is.
+  const newer = Boolean(info?.update_available)
+  const label = installable
+    ? (updateVersion ? `Update to ${updateVersion}` : 'Update available')
+    : manual
+      ? (updateVersion ? `${updateVersion} needs a manual step` : 'Update needs a manual step')
+      : (updateVersion ? `${updateVersion} could not be verified` : 'Update could not be verified')
 
+  // A check that came back with a note did not compare anything: a development
+  // build and a repository with no releases both land here, and neither is up
+  // to date. The note is the server's own sentence, kept rather than reworded.
+  const settled = info?.checked && !newer
   return (
     <>
       <button className="side-manager" type="button" aria-haspopup="dialog" onClick={onOpen}>
         manager {managerVersion ?? ''}
+        {!info && <span className="side-state"> · checking</span>}
+        {info && !info.checked && <span className="side-state warn"> · could not check</span>}
+        {settled && info.note && <span className="side-state"> · {info.note}</span>}
+        {settled && !info.note && <span className="side-state"> · up to date</span>}
       </button>
-      {available && (
-        <button className="side-update" type="button" aria-haspopup="dialog" onClick={onOpen}>
-          {updateVersion ? `Update ${updateVersion} available` : 'Update available'}
+      {newer && (
+        <button
+          className={installable ? 'side-update' : 'side-update pending'}
+          type="button"
+          aria-haspopup="dialog"
+          onClick={onOpen}
+        >
+          {label}
         </button>
       )}
     </>

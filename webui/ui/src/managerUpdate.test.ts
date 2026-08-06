@@ -39,26 +39,94 @@ describe('manager update availability', () => {
   })
 })
 
+// The sidebar renders one manager line and, when there is something newer, one
+// pill. These pull them back out of the element tree so each state can be read
+// the way the person in front of the console reads it.
+const sidebarPill = (info: UpdateInfo | null, onOpen: () => void = () => {}) => {
+  const sidebar = ManagerUpdateSidebar({ info, managerVersion: 'v1.9.9', onOpen })
+  return Children.toArray(sidebar.props.children).find(child =>
+    isValidElement<{ className?: string }>(child) && child.props.className?.startsWith('side-update'),
+  ) as ReactElement<{ className: string; children: string; onClick: () => void }> | undefined
+}
+
+const sidebarManagerLine = (info: UpdateInfo | null): string => {
+  const sidebar = ManagerUpdateSidebar({ info, managerVersion: 'v1.9.9', onOpen: () => {} })
+  const line = Children.toArray(sidebar.props.children).find(child =>
+    isValidElement<{ className?: string }>(child) && child.props.className === 'side-manager',
+  ) as ReactElement<{ children: unknown }> | undefined
+  const text = (node: unknown): string => {
+    if (typeof node === 'string' || typeof node === 'number') return String(node)
+    if (Array.isArray(node)) return node.map(text).join('')
+    if (isValidElement<{ children?: unknown }>(node)) return text(node.props.children)
+    return ''
+  }
+  return text(line?.props.children).replace(/\s+/g, ' ').trim()
+}
+
 describe('manager update dialog', () => {
   it('the sidebar control opens the dialog and it stays open through the restart window', () => {
     let state = initialManagerUpdateDialogState
-    const sidebar = ManagerUpdateSidebar({
-      info: availableUpdate(),
-      managerVersion: 'v1.9.9',
-      onOpen: () => {
-        state = managerUpdateDialogReducer(state, { type: 'open_from_sidebar' })
-      },
+    const updateControl = sidebarPill(availableUpdate(), () => {
+      state = managerUpdateDialogReducer(state, { type: 'open_from_sidebar' })
     })
-    const updateControl = Children.toArray(sidebar.props.children).find(child =>
-      isValidElement<{ className?: string }>(child) && child.props.className === 'side-update',
-    ) as ReactElement<{ children: string; onClick: () => void }> | undefined
 
-    expect(updateControl?.props.children).toBe('Update 1.10.0 available')
+    expect(updateControl?.props.children).toBe('Update to 1.10.0')
     updateControl?.props.onClick()
     expect(state).toEqual({ open: true, reconnecting: false })
 
     state = managerUpdateDialogReducer(state, { type: 'reconnecting', value: true })
     expect(state).toEqual({ open: true, reconnecting: true })
+  })
+})
+
+describe('the manager line states its own update status', () => {
+  it('says so when the check found nothing newer, instead of looking unchecked', () => {
+    const current = availableUpdate({ update_available: false, target_version: undefined, latest_version: '1.9.9' })
+    expect(sidebarManagerLine(current)).toBe('manager v1.9.9 · up to date')
+    expect(sidebarPill(current)).toBeUndefined()
+  })
+
+  it('separates a check that never got an answer from a clean result', () => {
+    expect(sidebarManagerLine(availableUpdate({ checked: false, update_available: false })))
+      .toBe('manager v1.9.9 · could not check')
+    expect(sidebarManagerLine(null)).toBe('manager v1.9.9 · checking')
+  })
+
+  it('does not call a build that cannot be compared up to date', () => {
+    // What a development build actually reports. It is the state the console
+    // was silent about, and being silent read as "nothing to update".
+    expect(sidebarManagerLine(availableUpdate({
+      current_version: 'dev',
+      latest_version: undefined,
+      target_version: undefined,
+      update_available: false,
+      signed: false,
+      compatible: false,
+      installable: false,
+      note: 'development builds cannot use console updates',
+    }))).toBe('manager v1.9.9 · development builds cannot use console updates')
+  })
+
+  it('drops the up-to-date claim the moment something newer exists', () => {
+    expect(sidebarManagerLine(availableUpdate())).toBe('manager v1.9.9')
+  })
+
+  it('shows a newer release the console cannot install by itself', () => {
+    // This used to render nothing at all, which read as being up to date.
+    const manual = availableUpdate({ installable: false, manual_bootstrap_required: true })
+    expect(sidebarPill(manual)?.props.children).toBe('1.10.0 needs a manual step')
+    expect(sidebarPill(manual)?.props.className).toBe('side-update pending')
+  })
+
+  it('shows a newer release that failed verification rather than hiding it', () => {
+    const unverified = availableUpdate({ installable: false, signed: false, target_version: undefined })
+    expect(sidebarPill(unverified)?.props.children).toBe('1.10.0 could not be verified')
+    expect(sidebarPill(unverified)?.props.className).toBe('side-update pending')
+  })
+
+  it('never invites a downgrade, whatever the server said was available', () => {
+    const older = availableUpdate({ current_version: 'v2.0.0', latest_version: '1.9.0', target_version: 'v1.9.0' })
+    expect(sidebarPill(older)?.props.children).not.toContain('Update to')
   })
 })
 
