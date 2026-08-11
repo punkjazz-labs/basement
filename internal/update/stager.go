@@ -129,7 +129,7 @@ func (stager *Stager) StagePrepared(ctx context.Context, candidate Candidate, st
 	status.State = "downloading"
 	status.UpdatedAt = journalNow(stager.Now)
 	if err := stager.writeStatus(status); err != nil {
-		return status, err
+		return fail(err)
 	}
 	partialAsset := filepath.Join(partialDir, status.AttemptID+".basement")
 	if err := stager.download(ctx, candidate.AssetURL, partialAsset, manifest.AssetSize); err != nil {
@@ -139,7 +139,7 @@ func (stager *Stager) StagePrepared(ctx context.Context, candidate Candidate, st
 	status.State = "verifying"
 	status.UpdatedAt = journalNow(stager.Now)
 	if err := stager.writeStatus(status); err != nil {
-		return status, err
+		return fail(err)
 	}
 	if err := verifyAssetPath(partialAsset, manifest); err != nil {
 		return fail(err)
@@ -171,6 +171,54 @@ func (stager *Stager) StagePrepared(ctx context.Context, candidate Candidate, st
 		return status, err
 	}
 	return status, nil
+}
+
+// ReconcileStartup fails over a staging attempt that a previous manager
+// process abandoned before handing it to the root updater. The manager-owned
+// states can only advance while the process that wrote them is alive, so at
+// startup any of them left behind with no pending root request and no root
+// receipt for the same attempt would otherwise read as an update in progress
+// forever, refusing every install, generation and further update.
+func (stager *Stager) ReconcileStartup() error {
+	if stager == nil {
+		return nil
+	}
+	var status AttemptStatus
+	if err := readJSONFile(stager.statusPath(), 64<<10, &status); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	switch status.State {
+	case "checking_signature", "downloading", "verifying":
+	default:
+		return nil
+	}
+	requestPath := filepath.Join(stager.DataDir, "updates", "staging", "pending", requestFileName)
+	var request ApplyRequest
+	requestErr := readJSONFile(requestPath, 64<<10, &request)
+	if requestErr == nil && request.AttemptID == status.AttemptID {
+		// The handoff file exists, so the root updater owns this attempt
+		// and will write the receipt that settles it.
+		return nil
+	}
+	if requestErr != nil && !errors.Is(requestErr, os.ErrNotExist) {
+		return requestErr
+	}
+	var receipt Receipt
+	receiptErr := readJSONFile(stager.RootStatusPath, 64<<10, &receipt)
+	if receiptErr == nil && receipt.AttemptID == status.AttemptID {
+		// Status() already prefers the root receipt for this attempt.
+		return nil
+	}
+	if receiptErr != nil && !errors.Is(receiptErr, os.ErrNotExist) {
+		return receiptErr
+	}
+	status.State = "failed_before_handoff"
+	status.Failure = "the manager restarted before this update reached the root updater; start the update again"
+	status.UpdatedAt = journalNow(stager.Now)
+	return stager.writeStatus(status)
 }
 
 func (stager *Stager) Status() (AttemptStatus, bool, error) {

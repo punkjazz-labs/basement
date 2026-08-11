@@ -134,6 +134,12 @@ func main() {
 	// when that happens.
 	jobEngine.SetTokenSampler(api.CaptureFinalTokenUsage)
 
+	// A staging attempt the previous process abandoned mid-download would
+	// otherwise read as an update in progress forever, refusing every
+	// install and generation until someone deletes the status file by hand.
+	if err := api.RecoverAbandonedUpdate(); err != nil {
+		logger.Warn("recover abandoned manager update", "error", err)
+	}
 	if err := jobEngine.ReconcileReservations(context.Background()); err != nil {
 		logger.Error("reconcile node reservations", "error", err)
 		exit(1)

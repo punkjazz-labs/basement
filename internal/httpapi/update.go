@@ -175,6 +175,13 @@ func (s *Server) updateStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
+// RecoverAbandonedUpdate settles a staging attempt a previous manager process
+// left behind, so a crash mid-download does not read as an update in progress
+// forever. Call once at startup, before requests are served.
+func (s *Server) RecoverAbandonedUpdate() error {
+	return s.updateStager.ReconcileStartup()
+}
+
 func (s *Server) updateMaintenanceActiveLocked() bool {
 	if s.updateApplying {
 		return true
