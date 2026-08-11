@@ -4,7 +4,7 @@ import {
   type SystemInfo, type UpdateAttemptStatus, type UpdateInfo,
 } from '../api'
 import {
-  followManagerUpdate, isInstallableManagerUpdate,
+  discoveredAttemptAction, followManagerUpdate, isInstallableManagerUpdate,
   isUpdateApplyResult, isUpdateAttemptStatus, updateRefusal,
   type UpdateRefusal,
 } from '../managerUpdate'
@@ -177,11 +177,14 @@ function ManagerUpdateBody({
       if (!isUpdateAttemptStatus(payload)) return
       if (info?.update_available && info.target_version !== payload.target_version) return
       setAttempt(payload)
-      if (!['succeeded', 'rolled_back', 'recovery_required', 'failed_before_handoff'].includes(payload.state)) {
+      const action = discoveredAttemptAction(payload.state)
+      if (action === 'follow') {
         startFollowing(payload.attempt_id)
+      } else if (action === 'announce') {
+        onManagerReady()
       }
     }).catch(() => {})
-  }, [info, startFollowing])
+  }, [info, startFollowing, onManagerReady])
 
   const checkForUpdates = async () => {
     setChecking(true)

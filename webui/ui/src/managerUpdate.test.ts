@@ -3,8 +3,8 @@ import { Children, isValidElement, type ReactElement } from 'react'
 import { OfflineError, type UpdateAttemptStatus, type UpdateInfo } from './api'
 import { ManagerUpdateSidebar } from './views/ManagerUpdate'
 import {
-  followManagerUpdate, initialManagerUpdateDialogState, isInstallableManagerUpdate,
-  managerUpdateDialogReducer, updateRefusal, type UpdatePollEvent,
+  discoveredAttemptAction, followManagerUpdate, initialManagerUpdateDialogState,
+  isInstallableManagerUpdate, managerUpdateDialogReducer, updateRefusal, type UpdatePollEvent,
 } from './managerUpdate'
 
 const availableUpdate = (overrides: Partial<UpdateInfo> = {}): UpdateInfo => ({
@@ -127,6 +127,28 @@ describe('the manager line states its own update status', () => {
   it('never invites a downgrade, whatever the server said was available', () => {
     const older = availableUpdate({ current_version: 'v2.0.0', latest_version: '1.9.0', target_version: 'v1.9.0' })
     expect(sidebarPill(older)?.props.children).not.toContain('Update to')
+  })
+})
+
+describe('an attempt discovered when the dialog opens', () => {
+  it('announces an update that finished while nothing was watching', () => {
+    // Closing the dialog aborts the live follower, which is otherwise the
+    // only thing that tells the rest of the console to refresh. Reopening
+    // used to show "Update complete" while the sidebar version, models and
+    // jobs stayed stale for up to an hour.
+    expect(discoveredAttemptAction('succeeded')).toBe('announce')
+    expect(discoveredAttemptAction('rolled_back')).toBe('announce')
+  })
+
+  it('shows a settled failure without claiming anything changed', () => {
+    expect(discoveredAttemptAction('recovery_required')).toBe('show')
+    expect(discoveredAttemptAction('failed_before_handoff')).toBe('show')
+  })
+
+  it('keeps watching an attempt that is still moving', () => {
+    for (const state of ['checking_signature', 'downloading', 'verifying', 'waiting_for_root', 'restarting', 'checking_health']) {
+      expect(discoveredAttemptAction(state)).toBe('follow')
+    }
   })
 })
 

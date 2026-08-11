@@ -22,6 +22,20 @@ const TERMINAL_STATES = new Set([
 
 const RESTART_DEADLINE_STATES = new Set(['waiting_for_root', 'restarting', 'checking_health'])
 
+// What to do with an attempt found on disk when the dialog opens. 'follow'
+// keeps watching a live attempt. 'announce' means the update finished while
+// nothing was watching — closing the dialog aborts the live follower, which
+// is otherwise the only thing that tells the rest of the console to refresh —
+// so the opener must refresh now. 'show' displays a settled failure without
+// pretending anything changed.
+export type DiscoveredAttemptAction = 'follow' | 'announce' | 'show'
+
+export function discoveredAttemptAction(state: string): DiscoveredAttemptAction {
+  if (state === 'succeeded' || state === 'rolled_back') return 'announce'
+  if (TERMINAL_STATES.has(state)) return 'show'
+  return 'follow'
+}
+
 export const RECONNECT_TIMEOUT_MS = 3 * 60 * 1000
 export const UPDATE_POLL_MS = 1000
 
