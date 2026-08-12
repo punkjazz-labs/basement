@@ -271,7 +271,55 @@ CREATE TABLE IF NOT EXISTS generations (
 	if err := s.migrateReservationOwnership(); err != nil {
 		return err
 	}
-	return s.migrateFleetUpgradeSchema()
+	if err := s.migrateFleetUpgradeSchema(); err != nil {
+		return err
+	}
+	return s.ensureFleetUpgradeResolveColumns()
+}
+
+// ensureFleetUpgradeResolveColumns adds the resolve columns to a
+// fleet_upgrade_nodes table created by a release that shipped before they
+// existed. The migration that creates the table was amended in place on the
+// assumption it had never shipped; hardware proved otherwise (2026-08-12): a
+// database whose schema version was already recorded skipped the amended
+// migration entirely and the first fleet upgrade failed on the missing
+// column. Checking the actual table shape is idempotent and heals every
+// database regardless of which code created it.
+func (s *Store) ensureFleetUpgradeResolveColumns() error {
+	rows, err := s.db.Query(`PRAGMA table_info(fleet_upgrade_nodes)`)
+	if err != nil {
+		return fmt.Errorf("inspect fleet_upgrade_nodes: %w", err)
+	}
+	present := map[string]bool{}
+	for rows.Next() {
+		var (
+			id         int
+			name, kind string
+			notNull    int
+			defaultVal any
+			primaryKey int
+		)
+		if err := rows.Scan(&id, &name, &kind, &notNull, &defaultVal, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		present[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for column, definition := range map[string]string{
+		"resolve_state":   `ALTER TABLE fleet_upgrade_nodes ADD COLUMN resolve_state TEXT NOT NULL DEFAULT ''`,
+		"resolve_failure": `ALTER TABLE fleet_upgrade_nodes ADD COLUMN resolve_failure TEXT NOT NULL DEFAULT ''`,
+	} {
+		if present[column] {
+			continue
+		}
+		if _, err := s.db.Exec(definition); err != nil {
+			return fmt.Errorf("add fleet_upgrade_nodes.%s: %w", column, err)
+		}
+	}
+	return nil
 }
 
 const (

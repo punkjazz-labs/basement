@@ -303,6 +303,67 @@ func TestCreatePeerAdmitsExactlyOneWinner(t *testing.T) {
 	}
 }
 
+// A database whose fleet upgrade tables were created by a release that
+// shipped before the resolve columns existed already records the schema
+// version those tables arrived with, so the amended creation migration is
+// skipped forever. Hardware proved the cost (2026-08-12): the first fleet
+// upgrade on such a machine failed on the missing column. Opening the store
+// must heal the actual table shape.
+func TestFleetUpgradeResolveColumnsAreAddedToAShippedDatabase(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	older, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{
+		`CREATE TABLE schema_meta (version INTEGER NOT NULL)`,
+		`INSERT INTO schema_meta(version) VALUES(4)`,
+		`CREATE TABLE fleet_upgrade_runs (
+  run_id TEXT PRIMARY KEY, fleet_id TEXT NOT NULL, controller_node_id TEXT NOT NULL,
+  release_tag TEXT NOT NULL, target_version TEXT NOT NULL, manifest_sha256 TEXT NOT NULL,
+  manifest_bytes BLOB NOT NULL, signature_bytes BLOB NOT NULL, asset_url TEXT NOT NULL,
+  state TEXT NOT NULL, failure TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+)`,
+		`CREATE TABLE fleet_upgrade_nodes (
+  run_id TEXT NOT NULL REFERENCES fleet_upgrade_runs(run_id) ON DELETE CASCADE,
+  node_id TEXT NOT NULL, display_name TEXT NOT NULL, sequence INTEGER NOT NULL,
+  role TEXT NOT NULL, state TEXT NOT NULL, running_version TEXT NOT NULL,
+  target_version TEXT NOT NULL, attempt_id TEXT NOT NULL DEFAULT '',
+  failure TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+  PRIMARY KEY(run_id,node_id), UNIQUE(run_id,sequence)
+)`,
+		`INSERT INTO fleet_upgrade_runs(run_id,fleet_id,controller_node_id,release_tag,target_version,manifest_sha256,manifest_bytes,signature_bytes,asset_url,state,created_at,updated_at)
+  VALUES('run-old','fleet-old','node-old','v1.1.0','v1.1.0','digest',x'00',x'00','https://example.invalid','succeeded','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`INSERT INTO fleet_upgrade_nodes(run_id,node_id,display_name,sequence,role,state,running_version,target_version,updated_at)
+  VALUES('run-old','node-old','spark-head',0,'controller','succeeded','v1.1.0','v1.1.0','2026-01-01T00:00:00Z')`,
+	}
+	for _, statement := range statements {
+		if _, err := older.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := older.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("a shipped database did not open: %v", err)
+	}
+	defer s.Close()
+	if err := s.UpdateFleetUpgradeNodeResolve(ctx, "run-old", "node-old", "resolved", ""); err != nil {
+		t.Fatalf("the healed table must accept resolve bookkeeping: %v", err)
+	}
+	run, err := s.FleetUpgradeRun(ctx, "run-old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Nodes) != 1 || run.Nodes[0].ResolveState != "resolved" {
+		t.Fatalf("run nodes = %+v, want the resolve state readable", run.Nodes)
+	}
+}
+
 // A database written before the singleton column exists must open, keep its
 // peer, and enforce the rule from then on.
 func TestPeersSingletonMigratesAnOlderDatabase(t *testing.T) {
