@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -852,6 +853,260 @@ func TestRemovePassesSharedArtifactsFromOtherInstalledModels(t *testing.T) {
 	}
 	if executor.captured[operations.ArtifactKey(removed.Artifacts[0])] {
 		t.Fatalf("removed model's own artifact must stay deletable: %#v", executor.captured)
+	}
+}
+
+// dockerAwareExecutor is a switchExecutor whose fake Docker daemon can also
+// be asked what it is running, the way the real host executor is asked
+// through operations.ManagedContainerLister. The container list is derived
+// from the same running map the operations mutate, so Docker reality and
+// executor behavior can never disagree inside a test. verifyFailuresLeft
+// fails a recipe's inference verification a set number of times and then
+// lets it pass, which is what task #48's hardware sequence needs: the
+// rolled-back model's verification must fail exactly once AFTER its
+// container was restarted, and the retried model must fail once and then
+// succeed.
+type dockerAwareExecutor struct {
+	switchExecutor
+	versions           map[string]int
+	verifyFailuresLeft map[string]int
+}
+
+func (d *dockerAwareExecutor) Execute(ctx context.Context, execution operations.Execution, op recipe.Operation, r recipe.Recipe, progress operations.Progress) (map[string]any, error) {
+	receipt, err := d.switchExecutor.Execute(ctx, execution, op, r, progress)
+	if err == nil && op.Type == "verify_openai_inference" {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.verifyFailuresLeft[r.ID] > 0 {
+			d.verifyFailuresLeft[r.ID]--
+			return nil, errors.New("inference verification failed on hardware")
+		}
+	}
+	return receipt, err
+}
+
+func (d *dockerAwareExecutor) Completed(ctx context.Context, execution operations.Execution, op recipe.Operation, r recipe.Recipe, receipt json.RawMessage) bool {
+	if op.Type == "verify_openai_inference" {
+		d.mu.Lock()
+		pending := d.verifyFailuresLeft[r.ID] > 0
+		d.mu.Unlock()
+		if pending {
+			return false
+		}
+	}
+	return d.switchExecutor.Completed(ctx, execution, op, r, receipt)
+}
+
+func (d *dockerAwareExecutor) ManagedContainers(context.Context) ([]operations.ManagedContainer, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	containers := make([]operations.ManagedContainer, 0, len(d.running))
+	for id, running := range d.running {
+		if !running {
+			continue
+		}
+		containers = append(containers, operations.ManagedContainer{
+			Name:     "basement-" + id + "-v" + strconv.Itoa(d.versions[id]),
+			Running:  true,
+			RecipeID: id,
+			Version:  strconv.Itoa(d.versions[id]),
+		})
+	}
+	return containers, nil
+}
+
+// TestRetryAfterDesyncedRollbackStopsTheContainerDockerActuallyRuns replays
+// task #48 as observed on hardware: model A serves, an install of B fails its
+// verification, and the rollback restarts A's container at the Docker level
+// but then fails ITS verification — the double-failure path clears the
+// store's active-model pointer while A's container keeps running. The retried
+// install of B plans from that lying store (no previous model, so no stop
+// step), and only switch-time reconciliation against Docker's own container
+// list can stop A before B claims the memory beside it.
+func TestRetryAfterDesyncedRollbackStopsTheContainerDockerActuallyRuns(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, target := twoSingleSparks(recipes)
+	executor := &dockerAwareExecutor{
+		switchExecutor:     switchExecutor{running: map[string]bool{}},
+		versions:           map[string]int{previous.ID: previous.Version, target.ID: target.Version},
+		verifyFailuresLeft: map[string]int{},
+	}
+	runner := New(s, executor, recipes)
+
+	installA, _, err := s.CreateJob(ctx, "install", previous.ID, "desync-install-a", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(installA.ID)
+	waitJob(t, s, installA.ID, "ready")
+
+	executor.mu.Lock()
+	executor.verifyFailuresLeft[target.ID] = 1
+	executor.verifyFailuresLeft[previous.ID] = 1
+	executor.mu.Unlock()
+	installB, _, err := s.CreateJob(ctx, "install", target.ID, "desync-install-b", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(installB.ID)
+	failed := waitJob(t, s, installB.ID, "failed")
+	if !strings.Contains(failed.Error, "rollback to "+previous.ID+" failed") {
+		t.Fatalf("fixture did not reach the double-failure path: %q", failed.Error)
+	}
+	executor.mu.Lock()
+	stillRunning := executor.running[previous.ID]
+	mark := len(executor.events)
+	executor.mu.Unlock()
+	if !stillRunning {
+		t.Fatal("fixture broke: the previous model's container should still be running after the failed rollback")
+	}
+	desynced, err := s.Model(ctx, previous.ID)
+	if err != nil || desynced.Active {
+		t.Fatalf("fixture broke: the store should no longer name %s active: %#v err=%v", previous.ID, desynced, err)
+	}
+
+	retry, _, err := s.CreateJob(ctx, "install", target.ID, "desync-install-b-retry", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(retry.ID)
+	finished := waitJob(t, s, retry.ID, "ready")
+
+	executor.mu.Lock()
+	events := append([]string(nil), executor.events[mark:]...)
+	running := make(map[string]bool, len(executor.running))
+	for id, value := range executor.running {
+		running[id] = value
+	}
+	executor.mu.Unlock()
+	stop := indexOfEvent(events, "stop_container:"+previous.ID)
+	memory := indexOfEvent(events, "verify_memory:"+target.ID)
+	start := indexOfEvent(events, "start_container:"+target.ID)
+	if stop < 0 || memory < stop || start < stop {
+		t.Fatalf("retry did not stop the actually-running container before starting the target: stop=%d memory=%d start=%d events=%v", stop, memory, start, events)
+	}
+	assertExactlyOneRunningRecipe(t, running, target.ID)
+	sawStopStep := false
+	for _, step := range finished.Steps {
+		if step.Operation == "stop_container" && step.State == "completed" {
+			sawStopStep = true
+		}
+	}
+	if !sawStopStep {
+		t.Fatalf("the reconciling stop must be a recorded job step, not an out-of-band kill: steps=%#v", finished.Steps)
+	}
+	model, err := s.Model(ctx, target.ID)
+	if err != nil || !model.Active || model.Status != "ready" {
+		t.Fatalf("retried model=%#v err=%v", model, err)
+	}
+}
+
+// TestSwitchWithMatchingStoreAndDockerPlansNoExtraStops proves the
+// reconciliation is a strict no-op when the store already tells the truth: a
+// switch away from the genuinely active model still stops it exactly once,
+// through the plan it always had.
+func TestSwitchWithMatchingStoreAndDockerPlansNoExtraStops(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, target := twoSingleSparks(recipes)
+	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: previous.ID, RecipeVersion: previous.Version, Status: "ready", ArtifactPath: "/managed/" + previous.ID, ContainerID: "serving-container", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	executor := &dockerAwareExecutor{
+		switchExecutor:     switchExecutor{running: map[string]bool{previous.ID: true}},
+		versions:           map[string]int{previous.ID: previous.Version, target.ID: target.Version},
+		verifyFailuresLeft: map[string]int{},
+	}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "install", target.ID, "matched-switch", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	finished := waitJob(t, s, job.ID, "ready")
+	stopSteps := 0
+	for _, step := range finished.Steps {
+		if step.Operation == "stop_container" {
+			stopSteps++
+		}
+	}
+	if stopSteps != 1 {
+		t.Fatalf("a matched store and Docker view must plan exactly one stop, got %d: steps=%#v", stopSteps, finished.Steps)
+	}
+	executor.mu.Lock()
+	events := append([]string(nil), executor.events...)
+	executor.mu.Unlock()
+	stops := 0
+	for _, event := range events {
+		if strings.HasPrefix(event, "stop_container:") {
+			stops++
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("exactly one container stop expected, got %d: %v", stops, events)
+	}
+	assertActiveModel(t, s, target.ID, previous.ID, "stopped")
+}
+
+// TestReinstallingTheServingVersionNeverStopsItsOwnContainer guards the
+// legitimate reuse path: reinstalling the exact running version keeps its
+// container (the Create 409 and Start 304 paths on real hardware), so the
+// Docker reconciliation must not read that container as an orphan to stop.
+func TestReinstallingTheServingVersionNeverStopsItsOwnContainer(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := singleSpark(recipes)
+	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: target.ID, RecipeVersion: target.Version, Status: "ready", ArtifactPath: "/managed/" + target.ID, ContainerID: "serving-container", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	executor := &dockerAwareExecutor{
+		switchExecutor:     switchExecutor{running: map[string]bool{target.ID: true}},
+		versions:           map[string]int{target.ID: target.Version},
+		verifyFailuresLeft: map[string]int{},
+	}
+	runner := New(s, executor, recipes)
+	job, _, err := s.CreateJob(ctx, "install", target.ID, "reinstall-serving", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	waitJob(t, s, job.ID, "ready")
+	executor.mu.Lock()
+	events := append([]string(nil), executor.events...)
+	stillRunning := executor.running[target.ID]
+	executor.mu.Unlock()
+	for _, event := range events {
+		if strings.HasPrefix(event, "stop_container:") {
+			t.Fatalf("reinstalling the serving version must not stop anything: %v", events)
+		}
+	}
+	if !stillRunning {
+		t.Fatal("the serving container should have kept running through its own reinstall")
 	}
 }
 

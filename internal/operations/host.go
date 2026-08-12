@@ -132,6 +132,14 @@ func (h *HostExecutor) RuntimeImageBytes(ctx context.Context, r recipe.Recipe) (
 	return h.docker.ImageSize(ctx, r.Runtime.Reference())
 }
 
+// ManagedContainers reports every container this manager's labels claim on
+// the local Docker daemon, running or not, satisfying
+// ManagedContainerLister so the engine can reconcile Docker reality with the
+// store's active-model pointer before it lets a switch start anything.
+func (h *HostExecutor) ManagedContainers(ctx context.Context) ([]ManagedContainer, error) {
+	return h.docker.ManagedContainers(ctx)
+}
+
 func (h *HostExecutor) ArtifactPath(r recipe.Recipe) string {
 	index, _ := r.ArtifactIndex("primary")
 	artifact := r.Artifacts[index]

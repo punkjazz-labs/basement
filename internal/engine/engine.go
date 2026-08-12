@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -527,6 +528,96 @@ func (e *Engine) adaptActivationPlan(ctx context.Context, job store.Job, target 
 	return refreshed, true, nil
 }
 
+// reconcileRunningContainers compares Docker reality against the switch plan,
+// in the same window adaptActivationPlan runs in: this job holds the runtime
+// lock and the switch hold, so nothing can legitimately start a container
+// until the adapted plan finishes. The plan so far was built entirely from
+// the store's active-model pointer, and hardware proved that pointer can lie:
+// a failed install whose rollback restarted the previous model's container at
+// the Docker level can leave the store naming a model that is not the one
+// actually serving, so the plan's stop step no-ops and the target starts
+// BESIDE the running model — two models in unified memory, and the first real
+// request dies in the driver. Any running basement-labeled container that is
+// neither the exact target (reinstalling the running version reuses its
+// container: the Create 409 and Start 304 paths, and verify_memory's
+// already_running short-circuit) nor already covered by a planned stop gets a
+// real stop_container step inserted where previousStopPlans would have put
+// it, so receipts and the job timeline record the stop like any other switch.
+//
+// Only THIS node's daemon is consulted (see FleetExecutor.ManagedContainers).
+// A desynced worker rank on the peer Spark cannot be reconciled from here
+// with a per-container stop: the peer runs its own manager and its own
+// preflight, and reaching into its daemon outside a planned worker placement
+// would act on a machine this job never resolved. That case is deliberately
+// left to the peer's own admission checks rather than handled halfway.
+func (e *Engine) reconcileRunningContainers(ctx context.Context, target recipe.Recipe, current jobPlan, completed int) (jobPlan, bool, error) {
+	lister, ok := e.executor.(operations.ManagedContainerLister)
+	if !ok {
+		return current, false, nil
+	}
+	containers, err := lister.ManagedContainers(ctx)
+	if err != nil {
+		return jobPlan{}, false, fmt.Errorf("list this machine's running containers before activating %s: %w; fix the reported Docker error, then run this job again", target.DisplayName, err)
+	}
+	// A stop step anywhere in the plan covers its whole recipe ID: the host
+	// executor's stop_container stops every running container carrying that
+	// recipe's label, not only the named version, and a completed stop that
+	// somehow left the container running again is re-executed on resume
+	// (run() re-verifies completed runtime steps through Completed).
+	stopsPlanned := map[string]bool{}
+	for _, plan := range current.plans {
+		if plan.Operation.Type == "stop_container" {
+			stopsPlanned[plan.Recipe.ID] = true
+		}
+	}
+	var extras []plannedOperation
+	for _, container := range containers {
+		if !container.Running || stopsPlanned[container.RecipeID] {
+			continue
+		}
+		version, _ := strconv.Atoi(container.Version)
+		if container.RecipeID == target.ID && version == target.Version {
+			continue // the target's own container; reused, never stopped here
+		}
+		orphan, ok := e.pinnedOrEffective(container.RecipeID, version)
+		if !ok {
+			// Starting the target anyway could put two models in memory, and
+			// killing the container outside the step machinery would leave no
+			// receipt of what was stopped or why. Refuse with instructions.
+			return jobPlan{}, false, fmt.Errorf("container %s is running a model (%s) whose recipe this manager cannot resolve, and %s cannot start safely beside it; stop that container, then run this job again", container.Name, container.RecipeID, target.DisplayName)
+		}
+		stopsPlanned[container.RecipeID] = true
+		extras = append(extras, plannedOperation{Operation: recipe.Operation{Type: "stop_container"}, Recipe: orphan})
+	}
+	if len(extras) == 0 {
+		return current, false, nil
+	}
+	// Insert where previousStopPlans sits: before the first step that needs
+	// the memory (verify_memory) or takes over serving (start_container).
+	// Everything at or after the insertion point has not run yet — completed
+	// is the index of the step about to run — so completed steps keep their
+	// indices and their receipts.
+	insert := -1
+	for index := completed; index < len(current.plans); index++ {
+		if kind := current.plans[index].Operation.Type; kind == "verify_memory" || kind == "start_container" {
+			insert = index
+			break
+		}
+	}
+	if insert < 0 {
+		// Nothing in the remaining plan starts or measures the runtime, so
+		// nothing new can collide with the running container.
+		return current, false, nil
+	}
+	plans := make([]plannedOperation, 0, len(current.plans)+len(extras))
+	plans = append(plans, current.plans[:insert]...)
+	plans = append(plans, extras...)
+	plans = append(plans, current.plans[insert:]...)
+	adapted := current
+	adapted.plans = plans
+	return adapted, true, nil
+}
+
 // refreshCompletedPortReceipt keeps preflight history honest when the model
 // to stop changed after verify_port completed. A refreshed synthetic receipt
 // names the managed model that now occupies the target port. When only the
@@ -757,6 +848,20 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 				}
 				if changed {
 					planned = refreshed
+					plans, previous = planned.plans, planned.previous
+					plan = plans[index]
+				}
+				// The store's answer is settled; now Docker's. A container the
+				// store no longer points at can still be serving (task #48),
+				// and the plan must stop it before anything of the target's
+				// claims memory or the port.
+				reconciled, stopsAdded, err := e.reconcileRunningContainers(ctx, r, planned, index)
+				if err != nil {
+					abort(index, err)
+					return
+				}
+				if stopsAdded {
+					planned = reconciled
 					plans, previous = planned.plans, planned.previous
 					plan = plans[index]
 				}

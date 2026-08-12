@@ -79,3 +79,16 @@ type Executor interface {
 	// runtime image when Docker holds it locally, for storage accounting.
 	RuntimeImageBytes(context.Context, recipe.Recipe) (int64, bool)
 }
+
+// ManagedContainerLister is the optional executor capability the engine uses
+// at switch time to see which basement-labeled containers this node's Docker
+// daemon actually holds, instead of trusting the store's active-model pointer
+// alone. A failed switch that was rolled back at the Docker level can leave
+// the store pointing at a model that is not the one whose container is
+// running, and a later switch planned from the store alone would then start a
+// second model beside the first and run the machine out of memory. Executors
+// that cannot see a Docker daemon (unit-test fakes) simply do not implement
+// this, and the engine plans from the store as before.
+type ManagedContainerLister interface {
+	ManagedContainers(context.Context) ([]ManagedContainer, error)
+}
