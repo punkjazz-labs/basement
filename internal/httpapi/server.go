@@ -131,6 +131,14 @@ type Server struct {
 	// Set once before the listener starts; nil means no feed is wired, which
 	// reads as never_fetched because that is exactly what it is.
 	feedHealth func() recipefeed.Health
+
+	// docredact holds every analyzed document from the console's document
+	// redactor (docs/plans/12-doc-redactor.md), in memory only. Restarting
+	// the manager loses every session, which is correct: export happens as
+	// an immediate browser download (see docredact.go), never a write to
+	// this machine's own filesystem, so nothing about a session is durable
+	// here to lose.
+	docredact *docredactSessions
 }
 
 // peerDelegationTimeout bounds a delegated placement call. The peer answers
@@ -157,7 +165,7 @@ type preflightResponse struct {
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
 	updateKeys, _ := managerupdate.ProductionKeyRing()
 	updateContext, updateCancel := context.WithCancel(context.Background())
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState(), generations: newGenerationQueue(), updateResolver: &managerupdate.Resolver{Source: managerupdate.NewHTTPReleaseSource(), Keys: updateKeys}, updateStager: managerupdate.NewStager(dataDir, updateKeys), updateContext: updateContext, updateCancel: updateCancel}
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState(), generations: newGenerationQueue(), updateResolver: &managerupdate.Resolver{Source: managerupdate.NewHTTPReleaseSource(), Keys: updateKeys}, updateStager: managerupdate.NewStager(dataDir, updateKeys), updateContext: updateContext, updateCancel: updateCancel, docredact: newDocredactSessions()}
 	server.SetRecipes(recipes, recipes)
 	// Every job that changes which model serves announces itself to the
 	// serving gate through this hook, whoever asked for it (see roles.go).
@@ -205,6 +213,11 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/generations/", server.withReadAuth(server.generationAction))
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
 	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
+	// Document redactor (docs/plans/12-doc-redactor.md), pattern pass only.
+	// Console session only, on both: a document's text and its findings are
+	// never something a bearer key should be able to submit or read.
+	mux.HandleFunc("/api/v1/docredact/analyze", server.withReadAuth(server.docredactAnalyze))
+	mux.HandleFunc("/api/v1/docredact/sessions/", server.withReadAuth(server.docredactSessionAction))
 	mux.HandleFunc("/api/v1/update/status", server.withReadAuth(server.updateStatus))
 	mux.HandleFunc("/api/v1/update/apply", server.withReadAuth(server.updateApplyAPI))
 	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateAPI))
