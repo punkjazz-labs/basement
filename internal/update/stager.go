@@ -270,6 +270,25 @@ func (stager *Stager) ApplyStaged(status AttemptStatus) (AttemptStatus, error) {
 // receipt for the same attempt would otherwise read as an update in progress
 // forever, refusing every install, generation and further update.
 func (stager *Stager) ReconcileStartup() error {
+	return stager.settleManagerOwned(
+		map[string]bool{"checking_signature": true, "downloading": true, "verifying": true},
+		"the manager restarted before this update reached the root updater; start the update again",
+	)
+}
+
+// SettleResolved settles a manager-owned staging attempt when the owner
+// resolves a stopped fleet upgrade. Unlike startup reconciliation this also
+// covers a fully staged release that will never be applied, because the run it
+// belonged to is over. States owned by the root updater are left alone: the
+// root process settles those itself through its receipt.
+func (stager *Stager) SettleResolved(failure string) error {
+	return stager.settleManagerOwned(
+		map[string]bool{"checking_signature": true, "downloading": true, "verifying": true, "staged": true},
+		failure,
+	)
+}
+
+func (stager *Stager) settleManagerOwned(states map[string]bool, failure string) error {
 	if stager == nil {
 		return nil
 	}
@@ -280,9 +299,7 @@ func (stager *Stager) ReconcileStartup() error {
 		}
 		return err
 	}
-	switch status.State {
-	case "checking_signature", "downloading", "verifying":
-	default:
+	if !states[status.State] {
 		return nil
 	}
 	requestPath := filepath.Join(stager.DataDir, "updates", "staging", "pending", requestFileName)
@@ -306,7 +323,7 @@ func (stager *Stager) ReconcileStartup() error {
 		return receiptErr
 	}
 	status.State = "failed_before_handoff"
-	status.Failure = "the manager restarted before this update reached the root updater; start the update again"
+	status.Failure = failure
 	status.UpdatedAt = journalNow(stager.Now)
 	return stager.writeStatus(status)
 }

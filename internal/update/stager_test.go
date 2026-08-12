@@ -131,6 +131,76 @@ func TestReconcileStartupLeavesSettledAndAbsentStatesAlone(t *testing.T) {
 	})
 }
 
+// A resolved fleet upgrade will never apply what this node staged, so resolve
+// may settle one state startup reconciliation must not touch: 'staged'. Both
+// paths leave anything the root updater owns strictly alone.
+func TestSettleResolvedSettlesManagerOwnedStatesIncludingStaged(t *testing.T) {
+	for _, state := range []string{"checking_signature", "downloading", "verifying", "staged"} {
+		t.Run(state, func(t *testing.T) {
+			stager := stagerFixture(t)
+			writeAttempt(t, stager, AttemptStatus{
+				SchemaVersion: 1, AttemptID: "update-resolved", State: state,
+				RunningVersion: "v1.0.0", TargetVersion: "v1.1.0", UpdatedAt: "2026-08-11T00:00:00Z",
+			})
+
+			if err := stager.SettleResolved("the fleet upgrade was resolved"); err != nil {
+				t.Fatal(err)
+			}
+
+			status, found, err := stager.Status()
+			if err != nil || !found {
+				t.Fatalf("status found=%v err=%v", found, err)
+			}
+			if status.State != "failed_before_handoff" || status.Failure != "the fleet upgrade was resolved" {
+				t.Fatalf("settled status=%+v", status)
+			}
+		})
+	}
+}
+
+func TestSettleResolvedLeavesRootOwnedAttemptsAlone(t *testing.T) {
+	t.Run("pending root request", func(t *testing.T) {
+		stager := stagerFixture(t)
+		writeAttempt(t, stager, AttemptStatus{
+			SchemaVersion: 1, AttemptID: "update-handed-off", State: "staged",
+			RunningVersion: "v1.0.0", TargetVersion: "v1.1.0", UpdatedAt: "2026-08-11T00:00:00Z",
+		})
+		pending := filepath.Join(stager.DataDir, "updates", "staging", "pending")
+		if err := os.MkdirAll(pending, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		request := ApplyRequest{SchemaVersion: 1, AttemptID: "update-handed-off", RunningVersion: "v1.0.0", TargetVersion: "v1.1.0"}
+		if err := writeJSONFile(filepath.Join(pending, requestFileName), request, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stager.SettleResolved("the fleet upgrade was resolved"); err != nil {
+			t.Fatal(err)
+		}
+		status, _, err := stager.Status()
+		if err != nil || status.State != "staged" {
+			t.Fatalf("state=%q err=%v, the root updater owns this attempt", status.State, err)
+		}
+	})
+	for _, state := range []string{"waiting_for_root", "succeeded", "rolled_back", "recovery_required", "failed_before_handoff"} {
+		t.Run(state, func(t *testing.T) {
+			stager := stagerFixture(t)
+			writeAttempt(t, stager, AttemptStatus{
+				SchemaVersion: 1, AttemptID: "update-settled", State: state,
+				RunningVersion: "v1.0.0", TargetVersion: "v1.1.0", UpdatedAt: "2026-08-11T00:00:00Z",
+			})
+
+			if err := stager.SettleResolved("the fleet upgrade was resolved"); err != nil {
+				t.Fatal(err)
+			}
+			status, _, err := stager.Status()
+			if err != nil || status.State != state {
+				t.Fatalf("state=%q err=%v, want untouched %q", status.State, err, state)
+			}
+		})
+	}
+}
+
 func stagerFixture(t *testing.T) *Stager {
 	t.Helper()
 	root := t.TempDir()

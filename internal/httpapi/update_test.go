@@ -341,6 +341,161 @@ func assertUpdateFleetScope(t *testing.T, server *Server, role string, nodeCount
 	}
 }
 
+func TestFleetUpgradeResolveAPI(t *testing.T) {
+	ctx := context.Background()
+	server, manager, authManager := membershipTestServer(t)
+	identity := manager.Identity()
+	self := store.FleetNode{
+		NodeID: identity.NodeID, DisplayName: "spark-head",
+		ConsoleURL: "http://192.168.99.10:7070", NodeURL: "https://192.168.99.10:7071",
+		Certificate: identity.CertificatePEM, ManagerVersion: "test", ManagerBuildIdentity: "test-build",
+	}
+	config, err := server.store.EnsureFleetController(ctx, self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := store.FleetNode{
+		NodeID: "node-worker", DisplayName: "spark-worker",
+		ConsoleURL: "http://192.168.99.11:7070", NodeURL: "https://192.168.99.11:7071",
+		Certificate: []byte("member-certificate"), ManagerVersion: "test", ManagerBuildIdentity: "test-build",
+	}
+	if _, _, err := server.store.PrepareFleetNode(ctx, self, member); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.store.CommitFleetNode(ctx, config.FleetID, member.NodeID); err != nil {
+		t.Fatal(err)
+	}
+	run := store.FleetUpgradeRun{RunID: "api-resolve", FleetID: config.FleetID, ControllerNodeID: identity.NodeID,
+		ReleaseTag: "v2.0.0", TargetVersion: "v2.0.0", ManifestSHA256: strings.Repeat("c", 64),
+		ManifestBytes: []byte("manifest"), SignatureBytes: []byte("signature"), AssetURL: "https://github.com/example/asset"}
+	nodes := []store.FleetUpgradeNode{
+		{NodeID: member.NodeID, DisplayName: "spark-worker", Sequence: 0, Role: "idle", RunningVersion: "test", TargetVersion: "v2.0.0"},
+		{NodeID: identity.NodeID, DisplayName: "spark-head", Sequence: 1, Role: "controller", RunningVersion: "test", TargetVersion: "v2.0.0"},
+	}
+	if _, _, err := server.store.CreateFleetUpgradeRun(ctx, run, nodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.store.UpdateFleetUpgradeNode(ctx, run.RunID, member.NodeID, "rolled_back", "test", "attempt-worker", "target health check failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.store.UpdateFleetUpgradeRunState(ctx, run.RunID, "failed", "node spark-worker failed: target health check failed"); err != nil {
+		t.Fatal(err)
+	}
+	cookie, csrf := pairMembershipConsole(t, server, authManager)
+	resolve := func(withAuth bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "http://console.test/api/v1/fleet/upgrade", strings.NewReader(`{"action":"resolve"}`))
+		if withAuth {
+			request.AddCookie(cookie)
+			request.Header.Set("Origin", "http://console.test")
+			request.Header.Set("X-CSRF-Token", csrf)
+		}
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+
+	if response := resolve(false); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated resolve status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response := resolve(true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("resolve status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body store.FleetUpgradeRun
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.State != "resolved" {
+		t.Fatalf("resolved run=%+v", body)
+	}
+	outcomes := map[string]string{}
+	for _, node := range body.Nodes {
+		outcomes[node.NodeID] = node.ResolveState
+	}
+	// The worker's certificate cannot carry a real transport in this test, so
+	// it stands in for a node that is unreachable at resolve time: recorded
+	// as the machine that still needs attention, without blocking the rest.
+	if outcomes[identity.NodeID] != "resolved" || outcomes[member.NodeID] != "unreachable" {
+		t.Fatalf("resolve outcomes=%v", outcomes)
+	}
+
+	if response := resolve(true); response.Code != http.StatusOK {
+		t.Fatalf("repeat resolve status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	fresh := store.FleetUpgradeRun{RunID: "api-resolve-2", FleetID: config.FleetID, ControllerNodeID: identity.NodeID,
+		ReleaseTag: "v2.0.1", TargetVersion: "v2.0.1", ManifestSHA256: strings.Repeat("d", 64),
+		ManifestBytes: []byte("manifest"), SignatureBytes: []byte("signature"), AssetURL: "https://github.com/example/asset"}
+	freshNodes := []store.FleetUpgradeNode{
+		{NodeID: member.NodeID, DisplayName: "spark-worker", Sequence: 0, Role: "idle", RunningVersion: "test", TargetVersion: "v2.0.1"},
+		{NodeID: identity.NodeID, DisplayName: "spark-head", Sequence: 1, Role: "controller", RunningVersion: "test", TargetVersion: "v2.0.1"},
+	}
+	if _, created, err := server.store.CreateFleetUpgradeRun(ctx, fresh, freshNodes); err != nil || !created {
+		t.Fatalf("a fresh run was refused after resolve: created=%v err=%v", created, err)
+	}
+	if response := resolve(true); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "still in progress") {
+		t.Fatalf("resolving a live run status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestResolveFleetUpgradeSettlesLocalNode(t *testing.T) {
+	ctx := context.Background()
+	server, manager, _ := membershipTestServer(t)
+	run := store.FleetUpgradeRun{RunID: "local-resolve", FleetID: "fleet-test", ControllerNodeID: "node-controller",
+		ReleaseTag: "v2.0.0", TargetVersion: "v2.0.0", ManifestSHA256: strings.Repeat("e", 64),
+		ManifestBytes: []byte("manifest"), SignatureBytes: []byte("signature"), AssetURL: "https://github.com/example/asset"}
+	stored, _, err := server.store.CreateFleetUpgradeRun(ctx, run, []store.FleetUpgradeNode{
+		{NodeID: manager.Identity().NodeID, DisplayName: "spark-head", Sequence: 0, Role: "member", RunningVersion: "test", TargetVersion: "v2.0.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.ensureFleetUpgradeReservation(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := server.store.NodeMaintenanceReservationActive(ctx); err != nil || !active {
+		t.Fatalf("fixture reservation active=%v err=%v", active, err)
+	}
+	if message, active := server.updateMaintenanceRefusalLocked(); !active || message != updateInProgressRefusal {
+		t.Fatalf("live run refusal=%q active=%v", message, active)
+	}
+
+	// A node that upgraded and then heard nothing keeps waiting; the refusal
+	// must say who it is waiting for instead of promising a reconnect.
+	if err := server.store.UpdateFleetUpgradeRunState(ctx, run.RunID, "awaiting_fleet", ""); err != nil {
+		t.Fatal(err)
+	}
+	if message, active := server.updateMaintenanceRefusalLocked(); !active || message != fleetUpgradeAwaitingRefusal {
+		t.Fatalf("awaiting refusal=%q active=%v", message, active)
+	}
+
+	if err := server.store.UpdateFleetUpgradeRunState(ctx, run.RunID, "failed", "node spark-w2 failed"); err != nil {
+		t.Fatal(err)
+	}
+	if message, active := server.updateMaintenanceRefusalLocked(); !active || message != fleetUpgradeAttentionRefusal {
+		t.Fatalf("failed refusal=%q active=%v", message, active)
+	}
+
+	request := fleet.UpgradeResolveRequest{Version: fleet.UpgradeProtocolVersion, RunID: run.RunID}
+	if err := server.ResolveFleetUpgrade(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := server.store.FleetUpgradeRun(ctx, run.RunID)
+	if err != nil || settled.State != "resolved" {
+		t.Fatalf("local run after resolve=%+v err=%v", settled, err)
+	}
+	if active, err := server.store.NodeMaintenanceReservationActive(ctx); err != nil || active {
+		t.Fatalf("reservation survived resolve: active=%v err=%v", active, err)
+	}
+	if message, active := server.updateMaintenanceRefusalLocked(); active {
+		t.Fatalf("node still refuses local work after resolve: %q", message)
+	}
+	if err := server.ResolveFleetUpgrade(ctx, request); err != nil {
+		t.Fatalf("resolve is not idempotent: %v", err)
+	}
+}
+
 func TestFleetUpgradeStatusAPIReportsPerNodeVersionsMidRollout(t *testing.T) {
 	server, manager, authManager := membershipTestServer(t)
 	run := store.FleetUpgradeRun{RunID: "api-mid-rollout", FleetID: "fleet-test", ControllerNodeID: manager.Identity().NodeID,

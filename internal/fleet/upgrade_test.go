@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,14 +18,20 @@ import (
 )
 
 type fakeUpgradeNode struct {
-	mu          sync.Mutex
-	state       string
-	running     string
-	target      string
-	busy        bool
-	rollback    bool
-	stageCalls  int
-	applyCalls  int
+	mu           sync.Mutex
+	state        string
+	running      string
+	target       string
+	busy         bool
+	rollback     bool
+	stageCalls   int
+	applyCalls   int
+	finishCalls  int
+	resolveCalls int
+	resolveErr   error
+	// locked models the node's local maintenance hold: staging takes it, and
+	// only a finish or resolve instruction from the controller releases it.
+	locked      bool
 	events      *[]string
 	displayName string
 }
@@ -33,6 +40,7 @@ func (node *fakeUpgradeNode) stage(runID string) LocalUpgradeStatus {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	node.stageCalls++
+	node.locked = true
 	*node.events = append(*node.events, "stage:"+node.displayName)
 	if node.busy {
 		node.state = "waiting_for_idle"
@@ -60,6 +68,27 @@ func (node *fakeUpgradeNode) status(runID string) LocalUpgradeStatus {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	return LocalUpgradeStatus{Version: UpgradeProtocolVersion, RunID: runID, State: node.state, RunningVersion: node.running, TargetVersion: node.target, AttemptID: "attempt-" + node.displayName}
+}
+
+func (node *fakeUpgradeNode) finish() error {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.finishCalls++
+	node.locked = false
+	*node.events = append(*node.events, "finish:"+node.displayName)
+	return nil
+}
+
+func (node *fakeUpgradeNode) resolve() error {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.resolveCalls++
+	*node.events = append(*node.events, "resolve:"+node.displayName)
+	if node.resolveErr != nil {
+		return node.resolveErr
+	}
+	node.locked = false
+	return nil
 }
 
 func TestFleetUpgradeBusyNodeDefersAndRolloutWaits(t *testing.T) {
@@ -301,6 +330,247 @@ func upgradeCoordinatorFixture(t *testing.T) (*Manager, *store.Store, store.Flee
 	}
 	coordinator.upgradeFinishCall = func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) error { return nil }
 	return coordinator, database, stored, memberID, nodes, events
+}
+
+// upgradeRecoveryFixture is a three node fleet: two members and the
+// controller last. It exists to prove the recovery path: a middle node that
+// fails must not leave the node before it locked, and the owner's resolve
+// must settle everything the failure left behind.
+func upgradeRecoveryFixture(t *testing.T) (*Manager, *store.Store, store.FleetUpgradeRun, map[string]*fakeUpgradeNode, *[]string) {
+	t.Helper()
+	ctx := context.Background()
+	coordinator, database := newTestManager(t, "spark-head", "192.168.99.10")
+	coordinator.version, coordinator.buildIdentity = "v1.0.0", "v1-build"
+	config, err := database.EnsureFleetController(ctx, coordinator.selfNode(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := []struct{ id, name, host string }{
+		{"node_w1", "spark-w1", "192.168.99.20"},
+		{"node_w2", "spark-w2", "192.168.99.21"},
+	}
+	for _, member := range members {
+		node := store.FleetNode{NodeID: member.id, DisplayName: member.name,
+			ConsoleURL: "http://" + member.host + ":7070", NodeURL: "https://" + member.host + ":7071",
+			Certificate: []byte("test-certificate"), ManagerVersion: "v1.0.0", ManagerBuildIdentity: "v1-build", CatalogueDigest: coordinator.digest()}
+		if _, _, err := database.PrepareFleetNode(ctx, coordinator.selfNode(config.FleetID), node); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CommitFleetNode(ctx, config.FleetID, member.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := store.FleetUpgradeRun{RunID: "recovery-run", FleetID: config.FleetID, ControllerNodeID: coordinator.identity.NodeID,
+		ReleaseTag: "v2.0.0", TargetVersion: "v2.0.0", ManifestSHA256: strings.Repeat("a", 64),
+		ManifestBytes: []byte("manifest"), SignatureBytes: []byte("signature"), AssetURL: "https://github.com/example/asset"}
+	ordered := []store.FleetUpgradeNode{
+		{NodeID: "node_w1", DisplayName: "spark-w1", Sequence: 0, Role: "idle", RunningVersion: "v1.0.0", TargetVersion: "v2.0.0"},
+		{NodeID: "node_w2", DisplayName: "spark-w2", Sequence: 1, Role: "idle", RunningVersion: "v1.0.0", TargetVersion: "v2.0.0"},
+		{NodeID: coordinator.identity.NodeID, DisplayName: "spark-head", Sequence: 2, Role: "controller", RunningVersion: "v1.0.0", TargetVersion: "v2.0.0"},
+	}
+	stored, _, err := database.CreateFleetUpgradeRun(ctx, run, ordered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := &[]string{}
+	nodes := map[string]*fakeUpgradeNode{
+		"node_w1":                   {state: "pending", running: "v1.0.0", target: "v2.0.0", events: events, displayName: "spark-w1"},
+		"node_w2":                   {state: "pending", running: "v1.0.0", target: "v2.0.0", events: events, displayName: "spark-w2"},
+		coordinator.identity.NodeID: {state: "pending", running: "v1.0.0", target: "v2.0.0", events: events, displayName: "spark-head"},
+	}
+	coordinator.upgradeStageCall = func(_ context.Context, run store.FleetUpgradeRun, node store.FleetUpgradeNode) (LocalUpgradeStatus, error) {
+		return nodes[node.NodeID].stage(run.RunID), nil
+	}
+	coordinator.upgradeApplyCall = func(_ context.Context, run store.FleetUpgradeRun, node store.FleetUpgradeNode) (LocalUpgradeStatus, error) {
+		return nodes[node.NodeID].apply(run.RunID), nil
+	}
+	coordinator.upgradeStatusCall = func(_ context.Context, node store.FleetUpgradeNode) (LocalUpgradeStatus, error) {
+		return nodes[node.NodeID].status(node.RunID), nil
+	}
+	coordinator.upgradeFinishCall = func(_ context.Context, _ store.FleetUpgradeRun, node store.FleetUpgradeNode) error {
+		return nodes[node.NodeID].finish()
+	}
+	coordinator.upgradeResolveCall = func(_ context.Context, _ store.FleetUpgradeRun, node store.FleetUpgradeNode) error {
+		return nodes[node.NodeID].resolve()
+	}
+	return coordinator, database, stored, nodes, events
+}
+
+func driveUpgradeToFailure(t *testing.T, coordinator *Manager) error {
+	t.Helper()
+	for range 16 {
+		done, err := coordinator.AdvanceUpgrade(context.Background())
+		if done {
+			return err
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Fatal("the rollout never reached a terminal outcome")
+	return nil
+}
+
+func TestFleetUpgradeReleasesSucceededNodeBeforeRunEnds(t *testing.T) {
+	coordinator, database, run, nodes, events := upgradeRecoveryFixture(t)
+	nodes["node_w2"].rollback = true
+	if err := driveUpgradeToFailure(t, coordinator); err == nil {
+		t.Fatal("a rolled back node did not stop the rollout")
+	}
+	stored, err := database.FleetUpgradeRun(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != "failed" || upgradeNodeByID(t, stored, "node_w1").State != "succeeded" || upgradeNodeByID(t, stored, "node_w2").State != "rolled_back" {
+		t.Fatalf("failed rollout=%+v", stored)
+	}
+	// (a) The node that already upgraded got its finish instruction the moment
+	// it proved healthy, before the later node failed, so its local
+	// maintenance hold is gone and it can serve local work again.
+	if nodes["node_w1"].finishCalls == 0 || nodes["node_w1"].locked {
+		t.Fatalf("succeeded node kept its local lock: finish=%d locked=%v events=%v", nodes["node_w1"].finishCalls, nodes["node_w1"].locked, *events)
+	}
+	finishIndex, applyIndex := -1, -1
+	for index, event := range *events {
+		switch event {
+		case "finish:spark-w1":
+			if finishIndex < 0 {
+				finishIndex = index
+			}
+		case "apply:spark-w2":
+			applyIndex = index
+		}
+	}
+	if finishIndex < 0 || applyIndex < 0 || finishIndex > applyIndex {
+		t.Fatalf("finish for the succeeded node did not precede the next apply: %v", *events)
+	}
+	if nodes[coordinator.identity.NodeID].finishCalls != 0 {
+		t.Fatalf("the controller was finished before its own upgrade: %v", *events)
+	}
+}
+
+func TestFleetUpgradeResolveSettlesRunAndEveryNode(t *testing.T) {
+	ctx := context.Background()
+	coordinator, database, run, nodes, _ := upgradeRecoveryFixture(t)
+	nodes["node_w2"].rollback = true
+	if err := driveUpgradeToFailure(t, coordinator); err == nil {
+		t.Fatal("a rolled back node did not stop the rollout")
+	}
+	if _, err := coordinator.PlanIndependent(ctx, "any-recipe"); err == nil || !strings.Contains(err.Error(), "resolve it from the update screen") {
+		t.Fatalf("the refusal for a failed run does not name the fix: %v", err)
+	}
+	resolved, err := coordinator.ResolveUpgrade(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// (b) Resolve settles the run and every reachable node, succeeded ones
+	// included, and each node released its local hold.
+	if resolved.State != "resolved" {
+		t.Fatalf("resolved run=%+v", resolved)
+	}
+	for _, node := range resolved.Nodes {
+		if node.ResolveState != "resolved" {
+			t.Fatalf("node %s was not resolved: %+v", node.DisplayName, node)
+		}
+	}
+	for id, node := range nodes {
+		if node.resolveCalls != 1 || node.locked {
+			t.Fatalf("node %s resolve=%d locked=%v", id, node.resolveCalls, node.locked)
+		}
+	}
+	if active, err := database.FleetUpgradeMaintenanceActive(ctx); err != nil || active {
+		t.Fatalf("maintenance still active after resolve: active=%v err=%v", active, err)
+	}
+	if _, err := coordinator.PlanIndependent(ctx, "any-recipe"); err != nil && strings.Contains(err.Error(), "fleet") {
+		t.Fatalf("placement is still blocked after resolve: %v", err)
+	}
+	// (c) The controller accepts a fresh run after resolve.
+	fresh := store.FleetUpgradeRun{RunID: "recovery-run-2", FleetID: run.FleetID, ControllerNodeID: coordinator.identity.NodeID,
+		ReleaseTag: "v2.0.1", TargetVersion: "v2.0.1", ManifestSHA256: strings.Repeat("b", 64),
+		ManifestBytes: []byte("manifest"), SignatureBytes: []byte("signature"), AssetURL: "https://github.com/example/asset"}
+	_, created, err := database.CreateFleetUpgradeRun(ctx, fresh, []store.FleetUpgradeNode{
+		{NodeID: "node_w1", DisplayName: "spark-w1", Sequence: 0, Role: "idle", RunningVersion: "v2.0.0", TargetVersion: "v2.0.1"},
+	})
+	if err != nil || !created {
+		t.Fatalf("a fresh run was refused after resolve: created=%v err=%v", created, err)
+	}
+}
+
+func TestFleetUpgradeResolveToleratesUnreachableNodeAndRetries(t *testing.T) {
+	ctx := context.Background()
+	coordinator, database, run, nodes, _ := upgradeRecoveryFixture(t)
+	nodes["node_w2"].rollback = true
+	if err := driveUpgradeToFailure(t, coordinator); err == nil {
+		t.Fatal("a rolled back node did not stop the rollout")
+	}
+	nodes["node_w2"].resolveErr = errors.New("the node did not answer")
+	resolved, err := coordinator.ResolveUpgrade(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// (d) The unreachable node does not block the others; its outcome is
+	// recorded so the console can point at the machine that needs attention.
+	if resolved.State != "resolved" {
+		t.Fatalf("resolved run=%+v", resolved)
+	}
+	holdout := upgradeNodeByID(t, resolved, "node_w2")
+	if holdout.ResolveState != "unreachable" || !strings.Contains(holdout.ResolveFailure, "did not answer") {
+		t.Fatalf("holdout outcome=%+v", holdout)
+	}
+	if upgradeNodeByID(t, resolved, "node_w1").ResolveState != "resolved" || upgradeNodeByID(t, resolved, coordinator.identity.NodeID).ResolveState != "resolved" {
+		t.Fatalf("reachable nodes were not resolved: %+v", resolved.Nodes)
+	}
+	if active, err := database.FleetUpgradeMaintenanceActive(ctx); err != nil || active {
+		t.Fatalf("one unreachable node kept the fleet locked: active=%v err=%v", active, err)
+	}
+	// (e) Resolve is idempotent and retryable: a second attempt with the node
+	// still dark changes nothing for settled nodes, and once the node answers
+	// a retry settles only the holdout.
+	if _, err := coordinator.ResolveUpgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if nodes["node_w1"].resolveCalls != 1 || nodes[coordinator.identity.NodeID].resolveCalls != 1 {
+		t.Fatalf("settled nodes were resolved again: w1=%d head=%d", nodes["node_w1"].resolveCalls, nodes[coordinator.identity.NodeID].resolveCalls)
+	}
+	nodes["node_w2"].resolveErr = nil
+	retried, err := coordinator.ResolveUpgrade(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgradeNodeByID(t, retried, "node_w2").ResolveState != "resolved" || nodes["node_w2"].locked {
+		t.Fatalf("retry did not settle the holdout: %+v", retried.Nodes)
+	}
+	if _, err := database.FleetUpgradeRun(ctx, run.RunID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFleetUpgradeResolveRefusesRunsThatNeedNoResolving(t *testing.T) {
+	ctx := context.Background()
+	coordinator, _, _, nodes, _ := upgradeRecoveryFixture(t)
+	if done, err := coordinator.AdvanceUpgrade(ctx); err != nil || done {
+		t.Fatalf("advance done=%v err=%v", done, err)
+	}
+	if _, err := coordinator.ResolveUpgrade(ctx); err == nil || !strings.Contains(err.Error(), "still in progress") {
+		t.Fatalf("a live run was resolved: %v", err)
+	}
+	for range 16 {
+		done, err := coordinator.AdvanceUpgrade(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done {
+			break
+		}
+	}
+	for id, node := range nodes {
+		if node.state != "succeeded" {
+			t.Fatalf("node %s did not finish the clean rollout: %+v", id, node.state)
+		}
+	}
+	if _, err := coordinator.ResolveUpgrade(ctx); err == nil || !strings.Contains(err.Error(), "nothing to resolve") {
+		t.Fatalf("a succeeded run was resolved: %v", err)
+	}
 }
 
 func upgradeNodeByID(t *testing.T, run store.FleetUpgradeRun, nodeID string) store.FleetUpgradeNode {

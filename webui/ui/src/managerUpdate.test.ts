@@ -3,10 +3,11 @@ import { Children, isValidElement, type ReactElement } from 'react'
 import { OfflineError, type UpdateAttemptStatus, type UpdateInfo } from './api'
 import { ManagerUpdateSidebar } from './views/ManagerUpdate'
 import {
-  discoveredAttemptAction, fleetUpgradeRowState, fleetUpgradeStateWord,
-  followManagerUpdate, initialManagerUpdateDialogState, isInstallableManagerUpdate,
-  managerUpdateCard, managerUpdateDialogReducer, orderedFleetUpgradeNodes,
-  updateRefusal, type UpdatePollEvent,
+  discoveredAttemptAction, fleetResolveHoldouts, fleetUpgradeResolveWord,
+  fleetUpgradeRowState, fleetUpgradeRunView, fleetUpgradeStateWord,
+  fleetUpgradeTerminal, followManagerUpdate, initialManagerUpdateDialogState,
+  isInstallableManagerUpdate, managerUpdateCard, managerUpdateDialogReducer,
+  orderedFleetUpgradeNodes, updateRefusal, type UpdatePollEvent,
 } from './managerUpdate'
 import type { FleetUpgradeNode } from './api'
 
@@ -108,6 +109,61 @@ describe('fleet update progress', () => {
   it('marks completed rows done and only the first unfinished row active', () => {
     const ordered = [node('spark-worker', 0, 'succeeded'), node('spark-mid', 1, 'checking_health'), node('spark-head', 2, 'pending')]
     expect(ordered.map((_, index) => fleetUpgradeRowState(ordered, index))).toEqual(['done', 'active', ''])
+  })
+})
+
+describe('a failed fleet update offers resolution instead of progress', () => {
+  const run = (state: string, nodes: FleetUpgradeNode[]) => ({
+    run_id: 'fleet-upgrade-test', fleet_id: 'fleet-test', controller_node_id: 'node-2',
+    release_tag: 'v2.0.0', target_version: 'v2.0.0', manifest_sha256: 'digest',
+    state, created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:00:00Z', nodes,
+  })
+  const node = (displayName: string, sequence: number, state: string, resolveState?: string): FleetUpgradeNode => ({
+    run_id: 'fleet-upgrade-test', node_id: `node-${sequence}`, display_name: displayName,
+    sequence, role: sequence === 2 ? 'controller' : 'member', state,
+    running_version: state === 'succeeded' ? 'v2.0.0' : 'v1.0.0', target_version: 'v2.0.0',
+    resolve_state: resolveState, updated_at: '2026-08-05T00:00:00Z',
+  })
+
+  it('treats a resolved run as terminal so it can be superseded like any settled run', () => {
+    expect(['succeeded', 'failed', 'resolved'].map(fleetUpgradeTerminal)).toEqual([true, true, true])
+    expect(['applying', 'staging', 'waiting_for_idle'].map(fleetUpgradeTerminal)).toEqual([false, false, false])
+  })
+
+  it('chooses the failed card while the run needs attention', () => {
+    const failed = run('failed', [node('spark-worker', 0, 'succeeded'), node('spark-mid', 1, 'rolled_back'), node('spark-head', 2, 'pending')])
+    expect(fleetUpgradeRunView(failed)).toBe('failed')
+  })
+
+  it('keeps pointing at the machine a resolve could not reach', () => {
+    const partial = run('resolved', [
+      node('spark-worker', 0, 'succeeded', 'resolved'),
+      node('spark-mid', 1, 'rolled_back', 'unreachable'),
+      node('spark-head', 2, 'pending', 'resolved'),
+    ])
+    expect(fleetUpgradeRunView(partial)).toBe('resolved_holdouts')
+    expect(fleetResolveHoldouts(partial.nodes).map(item => item.display_name)).toEqual(['spark-mid'])
+  })
+
+  it('settles completely once every node released its lock', () => {
+    const settled = run('resolved', [
+      node('spark-worker', 0, 'succeeded', 'resolved'),
+      node('spark-mid', 1, 'rolled_back', 'resolved'),
+      node('spark-head', 2, 'pending', 'resolved'),
+    ])
+    expect(fleetUpgradeRunView(settled)).toBe('resolved')
+    expect(fleetResolveHoldouts(settled.nodes)).toEqual([])
+  })
+
+  it('uses plain words for resolve outcomes', () => {
+    expect(fleetUpgradeResolveWord('resolved')).toBe('Released')
+    expect(fleetUpgradeResolveWord('unreachable')).toBe('Not reached')
+    expect(fleetUpgradeResolveWord(undefined)).toBe('')
+  })
+
+  it('names the failed states so the failed card does not show raw identifiers', () => {
+    expect(fleetUpgradeStateWord('failed_before_handoff')).toBe('Failed')
+    expect(fleetUpgradeStateWord('recovery_required')).toBe('Needs recovery')
   })
 })
 

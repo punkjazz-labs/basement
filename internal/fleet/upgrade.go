@@ -40,6 +40,14 @@ type UpgradeFinishRequest struct {
 	TargetVersion string `json:"target_version"`
 }
 
+// UpgradeResolveRequest tells one node that the owner has resolved the fleet
+// upgrade run, so the node must settle its local run journal and release its
+// per-node maintenance hold whatever its own outcome was.
+type UpgradeResolveRequest struct {
+	Version int    `json:"version"`
+	RunID   string `json:"run_id"`
+}
+
 type LocalUpgradeStatus struct {
 	Version        int    `json:"version"`
 	RunID          string `json:"run_id"`
@@ -64,6 +72,7 @@ type UpgradeRuntime interface {
 	ApplyFleetUpgrade(context.Context, UpgradeApplyRequest) (LocalUpgradeStatus, error)
 	FleetUpgradeStatus(context.Context, string) (LocalUpgradeStatus, error)
 	FinishFleetUpgrade(context.Context, UpgradeFinishRequest) error
+	ResolveFleetUpgrade(context.Context, UpgradeResolveRequest) error
 }
 
 func (m *Manager) requireFleetMutationAllowed(ctx context.Context) error {
@@ -71,10 +80,15 @@ func (m *Manager) requireFleetMutationAllowed(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if active {
-		return errors.New("fleet maintenance is active; placement and membership changes wait until every node runs the target version")
+	if !active {
+		return nil
 	}
-	return nil
+	// A failed run is not "in progress" and waiting never helps, so the
+	// refusal must name the real blocker and the action that clears it.
+	if run, runErr := m.database.LatestFleetUpgradeRun(ctx); runErr == nil && run.State == "failed" {
+		return errors.New("a fleet upgrade failed and needs attention; resolve it from the update screen on the fleet controller to unlock placement and membership")
+	}
+	return errors.New("fleet maintenance is active; placement and membership changes wait until every node runs the target version")
 }
 
 func candidateFromUpgradeRelease(release UpgradeRelease) managerupdate.Candidate {
@@ -281,6 +295,57 @@ func (m *Manager) LatestUpgrade(ctx context.Context) (store.FleetUpgradeRun, err
 	return m.database.LatestFleetUpgradeRun(ctx)
 }
 
+// ResolveUpgrade is the owner's explicit way out of a stopped rollout. It
+// settles the run so the controller accepts a fresh one, and tells every node
+// in the run, including the ones that upgraded successfully, to settle their
+// local journal and release their per-node maintenance hold. A node that
+// cannot be reached does not block the others: its outcome is recorded so the
+// console can show which machine still needs attention, and running resolve
+// again retries only the nodes that were missed.
+func (m *Manager) ResolveUpgrade(ctx context.Context) (store.FleetUpgradeRun, error) {
+	config, err := m.database.FleetConfig(ctx)
+	if err != nil {
+		return store.FleetUpgradeRun{}, err
+	}
+	if config.Role != "controller" {
+		return store.FleetUpgradeRun{}, errors.New("only the fleet controller can resolve a fleet upgrade")
+	}
+	run, err := m.database.LatestFleetUpgradeRun(ctx)
+	if errors.Is(err, os.ErrNotExist) {
+		return store.FleetUpgradeRun{}, errors.New("there is no fleet upgrade to resolve")
+	}
+	if err != nil {
+		return store.FleetUpgradeRun{}, err
+	}
+	switch run.State {
+	case "failed", "resolved":
+	case "succeeded":
+		return run, errors.New("the last fleet upgrade succeeded; there is nothing to resolve")
+	default:
+		// A non-terminal run is still being driven: the driver either
+		// advances it or marks it failed, and it restarts with the manager.
+		return run, errors.New("the fleet upgrade is still in progress; resolve applies once it has failed")
+	}
+	for _, node := range run.Nodes {
+		if node.ResolveState == "resolved" {
+			continue
+		}
+		if resolveErr := m.upgradeResolveCall(ctx, run, node); resolveErr != nil {
+			_ = m.database.UpdateFleetUpgradeNodeResolve(ctx, run.RunID, node.NodeID, "unreachable", cleanUpgradeFailure(resolveErr))
+			continue
+		}
+		if err := m.database.UpdateFleetUpgradeNodeResolve(ctx, run.RunID, node.NodeID, "resolved", ""); err != nil {
+			return store.FleetUpgradeRun{}, err
+		}
+	}
+	if run.State != "resolved" {
+		if err := m.database.UpdateFleetUpgradeRunState(ctx, run.RunID, "resolved", run.Failure); err != nil {
+			return store.FleetUpgradeRun{}, err
+		}
+	}
+	return m.database.FleetUpgradeRun(ctx, run.RunID)
+}
+
 func (m *Manager) startUpgradeDriver(ctx context.Context) {
 	m.upgradeMu.Lock()
 	if m.upgradeRunning {
@@ -417,6 +482,16 @@ func (m *Manager) recordUpgradeStatus(ctx context.Context, run store.FleetUpgrad
 		if err := m.database.UpdateFleetUpgradeNode(ctx, run.RunID, node.NodeID, "succeeded", status.RunningVersion, status.AttemptID, ""); err != nil {
 			return false, err
 		}
+		// A node that proved itself healthy on the target version returns to
+		// local service now, not only when the whole fleet finishes. Its
+		// finish call settles its local journal and releases its per-node
+		// maintenance hold; placement and membership stay closed fleet-wide
+		// until every node agrees, so mixed versions still cannot be placed.
+		// A miss here is fine: finalizing retries this same call, and a run
+		// that later fails is settled by the owner's resolve action.
+		if node.NodeID != m.identity.NodeID {
+			_ = m.upgradeFinishCall(ctx, run, node)
+		}
 		return false, nil
 	case "rolled_back", "recovery_required", "failed_before_handoff":
 		failure := strings.TrimSpace(status.Failure)
@@ -494,6 +569,18 @@ func (m *Manager) finishUpgradeNode(ctx context.Context, run store.FleetUpgradeR
 		return m.upgradeRuntimeValue().FinishFleetUpgrade(ctx, request)
 	}
 	return m.callUpgradeNode(ctx, node.NodeID, http.MethodPost, "/internal/fleet/v1/upgrade/finish", request, &struct{}{})
+}
+
+func (m *Manager) resolveUpgradeNode(ctx context.Context, run store.FleetUpgradeRun, node store.FleetUpgradeNode) error {
+	request := UpgradeResolveRequest{Version: UpgradeProtocolVersion, RunID: run.RunID}
+	if node.NodeID == m.identity.NodeID {
+		runtime := m.upgradeRuntimeValue()
+		if runtime == nil {
+			return errors.New("fleet upgrade runtime is unavailable")
+		}
+		return runtime.ResolveFleetUpgrade(ctx, request)
+	}
+	return m.callUpgradeNode(ctx, node.NodeID, http.MethodPost, "/internal/fleet/v1/upgrade/resolve", request, &struct{}{})
 }
 
 func (m *Manager) callUpgradeNode(ctx context.Context, nodeID, method, endpoint string, request, response any) error {
@@ -605,6 +692,36 @@ func (m *Manager) upgradeFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := m.upgradeRuntimeValue().FinishFleetUpgrade(r.Context(), request); err != nil {
+		writeFleetError(w, http.StatusConflict, err)
+		return
+	}
+	writeFleetJSON(w, http.StatusOK, struct{}{})
+}
+
+func (m *Manager) upgradeResolve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		fleetMethodNotAllowed(w)
+		return
+	}
+	if err := m.authorizeUpgradeController(r); err != nil {
+		writeFleetError(w, http.StatusForbidden, err)
+		return
+	}
+	var request UpgradeResolveRequest
+	if err := decodeFleetBody(r, &request); err != nil {
+		writeFleetError(w, http.StatusBadRequest, err)
+		return
+	}
+	if request.Version != UpgradeProtocolVersion || request.RunID == "" {
+		writeFleetError(w, http.StatusBadRequest, errors.New("fleet upgrade resolve identity is invalid"))
+		return
+	}
+	runtime := m.upgradeRuntimeValue()
+	if runtime == nil {
+		writeFleetError(w, http.StatusServiceUnavailable, errors.New("fleet upgrade runtime is unavailable"))
+		return
+	}
+	if err := runtime.ResolveFleetUpgrade(r.Context(), request); err != nil {
 		writeFleetError(w, http.StatusConflict, err)
 		return
 	}

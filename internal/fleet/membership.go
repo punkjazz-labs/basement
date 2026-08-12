@@ -72,10 +72,11 @@ type Manager struct {
 	// These calls are seams for deterministic rolling-upgrade tests. Production
 	// assigns the mutual TLS and local-runtime implementations once in
 	// NewManager and never reassigns them.
-	upgradeStageCall  func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) (LocalUpgradeStatus, error)
-	upgradeApplyCall  func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) (LocalUpgradeStatus, error)
-	upgradeStatusCall func(context.Context, store.FleetUpgradeNode) (LocalUpgradeStatus, error)
-	upgradeFinishCall func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) error
+	upgradeStageCall   func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) (LocalUpgradeStatus, error)
+	upgradeApplyCall   func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) (LocalUpgradeStatus, error)
+	upgradeStatusCall  func(context.Context, store.FleetUpgradeNode) (LocalUpgradeStatus, error)
+	upgradeFinishCall  func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) error
+	upgradeResolveCall func(context.Context, store.FleetUpgradeRun, store.FleetUpgradeNode) error
 }
 
 func NewManager(ctx context.Context, options Options) (*Manager, error) {
@@ -119,6 +120,7 @@ func NewManager(ctx context.Context, options Options) (*Manager, error) {
 	manager.upgradeApplyCall = manager.applyUpgradeNode
 	manager.upgradeStatusCall = manager.statusUpgradeNode
 	manager.upgradeFinishCall = manager.finishUpgradeNode
+	manager.upgradeResolveCall = manager.resolveUpgradeNode
 	if err := manager.initializeLegacyState(ctx, options.Recipes); err != nil {
 		return nil, err
 	}

@@ -231,27 +231,52 @@ func (s *Server) RecoverAbandonedUpdate() error {
 	return s.updateStager.ReconcileStartup()
 }
 
+const (
+	updateInProgressRefusal = "a manager update is in progress; wait for basement to reconnect before starting new work"
+	// A failed or resolved-but-not-settled fleet upgrade is not in progress,
+	// and waiting never clears it. The refusal has to name the real cause and
+	// the action that ends it.
+	fleetUpgradeAttentionRefusal = "a fleet upgrade failed and needs attention; resolve it from the update screen on the fleet controller to release this machine"
+	fleetUpgradeAwaitingRefusal  = "this machine finished its fleet update and is waiting for the fleet controller to confirm; if the fleet upgrade failed, resolve it from the controller's update screen"
+)
+
 func (s *Server) updateMaintenanceActiveLocked() bool {
+	_, active := s.updateMaintenanceRefusalLocked()
+	return active
+}
+
+// updateMaintenanceRefusalLocked reports whether local mutations must wait,
+// and the sentence that honestly explains why. During a live update the right
+// advice is to wait; once the local journal shows a failed or already-resolved
+// fleet run, waiting is a lie and the advice is to resolve it.
+func (s *Server) updateMaintenanceRefusalLocked() (string, bool) {
 	if s.updateApplying {
-		return true
+		return updateInProgressRefusal, true
 	}
 	if s.store != nil {
-		if active, err := s.store.FleetUpgradeMaintenanceActive(context.Background()); err == nil && active {
-			return true
-		}
-		if active, err := s.store.NodeMaintenanceReservationActive(context.Background()); err == nil && active {
-			return true
+		fleetActive, fleetErr := s.store.FleetUpgradeMaintenanceActive(context.Background())
+		reservationActive, reservationErr := s.store.NodeMaintenanceReservationActive(context.Background())
+		if (fleetErr == nil && fleetActive) || (reservationErr == nil && reservationActive) {
+			if run, err := s.store.LatestFleetUpgradeRun(context.Background()); err == nil {
+				switch run.State {
+				case "failed", "resolved":
+					return fleetUpgradeAttentionRefusal, true
+				case "awaiting_fleet":
+					return fleetUpgradeAwaitingRefusal, true
+				}
+			}
+			return updateInProgressRefusal, true
 		}
 	}
 	status, found, err := s.updateStager.Status()
 	if err != nil || !found {
-		return false
+		return "", false
 	}
 	switch status.State {
 	case "succeeded", "rolled_back", "recovery_required", "failed_before_handoff":
-		return false
+		return "", false
 	default:
-		return true
+		return updateInProgressRefusal, true
 	}
 }
 
@@ -281,10 +306,24 @@ func (s *Server) fleetUpgradeAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var request struct {
-			Confirmed bool `json:"confirmed"`
+			Confirmed bool   `json:"confirmed"`
+			Action    string `json:"action"`
 		}
 		if err := decodeBody(r, &request); err != nil {
 			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if request.Action == "resolve" {
+			run, err := s.fleetManager.ResolveUpgrade(r.Context())
+			if err != nil {
+				writeError(w, http.StatusConflict, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, run)
+			return
+		}
+		if request.Action != "" && request.Action != "start" {
+			writeError(w, http.StatusBadRequest, errors.New("unknown fleet upgrade action"))
 			return
 		}
 		if !request.Confirmed {
@@ -503,6 +542,48 @@ func (s *Server) FinishFleetUpgrade(ctx context.Context, request fleet.UpgradeFi
 	return s.releaseFleetUpgradeReservation(ctx, run.RunID)
 }
 
+// ResolveFleetUpgrade settles this node's share of a fleet upgrade the owner
+// resolved on the controller. Whatever the node's own outcome was, succeeded
+// included, its local run journal becomes terminal, any staged release that
+// will never be applied is settled, and the per-node maintenance reservation
+// is released so local installs, generations, and model control work again.
+// Every step tolerates already being done, so the controller can retry.
+func (s *Server) ResolveFleetUpgrade(ctx context.Context, request fleet.UpgradeResolveRequest) error {
+	if request.Version != fleet.UpgradeProtocolVersion || request.RunID == "" {
+		return errors.New("fleet upgrade resolve identity is invalid")
+	}
+	s.updateAdmissionMu.Lock()
+	defer s.updateAdmissionMu.Unlock()
+	run, err := s.store.FleetUpgradeRun(ctx, request.RunID)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err == nil {
+		if node, nodeErr := localUpgradeNode(run, s.fleetManager.Identity().NodeID); nodeErr == nil && node.AttemptID != "" {
+			status, found, statusErr := s.updateStager.Status()
+			if statusErr != nil {
+				return statusErr
+			}
+			if found && status.AttemptID == node.AttemptID {
+				if settleErr := s.updateStager.SettleResolved("the fleet upgrade was resolved before this release was applied; start a new update when ready"); settleErr != nil {
+					return settleErr
+				}
+			}
+		}
+		switch run.State {
+		case "succeeded", "resolved":
+		default:
+			if stateErr := s.store.UpdateFleetUpgradeRunState(ctx, run.RunID, "resolved", run.Failure); stateErr != nil {
+				return stateErr
+			}
+		}
+	}
+	if releaseErr := s.releaseFleetUpgradeReservation(ctx, request.RunID); releaseErr != nil && !errors.Is(releaseErr, os.ErrNotExist) {
+		return releaseErr
+	}
+	return nil
+}
+
 func (s *Server) ensureLocalFleetUpgrade(ctx context.Context, release fleet.UpgradeRelease) (store.FleetUpgradeRun, store.FleetUpgradeNode, error) {
 	config, err := s.store.FleetConfig(ctx)
 	if err != nil {
@@ -580,10 +661,11 @@ func localFleetUpgradeStatus(runID string, status managerupdate.AttemptStatus) f
 }
 
 func (s *Server) refuseMutationDuringUpdate(w http.ResponseWriter) bool {
-	if !s.updateMaintenanceActiveLocked() {
+	message, active := s.updateMaintenanceRefusalLocked()
+	if !active {
 		return false
 	}
-	writeError(w, http.StatusConflict, errors.New("a manager update is in progress; wait for basement to reconnect before starting new work"))
+	writeError(w, http.StatusConflict, errors.New(message))
 	return true
 }
 

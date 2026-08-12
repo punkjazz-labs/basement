@@ -109,6 +109,8 @@ const FLEET_UPGRADE_WORDS: Record<string, string> = {
   succeeded: 'Done',
   failed: 'Failed',
   rolled_back: 'Rolled back',
+  failed_before_handoff: 'Failed',
+  recovery_required: 'Needs recovery',
 }
 
 export const fleetUpgradeStateWord = (state: string): string => FLEET_UPGRADE_WORDS[state] ?? state
@@ -124,7 +126,33 @@ export const fleetUpgradeRowState = (
   return index === nodes.findIndex(node => node.state !== 'succeeded') ? 'active' : ''
 }
 
-export const fleetUpgradeTerminal = (state: string): boolean => state === 'succeeded' || state === 'failed'
+export const fleetUpgradeTerminal = (state: string): boolean =>
+  state === 'succeeded' || state === 'failed' || state === 'resolved'
+
+// Which card a fleet run should show. A failed run offers the resolve action
+// instead of implying progress; a resolved run either still lists the
+// machines the resolve could not reach, or is settled history.
+export type FleetUpgradeRunView = 'succeeded' | 'failed' | 'resolved_holdouts' | 'resolved' | 'progress'
+
+export function fleetUpgradeRunView(run: FleetUpgradeRun): FleetUpgradeRunView {
+  if (run.state === 'succeeded') return 'succeeded'
+  if (run.state === 'failed') return 'failed'
+  if (run.state === 'resolved') return fleetResolveHoldouts(run.nodes).length > 0 ? 'resolved_holdouts' : 'resolved'
+  return 'progress'
+}
+
+// The nodes an owner resolve did not settle. Only these still hold their
+// local update lock; every other machine is back in service.
+export const fleetResolveHoldouts = (nodes: FleetUpgradeNode[]): FleetUpgradeNode[] =>
+  orderedFleetUpgradeNodes(nodes.filter(node => node.resolve_state !== 'resolved'))
+
+const FLEET_RESOLVE_WORDS: Record<string, string> = {
+  resolved: 'Released',
+  unreachable: 'Not reached',
+}
+
+export const fleetUpgradeResolveWord = (state?: string): string =>
+  state ? FLEET_RESOLVE_WORDS[state] ?? state : ''
 
 export function isFleetUpgradeRun(value: unknown): value is FleetUpgradeRun {
   if (typeof value !== 'object' || value === null) return false

@@ -40,6 +40,11 @@ type FleetUpgradeNode struct {
 	TargetVersion  string `json:"target_version"`
 	AttemptID      string `json:"attempt_id,omitempty"`
 	Failure        string `json:"failure,omitempty"`
+	// ResolveState records what happened when the owner resolved a stopped
+	// run: 'resolved' when this node settled its local state and released its
+	// maintenance hold, 'unreachable' when the controller could not tell it.
+	ResolveState   string `json:"resolve_state,omitempty"`
+	ResolveFailure string `json:"resolve_failure,omitempty"`
 	UpdatedAt      string `json:"updated_at"`
 }
 
@@ -54,13 +59,14 @@ func scanFleetUpgradeRun(row rowScanner, run *FleetUpgradeRun) error {
 func scanFleetUpgradeNode(row rowScanner, node *FleetUpgradeNode) error {
 	return row.Scan(&node.RunID, &node.NodeID, &node.DisplayName, &node.Sequence,
 		&node.Role, &node.State, &node.RunningVersion, &node.TargetVersion,
-		&node.AttemptID, &node.Failure, &node.UpdatedAt)
+		&node.AttemptID, &node.Failure, &node.ResolveState, &node.ResolveFailure, &node.UpdatedAt)
 }
 
 // CreateFleetUpgradeRun takes the fleet maintenance latch and records the
 // complete restart order before any node downloads or restarts. A retry of the
 // same exact run is idempotent, while another active or failed run remains an
-// explicit conflict for the owner to resolve.
+// explicit conflict for the owner to resolve. A resolved run is settled
+// history, so it no longer blocks a fresh attempt.
 func (s *Store) CreateFleetUpgradeRun(ctx context.Context, run FleetUpgradeRun, nodes []FleetUpgradeNode) (FleetUpgradeRun, bool, error) {
 	if run.RunID == "" || run.FleetID == "" || run.ControllerNodeID == "" || run.TargetVersion == "" || run.ManifestSHA256 == "" || len(run.ManifestBytes) == 0 || len(run.SignatureBytes) == 0 || run.AssetURL == "" || len(nodes) == 0 {
 		return FleetUpgradeRun{}, false, errors.New("fleet upgrade identity, signed release, and nodes are required")
@@ -71,7 +77,7 @@ func (s *Store) CreateFleetUpgradeRun(ctx context.Context, run FleetUpgradeRun, 
 	}
 	defer tx.Rollback()
 	var activeID string
-	err = tx.QueryRowContext(ctx, `SELECT run_id FROM fleet_upgrade_runs WHERE state<>'succeeded' ORDER BY created_at DESC LIMIT 1`).Scan(&activeID)
+	err = tx.QueryRowContext(ctx, `SELECT run_id FROM fleet_upgrade_runs WHERE state NOT IN ('succeeded','resolved') ORDER BY created_at DESC LIMIT 1`).Scan(&activeID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return FleetUpgradeRun{}, false, err
 	}
@@ -149,7 +155,7 @@ func (s *Store) LatestFleetUpgradeRun(ctx context.Context) (FleetUpgradeRun, err
 
 func (s *Store) ActiveFleetUpgradeRun(ctx context.Context) (FleetUpgradeRun, error) {
 	var run FleetUpgradeRun
-	if err := scanFleetUpgradeRun(s.db.QueryRowContext(ctx, fleetUpgradeRunSelect+` WHERE state NOT IN ('succeeded','failed') ORDER BY created_at DESC,run_id DESC LIMIT 1`), &run); err != nil {
+	if err := scanFleetUpgradeRun(s.db.QueryRowContext(ctx, fleetUpgradeRunSelect+` WHERE state NOT IN ('succeeded','failed','resolved') ORDER BY created_at DESC,run_id DESC LIMIT 1`), &run); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return FleetUpgradeRun{}, os.ErrNotExist
 		}
@@ -164,7 +170,7 @@ func (s *Store) ActiveFleetUpgradeRun(ctx context.Context) (FleetUpgradeRun, err
 }
 
 func (s *Store) fleetUpgradeNodes(ctx context.Context, runID string) ([]FleetUpgradeNode, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT run_id,node_id,display_name,sequence,role,state,running_version,target_version,attempt_id,failure,updated_at FROM fleet_upgrade_nodes WHERE run_id=? ORDER BY sequence,node_id`, runID)
+	rows, err := s.db.QueryContext(ctx, `SELECT run_id,node_id,display_name,sequence,role,state,running_version,target_version,attempt_id,failure,resolve_state,resolve_failure,updated_at FROM fleet_upgrade_nodes WHERE run_id=? ORDER BY sequence,node_id`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -211,12 +217,31 @@ func (s *Store) UpdateFleetUpgradeRunState(ctx context.Context, runID, state, fa
 
 // FleetUpgradeMaintenanceActive remains true after a stopped rollout. Version
 // skew is still real after the driver stops, so placement and membership stay
-// closed until the owner resolves the failed node instead of being reopened by
-// an error path.
+// closed until the owner explicitly resolves the run instead of being reopened
+// by an error path. A resolved run is that explicit acknowledgment, so it
+// counts as settled alongside succeeded.
 func (s *Store) FleetUpgradeMaintenanceActive(ctx context.Context) (bool, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fleet_upgrade_runs WHERE state<>'succeeded'`).Scan(&count); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fleet_upgrade_runs WHERE state NOT IN ('succeeded','resolved')`).Scan(&count); err != nil {
 		return false, fmt.Errorf("read fleet upgrade maintenance: %w", err)
 	}
 	return count > 0, nil
+}
+
+// UpdateFleetUpgradeNodeResolve records the per-node outcome of an owner
+// resolve action without touching the node's upgrade state, which stays as the
+// history of what actually happened during the rollout.
+func (s *Store) UpdateFleetUpgradeNodeResolve(ctx context.Context, runID, nodeID, resolveState, resolveFailure string) error {
+	if runID == "" || nodeID == "" || resolveState == "" {
+		return errors.New("fleet upgrade node resolve outcome is required")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE fleet_upgrade_nodes SET resolve_state=?,resolve_failure=?,updated_at=? WHERE run_id=? AND node_id=?`,
+		resolveState, resolveFailure, now(), runID, nodeID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return os.ErrNotExist
+	}
+	return nil
 }

@@ -431,6 +431,8 @@ export interface FleetUpgradeNode {
   target_version: string
   attempt_id?: string
   failure?: string
+  resolve_state?: string
+  resolve_failure?: string
   updated_at: string
 }
 

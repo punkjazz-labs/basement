@@ -509,6 +509,8 @@ func (s *Store) migrateFleetUpgradeSchema() error {
   target_version TEXT NOT NULL,
   attempt_id TEXT NOT NULL DEFAULT '',
   failure TEXT NOT NULL DEFAULT '',
+  resolve_state TEXT NOT NULL DEFAULT '',
+  resolve_failure TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL,
   PRIMARY KEY(run_id,node_id),
   UNIQUE(run_id,sequence)

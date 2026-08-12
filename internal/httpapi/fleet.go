@@ -758,6 +758,10 @@ func (s *Server) fleetAdopt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	} else if active {
+		if run, runErr := s.store.LatestFleetUpgradeRun(r.Context()); runErr == nil && run.State == "failed" {
+			writeError(w, http.StatusConflict, errors.New("a fleet upgrade failed and needs attention; resolve it from the update screen before adding a machine"))
+			return
+		}
 		writeError(w, http.StatusConflict, errors.New("fleet maintenance is active; wait until every node runs the target version before adding a machine"))
 		return
 	}
