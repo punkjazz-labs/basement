@@ -75,7 +75,10 @@ func main() {
 	// cache exists on disk. Fleet migration needs that same history so an
 	// active distributed recipe from the cache is not missed as a legacy
 	// candidate merely because it was not in the original embedded set.
-	feed := recipefeed.NewFetcher(recipes, cfg.DataDir, logger)
+	// The database is also where accepted revocations land, permanently: a
+	// version this machine has been told not to install stays refused across
+	// restarts and across later indexes that no longer mention it.
+	feed := recipefeed.NewFetcher(recipes, cfg.DataDir, logger, db)
 	cachedAll, cachedEffective := feed.Snapshot()
 	provider := inventory.Host{DataDir: cfg.DataDir, DockerSocket: "/var/run/docker.sock"}
 	buildIdentity, err := fleet.BinaryBuildIdentity(cfg.Version)
@@ -127,6 +130,10 @@ func main() {
 	// A Spark adopted from this console is installed to listen the same way
 	// this one does (ADR 0014), so the API needs to know how that is.
 	api.SetListenAddress(cfg.Listen)
+	// The console reports feed health from the fetcher's own state, so an
+	// index that has not been refreshed in a month can say so rather than
+	// look like a healthy feed with nothing new in it.
+	api.SetRecipeFeedHealth(feed.Health)
 	// Token counters die with the container that publishes them, so the
 	// engine reads them one last time before it stops one. Installed before
 	// ResumeInterrupted below runs a single step: a resumed stop job can

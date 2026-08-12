@@ -46,7 +46,40 @@ const (
 
 	fetchTimeout    = 15 * time.Second
 	RefreshInterval = 6 * time.Hour
+
+	// StalenessBound is how old the accepted index may be before the console
+	// must say so (ADR 0009 item 7). A machine that has not fetched in a
+	// month may have missed a revocation, and the manager's answer to that is
+	// honesty, not enforcement: nothing is blocked, the age is simply told.
+	StalenessBound = 30 * 24 * time.Hour
 )
+
+// Feed health states. Three, deliberately: whether the last fetch reached the
+// feed, and whether there has ever been an accepted index at all, is the
+// whole of what the console can truthfully say about a feed.
+const (
+	StateOK           = "ok"
+	StateUnreachable  = "unreachable"
+	StateNeverFetched = "never_fetched"
+)
+
+// Health is what the console shows about the feed itself. Times are pointers
+// so "never" is null rather than a year-one timestamp pretending to be a
+// moment.
+type Health struct {
+	State               string     `json:"state"`
+	AcceptedGeneratedAt *time.Time `json:"accepted_generated_at"`
+	FetchedAt           *time.Time `json:"fetched_at"`
+	Stale               bool       `json:"stale"`
+}
+
+// RevocationRecorder is the permanent, insert-only home for revocations this
+// manager has accepted. The interface has exactly one method and no way to
+// express removal, so no code path above it can un-revoke anything: a later
+// index that omits an entry simply records nothing new (ADR 0009 item 7).
+type RevocationRecorder interface {
+	RecordRevocation(ctx context.Context, id string, version int, reason string, revokedAt time.Time) error
+}
 
 // newHTTPClient builds a client dedicated to index fetches: it never follows
 // redirects. The index URL is a fixed constant, so a redirect to anywhere —
@@ -68,11 +101,12 @@ func newHTTPClient() *http.Client {
 // an already-installed model keeps resolving to the exact recipe version it
 // was installed with even after the catalog moves on.
 type Fetcher struct {
-	cacheDir   string
-	indexURL   string // always IndexURL in production; overridden by tests only
-	publicKey  ed25519.PublicKey
-	logger     *slog.Logger
-	httpClient *http.Client
+	cacheDir    string
+	indexURL    string // always IndexURL in production; overridden by tests only
+	publicKey   ed25519.PublicKey
+	logger      *slog.Logger
+	httpClient  *http.Client
+	revocations RevocationRecorder
 
 	mu           sync.Mutex
 	embedded     []recipe.Recipe
@@ -80,14 +114,20 @@ type Fetcher struct {
 	fresh        []recipe.Recipe
 	all          map[string]recipe.Recipe // keyed by id+"@"+version; only ever grows
 	lastAccepted time.Time
+	fetchedAt    time.Time
+	lastFetchErr string
 }
 
 // NewFetcher seeds the registry with the embedded recipes and whatever
 // verified cache already exists on disk (a previous run's last accepted
 // index). It never touches the network — startup must work offline, and
 // must not block on it — so RefreshOnce/Run own every network call.
-func NewFetcher(embedded []recipe.Recipe, dataDir string, logger *slog.Logger) *Fetcher {
-	return newFetcher(embedded, dataDir, logger, recipe.IndexPublicKey())
+//
+// The recorder is taken at construction rather than wired afterwards because
+// loading the disk cache already accepts an index, revocations and all, and a
+// recorder attached one line later would miss exactly those.
+func NewFetcher(embedded []recipe.Recipe, dataDir string, logger *slog.Logger, revocations RevocationRecorder) *Fetcher {
+	return newFetcher(embedded, dataDir, logger, recipe.IndexPublicKey(), revocations)
 }
 
 // newFetcher is NewFetcher with the public key made explicit, so tests can
@@ -95,18 +135,19 @@ func NewFetcher(embedded []recipe.Recipe, dataDir string, logger *slog.Logger) *
 // moment of construction, exactly as production verifies against the one
 // real embedded key for the object's entire lifetime — the key is never
 // swapped out after construction.
-func newFetcher(embedded []recipe.Recipe, dataDir string, logger *slog.Logger, publicKey ed25519.PublicKey) *Fetcher {
+func newFetcher(embedded []recipe.Recipe, dataDir string, logger *slog.Logger, publicKey ed25519.PublicKey, revocations RevocationRecorder) *Fetcher {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	f := &Fetcher{
-		cacheDir:   filepath.Join(dataDir, "recipes-cache"),
-		indexURL:   IndexURL,
-		publicKey:  publicKey,
-		logger:     logger,
-		httpClient: newHTTPClient(),
-		embedded:   embedded,
-		all:        make(map[string]recipe.Recipe, len(embedded)),
+		cacheDir:    filepath.Join(dataDir, "recipes-cache"),
+		indexURL:    IndexURL,
+		publicKey:   publicKey,
+		logger:      logger,
+		httpClient:  newHTTPClient(),
+		revocations: revocations,
+		embedded:    embedded,
+		all:         make(map[string]recipe.Recipe, len(embedded)),
 	}
 	for _, r := range embedded {
 		f.all[versionKey(r.ID, r.Version)] = r
@@ -139,7 +180,44 @@ func (f *Fetcher) loadCache() {
 	}
 	if err := f.accept(indexBytes, sigBytes, false); err != nil {
 		f.logger.Warn("recipe index: cached index failed verification; ignoring cache", "error", err)
+		return
 	}
+	// The cache file's modification time is the moment the fetch that wrote
+	// it succeeded, so a restart reports when this machine last reached the
+	// feed instead of claiming it never has.
+	if info, err := os.Stat(indexPath); err == nil {
+		f.mu.Lock()
+		f.fetchedAt = info.ModTime()
+		f.mu.Unlock()
+	}
+}
+
+// Health reports what this manager can truthfully say about the feed itself:
+// whether the last attempt reached it, which index is in force, when it was
+// last fetched, and whether that index is old enough that a revocation could
+// have been missed (ADR 0009 item 7).
+func (f *Fetcher) Health() Health {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	health := Health{State: StateOK}
+	switch {
+	case f.lastAccepted.IsZero():
+		// Nothing has ever been accepted here, from the network or from a
+		// cache, so there is no index in force whatever the last attempt did.
+		health.State = StateNeverFetched
+	case f.lastFetchErr != "":
+		health.State = StateUnreachable
+	}
+	if !f.lastAccepted.IsZero() {
+		accepted := f.lastAccepted
+		health.AcceptedGeneratedAt = &accepted
+		health.Stale = time.Since(accepted) > StalenessBound
+	}
+	if !f.fetchedAt.IsZero() {
+		fetched := f.fetchedAt
+		health.FetchedAt = &fetched
+	}
+	return health
 }
 
 // Snapshot returns the current accumulated history and the current
@@ -167,6 +245,19 @@ func (f *Fetcher) Snapshot() (all, effective []recipe.Recipe) {
 // to log; the registry is left exactly as it was, so the effective catalog
 // never regresses because of a bad fetch.
 func (f *Fetcher) RefreshOnce(ctx context.Context) error {
+	err := f.refresh(ctx)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err != nil {
+		f.lastFetchErr = err.Error()
+		return err
+	}
+	f.lastFetchErr = ""
+	f.fetchedAt = time.Now()
+	return nil
+}
+
+func (f *Fetcher) refresh(ctx context.Context) error {
 	indexBytes, err := f.fetchCapped(ctx, f.indexURL, maxIndexBytes)
 	if err != nil {
 		return fmt.Errorf("fetch recipe index: %w", err)
@@ -228,6 +319,15 @@ func (f *Fetcher) accept(indexBytes, sigBytes []byte, persist bool) error {
 		// not log a failure every cycle.
 		return nil
 	}
+	// Revocations are persisted before the catalog is adopted, and a failure
+	// to persist one rejects the whole index. Taking the recipes while
+	// dropping the revocation that came with them is the one outcome this
+	// must never produce: the refusal to install lives in that record, so an
+	// unrecorded revocation is a revoked version that installs anyway. The
+	// registry is left untouched and the next refresh tries again.
+	if err := f.recordRevocations(idx.Revoked); err != nil {
+		return err
+	}
 	f.cached = idx.Recipes
 	f.fresh = idx.Recipes
 	f.lastAccepted = idx.GeneratedAt
@@ -241,6 +341,27 @@ func (f *Fetcher) accept(indexBytes, sigBytes []byte, persist bool) error {
 			// is logged, not treated as a refresh failure.
 			f.logger.Warn("recipe index: failed to persist verified cache to disk", "error", err)
 		}
+	}
+	return nil
+}
+
+// recordRevocations hands every revocation in an accepted index to the
+// permanent record. It never removes anything: an index that omits an entry
+// recorded earlier simply has nothing to say about it, and what was accepted
+// once stays accepted on this machine (ADR 0009 item 7).
+func (f *Fetcher) recordRevocations(revoked []recipe.Revocation) error {
+	if len(revoked) == 0 {
+		return nil
+	}
+	if f.revocations == nil {
+		return fmt.Errorf("index revokes %d recipe version(s) but this manager has nowhere to record them", len(revoked))
+	}
+	for _, entry := range revoked {
+		if err := f.revocations.RecordRevocation(context.Background(), entry.ID, entry.Version, entry.Reason, entry.RevokedAt); err != nil {
+			return fmt.Errorf("record revocation of %s version %d: %w", entry.ID, entry.Version, err)
+		}
+		f.logger.Warn("recipe index: recipe version revoked by its publisher",
+			"recipe_id", entry.ID, "recipe_version", entry.Version, "reason", entry.Reason)
 	}
 	return nil
 }

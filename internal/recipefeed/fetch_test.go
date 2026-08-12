@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -69,12 +70,57 @@ func marshalIndex(t *testing.T, generatedAt time.Time, recipes ...recipe.Recipe)
 	return body
 }
 
+// testRecorder stands in for the SQLite revocation store. It is insert-only
+// for the same reason the real one is: there is no un-revoke path to model.
+type testRecorder struct {
+	entries map[string]recipe.Revocation
+	fail    error
+}
+
+func newTestRecorder() *testRecorder {
+	return &testRecorder{entries: map[string]recipe.Revocation{}}
+}
+
+func (r *testRecorder) RecordRevocation(_ context.Context, id string, version int, reason string, revokedAt time.Time) error {
+	if r.fail != nil {
+		return r.fail
+	}
+	key := fmt.Sprintf("%s@%d", id, version)
+	if _, exists := r.entries[key]; exists {
+		return nil
+	}
+	r.entries[key] = recipe.Revocation{ID: id, Version: version, Reason: reason, RevokedAt: revokedAt}
+	return nil
+}
+
+func (r *testRecorder) revoked(id string, version int) (recipe.Revocation, bool) {
+	entry, ok := r.entries[fmt.Sprintf("%s@%d", id, version)]
+	return entry, ok
+}
+
+func marshalIndexWithRevocations(t *testing.T, generatedAt time.Time, revoked []recipe.Revocation, recipes ...recipe.Recipe) []byte {
+	t.Helper()
+	if recipes == nil {
+		recipes = []recipe.Recipe{}
+	}
+	body, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"generated_at":   generatedAt.Format(time.RFC3339),
+		"recipes":        recipes,
+		"revoked":        revoked,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
 // newTestFetcher builds a Fetcher wired to the given public key without
 // going through recipe.IndexPublicKey(), so tests can use their own
 // ephemeral keypair instead of the placeholder embedded in the binary.
 func newTestFetcher(t *testing.T, embedded []recipe.Recipe, pub ed25519.PublicKey) *Fetcher {
 	t.Helper()
-	f := newFetcher(embedded, t.TempDir(), discardLogger(), pub)
+	f := newFetcher(embedded, t.TempDir(), discardLogger(), pub, newTestRecorder())
 	return f
 }
 
@@ -192,6 +238,213 @@ func TestInvalidRecipeInFetchedIndexIsDroppedNotFatal(t *testing.T) {
 	}
 }
 
+// --- Revocation (ADR 0009 item 7) ---
+
+func TestAcceptedRevocationIsRecordedPermanently(t *testing.T) {
+	pub, priv := testKeypair(t)
+	recorder := newTestRecorder()
+	f := newFetcher([]recipe.Recipe{testRecipe(t, "recipe-a", 1)}, t.TempDir(), discardLogger(), pub, recorder)
+
+	revokedAt := time.Date(2026, 8, 12, 9, 0, 0, 0, time.UTC)
+	first := marshalIndexWithRevocations(t, time.Unix(1000, 0),
+		[]recipe.Revocation{{ID: "recipe-a", Version: 1, Reason: "the published weights were the wrong quantisation", RevokedAt: revokedAt}},
+		testRecipe(t, "recipe-a", 2))
+	if err := f.accept(first, sign(priv, first), false); err != nil {
+		t.Fatalf("index carrying a revocation rejected: %v", err)
+	}
+	entry, ok := recorder.revoked("recipe-a", 1)
+	if !ok {
+		t.Fatal("the revocation was not recorded")
+	}
+	if entry.Reason != "the published weights were the wrong quantisation" {
+		t.Fatalf("reason was not carried verbatim: %q", entry.Reason)
+	}
+
+	// A later index says nothing about it. Permanence means the machine does
+	// not forget: nothing above the recorder can withdraw what was accepted,
+	// so a compromised key cannot quietly restore a pulled recipe.
+	second := marshalIndexWithRevocations(t, time.Unix(2000, 0), nil, testRecipe(t, "recipe-a", 3))
+	if err := f.accept(second, sign(priv, second), false); err != nil {
+		t.Fatalf("a later index without revocations was rejected: %v", err)
+	}
+	if _, ok := recorder.revoked("recipe-a", 1); !ok {
+		t.Fatal("a later index that omitted the entry un-revoked it")
+	}
+	if len(recorder.entries) != 1 {
+		t.Fatalf("unexpected revocation record: %#v", recorder.entries)
+	}
+}
+
+func TestAcceptRejectsAnIndexWhoseRevocationCannotBeRecorded(t *testing.T) {
+	// Taking the recipes while dropping the revocation that came with them
+	// would leave a revoked version installable, so the whole index is
+	// refused and the registry is left as it was for the next attempt.
+	pub, priv := testKeypair(t)
+	recorder := newTestRecorder()
+	recorder.fail = errors.New("database is unwritable")
+	f := newFetcher([]recipe.Recipe{testRecipe(t, "recipe-a", 1)}, t.TempDir(), discardLogger(), pub, recorder)
+
+	body := marshalIndexWithRevocations(t, time.Now(),
+		[]recipe.Revocation{{ID: "recipe-a", Version: 1, Reason: "wrong weights", RevokedAt: time.Now()}},
+		testRecipe(t, "recipe-a", 2))
+	if err := f.accept(body, sign(priv, body), false); err == nil {
+		t.Fatal("an index whose revocation could not be recorded was accepted")
+	}
+	_, effective := f.Snapshot()
+	if got, ok := recipe.Find(effective, "recipe-a"); !ok || got.Version != 1 {
+		t.Fatalf("the refused index changed the catalog: %#v", effective)
+	}
+}
+
+func TestAcceptingARevocationStopsNothingThatIsServing(t *testing.T) {
+	// The manager never stops a running model on its own. Ingesting a
+	// revocation for the exact version in the effective catalog must leave
+	// that catalog resolvable, unchanged, and free of any instruction to act:
+	// the Fetcher holds no executor, engine or store beyond the insert-only
+	// recorder, so there is nothing here that could stop a container.
+	pub, priv := testKeypair(t)
+	recorder := newTestRecorder()
+	serving := testRecipe(t, "recipe-a", 1)
+	f := newFetcher([]recipe.Recipe{serving}, t.TempDir(), discardLogger(), pub, recorder)
+	beforeAll, beforeEffective := f.Snapshot()
+
+	body := marshalIndexWithRevocations(t, time.Now(),
+		[]recipe.Revocation{{ID: "recipe-a", Version: 1, Reason: "the runtime image was compromised", RevokedAt: time.Now()}})
+	if err := f.accept(body, sign(priv, body), false); err != nil {
+		t.Fatalf("an index that only revokes was rejected: %v", err)
+	}
+	afterAll, afterEffective := f.Snapshot()
+	if _, ok := recipe.FindVersion(afterAll, "recipe-a", 1); !ok {
+		t.Fatal("the revoked version stopped resolving, so an installed model could no longer be operated")
+	}
+	if len(afterAll) != len(beforeAll) {
+		t.Fatalf("ingest changed the version history: before=%#v after=%#v", beforeAll, afterAll)
+	}
+	if fmt.Sprint(beforeEffective) != fmt.Sprint(afterEffective) {
+		t.Fatalf("ingest changed the effective catalog:\nbefore=%#v\nafter=%#v", beforeEffective, afterEffective)
+	}
+}
+
+// --- Feed health (ADR 0009 items 6 and 7) ---
+
+func TestHealthReportsNeverFetchedBeforeAnyIndexIsAccepted(t *testing.T) {
+	pub, _ := testKeypair(t)
+	f := newTestFetcher(t, []recipe.Recipe{testRecipe(t, "recipe-a", 1)}, pub)
+	health := f.Health()
+	if health.State != StateNeverFetched {
+		t.Fatalf("state=%q, want %q", health.State, StateNeverFetched)
+	}
+	if health.AcceptedGeneratedAt != nil || health.FetchedAt != nil {
+		t.Fatalf("a feed that was never fetched cannot report times: %#v", health)
+	}
+	if health.Stale {
+		t.Fatal("nothing accepted cannot be stale; the state already says it")
+	}
+}
+
+func TestHealthReportsOKAfterASuccessfulFetch(t *testing.T) {
+	pub, priv := testKeypair(t)
+	generatedAt := time.Now().UTC().Truncate(time.Second)
+	body := marshalIndex(t, generatedAt, testRecipe(t, "remote-a", 5))
+	server := newIndexServer(t, body, sign(priv, body))
+	f := newFetcher(nil, t.TempDir(), discardLogger(), pub, newTestRecorder())
+	f.indexURL = server.URL + "/index.json"
+	if err := f.RefreshOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	health := f.Health()
+	if health.State != StateOK {
+		t.Fatalf("state=%q, want %q", health.State, StateOK)
+	}
+	if health.AcceptedGeneratedAt == nil || !health.AcceptedGeneratedAt.Equal(generatedAt) {
+		t.Fatalf("accepted_generated_at=%v, want %s", health.AcceptedGeneratedAt, generatedAt)
+	}
+	if health.FetchedAt == nil {
+		t.Fatal("a successful fetch must report when it happened")
+	}
+	if health.Stale {
+		t.Fatal("an index generated just now is not stale")
+	}
+}
+
+func TestHealthReportsStaleOnceTheAcceptedIndexPassesTheBound(t *testing.T) {
+	// Thirty-one days: one day past the bound, so the console can say a
+	// revocation may have been missed rather than imply the feed is current.
+	pub, priv := testKeypair(t)
+	f := newFetcher(nil, t.TempDir(), discardLogger(), pub, newTestRecorder())
+	old := time.Now().Add(-31 * 24 * time.Hour)
+	body := marshalIndex(t, old, testRecipe(t, "recipe-a", 1))
+	if err := f.accept(body, sign(priv, body), false); err != nil {
+		t.Fatalf("an old but validly signed index must still be accepted: %v", err)
+	}
+	health := f.Health()
+	if !health.Stale {
+		t.Fatalf("an index older than %s must report stale: %#v", StalenessBound, health)
+	}
+
+	fresh := marshalIndex(t, time.Now(), testRecipe(t, "recipe-a", 2))
+	if err := f.accept(fresh, sign(priv, fresh), false); err != nil {
+		t.Fatal(err)
+	}
+	if f.Health().Stale {
+		t.Fatal("a fresh index must clear the staleness warning")
+	}
+}
+
+func TestHealthReportsUnreachableAndKeepsTheLastAcceptedIndex(t *testing.T) {
+	pub, priv := testKeypair(t)
+	generatedAt := time.Now().UTC().Truncate(time.Second)
+	body := marshalIndex(t, generatedAt, testRecipe(t, "remote-a", 5))
+
+	reachable := true
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.json", func(w http.ResponseWriter, r *http.Request) {
+		if !reachable {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(body)
+	})
+	mux.HandleFunc("/index.json.sig", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(sign(priv, body))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	f := newFetcher(nil, t.TempDir(), discardLogger(), pub, newTestRecorder())
+	f.indexURL = server.URL + "/index.json"
+	if err := f.RefreshOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fetchedAt := f.Health().FetchedAt
+
+	reachable = false
+	if err := f.RefreshOnce(context.Background()); err == nil {
+		t.Fatal("expected the second fetch to fail")
+	}
+	health := f.Health()
+	if health.State != StateUnreachable {
+		t.Fatalf("state=%q, want %q", health.State, StateUnreachable)
+	}
+	if health.AcceptedGeneratedAt == nil || !health.AcceptedGeneratedAt.Equal(generatedAt) {
+		t.Fatalf("an unreachable feed must keep reporting the last accepted index: %#v", health)
+	}
+	if health.FetchedAt == nil || !health.FetchedAt.Equal(*fetchedAt) {
+		t.Fatalf("a failed fetch must not count as a fetch: %#v", health)
+	}
+	if _, effective := f.Snapshot(); len(effective) != 1 {
+		t.Fatalf("an unreachable feed changed the catalog: %#v", effective)
+	}
+
+	reachable = true
+	if err := f.RefreshOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if state := f.Health().State; state != StateOK {
+		t.Fatalf("state=%q after the feed came back, want %q", state, StateOK)
+	}
+}
+
 // --- HTTP integration: fetch, verify, cache, and merge end to end ---
 
 func newIndexServer(t *testing.T, indexBody, sigBody []byte) *httptest.Server {
@@ -215,7 +468,7 @@ func TestRefreshOnceFetchesVerifiesCachesAndMerges(t *testing.T) {
 	server := newIndexServer(t, body, sign(priv, body))
 
 	dataDir := t.TempDir()
-	f := newFetcher(nil, dataDir, discardLogger(), pub)
+	f := newFetcher(nil, dataDir, discardLogger(), pub, newTestRecorder())
 	f.indexURL = server.URL + "/index.json"
 
 	if err := f.RefreshOnce(context.Background()); err != nil {
@@ -238,7 +491,7 @@ func TestRefreshOnceFetchesVerifiesCachesAndMerges(t *testing.T) {
 
 	// A fresh Fetcher pointed at the same data dir, with no network access,
 	// must recover the cached recipe from disk alone (offline fallback).
-	offline := newFetcher(nil, dataDir, discardLogger(), pub)
+	offline := newFetcher(nil, dataDir, discardLogger(), pub, newTestRecorder())
 	_, offlineEffective := offline.Snapshot()
 	if got, ok := recipe.Find(offlineEffective, "remote-a"); !ok || got.Version != 5 {
 		t.Fatalf("cached index was not recovered offline: %#v", offlineEffective)
@@ -250,7 +503,7 @@ func TestRefreshOnceRejectsOversizedIndex(t *testing.T) {
 	oversized := make([]byte, maxIndexBytes+1024)
 	server := newIndexServer(t, oversized, sign(priv, oversized))
 
-	f := newFetcher(nil, t.TempDir(), discardLogger(), pub)
+	f := newFetcher(nil, t.TempDir(), discardLogger(), pub, newTestRecorder())
 	f.indexURL = server.URL + "/index.json"
 	if err := f.RefreshOnce(context.Background()); err == nil {
 		t.Fatal("oversized index response was not rejected")
@@ -269,7 +522,7 @@ func TestRefreshOnceNetworkFailureLeavesEmbeddedRecipesUntouched(t *testing.T) {
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
-	f := newFetcher(embedded, t.TempDir(), discardLogger(), pub)
+	f := newFetcher(embedded, t.TempDir(), discardLogger(), pub, newTestRecorder())
 	f.indexURL = server.URL + "/index.json"
 	before, beforeEffective := f.Snapshot()
 

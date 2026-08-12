@@ -119,12 +119,35 @@ Not operational or not built:
   production index or signature is published there.
 - No repository workflow creates a recipe index, validates one as a publication
   artifact, signs it, or publishes it.
-- The console does not announce a newly arrived recipe or show feed health.
-- Revocation (item 7) is designed but not built: the index schema, the
-  install refusal, the console notice, and the staleness warning all remain
-  to implement.
+- The console does not announce a newly arrived recipe, render the revocation
+  notice, or draw the feed-health surface the manager now serves.
+
 Resolved since:
 
+- Revocation (item 7) is built in the manager, 2026-08-12. The signed index
+  carries a top-level `revoked` array of `{id, version, reason, revoked_at}`,
+  entering the current schema version while no feed is live and no fielded
+  manager parses one. The decoder is strict in both directions: an unknown
+  top-level field is still refused, a revocation entry with an unknown field,
+  a missing or blank reason, a non-exact version, or a `revoked_at` that is
+  not RFC3339 refuses the whole index rather than being dropped with a
+  reason, and the schema still cannot express "all versions" or anything
+  product-wide. Accepted revocations are recorded in SQLite
+  (`recipe_revocations`, added by its own migration) with the reason and both
+  timestamps; the table is insert-only and no code path above it can remove a
+  row, so a later index that omits an entry, a restart, and a machine that
+  never fetches again all leave the version revoked. A revoked version cannot
+  be newly installed: the refusal is raised as soon as the recipe is resolved
+  and carries the publisher's reason verbatim. Nothing stops a model that is
+  already serving — ingest writes one row and generates no plan, stop, or
+  switch — and the console is given what it needs to say so: `revoked` and
+  `revoked_reason` on both the catalog and the installed models, plus a
+  `recipe_feed` health object on `/api/v1/system` reporting
+  `{state, accepted_generated_at, fetched_at, stale}` with the 30-day
+  staleness bound. Still not built, and not to be described otherwise: the
+  console does not yet render the notice or the feed-health surface, the
+  signing key is still the discarded placeholder, and no publication workflow
+  produces or signs an index, so no revocation can actually be issued today.
 - Feed ingest now enforces item 4 (2026-08-12): whatever a signed index
   claims, a recipe arrives at most as `basement-candidate` with `candidate`
   verification, demoted at the trust boundary in `VerifyAndParseIndex` with a

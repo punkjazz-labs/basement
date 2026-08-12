@@ -42,6 +42,127 @@ func marshalIndex(t *testing.T, generatedAt time.Time, recipes ...Recipe) []byte
 	return body
 }
 
+// marshalIndexWithRevocations builds an index whose revoked array is written
+// from raw maps, so a test can express shapes the Go type cannot — which is
+// the whole point of the strict decoder.
+func marshalIndexWithRevocations(t *testing.T, generatedAt time.Time, revoked []map[string]any, recipes ...Recipe) []byte {
+	t.Helper()
+	if recipes == nil {
+		recipes = []Recipe{}
+	}
+	body, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"generated_at":   generatedAt.Format(time.RFC3339),
+		"recipes":        recipes,
+		"revoked":        revoked,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func TestVerifyAndParseIndexAcceptsRevocations(t *testing.T) {
+	pub, priv := testKeypair(t)
+	revokedAt := time.Now().UTC().Truncate(time.Second)
+	body := marshalIndexWithRevocations(t, time.Now(), []map[string]any{{
+		"id":         "remote-example-1s",
+		"version":    2,
+		"reason":     "the published weights were the wrong quantisation",
+		"revoked_at": revokedAt.Format(time.RFC3339),
+	}}, validTestRecipe(t, "remote-example-1s", 3))
+	idx, reasons, err := VerifyAndParseIndex(body, sign(priv, body), pub)
+	if err != nil {
+		t.Fatalf("index with a well-formed revocation rejected: %v", err)
+	}
+	if len(reasons) != 0 {
+		t.Fatalf("valid index produced drop reasons: %v", reasons)
+	}
+	if len(idx.Revoked) != 1 {
+		t.Fatalf("expected one revocation, got: %#v", idx.Revoked)
+	}
+	got := idx.Revoked[0]
+	if got.ID != "remote-example-1s" || got.Version != 2 {
+		t.Fatalf("revocation names the wrong recipe version: %#v", got)
+	}
+	if got.Reason != "the published weights were the wrong quantisation" {
+		t.Fatalf("reason was not carried verbatim: %q", got.Reason)
+	}
+	if !got.RevokedAt.Equal(revokedAt) {
+		t.Fatalf("revoked_at=%s, want %s", got.RevokedAt, revokedAt)
+	}
+	// Revoking version 2 says nothing about version 3, which is still
+	// published in the same index and must still arrive.
+	if len(idx.Recipes) != 1 || idx.Recipes[0].Version != 3 {
+		t.Fatalf("a revocation removed an unrelated recipe version: %#v", idx.Recipes)
+	}
+}
+
+func TestVerifyAndParseIndexRejectsMalformedRevocations(t *testing.T) {
+	// Every one of these is refused outright rather than dropped with a
+	// reason: a revocation this manager cannot read is a safety statement it
+	// would be silently discarding, and the wildcard shapes are refused
+	// because the schema must not be able to express "all versions" at all.
+	cases := []struct {
+		name  string
+		entry map[string]any
+	}{
+		{"missing reason", map[string]any{"id": "remote-example-1s", "version": 1, "revoked_at": "2026-08-12T00:00:00Z"}},
+		{"blank reason", map[string]any{"id": "remote-example-1s", "version": 1, "reason": "   ", "revoked_at": "2026-08-12T00:00:00Z"}},
+		{"missing id", map[string]any{"version": 1, "reason": "licence problem", "revoked_at": "2026-08-12T00:00:00Z"}},
+		{"missing version", map[string]any{"id": "remote-example-1s", "reason": "licence problem", "revoked_at": "2026-08-12T00:00:00Z"}},
+		{"wildcard version", map[string]any{"id": "remote-example-1s", "version": "*", "reason": "licence problem", "revoked_at": "2026-08-12T00:00:00Z"}},
+		{"version range", map[string]any{"id": "remote-example-1s", "versions": "<=3", "reason": "licence problem", "revoked_at": "2026-08-12T00:00:00Z"}},
+		{"all versions flag", map[string]any{"id": "remote-example-1s", "version": 1, "all_versions": true, "reason": "licence problem", "revoked_at": "2026-08-12T00:00:00Z"}},
+		{"product wide", map[string]any{"id": "*", "version": 0, "reason": "licence problem", "revoked_at": "2026-08-12T00:00:00Z"}},
+		{"missing revoked_at", map[string]any{"id": "remote-example-1s", "version": 1, "reason": "licence problem"}},
+		{"revoked_at is not RFC3339", map[string]any{"id": "remote-example-1s", "version": 1, "reason": "licence problem", "revoked_at": "12 August 2026"}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			pub, priv := testKeypair(t)
+			body := marshalIndexWithRevocations(t, time.Now(), []map[string]any{testCase.entry})
+			if _, _, err := VerifyAndParseIndex(body, sign(priv, body), pub); err == nil {
+				t.Fatalf("index carrying a %s revocation was accepted", testCase.name)
+			}
+		})
+	}
+}
+
+func TestVerifyAndParseIndexStillRejectsUnknownTopLevelFieldAlongsideRevocations(t *testing.T) {
+	// revoked entering the current schema version does not loosen the
+	// decoder: it remains the case that any other new top-level field is a
+	// schema version bump by definition.
+	pub, priv := testKeypair(t)
+	body, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"generated_at":   time.Now().Format(time.RFC3339),
+		"recipes":        []Recipe{},
+		"revoked":        []map[string]any{},
+		"unrevoked":      []map[string]any{{"id": "remote-example-1s", "version": 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := VerifyAndParseIndex(body, sign(priv, body), pub); err == nil {
+		t.Fatal("index with an unknown top-level field alongside revoked was accepted")
+	}
+}
+
+func TestVerifyAndParseIndexAcceptsAnIndexWithNoRevocations(t *testing.T) {
+	// No feed publishes revocations most of the time, and an index that
+	// simply omits the array is the ordinary case, not a malformed document.
+	pub, priv := testKeypair(t)
+	body := marshalIndex(t, time.Now(), validTestRecipe(t, "remote-example-1s", 1))
+	idx, _, err := VerifyAndParseIndex(body, sign(priv, body), pub)
+	if err != nil {
+		t.Fatalf("index without a revoked array rejected: %v", err)
+	}
+	if len(idx.Revoked) != 0 {
+		t.Fatalf("expected no revocations, got: %#v", idx.Revoked)
+	}
+}
+
 func TestVerifyAndParseIndexAcceptsValidIndex(t *testing.T) {
 	pub, priv := testKeypair(t)
 	r := validTestRecipe(t, "remote-example-1s", 1)

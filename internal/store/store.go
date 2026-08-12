@@ -274,6 +274,9 @@ CREATE TABLE IF NOT EXISTS generations (
 	if err := s.migrateFleetUpgradeSchema(); err != nil {
 		return err
 	}
+	if err := s.migrateRecipeRevocations(); err != nil {
+		return err
+	}
 	return s.ensureFleetUpgradeResolveColumns()
 }
 
@@ -326,6 +329,7 @@ const (
 	fleetFoundationSchemaVersion = 2
 	reservationSchemaVersion     = 3
 	fleetSchemaVersion           = 4
+	revocationSchemaVersion      = 5
 	fleetMigrationStatementCount = 10
 )
 
@@ -571,6 +575,52 @@ func (s *Store) migrateFleetUpgradeSchema() error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit fleet upgrade migration: %w", err)
+	}
+	return nil
+}
+
+// migrateRecipeRevocations adds the permanent home for revocations accepted
+// from a signed index (ADR 0009 item 7). It is a new migration rather than an
+// edit to an existing one: amending a shipped migration in place is exactly
+// what left fleet_upgrade_nodes missing its resolve columns on hardware
+// (2026-08-12), because a database whose schema version was already recorded
+// skips the amended step entirely. Anything this table ever needs beyond its
+// current shape belongs in the migration after this one.
+//
+// The table only ever gains rows. There is no un-revoke path anywhere above
+// it, so a later index that omits an entry cannot restore what a compromised
+// key pulled; the honest remedy for an over-broad revocation is publishing a
+// fixed new version.
+func (s *Store) migrateRecipeRevocations() error {
+	var version int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_meta`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version >= revocationSchemaVersion {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin recipe revocation migration: %w", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS recipe_revocations (
+  recipe_id TEXT NOT NULL,
+  recipe_version INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  revoked_at TEXT NOT NULL,
+  accepted_at TEXT NOT NULL,
+  PRIMARY KEY(recipe_id,recipe_version)
+)`,
+		`UPDATE schema_meta SET version=5`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("migrate recipe revocations: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit recipe revocation migration: %w", err)
 	}
 	return nil
 }
