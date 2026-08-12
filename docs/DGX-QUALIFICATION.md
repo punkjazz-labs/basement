@@ -228,3 +228,33 @@ pre-recovery design, resolved in one authenticated call.
 Sequencing and fail-fast also behaved on hardware: the member failed first
 and the controller was never touched, so the fleet was mixed for minutes,
 not broken.
+
+## 2026-08-12: fleet rolling upgrade acceptance, PASS
+
+Two consecutive rolling upgrades ran to completion on the two-Spark fleet
+with no manual assistance of any kind.
+
+Run 1, v0.5.7 to v0.5.9: one console action on the controller. The member
+staged, verified the signed manifest, handed off to its root updater,
+switched slots, restarted, and answered healthy on the new version; the
+controller followed last, was unreachable for about five seconds during its
+own restart, and the run finalized succeeded in roughly 25 seconds end to
+end. Both nodes' receipts recorded succeeded.
+
+Run 2, v0.5.9 to v0.5.11: identical shape, and additionally proved the
+forced update check: a release published minutes earlier was visible
+immediately through the check control instead of after the hourly cache.
+
+Combined with the earlier findings, this session proved on hardware: the
+signed staging chain, the root handoff and slot switch, target health
+checking, automatic rollback of an unhealthy target (twice, both honest),
+member-first controller-last sequencing, fail-fast on member failure, the
+owner's resolve action releasing a failed run and every node including a
+rolled-back one (twice), and recovery of a machine whose manager, updater,
+or database state predated the fixes. Seven defects were found and each
+ships fixed in the release named beside it, v0.5.4 through v0.5.11.
+
+Follow-ups recorded, not blocking: the Fleet screen offers no migration
+affordance for a legacy-pending peer (completed this session via the join
+API directly), and the updater helper binary itself only updates through
+an installer run, which is worth folding into the one-click path.
