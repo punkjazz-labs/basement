@@ -262,16 +262,35 @@ func TestFleetJoinCodeIsOneUseAndDoesNotJoinAtPrepare(t *testing.T) {
 
 func TestFleetTransportRejectsCookiesBearerKeysAndPublicRoutes(t *testing.T) {
 	manager, _ := newTestManager(t, "member", "192.168.99.20")
+	other, _ := newTestManager(t, "controller", "192.168.99.10")
+	invite, _ := json.Marshal(map[string]string{
+		"fleet_id":               "fleet-under-test",
+		"controller_name":        "controller",
+		"controller_console_url": "http://192.168.99.10:7070",
+	})
+	callInvite := func(headerName, headerValue string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "https://member.test/internal/fleet/v1/invite", bytes.NewReader(invite))
+		request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{other.identity.Certificate}}
+		if headerName != "" {
+			request.Header.Set(headerName, headerValue)
+		}
+		response := httptest.NewRecorder()
+		manager.Handler().ServeHTTP(response, request)
+		return response
+	}
+	// The control carries a valid client certificate and an acceptable body,
+	// so the rejections below are attributable to the header alone. Without
+	// it, this test would pass even if the header check did not exist, since
+	// a certificate-less request is unauthorized for its own reason.
+	if control := callInvite("", ""); control.Code != http.StatusOK {
+		t.Fatalf("control invite refused: status=%d body=%s", control.Code, control.Body.String())
+	}
 	for _, header := range []struct {
 		name  string
 		value string
 	}{{"Cookie", "basement_session=value"}, {"Authorization", "Bearer public-key"}} {
-		request := httptest.NewRequest(http.MethodGet, "https://member.test/internal/fleet/v1/heartbeat", nil)
-		request.Header.Set(header.name, header.value)
-		response := httptest.NewRecorder()
-		manager.Handler().ServeHTTP(response, request)
-		if response.Code != http.StatusUnauthorized {
-			t.Errorf("%s authority reached fleet transport: status=%d", header.name, response.Code)
+		if response := callInvite(header.name, header.value); response.Code != http.StatusUnauthorized {
+			t.Errorf("%s authority reached fleet transport despite valid mutual TLS: status=%d", header.name, response.Code)
 		}
 	}
 	request := httptest.NewRequest(http.MethodGet, "https://member.test/api/v1/keys", nil)
