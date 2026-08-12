@@ -135,3 +135,59 @@ count and the same 30-second streaming benchmark measures 38 tok/s on this
 deployment, consistent with the non-streaming battery above. Streaming and
 non-streaming decode at the same speed; there is nothing to report
 upstream.
+
+## 2026-08-12: one-click manager update qualification on a real installer state
+
+The first attempt to run the console update on a machine installed the way a
+user installs surfaced three defects, each invisible to every earlier test
+because those tests never started from a genuine installer state.
+
+Machine: a single MSI Spark on manager v0.5.2, installed by the official
+installer, MiniMax H3 previously served, no model running at test time.
+
+1. **Startup crash loop, before the update was even attempted.** The machine
+   had an active model marked recovering whose recovered-model reservation
+   had been released by an earlier cycle. Startup reconciliation prepared the
+   same deterministic reservation identity, got the released row back
+   unchanged, failed to activate it, and exited; systemd restarted it into
+   the same wall every five seconds. The machine had served for days and
+   only a restart revealed it, so any machine in this state bricks its
+   manager on its next power cycle. Recovered by deleting the single settled
+   row (preimage preserved on the machine). Fixed so reconciliation clears a
+   settled row and claims fresh; ships in v0.5.4.
+
+2. **Staged handoff unreadable by the root updater.** The updater unit runs
+   as root with an empty capability set and reaches the staging directory
+   only through its membership in the manager's group, but the manager
+   staged every handoff file 0600 with a 0750 pending directory. The updater
+   died with permission denied, could not write a receipt, and the console
+   showed waiting for the root updater indefinitely. The pair had never
+   worked; the hardened unit had sat unloaded behind a missed daemon-reload
+   on this machine, and the earlier updater qualification predated it.
+   Handoffs are now staged group-accessible and a too-narrow pending
+   directory is repaired on the next staging; ships in v0.5.5.
+
+3. **Bootstrap slots refused.** With permissions corrected by hand, the
+   updater refused the machine's current slot as "not a stable release":
+   the installer creates content-addressed bootstrap slots, and the updater
+   accepted only version-named slots it had created itself. Every machine
+   starts on a bootstrap slot, so the first console update of any freshly
+   installed machine was structurally impossible. The earlier updater runs
+   on this machine (the v0.9.90/v0.9.91 slots) started from version-named
+   slots and could not see it. Bootstrap slots are now legitimate previous
+   slots everywhere, including as rollback targets; ships in v0.5.6.
+
+Also observed, not yet fixed: the update check caches for an hour with no
+bypass, so the console's own "Check for updates" button can return an answer
+up to an hour stale; and an updater failure after handoff leaves the console
+in waiting_for_root with no deadline, which the startup reconciliation
+shipped in v0.5.4 deliberately does not touch because the root updater owns
+that state. Both are recorded as follow-ups rather than silently absorbed.
+
+Qualification status: staging, signature verification, and the manager-side
+state machine are proven on this hardware through the v0.5.4 attempt (the
+handoff was verified and consumed once readable). The end-to-end hands-free
+proof, one click from a fresh installer state through restart, health check,
+receipt, and console announcement with no manual assist, requires the fixed
+updater from v0.5.6 on the machine and a newer release to update to; it is
+the acceptance test for this section and is recorded below when it runs.
