@@ -595,6 +595,155 @@ func TestComfyUIProgressReconnectsAfterTheSocketDrops(t *testing.T) {
 	}
 }
 
+// runtimeTransport is a scripted ComfyUI whose queue answer and history
+// completion the test controls per call. It answers the same four routes the
+// live driver uses.
+func runtimeTransport(outputRoot string, queueBody func(call int32) string, completeAfter int32, interrupted *atomic.Bool) http.RoundTripper {
+	var queueCalls, polls atomic.Int32
+	return roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body := "{}"
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == "/prompt":
+			body = `{"prompt_id":"p1"}`
+		case request.Method == http.MethodPost && request.URL.Path == "/interrupt":
+			interrupted.Store(true)
+		case request.Method == http.MethodGet && request.URL.Path == "/queue":
+			body = queueBody(queueCalls.Add(1))
+		case request.Method == http.MethodGet && request.URL.Path == "/history/p1":
+			if polls.Add(1) > completeAfter {
+				if err := os.WriteFile(filepath.Join(outputRoot, "clip.mp4"), []byte("video bytes"), 0o640); err != nil {
+					return nil, err
+				}
+				body = `{"p1":{"status":{"status_str":"success","completed":true,"messages":[]},"outputs":{"6":{"gifs":[{"filename":"clip.mp4","subfolder":"","type":"output"}]}}}}`
+			}
+		default:
+			return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})
+}
+
+func holdStallSeams(t *testing.T, stall time.Duration) {
+	t.Helper()
+	holdProgressSeams(t)
+	previousPoll, previousStall := GenerationPollInterval, GenerationStallTimeout
+	t.Cleanup(func() {
+		GenerationPollInterval = previousPoll
+		GenerationStallTimeout = previousStall
+	})
+	GenerationPollInterval = time.Millisecond
+	GenerationProgressReconnectInterval = time.Millisecond
+	GenerationStallTimeout = stall
+	dialComfyUIProgress = func(context.Context, string, string) (comfyUIProgressSocket, error) {
+		return nil, errors.New("socket unavailable")
+	}
+}
+
+const idleQueue = `{"queue_running":[],"queue_pending":[]}`
+
+func TestGenerationStoppedWhenNothingAdvances(t *testing.T) {
+	// A wedged runtime answers every poll and never moves: no websocket
+	// event, no queue change, no history entry. Before the stall bound this
+	// polled forever, held the model's queue, and only a human could free it.
+	holdStallSeams(t, 40*time.Millisecond)
+	var interrupted atomic.Bool
+	outputRoot := t.TempDir()
+	client := &ComfyUIClient{baseURL: "http://runtime.test", http: &http.Client{
+		Transport: runtimeTransport(outputRoot, func(int32) string { return idleQueue }, 1<<30, &interrupted),
+	}}
+
+	_, err := RunGeneration(
+		context.Background(), client, []byte(`{"1":{"class_type":"Test"}}`),
+		outputRoot, filepath.Join(t.TempDir(), "generation"), nil,
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "nothing advanced") {
+		t.Fatalf("err = %v, want the stall explanation", err)
+	}
+	if !interrupted.Load() {
+		t.Fatal("a stuck generation must ask the runtime to stop before giving up")
+	}
+}
+
+func TestQueueMovementKeepsAGenerationAlivePastTheStallBound(t *testing.T) {
+	// The run takes several times the stall bound to finish, but the queue
+	// keeps changing, which is exactly what a healthy long run looks like
+	// from the outside. It must never be called stuck.
+	holdStallSeams(t, 25*time.Millisecond)
+	var interrupted atomic.Bool
+	outputRoot := t.TempDir()
+	queue := func(call int32) string {
+		if call%2 == 0 {
+			return `{"queue_running":[["p1"]],"queue_pending":[]}`
+		}
+		return idleQueue
+	}
+	client := &ComfyUIClient{baseURL: "http://runtime.test", http: &http.Client{
+		Transport: runtimeTransport(outputRoot, queue, 100, &interrupted),
+	}}
+
+	outcome, err := RunGeneration(
+		context.Background(), client, []byte(`{"1":{"class_type":"Test"}}`),
+		outputRoot, filepath.Join(t.TempDir(), "generation"), nil,
+	)
+
+	if err != nil {
+		t.Fatalf("an advancing generation was stopped: %v", err)
+	}
+	if len(outcome.Files) != 1 || interrupted.Load() {
+		t.Fatalf("outcome=%#v interrupted=%v", outcome, interrupted.Load())
+	}
+}
+
+// tickingSocket emits a fresh sampler progress event on every receive, paced
+// by the poll interval so the test does not spin. Close must make Receive
+// fail: that is how the watcher's teardown works, and a Close that changes
+// nothing would hang RunGeneration's deferred join forever.
+type tickingSocket struct {
+	value  atomic.Int64
+	closed atomic.Bool
+}
+
+func (s *tickingSocket) Receive() ([]byte, error) {
+	time.Sleep(time.Millisecond)
+	if s.closed.Load() {
+		return nil, errors.New("socket closed")
+	}
+	return []byte(fmt.Sprintf(`{"type":"progress","data":{"prompt_id":"p1","value":%d,"max":1000000}}`, s.value.Add(1))), nil
+}
+
+func (s *tickingSocket) Close() error {
+	s.closed.Store(true)
+	return nil
+}
+
+func TestStepProgressKeepsAGenerationAlivePastTheStallBound(t *testing.T) {
+	// The queue never changes here; only the websocket shows life, one
+	// sampler step at a time. That alone must reset the stall clock, for
+	// the API path and for a nil-progress verification run alike.
+	holdStallSeams(t, 25*time.Millisecond)
+	dialComfyUIProgress = func(context.Context, string, string) (comfyUIProgressSocket, error) {
+		return &tickingSocket{}, nil
+	}
+	var interrupted atomic.Bool
+	outputRoot := t.TempDir()
+	client := &ComfyUIClient{baseURL: "http://runtime.test", http: &http.Client{
+		Transport: runtimeTransport(outputRoot, func(int32) string { return idleQueue }, 100, &interrupted),
+	}}
+
+	_, err := RunGeneration(
+		context.Background(), client, []byte(`{"1":{"class_type":"Test"}}`),
+		outputRoot, filepath.Join(t.TempDir(), "generation"), nil,
+	)
+
+	if err != nil {
+		t.Fatalf("a generation with live step progress was stopped: %v", err)
+	}
+	if interrupted.Load() {
+		t.Fatal("nothing here was stuck, so nothing should have been interrupted")
+	}
+}
+
 func TestFailingProgressSocketDoesNotFailTheGeneration(t *testing.T) {
 	holdProgressSeams(t)
 	previousPoll := GenerationPollInterval

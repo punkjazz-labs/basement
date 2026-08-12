@@ -235,6 +235,17 @@ type GenerationOutcome struct {
 // ordering test does not have to sit out real seconds.
 var GenerationPollInterval = 2 * time.Second
 
+// GenerationStallTimeout bounds how long a generation may go with nothing
+// observably advancing: no new websocket progress event and no change in the
+// runtime's queue. It is deliberately not an elapsed-time deadline. H3's
+// measured points cannot bound every canvas and duration the recipe permits,
+// and a wrong finite guess would discard hours of legitimate work, but a run
+// that advances nothing is not working, it is wedged. The margin is set by
+// the slowest silently-running node a legitimate run contains: a QHD VAE
+// decode reports no step progress at all while it works, so the bound must
+// comfortably hold the longest such gap, not the longest generation.
+var GenerationStallTimeout = 30 * time.Minute
+
 // GenerationProgressReconnectInterval paces reconnects after ComfyUI's
 // optional progress socket drops. Production never reassigns it; tests make
 // it short so proving a reconnect does not have to wait on a real backoff.
@@ -403,9 +414,11 @@ func parseComfyUIProgress(message []byte, promptID string) (GenerationStepProgre
 // outputRoot is the host side of the container's output directory; ComfyUI
 // writes there under names of its own choosing, and this moves the results
 // into the per-generation directory afterwards rather than trying to make
-// ComfyUI name them. There is deliberately no elapsed-time deadline here.
-// The recipe validates what may be requested, while explicit cancellation or
-// the caller's context decides when work must stop.
+// ComfyUI name them. There is deliberately no elapsed-time deadline here;
+// the only automatic bound is GenerationStallTimeout, which measures
+// advancement rather than duration. The recipe validates what may be
+// requested, while explicit cancellation or the caller's context decides
+// when work must otherwise stop.
 func RunGeneration(ctx context.Context, client *ComfyUIClient, graph []byte, outputRoot, destination string, progress GenerationProgress) (GenerationOutcome, error) {
 	started := time.Now()
 	clientID := nextComfyUIClientID()
@@ -413,23 +426,37 @@ func RunGeneration(ctx context.Context, client *ComfyUIClient, graph []byte, out
 	if err != nil {
 		return GenerationOutcome{}, err
 	}
+	// lastAdvance holds the elapsed offset of the newest observable
+	// advancement: a websocket progress event that differs from the one
+	// before it, or a change in the runtime's queue. Submission counts as
+	// the first advancement.
+	var lastAdvance atomic.Int64
+	advance := func() { lastAdvance.Store(int64(time.Since(started))) }
 	progressCtx, stopProgress := context.WithCancel(ctx)
-	var progressDone chan struct{}
-	if progress != nil {
-		progressDone = make(chan struct{})
-		go func() {
-			defer close(progressDone)
-			client.watchProgress(progressCtx, clientID, promptID, func(step GenerationStepProgress) error {
-				return progress(GenerationProgressUpdate{Elapsed: time.Since(started), Step: &step})
-			})
-		}()
-	}
+	progressDone := make(chan struct{})
+	go func() {
+		defer close(progressDone)
+		// The watcher runs even with no progress callback: a verification
+		// run needs its stall clock reset by real step events too.
+		var previous GenerationStepProgress
+		var seen bool
+		client.watchProgress(progressCtx, clientID, promptID, func(step GenerationStepProgress) error {
+			if !seen || step != previous {
+				previous, seen = step, true
+				advance()
+			}
+			if progress == nil {
+				return nil
+			}
+			return progress(GenerationProgressUpdate{Elapsed: time.Since(started), Step: &step})
+		})
+	}()
 	defer func() {
 		stopProgress()
-		if progressDone != nil {
-			<-progressDone
-		}
+		<-progressDone
 	}()
+	var previousQueue QueueState
+	var queueSeen bool
 	for {
 		entry, err := client.History(ctx, promptID)
 		if err != nil {
@@ -450,11 +477,26 @@ func RunGeneration(ctx context.Context, client *ComfyUIClient, graph []byte, out
 			outcome.Duration = time.Since(started)
 			return outcome, nil
 		}
-		if progress != nil {
-			queue, _ := client.Queue(ctx)
-			if err := progress(GenerationProgressUpdate{Elapsed: time.Since(started), Queue: &queue}); err != nil {
-				return GenerationOutcome{}, err
+		if queue, queueErr := client.Queue(ctx); queueErr == nil {
+			if !queueSeen || queue != previousQueue {
+				previousQueue, queueSeen = queue, true
+				advance()
 			}
+			if progress != nil {
+				if err := progress(GenerationProgressUpdate{Elapsed: time.Since(started), Queue: &queue}); err != nil {
+					return GenerationOutcome{}, err
+				}
+			}
+		}
+		if stall := GenerationStallTimeout; stall > 0 && time.Since(started)-time.Duration(lastAdvance.Load()) > stall {
+			// The runtime is holding the model's queue without doing
+			// anything. Asking it to stop is best effort: a wedge deep
+			// enough to ignore the interrupt is settled by restarting the
+			// model, and this error says so.
+			interruptCtx, cancelInterrupt := context.WithTimeout(ctx, 10*time.Second)
+			_ = client.Interrupt(interruptCtx)
+			cancelInterrupt()
+			return GenerationOutcome{}, fmt.Errorf("nothing advanced for %s, so the generation was stopped as stuck; if this repeats, stop and start the model", stall)
 		}
 		select {
 		case <-ctx.Done():
