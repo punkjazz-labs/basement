@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -117,6 +118,35 @@ func TestUpdaterRollsBackToTheBootstrapSlotWhenTargetIsUnhealthy(t *testing.T) {
 	}
 	if receipt.State != "rolled_back" {
 		t.Fatalf("receipt state = %q, want rolled_back onto the bootstrap slot", receipt.State)
+	}
+}
+
+// The updater unit runs under UMask=0077, and umask silently strips the
+// requested slot modes to owner-only. The manager runs as its own user, so a
+// root-owned slot it cannot execute crash loops the service into rollback
+// (hardware, 2026-08-12). The slot must come out world-readable regardless
+// of the process umask.
+func TestPreparedSlotIsExecutableWhateverTheUmask(t *testing.T) {
+	previous := syscall.Umask(0o077)
+	defer syscall.Umask(previous)
+	updater, paths := updaterFixture(t, nil)
+	if err := updater.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	slotDir := filepath.Join(paths.VersionsDir, "v2.0.0")
+	info, err := os.Stat(slotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("slot dir mode = %o, the service user cannot enter it", info.Mode().Perm())
+	}
+	binary, err := os.Stat(filepath.Join(slotDir, managerFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binary.Mode().Perm() != 0o755 {
+		t.Fatalf("slot binary mode = %o, the service user cannot execute it", binary.Mode().Perm())
 	}
 }
 

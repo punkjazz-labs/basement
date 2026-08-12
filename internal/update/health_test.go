@@ -2,7 +2,9 @@ package update
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +17,21 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return roundTrip(request)
+}
+
+// A capability-less root updater may not inspect another user's /proc entry;
+// only that specific refusal is skippable, because the healthz version probe
+// still proves which build answers. Everything else stays fatal.
+func TestExeVerificationSkippableOnlyForPermissionDenied(t *testing.T) {
+	if !exeVerificationSkippable(fs.ErrPermission) {
+		t.Fatal("a permission refusal must be skippable")
+	}
+	if !exeVerificationSkippable(fmt.Errorf("readlink: %w", fs.ErrPermission)) {
+		t.Fatal("a wrapped permission refusal must be skippable")
+	}
+	if exeVerificationSkippable(fs.ErrNotExist) {
+		t.Fatal("a missing process is not a permission problem and must stay fatal")
+	}
 }
 
 func TestSystemHealthCheckerRequiresExpectedExecutableAndVersion(t *testing.T) {

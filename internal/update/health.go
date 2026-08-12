@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -80,6 +81,14 @@ func (checker *SystemHealthChecker) Check(ctx context.Context, expectedVersion, 
 	}
 }
 
+// exeVerificationSkippable reports whether the /proc executable check failed
+// only because this process may not inspect another user's process, which is
+// the normal state of a capability-less root updater probing the manager's
+// own service user. Every other failure stays fatal.
+func exeVerificationSkippable(err error) bool {
+	return errors.Is(err, fs.ErrPermission)
+}
+
 func (checker *SystemHealthChecker) checkOnce(ctx context.Context, expectedVersion, expectedExecutable string) error {
 	pid, err := checker.Service.MainPID(ctx)
 	if err != nil || pid <= 0 {
@@ -90,16 +99,26 @@ func (checker *SystemHealthChecker) checkOnce(ctx context.Context, expectedVersi
 		procRoot = "/proc"
 	}
 	executable, err := os.Readlink(filepath.Join(procRoot, strconv.Itoa(pid), "exe"))
-	if err != nil {
+	switch {
+	case err == nil:
+		expected, expectedErr := filepath.EvalSymlinks(expectedExecutable)
+		if expectedErr != nil {
+			return fmt.Errorf("resolve expected manager executable: %w", expectedErr)
+		}
+		actual, actualErr := filepath.EvalSymlinks(executable)
+		if actualErr != nil || actual != expected {
+			return errors.New("basement.service is not running the selected version slot")
+		}
+	case exeVerificationSkippable(err):
+		// Reading another user's /proc entry needs a ptrace capability this
+		// process deliberately does not carry, and the manager runs as its
+		// own user. The version probe below still proves which build
+		// answers, which is the fact that matters; failing here instead
+		// stamped a successful rollback recovery_required on hardware
+		// (2026-08-12) and wedged the machine's updates behind a false
+		// alarm.
+	default:
 		return fmt.Errorf("read manager executable: %w", err)
-	}
-	expected, err := filepath.EvalSymlinks(expectedExecutable)
-	if err != nil {
-		return fmt.Errorf("resolve expected manager executable: %w", err)
-	}
-	actual, err := filepath.EvalSymlinks(executable)
-	if err != nil || actual != expected {
-		return errors.New("basement.service is not running the selected version slot")
 	}
 	commandLine, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "cmdline"))
 	if err != nil {

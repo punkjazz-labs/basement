@@ -435,6 +435,17 @@ func (updater *Updater) prepareSlot(transactionDir string, manifest Manifest) (s
 	if err := copyRegularFile(filepath.Join(transactionDir, managerFileName), target, 0o755); err != nil {
 		return "", err
 	}
+	// The unit runs this process under UMask=0077, which silently strips
+	// the modes requested above to owner-only. The manager service runs as
+	// its own user, so a root-owned slot it cannot read or execute crash
+	// loops the service straight into rollback (hardware, 2026-08-12).
+	// Chmod is not subject to the umask.
+	if err := os.Chmod(temporarySlot, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		return "", err
+	}
 	if err := verifyAssetPath(target, manifest); err != nil {
 		return "", err
 	}
