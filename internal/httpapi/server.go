@@ -92,6 +92,9 @@ type Server struct {
 	updateStager      *managerupdate.Stager
 	updateAdmissionMu sync.Mutex
 	updateApplying    bool
+	updateContext     context.Context
+	updateCancel      context.CancelFunc
+	updateWorkers     sync.WaitGroup
 
 	// gate keeps model switches apart from the requests they would cut off
 	// (see servingGate in roles.go). One Spark serves one model, so a switch
@@ -147,7 +150,8 @@ type preflightResponse struct {
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
 	updateKeys, _ := managerupdate.ProductionKeyRing()
-	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState(), generations: newGenerationQueue(), updateResolver: &managerupdate.Resolver{Source: managerupdate.NewHTTPReleaseSource(), Keys: updateKeys}, updateStager: managerupdate.NewStager(dataDir, updateKeys)}
+	updateContext, updateCancel := context.WithCancel(context.Background())
+	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState(), generations: newGenerationQueue(), updateResolver: &managerupdate.Resolver{Source: managerupdate.NewHTTPReleaseSource(), Keys: updateKeys}, updateStager: managerupdate.NewStager(dataDir, updateKeys), updateContext: updateContext, updateCancel: updateCancel}
 	server.SetRecipes(recipes, recipes)
 	// Every job that changes which model serves announces itself to the
 	// serving gate through this hook, whoever asked for it (see roles.go).
@@ -212,6 +216,7 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/fleet/placements/plan", server.fleetPlacementPlan)
 	mux.HandleFunc("/api/v1/fleet/deployments", server.fleetDeployments)
 	mux.HandleFunc("/api/v1/fleet/deployments/", server.fleetDeploymentAction)
+	mux.HandleFunc("/api/v1/fleet/upgrade", server.withReadAuth(server.fleetUpgradeAPI))
 	// Two-Spark serving: the head node drives this node's own rank through
 	// these, authenticated by fleet API key only (see withNodeAuth).
 	mux.HandleFunc("/api/v1/internal/node/fabric", server.withNodeAuth(server.nodeFabric))
@@ -256,6 +261,7 @@ func (s *Server) SetFleetManager(manager *fleet.Manager) {
 	s.fleetManager = manager
 	if manager != nil {
 		manager.SetIndependentRuntime(s)
+		manager.SetUpgradeRuntime(s)
 	}
 }
 
@@ -894,10 +900,21 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, jobID string) {
 	}
 }
 
-// Close releases every long-lived stream so graceful shutdown completes
-// immediately. Registered with the HTTP server's shutdown hooks.
+// Close releases long-lived work before the data directory and database are
+// closed. Update staging writes into that directory, so shutdown must cancel
+// its download and wait for the writer to leave.
 func (s *Server) Close() {
-	s.closeOnce.Do(func() { close(s.closing) })
+	s.closeOnce.Do(func() {
+		close(s.closing)
+		if s.updateCancel != nil {
+			s.updateCancel()
+		}
+		// applyUpdate holds this lock until its worker is registered. Taking it
+		// after cancellation prevents an Add from racing the Wait below.
+		s.updateAdmissionMu.Lock()
+		s.updateAdmissionMu.Unlock()
+		s.updateWorkers.Wait()
+	})
 }
 
 func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {

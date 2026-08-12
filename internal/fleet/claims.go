@@ -17,6 +17,7 @@ const (
 	ClaimKindIndependent = "independent"
 	ClaimKindLegacyRank  = "legacy-rank"
 	ClaimKindRecovered   = "recovered-model"
+	ClaimKindUpdate      = "manager-update"
 )
 
 // Claims is the versioned resource document one local allocator persists.
@@ -73,7 +74,7 @@ func (claims Claims) validate() error {
 		return errors.New("reservation claims version is not supported")
 	}
 	switch claims.Kind {
-	case ClaimKindLocalJob, ClaimKindIndependent, ClaimKindLegacyRank, ClaimKindRecovered:
+	case ClaimKindLocalJob, ClaimKindIndependent, ClaimKindLegacyRank, ClaimKindRecovered, ClaimKindUpdate:
 	default:
 		return errors.New("reservation claim kind is not supported")
 	}

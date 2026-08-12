@@ -387,6 +387,8 @@ export function modelStateWord(model: InstalledModel): string {
 
 export interface UpdateInfo {
   current_version: string
+  fleet_role: 'standalone' | 'controller' | 'member'
+  fleet_node_count: number
   latest_version?: string
   target_version?: string
   update_available: boolean
@@ -416,6 +418,36 @@ export interface UpdateAttemptStatus {
   target_version: string
   failure?: string
   updated_at: string
+}
+
+export interface FleetUpgradeNode {
+  run_id: string
+  node_id: string
+  display_name: string
+  sequence: number
+  role: string
+  state: string
+  running_version: string
+  target_version: string
+  attempt_id?: string
+  failure?: string
+  resolve_state?: string
+  resolve_failure?: string
+  updated_at: string
+}
+
+export interface FleetUpgradeRun {
+  run_id: string
+  fleet_id: string
+  controller_node_id: string
+  release_tag: string
+  target_version: string
+  manifest_sha256: string
+  state: string
+  failure?: string
+  created_at: string
+  updated_at: string
+  nodes: FleetUpgradeNode[]
 }
 
 let csrf = ''

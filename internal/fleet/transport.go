@@ -107,6 +107,11 @@ func (m *Manager) Handler() http.Handler {
 	mux.HandleFunc("/internal/fleet/v1/reservations/abort", m.reservationAbort)
 	mux.HandleFunc("/internal/fleet/v1/deployments/independent", m.independentDeployment)
 	mux.HandleFunc("/internal/fleet/v1/jobs/", m.independentJob)
+	mux.HandleFunc("/internal/fleet/v1/upgrade/stage", m.upgradeStage)
+	mux.HandleFunc("/internal/fleet/v1/upgrade/apply", m.upgradeApply)
+	mux.HandleFunc("/internal/fleet/v1/upgrade/status", m.upgradeStatus)
+	mux.HandleFunc("/internal/fleet/v1/upgrade/finish", m.upgradeFinish)
+	mux.HandleFunc("/internal/fleet/v1/upgrade/resolve", m.upgradeResolve)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Cookies and public API keys are different authorities and are never
 		// accepted on the manager transport. A compromised browser session or
@@ -285,12 +290,14 @@ func (m *Manager) Run(ctx context.Context) {
 	ticker := time.NewTicker(HeartbeatInterval)
 	defer ticker.Stop()
 	_ = m.PollOnce(ctx)
+	m.startUpgradeDriver(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			_ = m.PollOnce(ctx)
+			m.startUpgradeDriver(ctx)
 		}
 	}
 }

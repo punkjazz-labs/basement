@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   api, ApiError, OfflineError,
-  type SystemInfo, type UpdateAttemptStatus, type UpdateInfo,
+  type FleetUpgradeRun, type SystemInfo, type UpdateAttemptStatus, type UpdateInfo,
 } from '../api'
 import {
-  discoveredAttemptAction, followManagerUpdate, isInstallableManagerUpdate,
-  isUpdateApplyResult, isUpdateAttemptStatus, updateRefusal,
+  discoveredAttemptAction, fleetResolveHoldouts, fleetUpgradeResolveWord,
+  fleetUpgradeRowState, fleetUpgradeRunView, fleetUpgradeStateWord,
+  fleetUpgradeTerminal, followManagerUpdate, isFleetUpgradeRun,
+  isInstallableManagerUpdate, isUpdateApplyResult, isUpdateAttemptStatus,
+  managerUpdateCard, orderedFleetUpgradeNodes, UPDATE_POLL_MS, updateRefusal,
   type UpdateRefusal,
 } from '../managerUpdate'
 
@@ -104,7 +107,9 @@ function ManagerUpdateBody({
   info, onInfoChange, onReconnectingChange, onManagerReady,
   onOpenModels, onOpenActivity, onOpenGeneration,
 }: ManagerUpdateBodyProps) {
+  const card = managerUpdateCard(info)
   const [attempt, setAttempt] = useState<UpdateAttemptStatus | null>(null)
+  const [fleetRun, setFleetRun] = useState<FleetUpgradeRun | null>(null)
   const [refusal, setRefusal] = useState<UpdateRefusal | null>(null)
   const [error, setError] = useState('')
   const [checking, setChecking] = useState(false)
@@ -114,6 +119,7 @@ function ManagerUpdateBody({
   const [observedVersion, setObservedVersion] = useState('')
   const [showDiagnostics, setShowDiagnostics] = useState(false)
   const follower = useRef<AbortController | null>(null)
+  const fleetAttempt = useRef('')
   const checkedStatus = useRef(false)
 
   const setReconnectState = useCallback((next: boolean) => {
@@ -121,7 +127,7 @@ function ManagerUpdateBody({
     onReconnectingChange(next)
   }, [onReconnectingChange])
 
-  const startFollowing = useCallback((attemptID?: string, ambiguousFailure = '') => {
+  const startFollowing = useCallback((attemptID?: string, ambiguousFailure = '', trackAttempt = true) => {
     follower.current?.abort()
     const controller = new AbortController()
     follower.current = controller
@@ -147,7 +153,7 @@ function ManagerUpdateBody({
           setObservedVersion(event.version)
           return
         }
-        setAttempt(event.status)
+        if (trackAttempt) setAttempt(event.status)
         setReconnectState(event.status.state === 'restarting' || event.status.state === 'checking_health')
       },
       controller.signal,
@@ -155,7 +161,7 @@ function ManagerUpdateBody({
       if (controller.signal.aborted) return
       setReconnectState(false)
       if (outcome.kind === 'terminal') {
-        setAttempt(outcome.status)
+        if (trackAttempt) setAttempt(outcome.status)
         if (outcome.status.state === 'succeeded' || outcome.status.state === 'rolled_back') onManagerReady()
       } else if (outcome.kind === 'timeout') {
         setReconnectTimedOut(true)
@@ -171,6 +177,7 @@ function ManagerUpdateBody({
   }, [onReconnectingChange])
 
   useEffect(() => {
+    if (!info || card !== 'standalone') return
     if (checkedStatus.current) return
     checkedStatus.current = true
     api<unknown>('/api/v1/update/status').then(payload => {
@@ -184,7 +191,44 @@ function ManagerUpdateBody({
         onManagerReady()
       }
     }).catch(() => {})
-  }, [info, startFollowing, onManagerReady])
+  }, [card, info, startFollowing, onManagerReady])
+
+  useEffect(() => {
+    if (card !== 'controller') {
+      setFleetRun(null)
+      return
+    }
+    let cancelled = false
+    let timer = 0
+    const poll = async () => {
+      try {
+        const payload = await api<unknown>('/api/v1/fleet/upgrade')
+        if (!cancelled && isFleetUpgradeRun(payload)) {
+          const superseded = isInstallableManagerUpdate(info) &&
+            fleetUpgradeTerminal(payload.state) && payload.target_version !== info?.target_version
+          if (superseded) {
+            setFleetRun(null)
+          } else {
+            setFleetRun(payload)
+            const controller = payload.nodes.find(node => node.node_id === payload.controller_node_id)
+            if (!fleetUpgradeTerminal(payload.state) && controller?.attempt_id && fleetAttempt.current !== controller.attempt_id) {
+              fleetAttempt.current = controller.attempt_id
+              startFollowing(controller.attempt_id, '', false)
+            }
+          }
+        }
+      } catch {
+        // The existing update follower owns reconnect state while the
+        // controller restarts. The next fleet poll restores the run rows.
+      }
+      if (!cancelled) timer = window.setTimeout(poll, UPDATE_POLL_MS)
+    }
+    void poll()
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [card, info, startFollowing])
 
   const checkForUpdates = async () => {
     setChecking(true)
@@ -229,6 +273,40 @@ function ManagerUpdateBody({
       } else {
         setError(message)
       }
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  const applyFleetUpdate = async () => {
+    setApplying(true)
+    setError('')
+    try {
+      const payload = await api<unknown>('/api/v1/fleet/upgrade', {
+        method: 'POST',
+        body: JSON.stringify({ confirmed: true }),
+      })
+      if (!isFleetUpgradeRun(payload)) throw new Error('The fleet update response was incomplete. Check for updates, then try again.')
+      setFleetRun(payload)
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : 'Could not start the fleet update')
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  const resolveFleetUpdate = async () => {
+    setApplying(true)
+    setError('')
+    try {
+      const payload = await api<unknown>('/api/v1/fleet/upgrade', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'resolve' }),
+      })
+      if (!isFleetUpgradeRun(payload)) throw new Error('The resolve response was incomplete. Try again.')
+      setFleetRun(payload)
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : 'Could not resolve the fleet update')
     } finally {
       setApplying(false)
     }
@@ -300,7 +378,7 @@ function ManagerUpdateBody({
     )
   }
 
-  if (attempt?.state === 'succeeded') {
+  if (card === 'standalone' && attempt?.state === 'succeeded') {
     return (
       <div className="update-view">
         <section className="card update-card">
@@ -315,7 +393,7 @@ function ManagerUpdateBody({
     )
   }
 
-  if (attempt?.state === 'rolled_back') {
+  if (card === 'standalone' && attempt?.state === 'rolled_back') {
     return (
       <div className="update-view">
         <section className="card update-card">
@@ -340,7 +418,7 @@ function ManagerUpdateBody({
     )
   }
 
-  if (attempt?.state === 'failed_before_handoff' || attempt?.state === 'recovery_required') {
+  if (card === 'standalone' && (attempt?.state === 'failed_before_handoff' || attempt?.state === 'recovery_required')) {
     const recovery = attempt.state === 'recovery_required'
     return (
       <div className="update-view">
@@ -357,7 +435,7 @@ function ManagerUpdateBody({
   }
 
   const progressIndex = attempt ? PROGRESS.findIndex(step => step.state === attempt.state) : -1
-  if (attempt && progressIndex >= 0) {
+  if (card === 'standalone' && attempt && progressIndex >= 0) {
     return (
       <div className="update-view">
         <section className="card update-card">
@@ -383,6 +461,141 @@ function ManagerUpdateBody({
 
   if (!info) return <div className="empty">Checking for updates...</div>
 
+  if (card === 'member') {
+    return (
+      <div className="update-view">
+        <section className="card update-card">
+          <p className="update-member-copy">This Spark updates as part of the fleet. Start the update from the Spark running the fleet console.</p>
+        </section>
+      </div>
+    )
+  }
+
+  if (card === 'controller' && fleetRun) {
+    const nodes = orderedFleetUpgradeNodes(fleetRun.nodes)
+    const count = nodes.length
+    const view = fleetUpgradeRunView(fleetRun)
+    if (view === 'succeeded') {
+      return (
+        <div className="update-view">
+          <section className="card update-card">
+            <StateHead mark="OK" tone="complete" title="Fleet update complete">
+              <p>All {count} Sparks are running {displayVersion(fleetRun.target_version)}.</p>
+            </StateHead>
+            <div className="update-actions">
+              <button className="primary" type="button" onClick={onOpenModels}>Return to models</button>
+            </div>
+          </section>
+        </div>
+      )
+    }
+    if (view === 'failed') {
+      const failed = nodes.find(node => node.state === 'failed' || node.state === 'rolled_back' || node.state === 'failed_before_handoff' || node.state === 'recovery_required')
+      const failure = failed?.failure || fleetRun.failure
+      return (
+        <div className="update-view">
+          <section className="card update-card">
+            <StateHead mark="!" tone="fail" title={failed ? `${failed.display_name} failed to update` : 'Fleet update failed'}>
+              {failure && <p>{failure}</p>}
+            </StateHead>
+            <div className="update-progress-list" aria-label="Fleet update outcome">
+              {nodes.map(node => (
+                <div className="update-progress-row" data-api-state={node.state} key={node.node_id}>
+                  <i className="update-progress-dot" aria-hidden="true" />
+                  <span>{node.display_name}</span>
+                  <span className="value">{fleetUpgradeStateWord(node.state)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="update-notice fail">
+              <strong>The fleet stays locked until this is resolved</strong>
+              Resolving releases the update lock on every Spark, including the ones that
+              already updated, so the fleet can work and try again.
+            </div>
+            {error && <div className="error-note"><p>{error}</p></div>}
+            <div className="update-actions">
+              <button className="primary" type="button" disabled={applying} onClick={resolveFleetUpdate}>
+                {applying ? 'Resolving' : 'Resolve and unlock the fleet'}
+              </button>
+              <button className="quiet" type="button" onClick={onOpenModels}>Return to models</button>
+            </div>
+          </section>
+        </div>
+      )
+    }
+    if (view === 'resolved_holdouts') {
+      const holdouts = fleetResolveHoldouts(nodes)
+      return (
+        <div className="update-view">
+          <section className="card update-card">
+            <StateHead mark="!" tone="warn" title="Resolve did not reach every Spark">
+              <p>The fleet is unlocked, but {holdouts.length === 1 ? 'one Spark still holds' : `${holdouts.length} Sparks still hold`} a local update lock.</p>
+            </StateHead>
+            <div className="update-progress-list" aria-label="Sparks that still need attention">
+              {holdouts.map(node => (
+                <div className="update-progress-row" data-api-state={node.resolve_state ?? ''} key={node.node_id}>
+                  <i className="update-progress-dot" aria-hidden="true" />
+                  <span>{node.display_name}</span>
+                  <span className="value">{fleetUpgradeResolveWord(node.resolve_state) || 'Not reached'}</span>
+                </div>
+              ))}
+            </div>
+            {error && <div className="error-note"><p>{error}</p></div>}
+            <div className="update-actions">
+              <button className="primary" type="button" disabled={applying} onClick={resolveFleetUpdate}>
+                {applying ? 'Resolving' : 'Retry resolve'}
+              </button>
+              <button className="quiet" type="button" onClick={onOpenModels}>Return to models</button>
+            </div>
+          </section>
+        </div>
+      )
+    }
+    if (view === 'resolved') {
+      const retry = isInstallableManagerUpdate(info)
+      return (
+        <div className="update-view">
+          <section className="card update-card">
+            <StateHead mark="OK" tone="complete" title="Fleet update resolved">
+              <p>Every Spark released its update lock. The fleet is ready for a new update.</p>
+            </StateHead>
+            {error && <div className="error-note"><p>{error}</p></div>}
+            <div className="update-actions">
+              {retry && (
+                <button className="primary" type="button" disabled={applying} onClick={applyFleetUpdate}>
+                  {applying ? 'Starting update' : `Update ${count} Sparks to ${displayVersion(fleetRun.target_version)}`}
+                </button>
+              )}
+              <button className={retry ? 'quiet' : 'primary'} type="button" onClick={onOpenModels}>Return to models</button>
+            </div>
+          </section>
+        </div>
+      )
+    }
+    const done = nodes.filter(node => node.state === 'succeeded').length
+    return (
+      <div className="update-view">
+        <section className="card update-card">
+          <StateHead mark={`${done}/${count}`} tone="warn" title={`Updating ${count} Sparks`} signed>
+            <p>Updating to {displayVersion(fleetRun.target_version)}.</p>
+          </StateHead>
+          <div className="update-progress-list" aria-label="Fleet update progress">
+            {nodes.map((node, index) => {
+              const state = fleetUpgradeRowState(nodes, index)
+              return (
+                <div className={`update-progress-row ${state}`} data-api-state={node.state} key={node.node_id}>
+                  <i className="update-progress-dot" aria-hidden="true" />
+                  <span>{node.display_name}</span>
+                  <span className="value">{fleetUpgradeStateWord(node.state)}</span>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
   if (info.manual_upgrade_required || info.manual_bootstrap_required) {
     return (
       <div className="update-view">
@@ -402,6 +615,24 @@ function ManagerUpdateBody({
 
   if (isInstallableManagerUpdate(info)) {
     const target = displayVersion(info.target_version)
+    if (card === 'controller') {
+      const count = info.fleet_node_count
+      return (
+        <div className="update-view">
+          <section className="card update-card">
+            <StateHead mark="UP" tone="complete" title={<>Update basement to <span className="mono">{target}</span></>} signed>
+              <p>All {count} Sparks update one at a time. Each Spark&apos;s console reconnects as it restarts. Models keep serving.</p>
+            </StateHead>
+            {error && <div className="error-note"><p>{error}</p></div>}
+            <div className="update-actions">
+              <button className="primary" type="button" disabled={applying} onClick={applyFleetUpdate}>
+                {applying ? 'Starting update' : `Update ${count} Sparks to ${target}`}
+              </button>
+            </div>
+          </section>
+        </div>
+      )
+    }
     return (
       <div className="update-view">
         <section className="card update-card">
