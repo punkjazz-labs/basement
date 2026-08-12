@@ -57,6 +57,18 @@ type Manager struct {
 	// the TLS implementation assigned by NewManager; tests replace it with an
 	// in-memory round trip so they never bind a socket or contact a machine.
 	newClient func(string) *http.Client
+	// newFirstContactClient is the same seam for the one call that has no pin
+	// yet: the invitation that opens an addition. It reports the fingerprint
+	// the address presented, which becomes the pin for everything after it.
+	newFirstContactClient func(func(string)) *http.Client
+
+	// invitations are the additions this node has been asked to accept, and
+	// attempts are the additions it is driving. Both are in memory: they are
+	// one conversation a person is watching, not a record. See invitation.go.
+	invitationMu sync.Mutex
+	invitations  map[string]*invitation
+	attemptMu    sync.Mutex
+	attempts     map[string]*inviteAttempt
 
 	catalogueMu     sync.RWMutex
 	catalogueDigest string
@@ -111,11 +123,14 @@ func NewManager(ctx context.Context, options Options) (*Manager, error) {
 		effective:      append([]recipe.Recipe(nil), options.EffectiveRecipes...),
 		placementLocks: make(map[string]*sync.Mutex),
 		upgradeRetry:   time.Second,
+		invitations:    make(map[string]*invitation),
+		attempts:       make(map[string]*inviteAttempt),
 	}
 	if len(manager.effective) == 0 {
 		manager.effective = append([]recipe.Recipe(nil), options.Recipes...)
 	}
 	manager.newClient = manager.clientForFingerprint
+	manager.newFirstContactClient = manager.firstContactClient
 	manager.upgradeStageCall = manager.stageUpgradeNode
 	manager.upgradeApplyCall = manager.applyUpgradeNode
 	manager.upgradeStatusCall = manager.statusUpgradeNode

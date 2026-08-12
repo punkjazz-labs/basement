@@ -213,6 +213,13 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/fleet", server.withReadAuth(server.fleetMembershipSummary))
 	mux.HandleFunc("/api/v1/fleet/join-code", server.fleetJoinCode)
 	mux.HandleFunc("/api/v1/fleet/join", server.fleetJoin)
+	// Two-click fleet addition (ADR 0019). Console session only, on all four:
+	// approving an invitation is what mints a join code, and asking another
+	// Spark to join spends the owner's authority over their own machines.
+	mux.HandleFunc("/api/v1/fleet/invitations", server.withReadAuth(server.fleetInvitations))
+	mux.HandleFunc("/api/v1/fleet/invitations/", server.fleetInvitationAction)
+	mux.HandleFunc("/api/v1/fleet/invite", server.fleetInvite)
+	mux.HandleFunc("/api/v1/fleet/invite/status", server.withReadAuth(server.fleetInviteStatus))
 	mux.HandleFunc("/api/v1/fleet/placements/plan", server.fleetPlacementPlan)
 	mux.HandleFunc("/api/v1/fleet/deployments", server.fleetDeployments)
 	mux.HandleFunc("/api/v1/fleet/deployments/", server.fleetDeploymentAction)

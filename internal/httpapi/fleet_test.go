@@ -219,7 +219,7 @@ func newFakeSpark(t *testing.T, token string) *fakeSpark {
 	spark := &fakeSpark{token: token, secret: "rosk_fleetkeyfleetkeyfleetkey", hostname: "spark-worker"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": "1.4.2"})
 	})
 	mux.HandleFunc("/api/v1/auth/pair", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Origin") != "http://"+r.Host {
@@ -444,6 +444,11 @@ func TestFleetDiscoverFingerprintsBasementAndExcludesThisMachine(t *testing.T) {
 	}
 	if spark.Basement == nil || spark.Basement.BaseURL != basement.server.URL {
 		t.Errorf("a running basement was not recognized: %+v", spark.Basement)
+	}
+	// A machine whose manager answers its health check can be added to the
+	// fleet rather than installed, so the sweep has to say which one it is.
+	if spark.Basement != nil && (!spark.Basement.Running || spark.Basement.Version != "1.4.2") {
+		t.Errorf("a running manager was not reported as running: %+v", spark.Basement)
 	}
 	if printer.GB10Hint {
 		t.Errorf("printer.local should not read as GB10-class: %+v", printer)

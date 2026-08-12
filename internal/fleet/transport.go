@@ -42,12 +42,15 @@ type joinTokenRequest struct {
 	PrepareToken string `json:"prepare_token"`
 }
 
-// TLSConfig authenticates manager traffic before HTTP sees it. During an
-// explicit join-code window a standalone node permits an unknown self-signed
-// Ed25519 client certificate to complete TLS so /join/prepare can bind it to
-// the code. That certificate can call no regular endpoint, and the code is
-// required before any row changes. Once prepared or enrolled, only the exact
-// stored certificate completes another handshake.
+// TLSConfig authenticates manager traffic before HTTP sees it. A standalone
+// node permits an unknown self-signed Ed25519 client certificate to complete
+// TLS, because that is how a Spark that belongs to no fleet is asked to join
+// one: /invite records the request for an owner to answer, and /join/prepare
+// binds the certificate to a code an owner approved. Such a certificate can
+// call no regular endpoint. Every other handler on this transport separately
+// requires this node to be a member and the caller to be its adopted
+// controller, so admission here is never authority there. Once enrolled, only
+// pinned certificates complete another handshake.
 func (m *Manager) TLSConfig() *tls.Config {
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS13,
@@ -85,13 +88,7 @@ func (m *Manager) allowPeerCertificate(ctx context.Context, certificate *x509.Ce
 		return err
 	}
 	if config.Role == "standalone" {
-		open, err := m.database.HasOpenFleetJoinCode(ctx, now)
-		if err != nil {
-			return err
-		}
-		if open {
-			return nil
-		}
+		return nil
 	}
 	return errors.New("fleet client certificate is not pinned")
 }
@@ -101,6 +98,8 @@ func (m *Manager) Handler() http.Handler {
 	mux.HandleFunc("/internal/fleet/v1/join/prepare", m.joinPrepare)
 	mux.HandleFunc("/internal/fleet/v1/join/commit", m.joinCommit)
 	mux.HandleFunc("/internal/fleet/v1/join/abort", m.joinAbort)
+	mux.HandleFunc("/internal/fleet/v1/invite", m.inviteReceive)
+	mux.HandleFunc("/internal/fleet/v1/invite/status", m.inviteStatus)
 	mux.HandleFunc("/internal/fleet/v1/heartbeat", m.heartbeat)
 	mux.HandleFunc("/internal/fleet/v1/reservations/prepare", m.reservationPrepare)
 	mux.HandleFunc("/internal/fleet/v1/reservations/commit", m.reservationCommit)

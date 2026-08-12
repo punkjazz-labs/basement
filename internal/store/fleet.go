@@ -495,12 +495,6 @@ func (s *Store) CreateFleetJoinCode(ctx context.Context, codeHash string, expire
 	return err
 }
 
-func (s *Store) HasOpenFleetJoinCode(ctx context.Context, at time.Time) (bool, error) {
-	var present int
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fleet_join_codes WHERE consumed_at='' AND expires_at>?)`, at.UTC().Format(time.RFC3339Nano)).Scan(&present)
-	return present == 1, err
-}
-
 func (s *Store) PrepareMemberJoin(ctx context.Context, codeHash string, pending PendingFleetJoin, at time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

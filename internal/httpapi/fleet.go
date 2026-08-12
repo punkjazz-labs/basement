@@ -52,6 +52,15 @@ const (
 	// is probed in parallel, so this is the sweep's tail, not its sum.
 	basementProbeTimeout = 2 * time.Second
 
+	// basementHealthTimeout bounds the health check that follows a positive
+	// fingerprint. The machine has already answered once by then, so a
+	// manager that is really running answers this well inside a second.
+	basementHealthTimeout = time.Second
+
+	// maxVersionLength is what a version another machine reported for itself
+	// is held to before it is stored or shown.
+	maxVersionLength = 32
+
 	// adoptionBudget bounds a whole adoption. Uploading a manager binary and
 	// starting a service over a home network is minutes, not hours.
 	adoptionBudget = 20 * time.Minute
@@ -211,9 +220,13 @@ func (s *Server) siblingListenMode() setup.ListenMode {
 }
 
 // discoveredBasement is the console of a machine that is already running
-// basement, so the owner is offered pairing rather than an install.
+// basement, so the owner is offered pairing rather than an install. Running
+// says the manager there answered its health check just now, which is what
+// lets the console offer Add instead of Install; Version is what it reported.
 type discoveredBasement struct {
 	BaseURL string `json:"base_url"`
+	Running bool   `json:"running"`
+	Version string `json:"version"`
 }
 
 // discoveredCandidate is one machine a sweep found. Basement is null when
@@ -380,7 +393,44 @@ func (s *Server) probeBasement(ctx context.Context, address string) *discoveredB
 	if json.Unmarshal(payload, &shape) != nil || strings.TrimSpace(shape.Error) == "" {
 		return nil
 	}
-	return &discoveredBasement{BaseURL: baseURL}
+	found := &discoveredBasement{BaseURL: baseURL}
+	found.Running, found.Version = s.probeBasementHealth(probeCtx, baseURL)
+	return found
+}
+
+// probeBasementHealth asks a console that already reads as basement whether
+// its manager is answering, and which version it is. It is a second, shorter
+// request on a machine that has just proved it is one of ours, so the sweep's
+// tail grows by about a second at worst and nothing new is scanned.
+func (s *Server) probeBasementHealth(ctx context.Context, baseURL string) (bool, string) {
+	healthCtx, cancel := context.WithTimeout(ctx, basementHealthTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(healthCtx, http.MethodGet, baseURL+"/healthz", nil)
+	if err != nil {
+		return false, ""
+	}
+	response, err := s.peerClient.Do(request)
+	if err != nil {
+		return false, ""
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return false, ""
+	}
+	payload, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	if err != nil {
+		return false, ""
+	}
+	var health struct {
+		Status  string `json:"status"`
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(payload, &health) != nil || health.Status != "ok" {
+		return false, ""
+	}
+	// The version came off another machine, so it is held to something safe
+	// to store and to render, like every other name a sweep collects.
+	return true, capText(stripUnsafeRunes(health.Version), maxVersionLength)
 }
 
 // Adoption progress lives in memory on purpose. It is the narration of one
