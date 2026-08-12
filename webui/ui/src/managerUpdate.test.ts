@@ -7,7 +7,7 @@ import {
   fleetUpgradeRowState, fleetUpgradeRunView, fleetUpgradeStateWord,
   fleetUpgradeTerminal, followManagerUpdate, initialManagerUpdateDialogState,
   isInstallableManagerUpdate, managerUpdateCard, managerUpdateDialogReducer,
-  orderedFleetUpgradeNodes, updateRefusal, type UpdatePollEvent,
+  orderedFleetUpgradeNodes, unitUpdateNote, updateRefusal, type UpdatePollEvent,
 } from './managerUpdate'
 import type { FleetUpgradeNode } from './api'
 
@@ -310,5 +310,21 @@ describe('manager update restart polling', () => {
 
     expect(outcome).toEqual({ kind: 'timeout' })
     expect(now).toBe(180_000)
+  })
+})
+
+describe('unit updates', () => {
+  it('asks for the one action that enables them, and only when the machine said no', () => {
+    expect(unitUpdateNote(availableUpdate({ unit_updates: { state: 'unavailable', note: 'Run the installer once to enable unit updates' } })))
+      .toBe('Run the installer once to enable unit updates')
+    expect(unitUpdateNote(availableUpdate({ unit_updates: { state: 'available' } }))).toBeNull()
+  })
+
+  it('says nothing before the updater has reported', () => {
+    // A machine that has never run a protocol-2 update has probed nothing.
+    // Asking for an installer run here would be a guess.
+    expect(unitUpdateNote(availableUpdate({ unit_updates: { state: 'unknown' } }))).toBeNull()
+    expect(unitUpdateNote(availableUpdate())).toBeNull()
+    expect(unitUpdateNote(null)).toBeNull()
   })
 })

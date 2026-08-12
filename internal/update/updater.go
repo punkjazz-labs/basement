@@ -30,6 +30,12 @@ type Paths struct {
 	LegacyLink  string
 	StagingDir  string
 	StateDir    string
+	// UnitDir is where the three units this updater may reconcile live. It is
+	// writable only on a machine whose updater unit already lists it in
+	// ReadWritePaths, which no currently installed helper can arrange for
+	// itself; an empty value, or a directory the sandbox refuses, is
+	// generation 1 and not an error.
+	UnitDir string
 }
 
 func SystemPaths() Paths {
@@ -37,6 +43,7 @@ func SystemPaths() Paths {
 		InstallRoot: "/usr/lib/basement", VersionsDir: "/usr/lib/basement/versions",
 		CurrentLink: "/usr/lib/basement/current", LegacyLink: "/usr/lib/basement/basement",
 		StagingDir: "/var/lib/basement/updates/staging", StateDir: "/var/lib/basement-updater",
+		UnitDir: "/etc/systemd/system",
 	}
 }
 
@@ -77,25 +84,34 @@ func (SystemServiceController) MainPID(ctx context.Context) (int, error) {
 	return pid, nil
 }
 
-func fixedSystemctl(ctx context.Context, action, unit string) error {
-	command := exec.CommandContext(ctx, "systemctl", action, unit)
+func (SystemServiceController) DaemonReload(ctx context.Context) error {
+	return fixedSystemctl(ctx, "daemon-reload")
+}
+
+// fixedSystemctl runs a fixed, compiled-in systemctl invocation. Nothing a
+// request, a manifest or a file names ever reaches these arguments. The error
+// names the arguments it actually ran rather than a hard-coded unit, so a
+// reload failure does not report itself as a basement.service failure.
+func fixedSystemctl(ctx context.Context, arguments ...string) error {
+	command := exec.CommandContext(ctx, "systemctl", arguments...)
 	if output, err := command.CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl %s basement.service: %s", action, strings.TrimSpace(string(output)))
+		return fmt.Errorf("systemctl %s: %s", strings.Join(arguments, " "), strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
 type Updater struct {
-	Paths   Paths
-	Keys    KeyRing
-	Service ServiceController
-	Health  HealthChecker
-	Now     func() time.Time
+	Paths    Paths
+	Keys     KeyRing
+	Service  ServiceController
+	Health   HealthChecker
+	Reloader UnitReloader
+	Now      func() time.Time
 }
 
 func NewSystemUpdater(keys KeyRing) *Updater {
 	service := SystemServiceController{}
-	return &Updater{Paths: SystemPaths(), Keys: keys, Service: service, Health: NewSystemHealthChecker(service), Now: time.Now}
+	return &Updater{Paths: SystemPaths(), Keys: keys, Service: service, Health: NewSystemHealthChecker(service), Reloader: service, Now: time.Now}
 }
 
 func (updater *Updater) Apply(ctx context.Context) error {
@@ -365,13 +381,18 @@ func (updater *Updater) checkTarget(ctx context.Context, journal Journal, maySwa
 		return err
 	}
 	// Only here, with the target manager proven healthy, and never on any
-	// rollback path. Whatever this returns, the update is a success: the
-	// manager did become healthy, which is the outcome the receipt reports.
+	// rollback path. Whatever either of these returns, the update is a
+	// success: the manager did become healthy, which is the outcome the
+	// receipt reports. The binary swap goes first because it is the whole of
+	// generation 1 and needs no unit change to work; the unit reconcile that
+	// follows is a no-op on every machine still running a generation-1
+	// updater unit.
 	helperState := updater.swapHelper(journal, maySwapHelper)
+	unitState := updater.reconcileUnits(ctx, journal, maySwapHelper)
 	if err := updater.writeReceipt(Receipt{
 		SchemaVersion: journal.receiptSchema(), AttemptID: journal.AttemptID, State: "succeeded", TargetVersion: journal.TargetVersion,
 		RunningVersion: journal.TargetVersion, PreviousVersion: journal.PreviousVersion, UpdatedAt: journal.UpdatedAt,
-		HelperState: helperState,
+		HelperState: helperState, Units: unitState,
 	}); err != nil {
 		return err
 	}

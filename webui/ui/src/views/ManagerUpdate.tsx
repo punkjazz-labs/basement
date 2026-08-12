@@ -8,8 +8,8 @@ import {
   fleetUpgradeRowState, fleetUpgradeRunView, fleetUpgradeStateWord,
   fleetUpgradeTerminal, followManagerUpdate, isFleetUpgradeRun,
   isInstallableManagerUpdate, isUpdateApplyResult, isUpdateAttemptStatus,
-  managerUpdateCard, orderedFleetUpgradeNodes, UPDATE_POLL_MS, updateRefusal,
-  type UpdateRefusal,
+  managerUpdateCard, orderedFleetUpgradeNodes, UPDATE_POLL_MS, unitUpdateNote,
+  updateRefusal, type UpdateRefusal,
 } from '../managerUpdate'
 
 const PROGRESS = [
@@ -644,6 +644,7 @@ function ManagerUpdateBody({
             <dt>Running</dt><dd>{displayVersion(info.current_version)}</dd>
             <dt>Update</dt><dd>{target}</dd>
           </dl>
+          {unitUpdateNote(info) && <div className="update-note">{unitUpdateNote(info)}</div>}
           {error && <div className="error-note"><p>{error}</p></div>}
           <div className="update-actions">
             <button className="primary" type="button" disabled={applying} onClick={applyUpdate}>

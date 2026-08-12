@@ -99,6 +99,13 @@ func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
 		if report := s.updateStager.HelperReport(); report.Path != "" {
 			result["helper"] = report
 		}
+		// Generation 2 reconciles the systemd units from the updater's own
+		// embedded texts, but only on a machine whose updater unit already
+		// grants it that access. The console says which machine this is in
+		// the same voice as the bootstrap message above, and never implies it
+		// can grant the access itself (ADR 0020, decision 5 and the
+		// transition plan).
+		result["unit_updates"] = s.updateStager.UnitUpdateReport()
 		s.finishUpdateCheck(result, &candidate)
 		writeJSON(w, http.StatusOK, result)
 		return

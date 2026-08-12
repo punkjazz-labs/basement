@@ -22,10 +22,47 @@ type AttemptStatus struct {
 	TargetVersion  string `json:"target_version"`
 	Failure        string `json:"failure,omitempty"`
 	UpdatedAt      string `json:"updated_at"`
-	// HelperState is read back from a schema-2 receipt and never written to
-	// the manager's own status file, so an older manager never meets it in a
-	// file it decodes strictly.
+	// HelperState and Units are read back from a schema-2 receipt and never
+	// written to the manager's own status file, so an older manager never
+	// meets either in a file it decodes strictly.
 	HelperState string `json:"helper_state,omitempty"`
+	Units       string `json:"units,omitempty"`
+}
+
+// UnitUpdateReport says whether the root updater on this machine can reconcile
+// its own systemd units, which is generation 2 of ADR 0020. Only the updater's
+// own write probe can answer it, so the answer comes from the last schema-2
+// receipt and is "unknown" until one exists. The console must never imply it
+// can grant that access itself: the one action that does is an installer run.
+type UnitUpdateReport struct {
+	State string `json:"state"`
+	Note  string `json:"note,omitempty"`
+}
+
+const (
+	unitUpdatesAvailable   = "available"
+	unitUpdatesUnavailable = "unavailable"
+	unitUpdatesUnknown     = "unknown"
+	// InstallerEnablesUnitUpdates is the exact sentence ADR 0020 fixes for a
+	// machine still running a generation-1 updater unit.
+	InstallerEnablesUnitUpdates = "Run the installer once to enable unit updates"
+)
+
+func (stager *Stager) UnitUpdateReport() UnitUpdateReport {
+	if stager == nil {
+		return UnitUpdateReport{State: unitUpdatesUnknown}
+	}
+	var receipt Receipt
+	if err := readJSONFile(stager.RootStatusPath, 64<<10, &receipt); err != nil || receipt.Units == "" {
+		// No schema-2 receipt has ever been written here, so nothing has
+		// probed anything. Saying unavailable would ask for an installer run
+		// this machine may not need; unknown is the honest answer.
+		return UnitUpdateReport{State: unitUpdatesUnknown}
+	}
+	if unitsPermitted(receipt.Units) {
+		return UnitUpdateReport{State: unitUpdatesAvailable}
+	}
+	return UnitUpdateReport{State: unitUpdatesUnavailable, Note: InstallerEnablesUnitUpdates}
 }
 
 // HelperReport is what the manager can honestly say about the installed root
@@ -489,7 +526,7 @@ func (stager *Stager) Status() (AttemptStatus, bool, error) {
 		return AttemptStatus{
 			SchemaVersion: 1, AttemptID: root.AttemptID, State: root.State,
 			RunningVersion: root.RunningVersion, TargetVersion: root.TargetVersion,
-			Failure: root.Failure, UpdatedAt: root.UpdatedAt, HelperState: root.HelperState,
+			Failure: root.Failure, UpdatedAt: root.UpdatedAt, HelperState: root.HelperState, Units: root.Units,
 		}, true, nil
 	}
 	if rootErr != nil && !errors.Is(rootErr, os.ErrNotExist) {

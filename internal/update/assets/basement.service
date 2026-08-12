@@ -1,0 +1,44 @@
+[Unit]
+Description=basement
+Documentation=https://github.com/punkjazz-labs/runonspark-manager
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=basement
+Group=basement
+SupplementaryGroups=docker
+ExecStart=/usr/lib/basement/current/basement --data-dir /var/lib/basement --listen 127.0.0.1:7070
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+UMask=0027
+
+# Docker-group membership is privileged; keep every other host capability narrow.
+# PrivateDevices must stay off: inventory shells out to nvidia-smi, which needs
+# the real /dev/nvidia* nodes to report GPU visibility.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+# AF_NETLINK is how Linux enumerates network interfaces; without it the fleet
+# sweep cannot see the LAN at all. The empty capability set above keeps that
+# netlink socket read-only: changing links or routes needs CAP_NET_ADMIN.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/var/lib/basement
+
+[Install]
+WantedBy=multi-user.target

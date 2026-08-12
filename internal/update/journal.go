@@ -101,6 +101,9 @@ type Receipt struct {
 	// refuse a field it does not know, and a rollback puts an older manager
 	// back in front of this file.
 	HelperState string `json:"helper_state,omitempty"`
+	// Units follows exactly the same rule, and is the only place a machine
+	// records whether its updater can write its own unit directory.
+	Units string `json:"units,omitempty"`
 }
 
 // receiptSchema is the whole cross-version rule in one place: the helper

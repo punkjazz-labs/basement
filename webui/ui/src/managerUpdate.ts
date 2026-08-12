@@ -91,6 +91,17 @@ export const isInstallableManagerUpdate = (info: UpdateInfo | null): boolean => 
   isNewerManagerVersion(info.current_version, info.target_version),
 )
 
+// The update replaces the manager and the root updater on every machine. On a
+// machine whose updater unit predates generation 2 it cannot also refresh the
+// unit files, and only one action changes that. The console says so and never
+// implies it can grant the access itself. Silence is the answer whenever the
+// updater has not yet reported, because a guess here asks for an installer run
+// the machine may not need.
+export const unitUpdateNote = (info: UpdateInfo | null): string | null =>
+  info?.unit_updates?.state === 'unavailable'
+    ? info.unit_updates.note ?? 'Run the installer once to enable unit updates'
+    : null
+
 export type ManagerUpdateCard = 'standalone' | 'controller' | 'member'
 
 export const managerUpdateCard = (info: UpdateInfo | null): ManagerUpdateCard => {

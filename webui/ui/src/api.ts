@@ -430,7 +430,16 @@ export interface UpdateInfo {
   reason?: string
   manual_bootstrap_required?: boolean
   manual_upgrade_required?: boolean
+  unit_updates?: UnitUpdateReport
   checked_at?: string
+}
+
+// Whether the root updater on this machine can update its own systemd units.
+// Only the updater's own write probe can answer it, so the answer is unknown
+// until it has run once.
+export interface UnitUpdateReport {
+  state: 'available' | 'unavailable' | 'unknown'
+  note?: string
 }
 
 export interface UpdateApplyResult {

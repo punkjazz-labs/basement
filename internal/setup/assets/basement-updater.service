@@ -31,7 +31,7 @@ RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-ReadWritePaths=/usr/lib/basement /var/lib/basement/updates /var/lib/basement-updater
+ReadWritePaths=/usr/lib/basement /var/lib/basement/updates /var/lib/basement-updater /etc/systemd/system
 
 [Install]
 WantedBy=multi-user.target
