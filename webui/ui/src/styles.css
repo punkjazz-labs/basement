@@ -1033,3 +1033,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 /* The dot carries the state of the addition, so the line beside it stays a
    plain sentence. */
 .join-line { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 13px; color: var(--muted); }
+
+/* A second or third pending invitation stacks below the first, separated by
+   the same hairline the rest of the console uses. */
+.invitation-entry { border-top: 1px solid var(--line); padding-top: 14px; }

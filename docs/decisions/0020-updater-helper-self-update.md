@@ -300,6 +300,16 @@ applies normally, and that machine reaches helper self-update after one installe
 "no installer run" property of release N holds for the manager update itself, not for
 gaining helper self-update on machines whose helper predates protocol 2.
 
+Amended 2026-08-13, generation 2 implementation notes: the binary swap runs before unit
+reconciliation in the post-health window, because the swap must never depend on a unit
+write that a generation-1 sandbox refuses. The receipt's `units` field takes the values
+`not_permitted`, `reconciled`, `unchanged`, and `failed:<reason>`. The unit texts written
+are the running helper's embedded copies, not the freshly swapped binary's, since the
+rename leaves the running process on its old inode; a release that changes both helper and
+units reconciles the units on the following run. A `daemon-reload` failure after a good
+write is recorded as `failed:<reason>` with the new text on disk and the old one in
+systemd's memory; it is not a rollback trigger.
+
 ## Superseded decisions
 
 ADR 0008 lists among the things the updater service may not do

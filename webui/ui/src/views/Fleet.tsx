@@ -1102,9 +1102,13 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
 // Every console asks whether a Spark wants to adopt it, because the machine
 // being added is where the owner says yes. The answer is an owner session
 // here and nothing else: no code is read, and none is shown.
+// Every pending invitation renders, not just the oldest: a stranger on the
+// network can occupy the three invitation slots, and if only the first were
+// shown, the real console's request could sit buried behind that noise with
+// no way to see or clear it.
 export function FleetInvitationPrompt({ onAnswered }: { onAnswered: () => void }) {
-  const [invitation, setInvitation] = useState<FleetInvitation | null>(null)
-  const [answering, setAnswering] = useState(false)
+  const [invitations, setInvitations] = useState<FleetInvitation[]>([])
+  const [answering, setAnswering] = useState('')
   const [error, setError] = useState('')
   const ref = useRef<HTMLDialogElement>(null)
 
@@ -1114,7 +1118,7 @@ export function FleetInvitationPrompt({ onAnswered }: { onAnswered: () => void }
       if (document.hidden) return
       try {
         const waiting = fleetInvitations(await api<unknown>('/api/v1/fleet/invitations'))
-        if (!cancelled) setInvitation(waiting[0] ?? null)
+        if (!cancelled) setInvitations(waiting)
       } catch {
         /* nothing waiting is the ordinary answer */
       }
@@ -1130,44 +1134,47 @@ export function FleetInvitationPrompt({ onAnswered }: { onAnswered: () => void }
   useEffect(() => {
     const dialog = ref.current
     if (!dialog) return
-    if (invitation && !dialog.open) dialog.showModal()
-    if (!invitation && dialog.open) dialog.close()
-  }, [invitation])
+    if (invitations.length > 0 && !dialog.open) dialog.showModal()
+    if (invitations.length === 0 && dialog.open) dialog.close()
+  }, [invitations])
 
-  const answer = async (action: 'approve' | 'deny') => {
-    if (!invitation) return
-    setAnswering(true)
+  const answer = async (invitation: FleetInvitation, action: 'approve' | 'deny') => {
+    setAnswering(invitation.id)
     setError('')
     try {
       await api(`/api/v1/fleet/invitations/${encodeURIComponent(invitation.id)}/${action}`, {
         method: 'POST',
         body: '{}',
       })
-      setInvitation(null)
+      setInvitations(rest => rest.filter(entry => entry.id !== invitation.id))
       onAnswered()
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : 'That answer did not go through')
     } finally {
-      setAnswering(false)
+      setAnswering('')
     }
   }
 
   return (
-    <dialog ref={ref} onClose={() => setInvitation(null)} aria-label="A Spark wants to add this one">
-      {invitation && (
+    <dialog ref={ref} onClose={() => setInvitations([])} aria-label="A Spark wants to add this one">
+      {invitations.length > 0 && (
         <div className="dialog-pad">
-          <div className="dialog-head">
-            <div>
-              <p className="kicker">Fleet</p>
-              <h2>{invitationTitle(invitation)}</h2>
+          {invitations.map((invitation, index) => (
+            <div key={invitation.id} className={index > 0 ? 'invitation-entry' : undefined}>
+              <div className="dialog-head">
+                <div>
+                  {index === 0 && <p className="kicker">Fleet</p>}
+                  <h2>{invitationTitle(invitation)}</h2>
+                </div>
+              </div>
+              <p className="muted dialog-note">{invitationBody(invitation)}</p>
+              <div className="dialog-foot">
+                <button type="button" className="quiet" disabled={answering !== ''} onClick={() => void answer(invitation, 'deny')}>Deny</button>
+                <button type="button" className="primary" disabled={answering !== ''} onClick={() => void answer(invitation, 'approve')}>Approve</button>
+              </div>
             </div>
-          </div>
-          <p className="muted dialog-note">{invitationBody(invitation)}</p>
+          ))}
           {error && <p className="error-text dialog-note" role="alert">{error}</p>}
-          <div className="dialog-foot">
-            <button type="button" className="quiet" disabled={answering} onClick={() => answer('deny')}>Deny</button>
-            <button type="button" className="primary" disabled={answering} onClick={() => answer('approve')}>Approve</button>
-          </div>
         </div>
       )}
     </dialog>
