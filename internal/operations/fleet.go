@@ -205,6 +205,17 @@ func (f *FleetExecutor) RuntimeImageBytes(ctx context.Context, r recipe.Recipe) 
 	return f.local.RuntimeImageBytes(ctx, r)
 }
 
+// ManagedContainers reports the basement-labeled containers on THIS node's
+// Docker daemon only. The worker Spark's daemon is deliberately not asked:
+// its containers are reconciled by the manager that runs there, and the
+// engine's switch-time reconciliation documents that limit where it acts.
+func (f *FleetExecutor) ManagedContainers(ctx context.Context) ([]ManagedContainer, error) {
+	if lister, ok := f.local.(ManagedContainerLister); ok {
+		return lister.ManagedContainers(ctx)
+	}
+	return nil, nil
+}
+
 func (f *FleetExecutor) RenewWorkerReservation(ctx context.Context, jobID string, r recipe.Recipe) error {
 	target, err := f.peer.Target(ctx)
 	if err != nil {
