@@ -44,6 +44,49 @@ does not describe an operational feed today.
 6. **Failure posture.** Unsigned, tampered, stale, or unparseable feeds will be
    ignored with a diagnostic, while embedded recipes will keep working
    offline.
+7. **Revocation.** Added 2026-08-12, before any feed goes live, because
+   retrofitting revocation is much harder than designing it in. Signing proves
+   a recipe came from us; revocation is how we say we no longer stand behind
+   one — wrong weights, a licence problem, a compromised runtime image.
+
+   - **Where it lives.** The signed index gains a `revoked` array of
+     `{id, version, reason, revoked_at}` entries. Same document, same
+     signature, same freshness and downgrade protection as the recipes
+     themselves; there is no second channel to secure or to miss. `reason` is
+     required and human-readable, because the console will show it to the
+     person whose model it concerns.
+   - **Scope.** An entry names exactly one recipe id and version. The schema
+     deliberately cannot express "all versions", "all recipes", or any
+     product-wide statement, so the mechanism cannot become a kill switch for
+     the fleet. The issuer is whoever holds the feed signing key, under the
+     same custody ceremony the feed already requires; indexes are immutable
+     and published, so every revocation is public and auditable by
+     construction.
+   - **Permanence.** Once a manager has accepted an index revoking a version,
+     that version stays revoked on that machine even if a later index omits
+     the entry. Un-revoking would let a compromised key quietly restore a
+     pulled recipe; the honest remedy for an over-broad revocation is
+     publishing a fixed new version, which is already how any recipe change
+     ships.
+   - **Effect on installs.** A revoked version cannot be newly installed. The
+     refusal shows the reason, not a generic error.
+   - **Effect on a model already serving.** The manager never stops a running
+     model on its own: stopping someone's model without warning is its own
+     harm. The console tells the truth instead — a visible notice on the
+     model and on the recipe, carrying the reason — and the owner decides.
+     Saying nothing is the only forbidden option.
+   - **Offline machines.** A machine that has not fetched in a long time is
+     protected by honesty rather than enforcement: when the accepted index is
+     older than the staleness bound (30 days), the console reports that
+     revocations may have been missed, alongside the same feed-health surface
+     item 6 requires. Never fetching cannot un-revoke anything already
+     accepted, and embedded recipes are revoked the way they ship: by a
+     manager release.
+   - **Wire compatibility.** The `revoked` field enters the current schema
+     version now, while no feed is live and no fielded manager parses one, so
+     no version bump is spent on it. The strict index decoder means this is
+     the last free moment to add it: after a feed exists, any new top-level
+     field is a schema version bump by definition.
 
 Prerequisites to operational use include a real signing key, a decision record
 fixing the feed key ceremony, and a publication path that holds that key.
@@ -77,6 +120,9 @@ Not operational or not built:
 - No repository workflow creates a recipe index, validates one as a publication
   artifact, signs it, or publishes it.
 - The console does not announce a newly arrived recipe or show feed health.
+- Revocation (item 7) is designed but not built: the index schema, the
+  install refusal, the console notice, and the staleness warning all remain
+  to implement.
 Resolved since:
 
 - Feed ingest now enforces item 4 (2026-08-12): whatever a signed index
