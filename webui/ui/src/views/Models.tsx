@@ -8,6 +8,7 @@ import {
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
+import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
 
 const USE: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
@@ -352,7 +353,10 @@ export default function Models({
     preflight.checks.find(check => !check.ok && check.operation === 'verify_disk')?.receipt?.reclaim_candidates
 
   const firstRun = models.length === 0
-  const featured = firstRun ? sorted.find(recipe => recipe.id === RECOMMENDED_ID) : undefined
+  // A recipe the publisher has withdrawn is never the first thing a new owner
+  // is offered. It keeps its place in the table below, where the row says it
+  // is revoked and why, instead of being recommended and then refused.
+  const featured = firstRun ? sorted.find(recipe => recipe.id === RECOMMENDED_ID && !recipe.revoked) : undefined
   const rows = featured ? sorted.filter(recipe => recipe.id !== featured.id) : sorted
   // Installed models are the user's own shelf; they always sit above the
   // remaining catalog, each group keeping the curated order.
@@ -361,6 +365,10 @@ export default function Models({
 
   const rowFor = (recipe: Recipe) => {
     const model = installed.get(recipe.id)
+    // Which of the two revocation surfaces this row is in, if either: a
+    // withdrawn version nobody here installed, or a withdrawn version that is
+    // installed and carries on exactly as before.
+    const revocation = rowRevocation(recipe, model)
     const isMedia = Boolean(recipe.media_generation)
     // Only jobs that change what is running should lock the row. Smoke tests
     // and benchmarks run against a serving model — Open must stay available.
@@ -380,13 +388,18 @@ export default function Models({
     const peerWord = peerModel ? modelStateWord(peerModel) : delegated.has(recipe.id) ? 'Installing' : ''
     const peerBusy = peerWord === 'Installing' || peerWord === 'Starting' || peerWord === 'Switching'
     const localStatus = busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
+    // Nothing of this recipe runs anywhere in the fleet and its version has
+    // been withdrawn, so the row's whole state is the revocation. A Spark
+    // that is running it keeps its own word instead: what a machine is doing
+    // outranks what a publisher has decided.
+    const readsRevoked = revocation.revoked && !peerWord
     // A model that lives only on the other Spark reads as that Spark's
     // status; one that lives on both keeps this Spark's status in front.
-    const statusText = !model && peerWord ? peerWord : localStatus
+    const statusText = readsRevoked ? 'Revoked' : !model && peerWord ? peerWord : localStatus
     const peerNote = peer && peerWord ? (!model ? `on ${peer.name}` : `${peerWord} on ${peer.name}`) : ''
     // Serving is serving, whichever Spark is doing it; the annotation says
     // which one.
-    const dotClass = isActive || peerServing ? 'on' : busy || peerBusy ? 'busy' : ''
+    const dotClass = readsRevoked ? 'fail' : isActive || peerServing ? 'on' : busy || peerBusy ? 'busy' : ''
     const measured = model?.tokens_per_second
     const reference = REFERENCE_TPS[recipe.id]
     // Counting happens only while basement serves the model on this Spark,
@@ -420,7 +433,11 @@ export default function Models({
           <div className="m-id">
             <img src={LOGOS[recipe.id] ?? '/logos/nvidia.webp'} alt="" width="28" height="28" />
             <div>
-              <div className="nm">{recipe.display_name} {recipe.id === RECOMMENDED_ID && <span className="tag">Recommended</span>}</div>
+              <div className="nm">
+                {recipe.display_name}{' '}
+                {recipe.id === RECOMMENDED_ID && !revocation.installBlocked && <span className="tag">Recommended</span>}
+                {revocation.revoked && <span className="tag revoked">Revoked</span>}
+              </div>
               <div className="use">{USE[recipe.id] ?? 'Local model for your Spark.'}</div>
             </div>
           </div>
@@ -441,6 +458,9 @@ export default function Models({
             <span>
               {statusText}
               {peerNote && <small className="peer-note">{peerNote}</small>}
+              {/* The status above is true and stays true: this only adds what
+                  the publisher has since said about the version it runs. */}
+              {revocation.installedRevoked && <small className="peer-note warn">Recipe revoked</small>}
             </span>
           </div>
           <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
@@ -452,19 +472,32 @@ export default function Models({
                 Open on {peer.name}
               </button>
             )}
-            {!model && (fits || !canPair) && (
-              <button className="primary" disabled={busy || !fits} onClick={act(() => startInstall(recipe))}>
-                {busy ? 'Working' : fits ? installVerb(recipe) : 'Needs a Spark'}
+            {/* A withdrawn version is refused by the manager, so the button
+                that would only fail is offered dead rather than hidden: the
+                row still says what this model is and why it cannot start. */}
+            {!model && (fits || !canPair || revocation.installBlocked) && (
+              <button
+                className="primary"
+                disabled={busy || !fits || revocation.installBlocked}
+                onClick={act(() => startInstall(recipe))}
+              >
+                {busy ? 'Working' : fits || revocation.installBlocked ? installVerb(recipe) : 'Needs a Spark'}
               </button>
             )}
-            {!model && !fits && canPair && (
+            {!model && !fits && canPair && !revocation.installBlocked && (
               <button className="primary" onClick={act(openFleet)}>Pair a second Spark</button>
             )}
             {model && isActive && (
               <>
                 <button className="ghost" disabled={busy} onClick={act(() => simpleAction(recipe.id, 'stop'))}>Stop</button>
                 {updateAvailable && (
-                  <button className="ghost" disabled={busy} onClick={act(() => startInstall(recipe))}>Update</button>
+                  <button
+                    className="ghost"
+                    disabled={busy || revocation.installBlocked}
+                    onClick={act(() => startInstall(recipe))}
+                  >
+                    Update
+                  </button>
                 )}
                 <button className="primary" disabled={busy} onClick={act(isMedia ? openGenerate : openPlayground)}>
                   {isMedia ? 'Generate' : 'Open'}
@@ -474,7 +507,13 @@ export default function Models({
             {model && !isActive && model.status !== 'recovering' && (
               <>
                 {updateAvailable && (
-                  <button className="ghost" disabled={busy} onClick={act(() => startInstall(recipe))}>Update</button>
+                  <button
+                    className="ghost"
+                    disabled={busy || revocation.installBlocked}
+                    onClick={act(() => startInstall(recipe))}
+                  >
+                    Update
+                  </button>
                 )}
                 <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
                   {activeOther(recipe.id) ? 'Switch to' : 'Start'}
@@ -489,6 +528,15 @@ export default function Models({
         </div>
         {open && (
           <div className="mdetail">
+            {revoked(revocation) && (() => {
+              const body = revokeBody(revocation, isActive)
+              return (
+                <div className="revoke-line">
+                  <strong>{REVOKE_TITLE}</strong>
+                  {body && <span>{body}</span>}
+                </div>
+              )
+            })()}
             <div className="board">
               <div className="cell">
                 <div className="l">Speed</div>
@@ -644,6 +692,12 @@ export default function Models({
           rows.map(rowFor)
         )}
       </div>
+      {/* Where the recipes in that table came from, and how fresh they are.
+          A feed that has never been fetched says nothing at all. */}
+      {(() => {
+        const note = feedNote(system?.recipe_feed, Date.now())
+        return note ? <p className={`table-note ${note.warn ? 'warn' : ''}`}>{note.text}</p> : null
+      })()}
       {/* Only shown once something has actually been counted. Basement
           counts a model's tokens while it serves it here, so an empty total
           means no serving has been sampled yet, not that nothing ran. */}

@@ -284,6 +284,14 @@ input[type='text'], input[type='password'], textarea {
 /* A model that lives on another Spark in the fleet says so under its status,
    in the same quiet voice the rest of the row uses. */
 .m-status .peer-note { display: block; color: var(--faint); font-size: 11px; margin-top: 1px; }
+/* Something is true of the model that its status word does not carry, such as
+   a recipe the publisher has withdrawn under a model that keeps serving. */
+.m-status .peer-note.warn { color: var(--warn); }
+/* A version the publisher has withdrawn, on a row with nothing installed. */
+.tag.revoked {
+  color: var(--fail); background: transparent;
+  border-color: color-mix(in srgb, var(--fail) 45%, var(--line));
+}
 
 /* expanded detail — the "A depth" inside a row */
 .mdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }
@@ -306,6 +314,18 @@ input[type='text'], input[type='password'], textarea {
 .mdetail .row-tools { display: flex; gap: 10px; margin-top: 20px; }
 
 .table-note { color: var(--faint); font-size: 11.5px; margin: 2px 4px 0; }
+/* An index old enough that a revocation could be missing from it. */
+.table-note.warn { color: var(--warn); }
+
+/* The publisher's own withdrawal notice, inside the expanded row. Tinted
+   rather than loud: nothing here is broken and nothing stops on its own. */
+.revoke-line {
+  border: 1px solid color-mix(in srgb, var(--fail) 30%, transparent);
+  background: color-mix(in srgb, var(--fail) 6%, transparent);
+  border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; font-size: 12.5px;
+}
+.revoke-line strong { display: block; font-weight: 650; }
+.revoke-line span { display: block; color: var(--muted); margin-top: 3px; }
 
 /* Lifetime token usage, read at the same density as the table above it. */
 .token-total { display: flex; align-items: baseline; gap: 9px; margin: 10px 4px 0; font-size: 12px; color: var(--muted); }

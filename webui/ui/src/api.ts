@@ -78,6 +78,12 @@ export interface Recipe {
   media_generation?: MediaGenerationConfig
   artifact_bytes: number
   required_bytes: number
+  // The publisher has withdrawn this exact version. The recipe stays in the
+  // catalog on purpose, so the console can say why rather than have it
+  // vanish. revoked_reason is the publisher's own wording and is absent when
+  // the revocation carried none.
+  revoked: boolean
+  revoked_reason?: string
 }
 
 export interface InstalledModel {
@@ -89,6 +95,12 @@ export interface InstalledModel {
   tokens_per_second?: number
   time_to_first_token_ms?: number
   measured_at?: string
+  // Marked against the version this model was actually installed with, and
+  // only by /api/v1/models. The same shape also arrives inside a system
+  // payload, this Spark's or another's, where the pair is simply not there,
+  // so both fields are optional rather than assumed.
+  revoked?: boolean
+  revoked_reason?: string
 }
 
 // What one model has served on this Spark since basement started counting.
@@ -170,6 +182,19 @@ export interface ManagedNode {
   ready: boolean
 }
 
+// What this manager can truthfully say about the signed recipe feed itself.
+// state is ok, unreachable or never_fetched; the two timestamps are null when
+// there is nothing to report, and stale means the index in force is old
+// enough that a newer recipe or revocation could have been missed. An older
+// manager on another Spark answers without the block at all, so every reader
+// treats it as possibly absent.
+export interface RecipeFeedHealth {
+  state: string
+  accepted_generated_at?: string | null
+  fetched_at?: string | null
+  stale: boolean
+}
+
 export interface SystemInfo {
   hostname: string
   product_name: string
@@ -184,6 +209,7 @@ export interface SystemInfo {
   manager_version: string
   installed_models: InstalledModel[]
   hardware_scope: { mode: string; detected_spark_count: number; managed_nodes: ManagedNode[] }
+  recipe_feed?: RecipeFeedHealth
 }
 
 export interface PreflightCheck {

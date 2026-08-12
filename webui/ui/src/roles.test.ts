@@ -34,6 +34,7 @@ const recipe = (id: string, memory?: { weights: number; kv: number; overhead: nu
       : undefined,
     artifact_bytes: 0,
     required_bytes: 0,
+    revoked: false,
   }) as Recipe
 
 describe('role rows', () => {

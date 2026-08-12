@@ -23,6 +23,7 @@ const target = (extra: Partial<Recipe> = {}): Recipe => ({
   runtime: { kind: 'vllm', image: 'ghcr.io/example/vllm', digest: 'sha256:new', start_timeout_minutes: 20 },
   artifact_bytes: 60 * GB,
   required_bytes: 80 * GB,
+  revoked: false,
   ...extra,
 })
 

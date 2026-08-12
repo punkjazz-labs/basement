@@ -32,6 +32,7 @@ function makeRecipe(overrides: {
     memory_model: overrides.memoryModel,
     artifact_bytes: 0,
     required_bytes: 0,
+    revoked: false,
   }
 }
 
