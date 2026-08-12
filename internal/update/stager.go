@@ -282,9 +282,23 @@ func (stager *Stager) ApplyStaged(status AttemptStatus) (AttemptStatus, error) {
 // receipt for the same attempt would otherwise read as an update in progress
 // forever, refusing every install, generation and further update.
 func (stager *Stager) ReconcileStartup() error {
-	return stager.settleManagerOwned(
+	if err := stager.settleManagerOwned(
 		map[string]bool{"checking_signature": true, "downloading": true, "verifying": true},
 		"the manager restarted before this update reached the root updater; start the update again",
+	); err != nil {
+		return err
+	}
+	// waiting_for_root belongs to the root updater only while its handoff
+	// file or a receipt naming this attempt exists. A live apply always has
+	// one of the two: the request until the updater writes its restarting
+	// receipt, that receipt afterwards. Neither existing means the updater
+	// consumed the request without settling this attempt, which is exactly
+	// what a quarantine that could not read the request looks like, and the
+	// console would otherwise report an update in progress forever (found
+	// on hardware, 2026-08-12).
+	return stager.settleManagerOwned(
+		map[string]bool{"waiting_for_root": true},
+		"the root updater did not settle this update; check its receipt, then start the update again",
 	)
 }
 

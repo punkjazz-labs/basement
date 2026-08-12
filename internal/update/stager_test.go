@@ -98,8 +98,60 @@ func TestReconcileStartupPrefersAnExistingRootReceipt(t *testing.T) {
 	}
 }
 
+// An orphaned waiting_for_root is the state a quarantined-but-unreadable
+// handoff leaves behind: the root updater removed the request, its receipt
+// names no attempt, and nothing will ever settle the manager's status. Found
+// on hardware 2026-08-12, where it read as an update in progress forever.
+func TestReconcileStartupSettlesWaitingForRootNobodyOwns(t *testing.T) {
+	stager := stagerFixture(t)
+	writeAttempt(t, stager, AttemptStatus{
+		SchemaVersion: 1, AttemptID: "update-orphaned", State: "waiting_for_root",
+		RunningVersion: "v1.0.0", TargetVersion: "v1.1.0", UpdatedAt: "2026-08-12T00:00:00Z",
+	})
+	receipt := Receipt{SchemaVersion: 1, State: "failed_before_handoff", Failure: "copy update request: permission denied", UpdatedAt: "2026-08-12T00:01:00Z"}
+	if err := writeJSONFile(stager.RootStatusPath, receipt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := stager.ReconcileStartup(); err != nil {
+		t.Fatal(err)
+	}
+
+	status, _, err := stager.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "failed_before_handoff" || status.AttemptID != "update-orphaned" {
+		t.Fatalf("status = %+v, want the orphaned attempt settled", status)
+	}
+}
+
+func TestReconcileStartupLeavesWaitingForRootWithALiveHandoffAlone(t *testing.T) {
+	stager := stagerFixture(t)
+	writeAttempt(t, stager, AttemptStatus{
+		SchemaVersion: 1, AttemptID: "update-handed-off", State: "waiting_for_root",
+		RunningVersion: "v1.0.0", TargetVersion: "v1.1.0", UpdatedAt: "2026-08-12T00:00:00Z",
+	})
+	pending := filepath.Join(stager.DataDir, "updates", "staging", "pending")
+	if err := os.MkdirAll(pending, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	request := ApplyRequest{SchemaVersion: 1, AttemptID: "update-handed-off", RunningVersion: "v1.0.0", TargetVersion: "v1.1.0"}
+	if err := writeJSONFile(filepath.Join(pending, requestFileName), request, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := stager.ReconcileStartup(); err != nil {
+		t.Fatal(err)
+	}
+	status, _, err := stager.Status()
+	if err != nil || status.State != "waiting_for_root" {
+		t.Fatalf("state=%q err=%v, the root updater owns this attempt", status.State, err)
+	}
+}
+
 func TestReconcileStartupLeavesSettledAndAbsentStatesAlone(t *testing.T) {
-	for _, state := range []string{"waiting_for_root", "succeeded", "rolled_back", "recovery_required", "failed_before_handoff"} {
+	for _, state := range []string{"staged", "succeeded", "rolled_back", "recovery_required", "failed_before_handoff"} {
 		t.Run(state, func(t *testing.T) {
 			stager := stagerFixture(t)
 			writeAttempt(t, stager, AttemptStatus{
