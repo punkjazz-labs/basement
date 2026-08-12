@@ -77,6 +77,16 @@ func VerifyAndParseIndex(indexBytes, signatureFile []byte, publicKey ed25519.Pub
 			reasons = append(reasons, fmt.Sprintf("index recipe %s dropped: %s", r.ID, err))
 			continue
 		}
+		// A verified label is earned by qualification evidence recorded in
+		// this repository and is not transferable over the wire (ADR 0009
+		// item 4), so whatever the index claims, a recipe arrives at most as
+		// a candidate. Without this, a signed index could hand a user a
+		// recipe calling itself basement-verified with nothing behind it.
+		if r.Trust != "basement-candidate" || r.Verification != "candidate" {
+			reasons = append(reasons, fmt.Sprintf("index recipe %s demoted to candidate: verified status is earned locally, not received", r.ID))
+			r.Trust = "basement-candidate"
+			r.Verification = "candidate"
+		}
 		valid = append(valid, r)
 	}
 	return Index{SchemaVersion: raw.SchemaVersion, GeneratedAt: raw.GeneratedAt, Recipes: valid}, reasons, nil

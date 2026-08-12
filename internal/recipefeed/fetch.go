@@ -29,8 +29,11 @@ import (
 // published, this is the only line that needs to change.
 const IndexURL = "https://raw.githubusercontent.com/punkjazz-labs/runonspark-recipes/main/index.json"
 
-// signatureSuffix turns the index URL into its detached signature's URL.
-const signatureSuffix = ".minisig"
+// signatureSuffix turns the index URL into its detached signature's URL. The
+// file holds a base64-encoded raw ed25519 signature, so it is named .sig: the
+// earlier .minisig name promised minisign CLI compatibility the bytes never
+// had.
+const signatureSuffix = ".sig"
 
 const (
 	// maxIndexBytes and maxSignatureBytes cap the untrusted response bodies

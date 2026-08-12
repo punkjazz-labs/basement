@@ -84,6 +84,28 @@ func TestVerifyAndParseIndexNeverParsesBeforeVerifying(t *testing.T) {
 	}
 }
 
+func TestVerifyAndParseIndexDemotesWireVerifiedClaimsToCandidate(t *testing.T) {
+	// A verified label is earned by qualification evidence recorded in this
+	// repository. A correctly signed index claiming otherwise hands out a
+	// label nobody earned, so the claim arrives demoted, with a reason the
+	// operator can read, rather than trusted or silently rewritten.
+	pub, priv := testKeypair(t)
+	r := validTestRecipe(t, "remote-claims-verified-1s", 1)
+	r.Trust = "basement-verified"
+	r.Verification = "dgx-spark-verified"
+	body := marshalIndex(t, time.Now(), r)
+	idx, reasons, err := VerifyAndParseIndex(body, sign(priv, body), pub)
+	if err != nil {
+		t.Fatalf("a signed index with an inflated label must still parse: %v", err)
+	}
+	if len(idx.Recipes) != 1 || idx.Recipes[0].Trust != "basement-candidate" || idx.Recipes[0].Verification != "candidate" {
+		t.Fatalf("expected the recipe demoted to candidate, got: %#v", idx.Recipes)
+	}
+	if len(reasons) != 1 || !strings.Contains(reasons[0], "demoted to candidate") {
+		t.Fatalf("expected a demotion reason, got: %v", reasons)
+	}
+}
+
 func TestVerifyAndParseIndexDropsInvalidRecipeWithoutPoisoningBatch(t *testing.T) {
 	pub, priv := testKeypair(t)
 	good := validTestRecipe(t, "remote-good-1s", 1)

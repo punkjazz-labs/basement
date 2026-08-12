@@ -200,7 +200,7 @@ func newIndexServer(t *testing.T, indexBody, sigBody []byte) *httptest.Server {
 	mux.HandleFunc("/index.json", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(indexBody)
 	})
-	mux.HandleFunc("/index.json.minisig", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/index.json.sig", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(sigBody)
 	})
 	server := httptest.NewServer(mux)
@@ -229,7 +229,7 @@ func TestRefreshOnceFetchesVerifiesCachesAndMerges(t *testing.T) {
 
 	// The verified bytes must have been cached to disk for offline reuse.
 	indexPath := filepath.Join(dataDir, "recipes-cache", "index.json")
-	sigPath := indexPath + ".minisig"
+	sigPath := indexPath + ".sig"
 	for _, p := range []string{indexPath, sigPath} {
 		if _, statErr := os.Stat(p); statErr != nil {
 			t.Fatalf("expected %s to be written: %v", p, statErr)

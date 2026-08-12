@@ -18,10 +18,16 @@ does not describe an operational feed today.
    repository as pull requests. CI will run the same strict validator that
    gates embedded recipes. A human will approve and merge; nothing will
    self-publish.
-2. **Feed format.** The accepted design uses a manifest
-   `{generated_at, recipes: [{id, version, sha256, url}]}` plus one JSON file
-   per recipe version. Recipe files will be immutable once published; a change
-   will be a new version.
+2. **Feed format.** Amended 2026-08-12 to match what was built and tested: one
+   signed JSON index `{schema_version, generated_at, recipes: [...]}` with
+   complete recipe objects inline, plus a detached signature file named
+   `index.json.sig` holding a base64-encoded raw ed25519 signature. The
+   original multi-file manifest (a manifest of per-recipe sha256+url entries
+   plus one JSON file per recipe version) bought only per-file caching at the
+   cost of a second integrity mechanism, and the single-file shape keeps the
+   trust boundary in exactly one function. Published indexes are immutable; a
+   change is a new `generated_at`. The signature file is deliberately not
+   minisign-compatible and no longer pretends to be by its name.
 3. **Signing.** The manifest will be signed with ed25519. The public key will
    ship inside the manager binary. The manager will verify the manifest
    signature, then each recipe file's sha256 against the manifest. Key
@@ -71,12 +77,15 @@ Not operational or not built:
 - No repository workflow creates a recipe index, validates one as a publication
   artifact, signs it, or publishes it.
 - The console does not announce a newly arrived recipe or show feed health.
-- Feed ingest does not yet force incoming recipes back to candidate. It accepts
-  any trust and verification pair that passes the general recipe validator.
-- The implemented wire format differs from item 2 above. It is one signed JSON
-  index containing complete recipe objects inline, with one base64-encoded raw
-  ed25519 signature in a `.minisig`-named file. It is not the multi-file
-  manifest design and is not compatible with the minisign CLI file format.
+Resolved since:
+
+- Feed ingest now enforces item 4 (2026-08-12): whatever a signed index
+  claims, a recipe arrives at most as `basement-candidate` with `candidate`
+  verification, demoted at the trust boundary in `VerifyAndParseIndex` with a
+  logged reason.
+- The wire format question is settled by the amended item 2: the single
+  signed index is the accepted design, and the signature file is named
+  `index.json.sig` to say what it actually is.
 
 Recipes reaching users today are the recipes embedded in the manager binary.
 They do not arrive through a signed recipe feed. The future feed design remains

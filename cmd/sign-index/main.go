@@ -1,4 +1,4 @@
-// Command sign-index produces the detached signature (index.json.minisig)
+// Command sign-index produces the detached signature (index.json.sig)
 // for a recipe index, using a private key that lives only in a file on the
 // signer's own machine — never in this repository, never in an environment
 // variable's value (only its value is a path), never logged. It is not part
@@ -58,7 +58,7 @@ func run(indexPath, keyPath string) error {
 	}
 	signature := ed25519.Sign(privateKey, indexBytes)
 	signatureFile := base64.StdEncoding.EncodeToString(signature) + "\n"
-	sigPath := indexPath + ".minisig"
+	sigPath := indexPath + ".sig"
 	if err := os.WriteFile(sigPath, []byte(signatureFile), 0o640); err != nil {
 		return fmt.Errorf("write signature: %w", err)
 	}

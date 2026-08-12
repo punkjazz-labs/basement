@@ -32,7 +32,7 @@ func TestSignIndexProducesASignatureVerifySignatureAccepts(t *testing.T) {
 		t.Fatalf("run() failed: %v", err)
 	}
 
-	sigBytes, err := os.ReadFile(indexPath + ".minisig")
+	sigBytes, err := os.ReadFile(indexPath + ".sig")
 	if err != nil {
 		t.Fatalf("signature file was not written: %v", err)
 	}
