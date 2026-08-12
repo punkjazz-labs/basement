@@ -1172,6 +1172,17 @@ func (s *Store) ReleaseNodeReservation(ctx context.Context, reservationID string
 	return fmt.Errorf("reservation is %s and cannot be released", reservation.State)
 }
 
+// DeleteSettledNodeReservation removes a reservation whose life is over, so
+// its identity can be prepared again. Recovery reservations use one
+// deterministic identity per recipe, and a settled row left under that
+// identity would otherwise block startup recovery forever: Prepare returns
+// the row unchanged and Activate refuses it. The state guard means a live
+// reservation is never deleted, whoever calls this.
+func (s *Store) DeleteSettledNodeReservation(ctx context.Context, reservationID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM node_reservations WHERE reservation_id=? AND state IN ('released','expired')`, reservationID)
+	return err
+}
+
 func (s *Store) ReleaseActiveRecipeReservations(ctx context.Context, recipeID, exceptReservationID string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE node_reservations SET state='released',updated_at=? WHERE state='active' AND recipe_id=? AND reservation_id<>?`, now(), recipeID, exceptReservationID)
 	return err

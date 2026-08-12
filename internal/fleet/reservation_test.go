@@ -85,6 +85,66 @@ func TestLocalStartAndRemoteRankRaceAdmitsOneRuntimeOwner(t *testing.T) {
 	}
 }
 
+// The state a real machine was found in on 2026-08-12: an installed model
+// still marked active and recovering, while every reservation for it,
+// including the deterministic recovered-model one, had been released. Startup
+// recovery prepared that same identity, got the released row back unchanged,
+// failed to activate it, and the manager exited: a crash loop with the
+// console dead. Reconcile must clear the settled row and claim fresh.
+func TestReconcileRecoversActiveModelWhoseRecoveryReservationWasReleased(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	allocator := NewAllocator(database, "node-local")
+
+	reservationID := ReservationID(ClaimKindRecovered, "wedged-model")
+	if _, _, err := allocator.Prepare(ctx, ReservationRequest{
+		ReservationID: reservationID, DeploymentID: "recovered:wedged-model",
+		RecipeID: "wedged-model", RecipeVersion: 1,
+		Claims:       Claims{Version: ClaimsVersion, Kind: ClaimKindRecovered, Runtime: true},
+		PrepareToken: LocalPrepareToken(reservationID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Commit(ctx, reservationID, LocalPrepareToken(reservationID), []byte(`{"grant":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.Activate(ctx, reservationID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.Release(ctx, reservationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetInstalled(ctx, store.InstalledModel{RecipeID: "wedged-model", RecipeVersion: 1, Status: "recovering", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := allocator.Reconcile(ctx, nil); err != nil {
+		t.Fatalf("startup reconciliation must recover, not refuse to start: %v", err)
+	}
+
+	recovered, err := allocator.Reservation(ctx, reservationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != "active" {
+		t.Fatalf("recovered reservation state = %q, want active", recovered.State)
+	}
+
+	// Running it again with the reservation now genuinely active must keep
+	// it, not clear it: only settled rows may be deleted.
+	if err := allocator.Reconcile(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := allocator.Reservation(ctx, reservationID)
+	if err != nil || kept.State != "active" {
+		t.Fatalf("second reconcile state=%q err=%v, want the active claim kept", kept.State, err)
+	}
+}
+
 func TestActiveLegacyRankSurvivesRestartAndRejectsSameRecipeFromAnotherDriver(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "manager.db")

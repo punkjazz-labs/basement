@@ -375,6 +375,20 @@ func (a *Allocator) Reconcile(ctx context.Context, recipes []recipe.Recipe) erro
 			claims = ClaimsForRecipe(selected, RecipeClaimOptions{Kind: ClaimKindRecovered, Runtime: true})
 		}
 		reservationID := ReservationID(ClaimKindRecovered, recipeID)
+		// A settled reservation left under this deterministic identity would
+		// make Prepare return it unchanged and Activate refuse it, and the
+		// caller treats that refusal as fatal. Hardware proved what that
+		// means (2026-08-12): a machine whose active model once released its
+		// recovery reservation turned its next restart into a crash loop,
+		// with the console dead and nothing to click. A settled row holds no
+		// claim, so the identity is cleared for reuse instead.
+		if existing, err := a.Reservation(ctx, reservationID); err == nil && (existing.State == "released" || existing.State == "expired") {
+			if err := a.database.DeleteSettledNodeReservation(ctx, reservationID); err != nil {
+				return err
+			}
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		prepared, _, err := a.Prepare(ctx, ReservationRequest{
 			ReservationID: reservationID, DeploymentID: "recovered:" + recipeID,
 			DriverNodeID: a.nodeID, RecipeID: recipeID, RecipeVersion: model.RecipeVersion,
