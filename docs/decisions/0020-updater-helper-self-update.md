@@ -289,6 +289,17 @@ itself.
 The installers keep overwriting the helper and the units unconditionally. They remain the
 recovery path for a broken helper and must not delete a `.previous` file.
 
+Amended 2026-08-13, found during implementation: a machine can reach a protocol-2 manager
+through the signed chain while still running the installer's older helper, and that helper's
+strict decoder rejects a schema-2 `request.json` as unknown fields, which would fail a
+manager update over the one component this design says must never fail one. The handoff
+schema is therefore chosen per machine: the stager asks the installed helper
+`basement-updater version` first and writes a schema-2 request only when the helper reports
+protocol 2 or newer; otherwise it writes an unchanged schema-1 handoff, the manager release
+applies normally, and that machine reaches helper self-update after one installer run. The
+"no installer run" property of release N holds for the manager update itself, not for
+gaining helper self-update on machines whose helper predates protocol 2.
+
 ## Superseded decisions
 
 ADR 0008 lists among the things the updater service may not do
