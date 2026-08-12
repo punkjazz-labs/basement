@@ -1,9 +1,16 @@
 # Spec 12: doc redactor, a safe copy for cloud upload
 
-A first-party app on top of basement, not a console tab. Same reasoning as spec 17: it
-ships from its own repository (`punkjazz-labs/basement-redactor`), addresses a Spark
-through the stable `/v1` endpoint with an API key, and never links against this
-repository's internals. Branch names below are for that repository.
+**Amended 2026-08-13, owner decision: the redactor runs from basement directly.** It is
+a console tab, not a standalone app. The engine lives in this repository as
+`internal/docredact`, the console API serves it from `internal/httpapi` behind the same
+session auth as every other tab, and the page ships in the console bundle. There is no
+configuration screen: basement already knows its models, and the model pass uses them
+the way Generate does. The document travels from the owner's browser to the manager
+over the console session, so the privacy line becomes "read in your browser and sent
+only to your Spark". Export is two browser downloads (redacted copy, mapping); nothing
+is written server side. The standalone-repo framing below is kept for the engine,
+detection, review, export, and test requirements, which are unchanged; ignore its
+packaging, loopback server, keychain, and API-key sections.
 
 Note for anyone searching this repository: `internal/redact` here is unrelated. It scrubs
 tokens out of job receipts and log lines. Do not reuse the name in the new repository and
