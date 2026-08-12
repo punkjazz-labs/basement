@@ -257,4 +257,81 @@ func TestStagerSeparatesFleetVerificationFromUpdaterHandoff(t *testing.T) {
 	if _, err := os.Stat(requestPath); err != nil {
 		t.Fatalf("handoff did not create updater request: %v", err)
 	}
+
+	// The root updater has an empty capability set and reaches this handoff
+	// only through its membership in the manager's group. Hardware proved
+	// (2026-08-12) that a handoff staged without group access strands the
+	// update in waiting_for_root with no receipt at all: the pending
+	// directory needs group write for quarantine and cleanup, and every
+	// handoff file needs its group-read bit.
+	pendingDir := filepath.Dir(requestPath)
+	info, err := os.Stat(pendingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o770 {
+		t.Fatalf("pending dir mode = %o, the group-running updater needs rwx", info.Mode().Perm())
+	}
+	for name, want := range map[string]os.FileMode{
+		requestFileName: 0o640, ManifestAssetName: 0o640, SignatureAssetName: 0o640, managerFileName: 0o750,
+	} {
+		info, err := os.Stat(filepath.Join(pendingDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != want {
+			t.Fatalf("%s mode = %o, want %o for the group-running updater", name, info.Mode().Perm(), want)
+		}
+	}
+}
+
+// An older manager created the pending directory without group access, and a
+// directory that already exists is exactly the case MkdirAll silently leaves
+// alone. The next staging must repair it, not inherit the strand.
+func TestApplyStagedRepairsANarrowPendingDirectory(t *testing.T) {
+	stager := stagerFixture(t)
+	pendingDir := filepath.Join(stager.DataDir, "updates", "staging", "pending")
+	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(pendingDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := arm64ELF([]byte("repair target"))
+	digest := sha256.Sum256(manager)
+	manifestBytes, err := MarshalManifest(Manifest{SchemaVersion: ManifestSchemaVersion, KeyID: "release-test", ReleaseVersion: "v2.0.0",
+		OS: "linux", Arch: "arm64", AssetName: LinuxARM64AssetName, AssetSize: int64(len(manager)), AssetSHA256: hex.EncodeToString(digest[:]),
+		UpdaterProtocol: UpdaterProtocol, RollbackFrom: []string{"v1.0.0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := append([]byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, manifestBytes))), '\n')
+	candidate := Candidate{Release: Release{TagName: "v2.0.0"}, ManifestBytes: manifestBytes, Signature: signature,
+		AssetURL: "https://github.com/example/releases/download/v2.0.0/" + LinuxARM64AssetName}
+	stager.Keys = KeyRing{"release-test": publicKey}
+	stager.BootstrapCheck = func() error { return nil }
+	stager.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, ContentLength: int64(len(manager)), Body: io.NopCloser(bytes.NewReader(manager)), Header: make(http.Header)}, nil
+	})}
+	status, err := stager.Prepare(candidate, "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, err = stager.StageOnly(context.Background(), candidate, status); err != nil {
+		t.Fatal(err)
+	}
+	if status, err = stager.ApplyStaged(status); err != nil || status.State != "waiting_for_root" {
+		t.Fatalf("handoff status=%+v err=%v", status, err)
+	}
+	info, err := os.Stat(pendingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o770 {
+		t.Fatalf("pending dir mode = %o after staging, want the repair to 770", info.Mode().Perm())
+	}
 }

@@ -225,8 +225,20 @@ func (stager *Stager) ApplyStaged(status AttemptStatus) (AttemptStatus, error) {
 	if err := verifyAssetPath(preparedAsset, manifest); err != nil {
 		return fail(err)
 	}
+	// The root updater runs with an empty capability set, so being root
+	// grants it nothing here: it reaches this handoff purely through its
+	// membership in the manager's group (SupplementaryGroups in its unit).
+	// The pending directory needs group write for it to quarantine and
+	// clean up, and every handoff file needs its group-read bit. Hardware
+	// proved the mismatch (2026-08-12): files staged 0600 left the updater
+	// permission denied, no receipt was ever written, and the console
+	// showed waiting for the root updater forever. The explicit Chmod
+	// repairs a pending directory an older manager created too narrow.
 	pendingDir := filepath.Join(stagingRoot, "pending")
-	if err := os.MkdirAll(pendingDir, 0o750); err != nil {
+	if err := os.MkdirAll(pendingDir, 0o770); err != nil {
+		return fail(err)
+	}
+	if err := os.Chmod(pendingDir, 0o770); err != nil {
 		return fail(err)
 	}
 	requestPath := filepath.Join(pendingDir, requestFileName)
@@ -238,11 +250,11 @@ func (stager *Stager) ApplyStaged(status AttemptStatus) (AttemptStatus, error) {
 	for name, payload := range map[string][]byte{
 		ManifestAssetName: manifestBytes, SignatureAssetName: signature,
 	} {
-		if err := writeBytesAtomic(filepath.Join(pendingDir, name), payload, 0o600); err != nil {
+		if err := writeBytesAtomic(filepath.Join(pendingDir, name), payload, 0o640); err != nil {
 			return fail(err)
 		}
 	}
-	if err := copyFileAtomic(preparedAsset, filepath.Join(pendingDir, managerFileName), 0o700); err != nil {
+	if err := copyFileAtomic(preparedAsset, filepath.Join(pendingDir, managerFileName), 0o750); err != nil {
 		return fail(err)
 	}
 	if err := verifyAssetPath(filepath.Join(pendingDir, managerFileName), manifest); err != nil {
@@ -252,7 +264,7 @@ func (stager *Stager) ApplyStaged(status AttemptStatus) (AttemptStatus, error) {
 		SchemaVersion: 1, AttemptID: status.AttemptID, RunningVersion: status.RunningVersion,
 		TargetVersion: manifest.ReleaseVersion, ManifestSHA256: ManifestDigest(manifestBytes),
 	}
-	if err := writeJSONFile(requestPath, request, 0o600); err != nil {
+	if err := writeJSONFile(requestPath, request, 0o640); err != nil {
 		return fail(err)
 	}
 	status.State = "waiting_for_root"
