@@ -169,6 +169,15 @@ recipe's `shm_bytes` no longer defines an isolated `/dev/shm` boundary for that
 container. This weakens isolation and increases the chance of interference with
 host or other container IPC objects.
 
+**Resolution (2026-08-13).** Resolved in code. The distributed branch no longer
+sets `IpcMode`, so a rank keeps its own IPC namespace with `/dev/shm` sized from
+the recipe's `shm_bytes`; host networking, `/dev/infiniband`, `IPC_LOCK` and
+unlimited `memlock` stay, since those are what RDMA actually argues for. Both
+two-Spark recipes were version-bumped so existing containers are recreated
+(drift detection does not compare `IpcMode` or `ShmSize`). Hardware verification
+of the two-Spark path under isolated IPC is still pending: the fleet is
+currently reserved for other work.
+
 ## ADR 0007: Stable authenticated endpoint and API keys
 
 ### Editorial speed figures still precede device measurements
@@ -527,7 +536,8 @@ repository documentation both say it has not.
    running them.
 5. **Distributed containers use host IPC (ADR 0006).** The two-Spark path
    reverses an explicit isolation remediation and makes recipe `shm_bytes` cease
-   to be an isolated boundary.
+   to be an isolated boundary. Resolved in code on 2026-08-13 (see the finding
+   above); hardware verification is pending.
 6. **The signed recipe channel has no usable production key or endpoint (ADRs
    0009 and 0012).** Users cannot receive or verify the recipe delivery path the
    trust story says exists.

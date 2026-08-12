@@ -29,7 +29,10 @@ removal logic that never actually checked artifact sharing.
    is sized explicitly from the recipe's validated `shm_bytes`, making the
    field real instead of decorative. Qwen 27B, which declared `shm_bytes: 0`
    under the old host namespace, now declares the same 32 GiB as its siblings
-   (version bump v2→v3).
+   (version bump v2→v3). Amendment 2026-08-13: the distributed-container branch
+   added for two-Spark serving briefly reintroduced `IpcMode: host`; it was
+   removed again and both two-Spark recipes were version-bumped, so ranks share
+   the fabric through host networking and RDMA only.
 4. **Cancellation**: `Cancel` no longer writes the terminal `cancelled` state
    while the job goroutine is running. It records a non-terminal `cancelling`
    state (guarded so it can never overwrite a terminal state) and the running

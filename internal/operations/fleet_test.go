@@ -133,8 +133,17 @@ func TestDistributedContainerGetsTheFabricAndItsEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	hostConfig := body["HostConfig"].(map[string]any)
-	if hostConfig["NetworkMode"] != "host" || hostConfig["IpcMode"] != "host" {
+	if hostConfig["NetworkMode"] != "host" {
 		t.Fatalf("distributed container is not on the host fabric: %#v", hostConfig)
+	}
+	// ADR 0006: the fabric is host networking and RDMA, not a shared IPC
+	// namespace. The container keeps its own /dev/shm, sized from the recipe,
+	// so shm_bytes is a real boundary for a two-Spark model too.
+	if mode, shared := hostConfig["IpcMode"]; shared {
+		t.Fatalf("distributed container asked for IPC mode %v; it must keep its own namespace", mode)
+	}
+	if shm, _ := hostConfig["ShmSize"].(float64); int64(shm) != r.Runtime.ShmBytes {
+		t.Fatalf("ShmSize = %v, want the recipe's shm_bytes %d", hostConfig["ShmSize"], r.Runtime.ShmBytes)
 	}
 	if _, published := hostConfig["PortBindings"]; published {
 		t.Fatal("host networking publishes nothing, so a port binding is misleading")

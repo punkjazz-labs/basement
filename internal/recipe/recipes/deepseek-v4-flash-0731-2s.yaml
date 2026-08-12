@@ -81,7 +81,7 @@ id: deepseek-v4-flash-0731-2s
 #
 # memory_model is omitted: TP=2 shards weights across nodes and the flat
 # single-node formula would be wrong by construction.
-version: 2
+version: 3
 display_name: DeepSeek V4 Flash 0731
 publisher: DeepSeek
 model_by: DeepSeek
@@ -145,9 +145,9 @@ runtime:
   writable_paths:
     - /root/.tilelang
     - /root/tmp
-  # 64 GiB, matching the deployment this recipe follows. Two ranks exchanging
-  # tensors through host IPC spend this, and the previous 32 GiB was our own
-  # number rather than a measured one.
+  # 64 GiB, matching the deployment this recipe follows. The container gets an
+  # isolated IPC namespace with /dev/shm sized to exactly this value, and the
+  # previous 32 GiB was our own number rather than a measured one.
   shm_bytes: 68719476736
   memory_lock: true
   ipc_lock: true

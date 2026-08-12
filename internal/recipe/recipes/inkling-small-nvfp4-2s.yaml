@@ -51,7 +51,7 @@ id: inkling-small-nvfp4-2s
 #   token at bf16, 14336 at fp8; and 35 of 42 layers are sliding-window
 #   (512), so their KV is bounded per sequence rather than growing with
 #   context.
-version: 1
+version: 2
 display_name: Inkling Small NVFP4
 publisher: Thinking Machines
 model_by: Thinking Machines

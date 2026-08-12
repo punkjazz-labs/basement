@@ -364,13 +364,15 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 		hostConfig["CapAdd"] = []string{"IPC_LOCK"}
 	}
 	if placement.Distributed() {
-		// Ranks reach each other over the cabled fabric, which means the host
-		// network namespace and the RDMA devices. Published ports mean nothing
-		// under host networking, so the API server is told to bind loopback
-		// itself (see serveEndpointArgs) rather than relying on a port mapping.
+		// Ranks reach each other over the cabled fabric and nothing else: the
+		// host network namespace plus the RDMA devices carry every tensor
+		// between them, so the container keeps its own IPC namespace. Published
+		// ports mean nothing under host networking, so the API server is told to
+		// bind loopback itself (see serveEndpointArgs) rather than relying on a
+		// port mapping. /dev/shm is sized explicitly from the recipe above,
+		// which is what makes shm_bytes a real boundary here (ADR 0006).
 		delete(hostConfig, "PortBindings")
 		hostConfig["NetworkMode"] = "host"
-		hostConfig["IpcMode"] = "host"
 		hostConfig["Devices"] = []map[string]any{{"PathOnHost": "/dev/infiniband", "PathInContainer": "/dev/infiniband", "CgroupPermissions": "rwm"}}
 		hostConfig["CapAdd"] = []string{"IPC_LOCK"}
 		hostConfig["Ulimits"] = []map[string]any{{"Name": "memlock", "Soft": -1, "Hard": -1}}
