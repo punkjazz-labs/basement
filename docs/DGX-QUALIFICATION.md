@@ -191,3 +191,40 @@ proof, one click from a fresh installer state through restart, health check,
 receipt, and console announcement with no manual assist, requires the fixed
 updater from v0.5.6 on the machine and a newer release to update to; it is
 the acceptance test for this section and is recorded below when it runs.
+
+## 2026-08-12, continued: fleet rolling upgrade findings and the resolve live-fire
+
+The first two-node rolling upgrade attempt on real hardware surfaced three
+more defects and produced the first live proof of the recovery path.
+
+4. **Shipped databases lacked the resolve columns.** The migration creating
+   the fleet upgrade tables was amended in place to add them, on the
+   assumption it had never shipped. It had: a database that recorded that
+   schema version before the amendment skips the migration forever, and the
+   first fleet upgrade failed on the missing column. The store now heals the
+   actual table shape on open; ships in v0.5.9.
+
+5. **The prepared slot was stripped to owner-only by the unit's umask.** The
+   updater asks for world-readable slot modes, and UMask=0077 silently
+   reduced them to root-only. The manager service runs as its own user, so
+   the updated node crash looped on permission denied and the updater rolled
+   it back, exactly as designed. Chmod is not subject to the umask; ships in
+   v0.5.10.
+
+6. **A successful rollback was stamped recovery_required.** Verifying the
+   running executable reads another user's /proc entry, which needs a ptrace
+   capability the capability-less updater deliberately lacks. The healthz
+   version probe already proves which build answers, so that one refusal is
+   now skippable; ships in v0.5.10.
+
+**Resolve path, live-fire PASS.** The failed run left the fleet exactly as
+the recovery design predicts: member rolled back and locked, controller
+staged and holding, run failed with the member's real failure recorded. One
+resolve action from the controller settled the run and released both nodes,
+including the one that had rolled back, and the fleet accepted new work
+again. This is the scenario that permanently bricked the fleet in the
+pre-recovery design, resolved in one authenticated call.
+
+Sequencing and fail-fast also behaved on hardware: the member failed first
+and the controller was never touched, so the fleet was mixed for minutes,
+not broken.
