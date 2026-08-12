@@ -132,8 +132,11 @@ expansion is only reached when `topology.spark_count == 2`.
 
 Same image and same weights on both nodes. Both containers get:
 
-- `NetworkMode: host`, `IpcMode: host`, `/dev/infiniband` device, `IPC_LOCK`,
-  `memlock` unlimited, the recipe's `shm_bytes`.
+- `NetworkMode: host`, `/dev/infiniband` device, `IPC_LOCK`, `memlock`
+  unlimited, the recipe's `shm_bytes`. (Amended 2026-08-13: `IpcMode: host`
+  was in the original launch set but contradicted ADR 0006 and made
+  `shm_bytes` inert; distributed containers now keep an isolated IPC
+  namespace with `/dev/shm` sized from the recipe.)
 - The recipe's existing `runtime.environment`, plus
   `topology.interconnect.shared_environment`, plus the per-role
   `head_environment` / `worker_environment`.
@@ -170,9 +173,11 @@ Worker arguments add the same distributed flags with `--node-rank 1` and
 ## Deliberate deviations from the community recipe
 
 - No `--privileged`. The narrower set (`/dev/infiniband`, `IPC_LOCK`,
-  unlimited `memlock`, host IPC and network) is what RDMA documentation
-  actually requires. UNTESTED on hardware: if NCCL cannot open the HCA, this
-  is the first thing to revisit.
+  unlimited `memlock`, host network) is what RDMA documentation actually
+  requires. (Amended 2026-08-13: host IPC was dropped from this set per ADR
+  0006; an explicit `shm_bytes` covers shared memory. Isolated IPC on the
+  two-Spark path is not yet re-verified on hardware: if NCCL cannot open the
+  HCA or complains about shared memory, this is the first thing to revisit.)
 - The API server binds loopback instead of `0.0.0.0`, to keep ADR 0007.
 - Worker weight download is the manager's own verified download on the worker
   node, not a manual `hf download`.
