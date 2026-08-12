@@ -10,17 +10,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
 )
 
 const (
-	ManifestSchemaVersion = 1
-	UpdaterProtocol       = 1
-	LinuxARM64AssetName   = "basement-linux-arm64"
-	MaxManifestBytes      = 64 << 10
-	MaxSignatureBytes     = 256
+	// ManifestSchemaVersion is the base schema: one signed manager asset and
+	// nothing else. ManifestHelperSchemaVersion adds the signed identity of
+	// the root updater helper, so the helper rides the same signature as the
+	// manager (ADR 0020, decision 1).
+	ManifestSchemaVersion       = 1
+	ManifestHelperSchemaVersion = 2
+	// UpdaterProtocol is the highest protocol this build speaks. A protocol-2
+	// manager accepts both schemas; a protocol-1 manager refuses schema 2 on
+	// its schema constant and on strict unknown-field decoding, which is the
+	// transition mechanism rather than a bug to work around.
+	UpdaterProtocol           = 2
+	LinuxARM64AssetName       = "basement-linux-arm64"
+	LinuxARM64HelperAssetName = "basement-updater-linux-arm64"
+	MaxManifestBytes          = 64 << 10
+	MaxSignatureBytes         = 256
 )
 
 var (
@@ -44,6 +55,27 @@ type Manifest struct {
 	AssetSHA256     string   `json:"asset_sha256"`
 	UpdaterProtocol int      `json:"updater_protocol"`
 	RollbackFrom    []string `json:"rollback_from"`
+	// The helper fields exist only in schema 2 and are appended last so a
+	// schema-1 manifest still marshals to exactly the bytes it always did.
+	HelperAssetName string `json:"helper_asset_name,omitempty"`
+	HelperSize      int64  `json:"helper_size,omitempty"`
+	HelperSHA256    string `json:"helper_sha256,omitempty"`
+}
+
+// ManifestProtocol reports the updater protocol a schema requires. The
+// manifest field is what an older manager checks before it refuses a release
+// it cannot apply, so a schema-1 manifest is published at protocol 1 and
+// stays reachable from every protocol-1 manager already in the field. Only a
+// schema-2 manifest demands protocol 2.
+func ManifestProtocol(schema int) (int, error) {
+	switch schema {
+	case ManifestSchemaVersion:
+		return 1, nil
+	case ManifestHelperSchemaVersion:
+		return 2, nil
+	default:
+		return 0, errors.New("update manifest schema is unsupported")
+	}
 }
 
 type KeyRing map[string]ed25519.PublicKey
@@ -229,9 +261,11 @@ func decodeSignature(payload []byte) ([]byte, error) {
 }
 
 func validateManifest(manifest Manifest) error {
+	requiredProtocol, err := ManifestProtocol(manifest.SchemaVersion)
+	if err != nil {
+		return err
+	}
 	switch {
-	case manifest.SchemaVersion != ManifestSchemaVersion:
-		return errors.New("update manifest schema is unsupported")
 	case !keyIDPattern.MatchString(manifest.KeyID):
 		return errors.New("update manifest key id is invalid")
 	case manifest.OS != "linux" || manifest.Arch != "arm64":
@@ -242,8 +276,13 @@ func validateManifest(manifest Manifest) error {
 		return errors.New("update manifest asset size is invalid")
 	case !hexDigestPattern.MatchString(manifest.AssetSHA256):
 		return errors.New("update manifest asset digest is invalid")
-	case manifest.UpdaterProtocol != UpdaterProtocol:
+	case manifest.UpdaterProtocol < 1 || manifest.UpdaterProtocol > UpdaterProtocol:
 		return errors.New("update manifest updater protocol is unsupported")
+	case manifest.UpdaterProtocol < requiredProtocol:
+		return errors.New("update manifest updater protocol is older than its schema requires")
+	}
+	if err := validateManifestHelper(manifest); err != nil {
+		return err
 	}
 	if _, err := ParseVersion(manifest.ReleaseVersion); err != nil {
 		return errors.New("update manifest release version is invalid")
@@ -262,6 +301,55 @@ func validateManifest(manifest Manifest) error {
 		seen[version] = true
 	}
 	return nil
+}
+
+// validateManifestHelper keeps each schema strict about the other's fields. A
+// schema-1 manifest that carried a helper digest would claim an evaluation the
+// schema does not define, and a schema-2 manifest without one would promise a
+// helper it never names.
+func validateManifestHelper(manifest Manifest) error {
+	if manifest.SchemaVersion == ManifestSchemaVersion {
+		if manifest.HelperAssetName != "" || manifest.HelperSize != 0 || manifest.HelperSHA256 != "" {
+			return errors.New("update manifest schema 1 does not carry a helper identity")
+		}
+		return nil
+	}
+	switch {
+	case manifest.HelperAssetName != LinuxARM64HelperAssetName:
+		return errors.New("update manifest names an unsupported helper asset")
+	case manifest.HelperSize <= 0:
+		return errors.New("update manifest helper size is invalid")
+	case !hexDigestPattern.MatchString(manifest.HelperSHA256):
+		return errors.New("update manifest helper digest is invalid")
+	}
+	return nil
+}
+
+// VerifyHelperAsset applies the manager payload's rules to the root updater
+// helper: the signed size exactly, the signed digest, and the same Linux
+// ARM64 ELF format check. It reports helper wording so a failure names the
+// binary that actually failed.
+func VerifyHelperAsset(reader io.Reader, expectedSize int64, expectedDigest string) error {
+	if err := VerifyAsset(reader, expectedSize, expectedDigest); err != nil {
+		return fmt.Errorf("root updater helper: %w", err)
+	}
+	return nil
+}
+
+// FileDigest reports the SHA-256 of a file already on disk. The manager uses
+// it to compare the installed helper against a signed digest, and the helper
+// uses it on the bytes actually executing.
+func FileDigest(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 type headerWriter struct {

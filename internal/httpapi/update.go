@@ -92,6 +92,13 @@ func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
 		} else {
 			result["installable"] = true
 		}
+		// The root updater helper is a second signed binary on the machine
+		// and, from updater protocol 2, one the update can replace. Saying
+		// which build is installed, and warning when it will not answer at
+		// all, is the only way anyone can tell (ADR 0020, decision 3).
+		if report := s.updateStager.HelperReport(); report.Path != "" {
+			result["helper"] = report
+		}
 		s.finishUpdateCheck(result, &candidate)
 		writeJSON(w, http.StatusOK, result)
 		return

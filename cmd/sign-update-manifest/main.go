@@ -19,6 +19,7 @@ import (
 func main() {
 	mode := flag.String("mode", "sign", "sign, verify, or keygen")
 	assetPath := flag.String("asset", "", "linux ARM64 manager binary")
+	helperPath := flag.String("helper", "", "linux ARM64 root updater helper; signing one emits manifest schema 2")
 	version := flag.String("version", "", "release tag")
 	keyID := flag.String("key-id", "", "release signing key id")
 	rollbackFrom := flag.String("rollback-from", "", "comma-separated rollback versions")
@@ -31,9 +32,9 @@ func main() {
 	var err error
 	switch *mode {
 	case "sign":
-		err = sign(*assetPath, *version, *keyID, *rollbackFrom, *manifestPath, *signaturePath, *publicKeyPath, os.Stdin)
+		err = sign(*assetPath, *helperPath, *version, *keyID, *rollbackFrom, *manifestPath, *signaturePath, *publicKeyPath, os.Stdin)
 	case "verify":
-		err = verify(*assetPath, *version, *manifestPath, *signaturePath, *keyRingValue)
+		err = verify(*assetPath, *helperPath, *version, *manifestPath, *signaturePath, *keyRingValue)
 	case "keygen":
 		err = keygen(*keyID, *publicKeyPath, os.Stdout)
 	default:
@@ -45,7 +46,7 @@ func main() {
 	}
 }
 
-func sign(assetPath, version, keyID, rollbackCSV, manifestPath, signaturePath, publicKeyPath string, privateKeyInput io.Reader) error {
+func sign(assetPath, helperPath, version, keyID, rollbackCSV, manifestPath, signaturePath, publicKeyPath string, privateKeyInput io.Reader) error {
 	if assetPath == "" || version == "" || keyID == "" || rollbackCSV == "" || manifestPath == "" || signaturePath == "" || publicKeyPath == "" {
 		return errors.New("sign requires asset, version, key-id, rollback-from, manifest, signature, and public-key-out")
 	}
@@ -53,26 +54,35 @@ func sign(assetPath, version, keyID, rollbackCSV, manifestPath, signaturePath, p
 	if err != nil {
 		return err
 	}
-	asset, err := os.Open(assetPath)
+	size, digest, err := measure(assetPath)
 	if err != nil {
 		return err
 	}
-	hasher := sha256.New()
-	size, err := io.Copy(hasher, asset)
-	closeErr := asset.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	rollback := strings.Split(rollbackCSV, ",")
-	manifestBytes, err := update.MarshalManifest(update.Manifest{
+	// The helper is what decides the schema. Publishing it means publishing
+	// schema 2, which every manager older than protocol 2 refuses; leaving it
+	// out publishes the schema those managers can still read and install.
+	manifest := update.Manifest{
 		SchemaVersion: update.ManifestSchemaVersion, KeyID: keyID, ReleaseVersion: version,
 		OS: "linux", Arch: "arm64", AssetName: update.LinuxARM64AssetName,
-		AssetSize: size, AssetSHA256: hex.EncodeToString(hasher.Sum(nil)), UpdaterProtocol: update.UpdaterProtocol,
-		RollbackFrom: rollback,
-	})
+		AssetSize: size, AssetSHA256: digest,
+		RollbackFrom: strings.Split(rollbackCSV, ","),
+	}
+	if helperPath != "" {
+		helperSize, helperDigest, err := measure(helperPath)
+		if err != nil {
+			return err
+		}
+		manifest.SchemaVersion = update.ManifestHelperSchemaVersion
+		manifest.HelperAssetName = update.LinuxARM64HelperAssetName
+		manifest.HelperSize = helperSize
+		manifest.HelperSHA256 = helperDigest
+	}
+	protocol, err := update.ManifestProtocol(manifest.SchemaVersion)
+	if err != nil {
+		return err
+	}
+	manifest.UpdaterProtocol = protocol
+	manifestBytes, err := update.MarshalManifest(manifest)
 	if err != nil {
 		return err
 	}
@@ -133,7 +143,24 @@ func keygen(keyID, publicKeyPath string, privateKeyOutput io.Writer) error {
 	return nil
 }
 
-func verify(assetPath, releaseTag, manifestPath, signaturePath, keyRingValue string) error {
+func measure(path string) (int64, string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, "", err
+	}
+	hasher := sha256.New()
+	size, err := io.Copy(hasher, file)
+	closeErr := file.Close()
+	if err != nil {
+		return 0, "", err
+	}
+	if closeErr != nil {
+		return 0, "", closeErr
+	}
+	return size, hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func verify(assetPath, helperPath, releaseTag, manifestPath, signaturePath, keyRingValue string) error {
 	if assetPath == "" || releaseTag == "" || manifestPath == "" || signaturePath == "" || keyRingValue == "" {
 		return errors.New("verify requires asset, version, manifest, signature, and key-ring")
 	}
@@ -164,7 +191,30 @@ func verify(assetPath, releaseTag, manifestPath, signaturePath, keyRingValue str
 	if closeErr := asset.Close(); verifyErr == nil {
 		verifyErr = closeErr
 	}
-	return verifyErr
+	if verifyErr != nil {
+		return verifyErr
+	}
+	// A schema-2 manifest is only as good as the helper it names, so the
+	// verify passes measure that binary too rather than trusting the signing
+	// pass to have got it right.
+	if helperPath == "" {
+		if manifest.SchemaVersion == update.ManifestHelperSchemaVersion {
+			return errors.New("the signed manifest names a helper; pass -helper to verify it")
+		}
+		return nil
+	}
+	if manifest.SchemaVersion != update.ManifestHelperSchemaVersion {
+		return errors.New("a helper was passed but the signed manifest names none")
+	}
+	helper, err := os.Open(helperPath)
+	if err != nil {
+		return err
+	}
+	helperErr := update.VerifyHelperAsset(helper, manifest.HelperSize, manifest.HelperSHA256)
+	if closeErr := helper.Close(); helperErr == nil {
+		helperErr = closeErr
+	}
+	return helperErr
 }
 
 func readPrivateKey(reader io.Reader) (ed25519.PrivateKey, error) {

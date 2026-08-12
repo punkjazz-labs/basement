@@ -24,12 +24,49 @@ const (
 
 var attemptIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
+const (
+	// RequestSchemaVersion is the handoff every manager has always written.
+	// RequestHelperSchemaVersion adds the helper digest and, more
+	// importantly, tells the helper that the manager waiting for this
+	// transaction understands a helper_state in the receipt it writes back
+	// (ADR 0020, decision 6).
+	RequestSchemaVersion       = 1
+	RequestHelperSchemaVersion = 2
+	// journalSchemaVersion is private state: only the helper reads its own
+	// journal, so it advances unconditionally. A schema-1 journal found at
+	// boot recovery keeps schema-1 semantics and is completed as it stands,
+	// never upgraded in place mid-transaction.
+	journalSchemaVersion = 2
+)
+
+// HelperState values recorded in a schema-2 receipt. A failed swap is never a
+// failed update: the manager did become healthy, which is the honest outcome
+// to report.
+const (
+	HelperStateUpdated     = "updated"
+	HelperStateUnchanged   = "unchanged"
+	helperStateFailPrefix  = "swap_failed:"
+	helperMaxFailureReason = 200
+)
+
+func helperSwapFailed(reason string) string {
+	reason = strings.Join(strings.Fields(reason), " ")
+	if reason == "" {
+		reason = "unknown reason"
+	}
+	if len(reason) > helperMaxFailureReason {
+		reason = reason[:helperMaxFailureReason]
+	}
+	return helperStateFailPrefix + reason
+}
+
 type ApplyRequest struct {
 	SchemaVersion  int    `json:"schema_version"`
 	AttemptID      string `json:"attempt_id"`
 	RunningVersion string `json:"running_version"`
 	TargetVersion  string `json:"target_version"`
 	ManifestSHA256 string `json:"manifest_sha256"`
+	HelperSHA256   string `json:"helper_sha256,omitempty"`
 }
 
 type Journal struct {
@@ -42,6 +79,12 @@ type Journal struct {
 	ManifestSHA256  string `json:"manifest_sha256"`
 	Failure         string `json:"failure,omitempty"`
 	UpdatedAt       string `json:"updated_at"`
+	// RequestSchema carries the requesting manager's schema across every
+	// resume boundary, because the receipt written at the end of a
+	// transaction has to speak the schema of the request that started it
+	// even when a reboot separated the two.
+	RequestSchema int    `json:"request_schema,omitempty"`
+	HelperSHA256  string `json:"helper_sha256,omitempty"`
 }
 
 type Receipt struct {
@@ -53,6 +96,23 @@ type Receipt struct {
 	PreviousVersion string `json:"previous_version,omitempty"`
 	Failure         string `json:"failure,omitempty"`
 	UpdatedAt       string `json:"updated_at"`
+	// HelperState appears only in a schema-2 receipt, which is written only
+	// for a schema-2 request. An older manager decodes strictly and would
+	// refuse a field it does not know, and a rollback puts an older manager
+	// back in front of this file.
+	HelperState string `json:"helper_state,omitempty"`
+}
+
+// receiptSchema is the whole cross-version rule in one place: the helper
+// writes its receipt at the schema of the request it is serving. A schema-1
+// request produces a schema-1 receipt with no helper_state even when this
+// helper speaks protocol 2 and did swap itself, because a rollback puts the
+// requesting manager back in front of that file and it decodes strictly.
+func (journal Journal) receiptSchema() int {
+	if journal.RequestSchema == RequestHelperSchemaVersion {
+		return RequestHelperSchemaVersion
+	}
+	return RequestSchemaVersion
 }
 
 func readJSONFile(path string, limit int64, target any) error {
@@ -149,7 +209,16 @@ func journalNow(now func() time.Time) string {
 }
 
 func validateApplyRequest(request ApplyRequest) error {
-	if request.SchemaVersion != 1 {
+	switch request.SchemaVersion {
+	case RequestSchemaVersion:
+		if request.HelperSHA256 != "" {
+			return errors.New("update request schema 1 does not carry a helper digest")
+		}
+	case RequestHelperSchemaVersion:
+		if !hexDigestPattern.MatchString(request.HelperSHA256) {
+			return errors.New("update request helper digest is invalid")
+		}
+	default:
 		return errors.New("update request schema is unsupported")
 	}
 	if !attemptIDPattern.MatchString(request.AttemptID) {
@@ -168,8 +237,20 @@ func validateApplyRequest(request ApplyRequest) error {
 }
 
 func validateJournal(journal Journal) error {
-	if journal.SchemaVersion != 1 || !attemptIDPattern.MatchString(journal.AttemptID) {
+	if journal.SchemaVersion < 1 || journal.SchemaVersion > journalSchemaVersion || !attemptIDPattern.MatchString(journal.AttemptID) {
 		return errors.New("updater journal identity is invalid")
+	}
+	// A schema-1 journal predates helper handling entirely, so it is read
+	// with schema-1 semantics and completed as it stands. It is never
+	// upgraded in place while a transaction is still open.
+	if journal.SchemaVersion == 1 && (journal.RequestSchema != 0 || journal.HelperSHA256 != "") {
+		return errors.New("updater journal schema 1 does not carry helper identity")
+	}
+	if journal.RequestSchema == RequestHelperSchemaVersion && !hexDigestPattern.MatchString(journal.HelperSHA256) {
+		return errors.New("updater journal helper digest is invalid")
+	}
+	if journal.RequestSchema != 0 && journal.RequestSchema != RequestSchemaVersion && journal.RequestSchema != RequestHelperSchemaVersion {
+		return errors.New("updater journal request schema is unsupported")
 	}
 	if _, err := ParseVersion(journal.TargetVersion); err != nil {
 		return errors.New("updater journal target version is invalid")

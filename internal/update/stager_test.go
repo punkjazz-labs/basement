@@ -8,6 +8,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -251,6 +253,260 @@ func TestSettleResolvedLeavesRootOwnedAttemptsAlone(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A schema-2 release whose helper differs from the installed one is the case
+// generation 1 exists for: the helper rides the same signature as the
+// manager, is verified against the signed size and digest, and reaches the
+// root updater at the same mode as the manager payload.
+func TestStagingASchemaTwoReleaseHandsOffTheSignedHelper(t *testing.T) {
+	fixture := helperReleaseFixture(t, arm64ELF([]byte("new helper")))
+	stager := fixture.stager(t, arm64ELF([]byte("installed helper")), 2)
+
+	status := stageAndApply(t, stager, fixture.candidate)
+	if status.State != "waiting_for_root" {
+		t.Fatalf("status = %+v", status)
+	}
+	pendingDir := filepath.Join(stager.DataDir, "updates", "staging", "pending")
+	info, err := os.Stat(filepath.Join(pendingDir, helperFileName))
+	if err != nil {
+		t.Fatalf("the signed helper was not handed off: %v", err)
+	}
+	if info.Mode().Perm() != 0o750 {
+		t.Fatalf("helper mode = %o, want 0750 for the group-running updater", info.Mode().Perm())
+	}
+	staged, err := os.ReadFile(filepath.Join(pendingDir, helperFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(staged, fixture.helper) {
+		t.Fatal("the handed-off helper is not the release's helper")
+	}
+	var request ApplyRequest
+	if err := readJSONFile(filepath.Join(pendingDir, requestFileName), 64<<10, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.SchemaVersion != RequestHelperSchemaVersion || request.HelperSHA256 != fixture.helperDigest {
+		t.Fatalf("request = %+v, want schema 2 naming the signed helper digest", request)
+	}
+}
+
+// When the installed helper already matches, nothing is downloaded and
+// nothing is staged, but the request still says schema 2 so the root updater
+// can report unchanged rather than silence.
+func TestStagingSkipsTheHelperWhenTheInstalledOneMatches(t *testing.T) {
+	current := arm64ELF([]byte("current helper"))
+	fixture := helperReleaseFixture(t, current)
+	stager := fixture.stager(t, current, 2)
+	requested := 0
+	stager.Client = fixture.transport(&requested)
+
+	stageAndApply(t, stager, fixture.candidate)
+	if requested != 1 {
+		t.Fatalf("downloads = %d, want only the manager payload", requested)
+	}
+	pendingDir := filepath.Join(stager.DataDir, "updates", "staging", "pending")
+	if _, err := os.Stat(filepath.Join(pendingDir, helperFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("helper bytes were staged for a helper that is already current: %v", err)
+	}
+	var request ApplyRequest
+	if err := readJSONFile(filepath.Join(pendingDir, requestFileName), 64<<10, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.SchemaVersion != RequestHelperSchemaVersion || request.HelperSHA256 != fixture.helperDigest {
+		t.Fatalf("request = %+v, want schema 2 even with nothing to stage", request)
+	}
+}
+
+// The hard rule: a helper that cannot be read is unknown, never stale, and
+// must never cause a helper download. Treating unreadable as stale would
+// download and hand off a helper on every single check.
+func TestStagingNeverDownloadsAHelperItCannotCompare(t *testing.T) {
+	fixture := helperReleaseFixture(t, arm64ELF([]byte("new helper")))
+	stager := fixture.stager(t, arm64ELF([]byte("installed helper")), 2)
+	stager.UpdaterBinaryPath = filepath.Join(t.TempDir(), "unreadable-basement-updater")
+	requested := 0
+	stager.Client = fixture.transport(&requested)
+
+	stageAndApply(t, stager, fixture.candidate)
+	if requested != 1 {
+		t.Fatalf("downloads = %d, an unreadable helper triggered a helper download", requested)
+	}
+	pendingDir := filepath.Join(stager.DataDir, "updates", "staging", "pending")
+	if _, err := os.Stat(filepath.Join(pendingDir, helperFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("helper bytes were staged from an unknown comparison: %v", err)
+	}
+}
+
+// A helper that predates protocol 2 decodes its request strictly and would
+// refuse a schema-2 one outright, failing a manager update over a helper that
+// must never fail one. Such a machine takes the manager release now.
+func TestStagingFallsBackToSchemaOneForAnOlderHelper(t *testing.T) {
+	fixture := helperReleaseFixture(t, arm64ELF([]byte("new helper")))
+	stager := fixture.stager(t, arm64ELF([]byte("installed helper")), 0)
+	stager.HelperVersionRunner = func(context.Context, string) (string, error) {
+		return "", errors.New("exit status 2")
+	}
+	requested := 0
+	stager.Client = fixture.transport(&requested)
+
+	stageAndApply(t, stager, fixture.candidate)
+	if requested != 1 {
+		t.Fatalf("downloads = %d, want only the manager payload", requested)
+	}
+	pendingDir := filepath.Join(stager.DataDir, "updates", "staging", "pending")
+	var request ApplyRequest
+	if err := readJSONFile(filepath.Join(pendingDir, requestFileName), 64<<10, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.SchemaVersion != RequestSchemaVersion || request.HelperSHA256 != "" {
+		t.Fatalf("request = %+v, want a schema 1 handoff an older helper can read", request)
+	}
+}
+
+// A schema-1 release evaluates no helper at all, whatever is installed.
+func TestStagingASchemaOneReleaseEvaluatesNoHelper(t *testing.T) {
+	fixture := helperReleaseFixture(t, arm64ELF([]byte("new helper")))
+	fixture.reSign(t, false)
+	stager := fixture.stager(t, arm64ELF([]byte("installed helper")), 2)
+	requested := 0
+	stager.Client = fixture.transport(&requested)
+
+	stageAndApply(t, stager, fixture.candidate)
+	if requested != 1 {
+		t.Fatalf("downloads = %d, a schema 1 release staged a helper", requested)
+	}
+	pendingDir := filepath.Join(stager.DataDir, "updates", "staging", "pending")
+	var request ApplyRequest
+	if err := readJSONFile(filepath.Join(pendingDir, requestFileName), 64<<10, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.SchemaVersion != RequestSchemaVersion || request.HelperSHA256 != "" {
+		t.Fatalf("request = %+v, want an unchanged schema 1 handoff", request)
+	}
+}
+
+// Bytes that do not match the signed helper digest never reach the root
+// updater, whatever the release host served.
+func TestStagingRefusesAHelperThatDoesNotMatchItsSignedDigest(t *testing.T) {
+	fixture := helperReleaseFixture(t, arm64ELF([]byte("new helper")))
+	stager := fixture.stager(t, arm64ELF([]byte("installed helper")), 2)
+	served := map[string][]byte{
+		fixture.candidate.AssetURL:       fixture.manager,
+		fixture.candidate.HelperAssetURL: arm64ELF([]byte("substituted helper")),
+	}
+	stager.Client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		payload, ok := served[request.URL.String()]
+		if !ok {
+			return nil, fmt.Errorf("unexpected download %s", request.URL)
+		}
+		return &http.Response{StatusCode: http.StatusOK, ContentLength: int64(len(payload)), Body: io.NopCloser(bytes.NewReader(payload)), Header: make(http.Header)}, nil
+	})}
+	status, err := stager.Prepare(fixture.candidate, "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stager.StageOnly(context.Background(), fixture.candidate, status); err == nil {
+		t.Fatal("a helper that does not match its signed digest was staged")
+	}
+}
+
+type helperFixture struct {
+	candidate    Candidate
+	manager      []byte
+	helper       []byte
+	helperDigest string
+	keys         KeyRing
+	privateKey   ed25519.PrivateKey
+}
+
+func helperReleaseFixture(t *testing.T, helper []byte) *helperFixture {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperDigest := sha256.Sum256(helper)
+	fixture := &helperFixture{
+		manager: arm64ELF([]byte("target manager")), helper: helper,
+		helperDigest: hex.EncodeToString(helperDigest[:]),
+		keys:         KeyRing{"release-test": publicKey}, privateKey: privateKey,
+	}
+	fixture.reSign(t, true)
+	return fixture
+}
+
+func (fixture *helperFixture) reSign(t *testing.T, withHelper bool) {
+	t.Helper()
+	digest := sha256.Sum256(fixture.manager)
+	manifest := Manifest{
+		SchemaVersion: ManifestSchemaVersion, KeyID: "release-test", ReleaseVersion: "v2.0.0",
+		OS: "linux", Arch: "arm64", AssetName: LinuxARM64AssetName,
+		AssetSize: int64(len(fixture.manager)), AssetSHA256: hex.EncodeToString(digest[:]),
+		UpdaterProtocol: 1, RollbackFrom: []string{"v1.0.0"},
+	}
+	if withHelper {
+		manifest.SchemaVersion = ManifestHelperSchemaVersion
+		manifest.UpdaterProtocol = 2
+		manifest.HelperAssetName = LinuxARM64HelperAssetName
+		manifest.HelperSize = int64(len(fixture.helper))
+		manifest.HelperSHA256 = fixture.helperDigest
+	}
+	manifestBytes, err := MarshalManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := append([]byte(base64.StdEncoding.EncodeToString(ed25519.Sign(fixture.privateKey, manifestBytes))), '\n')
+	prefix := "https://github.com/example/releases/download/v2.0.0/"
+	fixture.candidate = Candidate{
+		Release: Release{TagName: "v2.0.0"}, ManifestBytes: manifestBytes, Signature: signature,
+		AssetURL: prefix + LinuxARM64AssetName, HelperAssetURL: prefix + LinuxARM64HelperAssetName,
+	}
+}
+
+func (fixture *helperFixture) stager(t *testing.T, installedHelper []byte, protocol int) *Stager {
+	t.Helper()
+	stager := NewStager(t.TempDir(), fixture.keys)
+	stager.RootStatusPath = filepath.Join(t.TempDir(), "root-status.json")
+	stager.BootstrapCheck = func() error { return nil }
+	installHelper(t, stager, installedHelper)
+	digest := sha256.Sum256(installedHelper)
+	stager.HelperVersionRunner = fixedHelperVersion("v1.0.0", protocol, hex.EncodeToString(digest[:]))
+	requested := 0
+	stager.Client = fixture.transport(&requested)
+	return stager
+}
+
+func (fixture *helperFixture) transport(requested *int) *http.Client {
+	served := map[string][]byte{
+		fixture.candidate.AssetURL:       fixture.manager,
+		fixture.candidate.HelperAssetURL: fixture.helper,
+	}
+	return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		payload, ok := served[request.URL.String()]
+		if !ok {
+			return nil, fmt.Errorf("unexpected download %s", request.URL)
+		}
+		*requested++
+		return &http.Response{StatusCode: http.StatusOK, ContentLength: int64(len(payload)), Body: io.NopCloser(bytes.NewReader(payload)), Header: make(http.Header)}, nil
+	})}
+}
+
+func stageAndApply(t *testing.T, stager *Stager, candidate Candidate) AttemptStatus {
+	t.Helper()
+	status, err := stager.Prepare(candidate, "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err = stager.StageOnly(context.Background(), candidate, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err = stager.ApplyStaged(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return status
 }
 
 func stagerFixture(t *testing.T) *Stager {

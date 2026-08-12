@@ -366,8 +366,28 @@ built for macOS and Windows only.
    The Mac step signs the exact Linux update manifest before publication,
    verifies it against the public key embedded by the release build, uploads
    it, downloads it again, and verifies the published bytes. A release is
-   left as a draft if any check fails. Rotating this key or the root updater
-   requires a manual installer upgrade in updater protocol 1.
+   left as a draft if any check fails.
+
+   From updater protocol 2 the root updater helper rides this same signature
+   ([ADR 0020](decisions/0020-updater-helper-self-update.md)). Setting
+   `SIGN_UPDATER_HELPER=1` signs the already-downloaded
+   `basement-updater-linux-arm64` into the manifest, which makes it manifest
+   schema 2: the manager then compares the installed helper against the signed
+   digest and, when they differ, stages the helper alongside its own payload
+   for the root updater to swap in after the new manager is healthy. The
+   default is off, and it must stay off for the first release that carries a
+   protocol-2 manager, because every manager still on protocol 1 refuses a
+   schema-2 manifest and needs that release published as schema 1 to reach
+   protocol 2 at all. That stepping-stone release must stay published
+   permanently. Only the release after it is signed with the helper.
+
+   The systemd units still change only through an installer run, and so does
+   a helper older than protocol 2, which cannot read a schema-2 handoff.
+   Rotating the signing key now flows through the helper swap, so a rotation
+   must publish an overlap ring carrying both the old and the new key for at
+   least one release: a helper whose ring drops the current key in the same
+   release that introduces the new one breaks the chain for every machine that
+   has not swapped yet.
 
    It reads the identity from `SIGN_IDENTITY` (required, no default — the
    script fails with a clear message if it is unset) and the keychain profile
@@ -432,9 +452,15 @@ credential, read by `basement pairing-url`), `auth-signing-key`,
 `fleet-identity.pem` (the address-independent Ed25519 node key and its
 self-signed certificate, mode 0600), downloaded model artifacts, and
 generated container configuration. A console update adds one signed manager
-slot, changes the `current` symlink, and restarts only the manager service. The
-fixed root updater, its units, and its embedded public key change only when the
-installer is run manually. Everything else in the data directory stays.
+slot, changes the `current` symlink, and restarts only the manager service. From
+a schema-2 release it may also replace the root updater helper at
+`/usr/lib/basement/updater/basement-updater`, keeping the binary it replaced
+beside it as `.previous`; that swap happens only after the new manager is
+healthy, never on a rollback, and a swap that fails leaves the update recorded
+as succeeded. Because the helper carries its own compiled-in key ring, the
+embedded public keys roll forward with it. The systemd units still change only
+when the installer is run manually. Everything else in the data directory
+stays.
 
 **Model containers survive a manager restart.** They are Docker containers
 owned by the daemon, not children of the manager process, so a restarted manager
@@ -445,10 +471,12 @@ baked-in configuration no longer matches the current one, such as a moved data
 directory or a fabric master address that changed across a reboot, but only
 when a value positively disagrees.
 
-The manager update payload changes one manager slot and the selected symlink.
-The manual release package may also change the fixed updater helper and systemd
-units. A data layout or container contract change still needs a migration path
-and an ADR before it belongs in code.
+The manager update payload changes one manager slot and the selected symlink,
+and from a schema-2 release the root updater helper as well. The systemd units
+change only through the manual release package, which stays the recovery path
+for a helper that will not run and must never delete a `.previous` copy. A data
+layout or container contract change still needs a migration path and an ADR
+before it belongs in code.
 
 ## Where the rest lives
 

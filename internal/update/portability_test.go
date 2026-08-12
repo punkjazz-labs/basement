@@ -3,6 +3,7 @@ package update_test
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,32 @@ func TestManagerCrossCompilesForEveryPublishedTarget(t *testing.T) {
 				"GOOS="+target.os, "GOARCH="+target.arch, "CGO_ENABLED=0")
 			if output, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("the manager does not build for %s/%s, which the release publishes:\n%s",
+					target.os, target.arch, strings.TrimSpace(string(output)))
+			}
+		})
+	}
+}
+
+// The root updater helper ships for exactly one target, and its version
+// subcommand reads /proc/self/exe, which only exists on Linux. That split is
+// the same shape as the import that once broke a release at tag time, so it
+// is checked here rather than discovered there. The host target is built too,
+// because that is what runs this package's own tests.
+func TestUpdaterHelperBuildsForItsPublishedTargetAndTheHost(t *testing.T) {
+	if testing.Short() {
+		t.Skip("cross-compiling is slow")
+	}
+	for _, target := range []struct{ os, arch string }{
+		{"linux", "arm64"}, {runtime.GOOS, runtime.GOARCH},
+	} {
+		t.Run(target.os+"/"+target.arch, func(t *testing.T) {
+			t.Parallel()
+			command := exec.Command("go", "build", "-o", os.DevNull, "./cmd/basement-updater")
+			command.Dir = "../.."
+			command.Env = append(command.Environ(),
+				"GOOS="+target.os, "GOARCH="+target.arch, "CGO_ENABLED=0")
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("the root updater helper does not build for %s/%s:\n%s",
 					target.os, target.arch, strings.TrimSpace(string(output)))
 			}
 		})

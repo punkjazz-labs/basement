@@ -2,6 +2,20 @@
 # Generate and verify the signed Linux manager update assets on the release
 # Mac. The Ed25519 private key is read from macOS Keychain and is passed only
 # through stdin to the signing command.
+#
+# SIGN_UPDATER_HELPER=1 signs the root updater helper into the same manifest,
+# which makes it manifest schema 2 (ADR 0020). Schema 2 is the release from
+# which a machine updates its own helper through the signed chain, and it is
+# also the release every manager older than updater protocol 2 refuses: those
+# managers fall back to the newest schema-1 release they can read and reach
+# schema 2 on the hop after that.
+#
+# The default is deliberately off. The first release carrying a protocol-2
+# manager and a protocol-2 helper must be published as schema 1 so that every
+# manager already in the field can install it; only the release after that
+# one is signed with SIGN_UPDATER_HELPER=1. Turning this on too early strands
+# every machine that has not yet reached protocol 2, and the release before it
+# must stay published permanently as their stepping stone.
 set -eu
 
 if [ "$#" -lt 2 ]; then
@@ -28,6 +42,15 @@ done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
+# The rollback versions have been consumed into rollback_csv, so the positional
+# parameters are free to carry the optional helper flag without any quoting
+# that word splitting could get wrong.
+if [ "${SIGN_UPDATER_HELPER:-0}" = "1" ]; then
+  set -- -helper "$work/basement-updater-linux-arm64"
+else
+  set --
+fi
+
 gh release download "$tag" --repo "$repository" \
   --pattern basement-linux-arm64 \
   --pattern basement-updater-linux-arm64 \
@@ -43,6 +66,7 @@ security find-generic-password -a "$keychain_account" -s "$keychain_service" -w 
   go run ./cmd/sign-update-manifest \
     -mode sign \
     -asset "$work/basement-linux-arm64" \
+    "$@" \
     -version "$tag" \
     -key-id "$key_id" \
     -rollback-from "$rollback_csv" \
@@ -62,6 +86,7 @@ esac
 go run ./cmd/sign-update-manifest \
   -mode verify \
   -asset "$work/basement-linux-arm64" \
+  "$@" \
   -version "$tag" \
   -manifest "$work/basement-linux-arm64.update.json" \
   -signature "$work/basement-linux-arm64.update.sig" \
@@ -81,6 +106,7 @@ gh release download "$tag" --repo "$repository" \
 go run ./cmd/sign-update-manifest \
   -mode verify \
   -asset "$work/basement-linux-arm64" \
+  "$@" \
   -version "$tag" \
   -manifest "$work/basement-linux-arm64.update.json" \
   -signature "$work/basement-linux-arm64.update.sig" \

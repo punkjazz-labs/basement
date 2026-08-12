@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 const (
 	requestFileName   = "request.json"
 	managerFileName   = "basement"
+	helperFileName    = "basement-updater"
 	journalFileName   = "journal.json"
 	receiptFileName   = "status.json"
 	transactionFolder = "transactions"
@@ -173,6 +175,15 @@ func (updater *Updater) prepareAndApply(ctx context.Context) (resultErr error) {
 			return fmt.Errorf("copy staged %s: %w", name, err)
 		}
 	}
+	// The staged helper is optional even under a schema-2 request: the
+	// manager stages nothing when the installed helper already matches, and
+	// nothing it could not download. A missing helper is recorded later as a
+	// swap that did not happen, never as a failed update.
+	if request.SchemaVersion == RequestHelperSchemaVersion {
+		if err := copyRegularFile(filepath.Join(updater.Paths.pendingDir(), helperFileName), filepath.Join(transactionDir, helperFileName), 0o700); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("copy staged %s: %w", helperFileName, err)
+		}
+	}
 	manifestBytes, err := os.ReadFile(filepath.Join(transactionDir, ManifestAssetName))
 	if err != nil {
 		return err
@@ -223,15 +234,16 @@ func (updater *Updater) prepareAndApply(ctx context.Context) (resultErr error) {
 		return err
 	}
 	journal := Journal{
-		SchemaVersion: 1, AttemptID: request.AttemptID, State: JournalPrepared,
+		SchemaVersion: journalSchemaVersion, AttemptID: request.AttemptID, State: JournalPrepared,
 		TargetVersion: request.TargetVersion, PreviousSlot: previousSlot, PreviousVersion: request.RunningVersion,
 		ManifestSHA256: request.ManifestSHA256, UpdatedAt: journalNow(updater.Now),
+		RequestSchema: request.SchemaVersion, HelperSHA256: request.HelperSHA256,
 	}
 	if err := updater.writeJournal(journal); err != nil {
 		return err
 	}
 	if err := updater.writeReceipt(Receipt{
-		SchemaVersion: 1, AttemptID: journal.AttemptID, State: "restarting", TargetVersion: journal.TargetVersion,
+		SchemaVersion: journal.receiptSchema(), AttemptID: journal.AttemptID, State: "restarting", TargetVersion: journal.TargetVersion,
 		RunningVersion: journal.PreviousVersion, PreviousVersion: journal.PreviousVersion, UpdatedAt: journal.UpdatedAt,
 	}); err != nil {
 		return err
@@ -243,7 +255,7 @@ func (updater *Updater) prepareAndApply(ctx context.Context) (resultErr error) {
 	if err := syncDirectory(updater.Paths.pendingDir()); err != nil {
 		return err
 	}
-	return updater.switchTarget(ctx, journal, temporarySlot, manifest)
+	return updater.switchTarget(ctx, journal, temporarySlot, manifest, true)
 }
 
 func (updater *Updater) resume(ctx context.Context, journal Journal) error {
@@ -262,7 +274,7 @@ func (updater *Updater) resume(ctx context.Context, journal Journal) error {
 			if err := updater.writeJournal(journal); err != nil {
 				return err
 			}
-			return updater.checkTarget(ctx, journal)
+			return updater.checkTarget(ctx, journal, false)
 		}
 		if current != journal.PreviousSlot {
 			return updater.recoveryRequired(journal, errors.New("selected slot is neither the target nor the recorded previous slot"))
@@ -280,12 +292,16 @@ func (updater *Updater) resume(ctx context.Context, journal Journal) error {
 		if err != nil {
 			return updater.recoveryRequired(journal, err)
 		}
-		return updater.switchTarget(ctx, journal, filepath.Join(updater.Paths.VersionsDir, "."+journal.TargetVersion+".prepared"), manifest)
+		// A resumed transaction is one a crash or a power cut interrupted.
+		// The helper never swaps itself on that path: the swap is only ever
+		// the tail of a transaction this process carried from the request
+		// through to a healthy target.
+		return updater.switchTarget(ctx, journal, filepath.Join(updater.Paths.VersionsDir, "."+journal.TargetVersion+".prepared"), manifest, false)
 	case JournalSwitched:
 		if current != journal.TargetVersion {
 			return updater.rollback(ctx, journal, errors.New("target slot is no longer selected"))
 		}
-		return updater.checkTarget(ctx, journal)
+		return updater.checkTarget(ctx, journal, false)
 	case JournalRollbackSwitched:
 		if current != journal.PreviousSlot {
 			if err := updater.selectSlot(journal.PreviousSlot); err != nil {
@@ -298,7 +314,7 @@ func (updater *Updater) resume(ctx context.Context, journal Journal) error {
 	}
 }
 
-func (updater *Updater) switchTarget(ctx context.Context, journal Journal, temporarySlot string, manifest Manifest) error {
+func (updater *Updater) switchTarget(ctx context.Context, journal Journal, temporarySlot string, manifest Manifest, maySwapHelper bool) error {
 	if err := updater.Service.Stop(ctx); err != nil {
 		return updater.recoveryRequired(journal, err)
 	}
@@ -326,15 +342,15 @@ func (updater *Updater) switchTarget(ctx context.Context, journal Journal, tempo
 		return err
 	}
 	if err := updater.writeReceipt(Receipt{
-		SchemaVersion: 1, AttemptID: journal.AttemptID, State: "checking_health", TargetVersion: journal.TargetVersion,
+		SchemaVersion: journal.receiptSchema(), AttemptID: journal.AttemptID, State: "checking_health", TargetVersion: journal.TargetVersion,
 		RunningVersion: journal.TargetVersion, PreviousVersion: journal.PreviousVersion, UpdatedAt: journal.UpdatedAt,
 	}); err != nil {
 		return err
 	}
-	return updater.checkTarget(ctx, journal)
+	return updater.checkTarget(ctx, journal, maySwapHelper)
 }
 
-func (updater *Updater) checkTarget(ctx context.Context, journal Journal) error {
+func (updater *Updater) checkTarget(ctx context.Context, journal Journal, maySwapHelper bool) error {
 	if err := updater.Service.Start(ctx); err != nil {
 		return updater.rollback(ctx, journal, err)
 	}
@@ -348,14 +364,137 @@ func (updater *Updater) checkTarget(ctx context.Context, journal Journal) error 
 	if err := updater.writeJournal(journal); err != nil {
 		return err
 	}
+	// Only here, with the target manager proven healthy, and never on any
+	// rollback path. Whatever this returns, the update is a success: the
+	// manager did become healthy, which is the outcome the receipt reports.
+	helperState := updater.swapHelper(journal, maySwapHelper)
 	if err := updater.writeReceipt(Receipt{
-		SchemaVersion: 1, AttemptID: journal.AttemptID, State: "succeeded", TargetVersion: journal.TargetVersion,
+		SchemaVersion: journal.receiptSchema(), AttemptID: journal.AttemptID, State: "succeeded", TargetVersion: journal.TargetVersion,
 		RunningVersion: journal.TargetVersion, PreviousVersion: journal.PreviousVersion, UpdatedAt: journal.UpdatedAt,
+		HelperState: helperState,
 	}); err != nil {
 		return err
 	}
 	updater.pruneSlots(journal.TargetVersion, journal.PreviousSlot)
 	return nil
+}
+
+func (paths Paths) updaterDir() string   { return filepath.Join(paths.InstallRoot, "updater") }
+func (paths Paths) helperPath() string   { return filepath.Join(paths.updaterDir(), helperFileName) }
+func (paths Paths) helperNext() string   { return paths.helperPath() + ".next" }
+func (paths Paths) helperBackup() string { return paths.helperPath() + ".previous" }
+
+// swapHelper replaces the root updater helper with the bytes this release
+// signed. It returns the helper_state to record, which is empty for a
+// schema-1 request: an older manager decodes the receipt strictly and must
+// never meet a field it does not know.
+//
+// Renaming over the path of a running executable is safe on Linux. This
+// process holds its own inode and keeps executing the old bytes until it
+// exits. The live path is never opened for writing, which is what would
+// return ETXTBSY, and MemoryDenyWriteExecute is not violated because these
+// bytes are written to a file and never mapped executable in this run.
+func (updater *Updater) swapHelper(journal Journal, maySwap bool) string {
+	if journal.receiptSchema() != RequestHelperSchemaVersion {
+		return ""
+	}
+	transactionDir := updater.Paths.transactionDir(journal.AttemptID)
+	manifest, err := updater.verifiedManifest(transactionDir)
+	if err != nil {
+		return helperSwapFailed(cleanFailure(err))
+	}
+	if manifest.SchemaVersion != ManifestHelperSchemaVersion || manifest.HelperSHA256 != journal.HelperSHA256 {
+		return helperSwapFailed("the signed release does not name the helper this request promised")
+	}
+	live, err := FileDigest(updater.Paths.helperPath())
+	if err != nil {
+		return helperSwapFailed(cleanFailure(err))
+	}
+	if live == manifest.HelperSHA256 {
+		return HelperStateUnchanged
+	}
+	if !maySwap {
+		return helperSwapFailed("a recovered transaction does not swap the helper")
+	}
+	if err := updater.replaceHelper(transactionDir, manifest); err != nil {
+		return helperSwapFailed(cleanFailure(err))
+	}
+	return HelperStateUpdated
+}
+
+func (updater *Updater) verifiedManifest(transactionDir string) (Manifest, error) {
+	manifestBytes, err := os.ReadFile(filepath.Join(transactionDir, ManifestAssetName))
+	if err != nil {
+		return Manifest{}, err
+	}
+	signature, err := os.ReadFile(filepath.Join(transactionDir, SignatureAssetName))
+	if err != nil {
+		return Manifest{}, err
+	}
+	// The helper verifies with its own compiled-in key ring, exactly as it
+	// verified the manager payload. The ring is never data and never comes
+	// from the manifest.
+	return VerifySignedManifest(manifestBytes, signature, updater.Keys)
+}
+
+func (updater *Updater) replaceHelper(transactionDir string, manifest Manifest) error {
+	staged := filepath.Join(transactionDir, helperFileName)
+	if err := verifyHelperPath(staged, manifest); err != nil {
+		return err
+	}
+	next := updater.Paths.helperNext()
+	if err := os.Remove(next); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	// Every mode below is set with an explicit Chmod. The unit runs this
+	// process under UMask=0077, which would otherwise leave the new helper
+	// at 0700: root would still execute it, but the manager could no longer
+	// hash it and staleness detection would silently degrade to unknown.
+	if err := copySyncedFile(staged, next, 0o755); err != nil {
+		return err
+	}
+	if err := copySyncedFile(updater.Paths.helperPath(), updater.Paths.helperBackup(), 0o755); err != nil {
+		_ = os.Remove(next)
+		return err
+	}
+	if err := syncDirectory(updater.Paths.updaterDir()); err != nil {
+		_ = os.Remove(next)
+		return err
+	}
+	if err := os.Rename(next, updater.Paths.helperPath()); err != nil {
+		_ = os.Remove(next)
+		return err
+	}
+	return syncDirectory(updater.Paths.updaterDir())
+}
+
+// copySyncedFile writes destination from source at an explicit mode and
+// leaves the bytes on the platter. It writes to the final name rather than a
+// temporary one because both of its call sites are names no other process
+// reads: the live helper path is only ever reached by rename.
+func copySyncedFile(source, destination string, mode os.FileMode) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		output.Close()
+		return err
+	}
+	if err := output.Chmod(mode); err != nil {
+		output.Close()
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		output.Close()
+		return err
+	}
+	return output.Close()
 }
 
 func (updater *Updater) rollback(ctx context.Context, journal Journal, targetFailure error) error {
@@ -370,7 +509,7 @@ func (updater *Updater) rollback(ctx context.Context, journal Journal, targetFai
 		return err
 	}
 	if err := updater.writeReceipt(Receipt{
-		SchemaVersion: 1, AttemptID: journal.AttemptID, State: "checking_health", TargetVersion: journal.TargetVersion,
+		SchemaVersion: journal.receiptSchema(), AttemptID: journal.AttemptID, State: "checking_health", TargetVersion: journal.TargetVersion,
 		RunningVersion: journal.PreviousVersion, PreviousVersion: journal.PreviousVersion,
 		Failure: journal.Failure, UpdatedAt: journal.UpdatedAt,
 	}); err != nil {
@@ -393,7 +532,7 @@ func (updater *Updater) checkRollback(ctx context.Context, journal Journal) erro
 		return err
 	}
 	if err := updater.writeReceipt(Receipt{
-		SchemaVersion: 1, AttemptID: journal.AttemptID, State: "rolled_back", TargetVersion: journal.TargetVersion,
+		SchemaVersion: journal.receiptSchema(), AttemptID: journal.AttemptID, State: "rolled_back", TargetVersion: journal.TargetVersion,
 		RunningVersion: journal.PreviousVersion, PreviousVersion: journal.PreviousVersion,
 		Failure: journal.Failure, UpdatedAt: journal.UpdatedAt,
 	}); err != nil {
@@ -411,7 +550,7 @@ func (updater *Updater) recoveryRequired(journal Journal, cause error) error {
 		return errors.Join(cause, err)
 	}
 	if err := updater.writeReceipt(Receipt{
-		SchemaVersion: 1, AttemptID: journal.AttemptID, State: "recovery_required", TargetVersion: journal.TargetVersion,
+		SchemaVersion: journal.receiptSchema(), AttemptID: journal.AttemptID, State: "recovery_required", TargetVersion: journal.TargetVersion,
 		PreviousVersion: journal.PreviousVersion,
 		Failure:         journal.Failure, UpdatedAt: journal.UpdatedAt,
 	}); err != nil {
@@ -552,6 +691,21 @@ func verifyAssetPath(path string, manifest Manifest) error {
 		return err
 	}
 	err = VerifyAsset(file, manifest.AssetSize, manifest.AssetSHA256)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func verifyHelperPath(path string, manifest Manifest) error {
+	if manifest.SchemaVersion != ManifestHelperSchemaVersion {
+		return errors.New("this release does not sign a root updater helper")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	err = VerifyHelperAsset(file, manifest.HelperSize, manifest.HelperSHA256)
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 )
@@ -21,7 +22,29 @@ type AttemptStatus struct {
 	TargetVersion  string `json:"target_version"`
 	Failure        string `json:"failure,omitempty"`
 	UpdatedAt      string `json:"updated_at"`
+	// HelperState is read back from a schema-2 receipt and never written to
+	// the manager's own status file, so an older manager never meets it in a
+	// file it decodes strictly.
+	HelperState string `json:"helper_state,omitempty"`
 }
+
+// HelperReport is what the manager can honestly say about the installed root
+// updater helper. State is "ok" only when the binary could actually be
+// hashed: a helper that cannot be read is unknown, never stale, and must
+// never cause a helper download (ADR 0020, decision 3).
+type HelperReport struct {
+	Path     string `json:"path"`
+	State    string `json:"state"`
+	SHA256   string `json:"sha256,omitempty"`
+	Version  string `json:"version,omitempty"`
+	Protocol int    `json:"protocol,omitempty"`
+	Warning  string `json:"warning,omitempty"`
+}
+
+const (
+	helperStateOK      = "ok"
+	helperStateUnknown = "unknown"
+)
 
 type Stager struct {
 	DataDir            string
@@ -35,6 +58,11 @@ type Stager struct {
 	UpdaterPathLink    string
 	BootstrapCheck     func() error
 	Now                func() time.Time
+	// HelperVersionRunner runs `basement-updater version` and returns its
+	// output. It exists so tests can stand in for the installed helper; the
+	// default execs the binary at UpdaterBinaryPath, which takes no lock and
+	// writes nothing.
+	HelperVersionRunner func(context.Context, string) (string, error)
 }
 
 func NewStager(dataDir string, keys KeyRing) *Stager {
@@ -135,8 +163,10 @@ func (stager *Stager) StageOnly(ctx context.Context, candidate Candidate, status
 		return fail(err)
 	}
 	preparedAsset := filepath.Join(preparedDir, managerFileName)
+	preparedHelper := filepath.Join(preparedDir, helperFileName)
+	plan := stager.planHelper(manifest)
 	if status.State == "staged" {
-		if err := verifyAssetPath(preparedAsset, manifest); err == nil {
+		if err := verifyAssetPath(preparedAsset, manifest); err == nil && stager.helperStagingSettled(preparedHelper, manifest, plan) {
 			return status, nil
 		}
 	}
@@ -179,12 +209,62 @@ func (stager *Stager) StageOnly(ctx context.Context, candidate Candidate, status
 	if err := verifyAssetPath(preparedAsset, manifest); err != nil {
 		return fail(err)
 	}
+	if err := stager.stageHelper(ctx, candidate, manifest, plan, partialDir, preparedHelper, status.AttemptID); err != nil {
+		return fail(err)
+	}
 	status.State = "staged"
 	status.UpdatedAt = journalNow(stager.Now)
 	if err := stager.writeStatus(status); err != nil {
 		return status, err
 	}
 	return status, nil
+}
+
+// stageHelper downloads the signed helper under exactly the manager
+// payload's rules and leaves it beside the manager in the prepared
+// directory. It stages nothing when the installed helper already matches,
+// when the installed helper could not be hashed, or when the manifest is
+// schema 1.
+func (stager *Stager) stageHelper(ctx context.Context, candidate Candidate, manifest Manifest, plan helperPlan, partialDir, preparedHelper, attemptID string) error {
+	if err := os.Remove(preparedHelper); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if !plan.stale {
+		return nil
+	}
+	if candidate.HelperAssetURL == "" {
+		// The helper URL is carried from the release listing, never derived
+		// from the manager asset URL. A caller that cannot supply it still
+		// gets its manager update; the root updater then records
+		// swap_failed, which is the honest outcome and never a failed
+		// update.
+		return nil
+	}
+	partialHelper := filepath.Join(partialDir, attemptID+".basement-updater")
+	if err := os.Remove(partialHelper); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := stager.download(ctx, candidate.HelperAssetURL, partialHelper, manifest.HelperSize); err != nil {
+		return err
+	}
+	defer os.Remove(partialHelper)
+	if err := verifyHelperPath(partialHelper, manifest); err != nil {
+		return err
+	}
+	if err := renameFileAtomic(partialHelper, preparedHelper, 0o700); err != nil {
+		return err
+	}
+	return verifyHelperPath(preparedHelper, manifest)
+}
+
+// helperStagingSettled reports whether an already-staged attempt still has
+// exactly the helper bytes it should, so a resumed attempt is not silently
+// left without the helper the request will promise.
+func (stager *Stager) helperStagingSettled(preparedHelper string, manifest Manifest, plan helperPlan) bool {
+	if !plan.stale {
+		return true
+	}
+	return verifyHelperPath(preparedHelper, manifest) == nil
 }
 
 // ApplyStaged reopens and re-verifies every staged byte before it creates the
@@ -260,9 +340,16 @@ func (stager *Stager) ApplyStaged(status AttemptStatus) (AttemptStatus, error) {
 	if err := verifyAssetPath(filepath.Join(pendingDir, managerFileName), manifest); err != nil {
 		return fail(err)
 	}
+	plan := stager.planHelper(manifest)
+	if err := stager.handOffHelper(preparedDir, pendingDir, manifest, plan); err != nil {
+		return fail(err)
+	}
 	request := ApplyRequest{
-		SchemaVersion: 1, AttemptID: status.AttemptID, RunningVersion: status.RunningVersion,
+		SchemaVersion: plan.schema, AttemptID: status.AttemptID, RunningVersion: status.RunningVersion,
 		TargetVersion: manifest.ReleaseVersion, ManifestSHA256: ManifestDigest(manifestBytes),
+	}
+	if plan.helperSchema() {
+		request.HelperSHA256 = plan.digest
 	}
 	if err := writeJSONFile(requestPath, request, 0o640); err != nil {
 		return fail(err)
@@ -273,6 +360,42 @@ func (stager *Stager) ApplyStaged(status AttemptStatus) (AttemptStatus, error) {
 		return status, err
 	}
 	return status, nil
+}
+
+// handOffHelper puts verified helper bytes where the root updater can read
+// them, at the same mode as the manager payload, and clears any helper a
+// previous attempt left behind so the root updater never finds bytes its
+// request does not name. The mode comes from an explicit Chmod inside
+// copyFileAtomic rather than from the process umask.
+func (stager *Stager) handOffHelper(preparedDir, pendingDir string, manifest Manifest, plan helperPlan) error {
+	pendingHelper := filepath.Join(pendingDir, helperFileName)
+	preparedHelper := filepath.Join(preparedDir, helperFileName)
+	if !plan.stale {
+		if err := os.Remove(pendingHelper); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if _, err := os.Stat(preparedHelper); errors.Is(err, os.ErrNotExist) {
+		// Nothing was staged because nothing could be: the root updater
+		// records swap_failed and the manager update goes on.
+		if err := os.Remove(pendingHelper); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := verifyHelperPath(preparedHelper, manifest); err != nil {
+		return err
+	}
+	if err := copyFileAtomic(preparedHelper, pendingHelper, 0o750); err != nil {
+		return err
+	}
+	if err := os.Chmod(pendingHelper, 0o750); err != nil {
+		return err
+	}
+	return verifyHelperPath(pendingHelper, manifest)
 }
 
 // ReconcileStartup fails over a staging attempt that a previous manager
@@ -366,7 +489,7 @@ func (stager *Stager) Status() (AttemptStatus, bool, error) {
 		return AttemptStatus{
 			SchemaVersion: 1, AttemptID: root.AttemptID, State: root.State,
 			RunningVersion: root.RunningVersion, TargetVersion: root.TargetVersion,
-			Failure: root.Failure, UpdatedAt: root.UpdatedAt,
+			Failure: root.Failure, UpdatedAt: root.UpdatedAt, HelperState: root.HelperState,
 		}, true, nil
 	}
 	if rootErr != nil && !errors.Is(rootErr, os.ErrNotExist) {
@@ -398,7 +521,102 @@ func (stager *Stager) checkBootstrap() error {
 			return errors.New("run the installer once to enable console updates")
 		}
 	}
+	// The smoke check is deliberately not fatal. A helper that will not run
+	// is surfaced as a warning and never blocks an update, because the update
+	// is the repair (ADR 0020, decision 3).
+	stager.HelperReport()
 	return nil
+}
+
+// HelperReport describes the installed root updater helper. It hashes the
+// binary, which the unprivileged manager can do because the helper is
+// root-owned and world-readable at 0755, and runs the helper's own version
+// subcommand. Neither step takes a lock or writes anything, and neither
+// failure is fatal here.
+func (stager *Stager) HelperReport() HelperReport {
+	if stager == nil {
+		return HelperReport{}
+	}
+	report := HelperReport{Path: stager.UpdaterBinaryPath, State: helperStateOK}
+	digest, err := FileDigest(stager.UpdaterBinaryPath)
+	if err != nil {
+		// Mode 0700 on the installed helper reads exactly like this. Root
+		// still executes it, so updates continue; what degrades is the
+		// manager's ability to tell whether it is current, and saying
+		// unknown is the honest answer.
+		report.State = helperStateUnknown
+		report.Warning = "the root updater helper could not be read, so its version cannot be confirmed"
+		return report
+	}
+	report.SHA256 = digest
+	identity, err := stager.helperIdentity()
+	if err != nil {
+		report.Warning = "the root updater helper did not answer a version request; an update repairs it, or run the installer once"
+		return report
+	}
+	report.Version = identity.Version
+	report.Protocol = identity.Protocol
+	return report
+}
+
+func (stager *Stager) helperIdentity() (HelperIdentity, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runner := stager.HelperVersionRunner
+	if runner == nil {
+		runner = execHelperVersion
+	}
+	output, err := runner(ctx, stager.UpdaterBinaryPath)
+	if err != nil {
+		return HelperIdentity{}, err
+	}
+	return ParseHelperVersion(output)
+}
+
+func execHelperVersion(ctx context.Context, path string) (string, error) {
+	output, err := exec.CommandContext(ctx, path, "version").Output()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+// helperPlan is the whole helper decision for one candidate: which request
+// schema to hand the root updater, which digest it should end up carrying,
+// and whether new helper bytes have to be downloaded at all.
+type helperPlan struct {
+	schema int
+	digest string
+	stale  bool
+}
+
+func (plan helperPlan) helperSchema() bool { return plan.schema == RequestHelperSchemaVersion }
+
+func (stager *Stager) planHelper(manifest Manifest) helperPlan {
+	plan := helperPlan{schema: RequestSchemaVersion}
+	if manifest.SchemaVersion != ManifestHelperSchemaVersion {
+		return plan
+	}
+	report := stager.HelperReport()
+	if report.Protocol < RequestHelperSchemaVersion {
+		// The installed helper predates protocol 2, decodes its request
+		// strictly, and would refuse a schema-2 one as an unknown field.
+		// That refusal would fail a manager update over a helper the ADR
+		// says must never fail one, so this machine takes the manager
+		// release now and reaches helper self-update after one installer
+		// run. ADR 0020 does not cover this case; see the note in
+		// docs/BUILDING.md.
+		return plan
+	}
+	plan.schema = RequestHelperSchemaVersion
+	plan.digest = manifest.HelperSHA256
+	if report.SHA256 == "" {
+		// Unknown, never stale. Failing to read the installed helper must
+		// not cause a helper download.
+		return plan
+	}
+	plan.stale = report.SHA256 != manifest.HelperSHA256
+	return plan
 }
 
 func (stager *Stager) download(ctx context.Context, location, destination string, expectedSize int64) error {

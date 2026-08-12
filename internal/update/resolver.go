@@ -45,6 +45,11 @@ type Candidate struct {
 	ManifestBytes []byte
 	Signature     []byte
 	AssetURL      string
+	// HelperAssetURL is the release's own URL for the root updater helper,
+	// carried rather than derived from AssetURL. A wrong helper URL fails
+	// closed on the signed helper digest, but only a URL that came from the
+	// release listing can be right in the first place.
+	HelperAssetURL string
 }
 
 type Resolution struct {
@@ -103,8 +108,14 @@ func (resolver Resolver) Resolve(ctx context.Context, runningVersion string) (Re
 		return ordered[left].version.Compare(ordered[right].version) > 0
 	})
 	hasSignedNewerRelease := false
+	// Every refusal below is a skip, never an abort. A release this build
+	// cannot read at all, because its manifest schema or its updater protocol
+	// is newer, must leave the older releases behind it still reachable: that
+	// fallback is what carries a machine to the last release it can accept
+	// and, from there, one hop at a time to the newest (ADR 0020, transition
+	// plan). Aborting the check here would strand it on the release it has.
 	for _, item := range ordered {
-		manifestURL, signatureURL, assetURL, ok := updateAssetURLs(item.release.Assets)
+		manifestURL, signatureURL, assetURL, helperURL, ok := updateAssetURLs(item.release.Assets)
 		if !ok {
 			continue
 		}
@@ -126,7 +137,7 @@ func (resolver Resolver) Resolve(ctx context.Context, runningVersion string) (Re
 		}
 		candidate := Candidate{
 			Release: item.release, Manifest: manifest, ManifestBytes: append([]byte(nil), manifestBytes...),
-			Signature: append([]byte(nil), signature...), AssetURL: assetURL,
+			Signature: append([]byte(nil), signature...), AssetURL: assetURL, HelperAssetURL: helperURL,
 		}
 		result.Candidate = &candidate
 		return result, nil
@@ -135,7 +146,11 @@ func (resolver Resolver) Resolve(ctx context.Context, runningVersion string) (Re
 	return result, nil
 }
 
-func updateAssetURLs(assets []ReleaseAsset) (manifestURL, signatureURL, assetURL string, ok bool) {
+// updateAssetURLs collects what a release offers. The helper URL is optional
+// here on purpose: a schema-1 release names no helper, and a schema-2 release
+// missing the asset must still deliver its manager rather than being skipped
+// over a binary the machine may already have.
+func updateAssetURLs(assets []ReleaseAsset) (manifestURL, signatureURL, assetURL, helperURL string, ok bool) {
 	for _, asset := range assets {
 		switch asset.Name {
 		case ManifestAssetName:
@@ -144,9 +159,11 @@ func updateAssetURLs(assets []ReleaseAsset) (manifestURL, signatureURL, assetURL
 			signatureURL = asset.URL
 		case LinuxARM64AssetName:
 			assetURL = asset.URL
+		case LinuxARM64HelperAssetName:
+			helperURL = asset.URL
 		}
 	}
-	return manifestURL, signatureURL, assetURL, manifestURL != "" && signatureURL != "" && assetURL != ""
+	return manifestURL, signatureURL, assetURL, helperURL, manifestURL != "" && signatureURL != "" && assetURL != ""
 }
 
 type HTTPReleaseSource struct {
