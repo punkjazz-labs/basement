@@ -8,6 +8,7 @@ import Models from './views/Models'
 import Roles from './views/Roles'
 import Playground from './views/Playground'
 import Generate from './views/Generate'
+import Redactor from './views/Redactor'
 import Connect from './views/Connect'
 import Monitor from './views/Monitor'
 import Fleet, { FleetInvitationPrompt } from './views/Fleet'
@@ -18,10 +19,12 @@ import DeploymentDialog from './views/Deployment'
 import { ConfirmHost } from './confirm'
 import { initialManagerUpdateDialogState, managerUpdateDialogReducer } from './managerUpdate'
 
-const TABS = ['Models', 'Roles', 'Playground', 'Generate', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
+const TABS = ['Models', 'Roles', 'Playground', 'Generate', 'Redactor', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
 type Tab = (typeof TABS)[number]
 
-const DESC: Record<Tab, string> = {
+// Redactor has no line here on purpose: its own bar names the open document,
+// and nothing above it needs to repeat what the screen already shows.
+const DESC: Partial<Record<Tab, string>> = {
   Models: 'The best open models, tuned for your Spark. Pick one and click Install.',
   Roles: 'Persistent endpoints that stay stable while you change the model behind them.',
   Playground: 'Talk to the model that is serving right now.',
@@ -321,7 +324,7 @@ export default function App() {
             <h1>{tab}</h1>
             {!connected && !updateDialog.reconnecting && <span className="offline" role="status">Disconnected</span>}
           </div>
-          <p className="desc">{DESC[tab]}</p>
+          {DESC[tab] && <p className="desc">{DESC[tab]}</p>}
         </header>
         <main id="main" className={tab === 'Generate' ? 'wide-generate' : undefined}>
           {tab === 'Models' && <Models {...state} />}
@@ -339,6 +342,12 @@ export default function App() {
           {tab === 'Generate' && activeRecipe?.media_generation && (
             <Generate recipe={activeRecipe} recipes={recipes} />
           )}
+          {/* The redactor stays mounted too: the open document, its findings
+              and everything hidden by hand live in this session only, so a
+              trip to another tab must not throw them away. */}
+          <div style={{ display: tab === 'Redactor' ? 'contents' : 'none' }}>
+            <Redactor />
+          </div>
           {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
           {tab === 'Monitor' && <Monitor telemetry={telemetry} activeName={activeRecipe?.display_name} />}
           {tab === 'Fleet' && <Fleet {...state} liveTPS={liveTPS} />}

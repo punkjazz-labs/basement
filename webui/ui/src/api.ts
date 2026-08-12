@@ -290,6 +290,25 @@ export interface Role {
   updated_at: string
 }
 
+// One literal the redactor will replace, and every occurrence of it in the
+// document behind one toggle. source says which pass found it: the manager's
+// patterns, a model, or the owner selecting the text themselves. token is the
+// pseudonym that stands in for the literal in the redacted copy.
+export interface DocredactFinding {
+  id: string
+  token: string
+  literal: string
+  category: string
+  source: string
+  occurrences: number
+  enabled: boolean
+}
+
+export interface DocredactSession {
+  session_id: string
+  findings: DocredactFinding[]
+}
+
 // ---- Finding and adopting a second Spark ------------------------------------
 // One machine the network sweep answered for. gb10_hint and basement are the
 // sweep's own findings, never a guess made here: they rank the list the
