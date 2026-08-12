@@ -41,13 +41,18 @@ jobs:
             done
           done
 
+      # The helper carries the same key ring as the manager, so both sides
+      # verify with the same public keys, and the same -X main.version stamp,
+      # so `basement-updater version` can name the build that is installed.
+      # From updater protocol 2 that name is what a machine reports and what
+      # the signed manifest compares against.
       - name: Build root updater helper
         env:
           UPDATE_PUBLIC_KEYS: ${{ vars.BASEMENT_UPDATE_PUBLIC_KEYS }}
         run: |
           test -n "${UPDATE_PUBLIC_KEYS}" || exit 1
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
-            -ldflags "-s -w -X github.com/punkjazz-labs/basement/internal/update.releasePublicKeys=${UPDATE_PUBLIC_KEYS}" \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X github.com/punkjazz-labs/basement/internal/update.releasePublicKeys=${UPDATE_PUBLIC_KEYS}" \
             -o dist/basement-updater-linux-arm64 ./cmd/basement-updater
           (cd dist && sha256sum basement-updater-linux-arm64 > basement-updater-linux-arm64.sha256)
 
