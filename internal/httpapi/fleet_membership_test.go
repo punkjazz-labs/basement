@@ -52,6 +52,54 @@ func TestFleetMembershipRoutesRequireOwnerSession(t *testing.T) {
 	}
 }
 
+// Joining a fleet is an owner action on the browser session. A published API
+// key must never reach it, and a body this manager does not understand must be
+// refused before any node is contacted.
+func TestFleetJoinRouteRefusesKeysAndUnreadableRequests(t *testing.T) {
+	server, _, authManager := membershipTestServer(t)
+	_, key, err := server.store.CreateAPIKey(context.Background(), "public client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"display_name":"spark-worker","console_url":"http://192.168.99.20:7070","node_url":"https://192.168.99.20:7071","join_code":"v1.not-a-code"}`
+	keyed := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "http://console.test/api/v1/fleet/join", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+key)
+	server.Handler().ServeHTTP(keyed, request)
+	if keyed.Code != http.StatusForbidden {
+		t.Fatalf("an API key reached the join route: status=%d body=%s", keyed.Code, keyed.Body.String())
+	}
+
+	cookie, csrf := pairMembershipConsole(t, server, authManager)
+	ownerRequest := func(payload string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "http://console.test/api/v1/fleet/join", strings.NewReader(payload))
+		request.AddCookie(cookie)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", "http://console.test")
+		request.Header.Set("X-CSRF-Token", csrf)
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+
+	malformed := ownerRequest(body)
+	if malformed.Code != http.StatusConflict {
+		t.Fatalf("malformed join code status=%d body=%s", malformed.Code, malformed.Body.String())
+	}
+	var failure struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(malformed.Body).Decode(&failure); err != nil || !strings.Contains(failure.Error, "join code") {
+		t.Fatalf("join failure did not name the join code: %+v err=%v", failure, err)
+	}
+
+	unknown := ownerRequest(`{"display_name":"spark-worker","console_url":"http://192.168.99.20:7070","node_url":"https://192.168.99.20:7071","join_code":"v1.a.b","fleet_id":"fleet_other"}`)
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatalf("an unknown request field was accepted: status=%d body=%s", unknown.Code, unknown.Body.String())
+	}
+}
+
 func TestPublicMuxCannotReachFleetTransport(t *testing.T) {
 	server, _, _ := membershipTestServer(t)
 	response := httptest.NewRecorder()

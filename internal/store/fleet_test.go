@@ -187,6 +187,112 @@ func TestMultipleLegacyPeersArePreservedAndRequireRepair(t *testing.T) {
 	}
 }
 
+// Adopting the legacy peer is the only moment that can settle the migration
+// marker, because every other path that writes it is unreachable once this
+// controller already has a fleet id.
+func TestAdoptingTheLegacyPeerAbsorbsItsRowAndSettlesMigrationState(t *testing.T) {
+	ctx := context.Background()
+	database, peer, self := legacyPendingController(t)
+	adopted := testFleetNode("node_00000000000000000000000000000002", "https://192.168.99.20:7071")
+	adopted.ConsoleURL = peer.BaseURL
+	fleetID, idempotent, err := database.PrepareFleetNode(ctx, self, adopted)
+	if err != nil || idempotent || fleetID != self.FleetID {
+		t.Fatalf("prepare fleet node: fleet=%q idempotent=%v err=%v", fleetID, idempotent, err)
+	}
+	nodes, err := database.FleetNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("the legacy placeholder was not absorbed: %+v", nodes)
+	}
+	merged := findFleetNode(t, nodes, adopted.NodeID)
+	if merged.LegacyPeerID != peer.ID || merged.MembershipState != "adopting" {
+		t.Fatalf("the adopted node did not carry the legacy peer forward: %+v", merged)
+	}
+	for _, node := range nodes {
+		if node.MembershipState == "legacy-pending" {
+			t.Fatalf("the legacy placeholder row survived the merge: %+v", node)
+		}
+	}
+	config, err := database.FleetConfig(ctx)
+	if err != nil || config.MigrationState != "ready" {
+		t.Fatalf("migration state after the merge=%q err=%v", config.MigrationState, err)
+	}
+	// The old peer row and credential stay untouched on purpose: they are the
+	// rollback path and still serve the existing two-node executor.
+	_, credential, err := database.PeerCredentials(ctx, peer.ID)
+	if err != nil || credential != "legacy-secret" {
+		t.Fatalf("the legacy peer row changed: credential=%q err=%v", credential, err)
+	}
+}
+
+// The merge matches the console URL as an exact string. The same machine
+// reached by another spelling is a different address to this code, so the
+// placeholder and the marker must both survive untouched.
+func TestAdoptingADifferentConsoleURLKeepsTheLegacyPlaceholder(t *testing.T) {
+	ctx := context.Background()
+	database, peer, self := legacyPendingController(t)
+	adopted := testFleetNode("node_00000000000000000000000000000002", "https://192.168.99.20:7071")
+	adopted.ConsoleURL = "http://spark-worker.local:7070"
+	if _, _, err := database.PrepareFleetNode(ctx, self, adopted); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := database.FleetNodes(ctx)
+	if err != nil || len(nodes) != 3 {
+		t.Fatalf("unexpected nodes after a non-matching console URL: %+v err=%v", nodes, err)
+	}
+	if merged := findFleetNode(t, nodes, adopted.NodeID); merged.LegacyPeerID != "" {
+		t.Fatalf("a different console URL claimed the legacy peer: %+v", merged)
+	}
+	legacy := findFleetNode(t, nodes, "legacy_"+peer.ID)
+	if legacy.MembershipState != "legacy-pending" || legacy.LegacyPeerID != peer.ID {
+		t.Fatalf("the legacy placeholder was disturbed: %+v", legacy)
+	}
+	config, err := database.FleetConfig(ctx)
+	if err != nil || config.MigrationState != "legacy-pending" {
+		t.Fatalf("migration state=%q err=%v", config.MigrationState, err)
+	}
+}
+
+func legacyPendingController(t *testing.T) (*Store, Peer, FleetNode) {
+	t.Helper()
+	ctx := context.Background()
+	database, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	self := testFleetNode("node_00000000000000000000000000000001", "https://192.168.99.10:7071")
+	if err := database.EnsureNodeIdentity(ctx, testNodeIdentity(self.NodeID)); err != nil {
+		t.Fatal(err)
+	}
+	peer, err := database.CreatePeer(ctx, "spark-worker", "http://192.168.99.20:7070", "legacy-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.InitializeFleetMigration(ctx, self, nil); err != nil {
+		t.Fatal(err)
+	}
+	config, err := database.FleetConfig(ctx)
+	if err != nil || config.FleetID == "" || config.MigrationState != "legacy-pending" {
+		t.Fatalf("legacy setup config=%+v err=%v", config, err)
+	}
+	self.FleetID = config.FleetID
+	return database, peer, self
+}
+
+func findFleetNode(t *testing.T, nodes []FleetNode, nodeID string) FleetNode {
+	t.Helper()
+	for _, node := range nodes {
+		if node.NodeID == nodeID {
+			return node
+		}
+	}
+	t.Fatalf("node %s is missing from %+v", nodeID, nodes)
+	return FleetNode{}
+}
+
 func TestFourConcurrentFleetAdmissionsAtFinalSlotAdmitOne(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(filepath.Join(t.TempDir(), "manager.db"))

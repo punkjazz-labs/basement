@@ -435,6 +435,13 @@ func (s *Store) PrepareFleetNode(ctx context.Context, self, node FleetNode) (str
 		if _, err := tx.ExecContext(ctx, `DELETE FROM fleet_nodes WHERE fleet_id=? AND node_id=?`, config.FleetID, legacyNodeID); err != nil {
 			return "", false, err
 		}
+		// Nothing recomputes migration_state after first-time initialization,
+		// and every other path that clears it is unreachable once a fleet id
+		// exists. Absorbing the last legacy placeholder is therefore the only
+		// moment that can settle the marker the console reports.
+		if _, err := tx.ExecContext(ctx, `UPDATE fleet_config SET migration_state='ready' WHERE singleton=1 AND migration_state='legacy-pending'`); err != nil {
+			return "", false, err
+		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return "", false, err
 	}

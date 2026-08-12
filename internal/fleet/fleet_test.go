@@ -328,6 +328,57 @@ func TestOwnerInitiatedAdoptionBuildsFourNodeFleet(t *testing.T) {
 	}
 }
 
+// Once the legacy peer has really joined, the owner must stop being told that
+// a migration is still pending, because the summary is what the console shows.
+func TestAdoptingTheLegacyPeerClearsThePendingMigrationSummary(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	controllerStore, err := store.Open(filepath.Join(directory, "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { controllerStore.Close() })
+	member, _ := newTestManager(t, "spark-worker", "192.168.99.20")
+	if _, err := controllerStore.CreatePeer(ctx, "spark-worker", "http://192.168.99.20:7070", "legacy-secret"); err != nil {
+		t.Fatal(err)
+	}
+	options := testManagerOptions(directory, controllerStore, "192.168.99.10")
+	options.DisplayName = "controller"
+	controller, err := NewManager(ctx, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := controller.Summary(ctx)
+	if err != nil || pending.MigrationState != "legacy-pending" {
+		t.Fatalf("legacy peer was not reported as pending: %+v err=%v", pending, err)
+	}
+	controller.newClient = inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := controller.Adopt(ctx, AdoptRequest{
+		DisplayName: "spark-worker", ConsoleURL: "http://192.168.99.20:7070",
+		NodeURL: "https://192.168.99.20:7071", JoinCode: code.Code,
+	})
+	if err != nil {
+		t.Fatalf("adopt the legacy peer: %v", err)
+	}
+	if result.Node.NodeID != member.identity.NodeID || result.Node.MembershipState != "active" {
+		t.Fatalf("unexpected adopted node: %+v", result.Node)
+	}
+	summary, err := controller.Summary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.MigrationState != "ready" {
+		t.Fatalf("the migration stayed pending after the peer joined: %+v", summary)
+	}
+	if len(summary.Nodes) != 2 {
+		t.Fatalf("the legacy placeholder is still listed: %+v", summary.Nodes)
+	}
+}
+
 func TestFleetSummaryUsesReceiptFreshnessAndReportsClockSkew(t *testing.T) {
 	ctx := context.Background()
 	controller, controllerStore := newTestManager(t, "controller", "192.168.99.10")
