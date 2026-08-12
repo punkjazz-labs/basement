@@ -176,19 +176,26 @@ func (checker *SystemHealthChecker) localProbeAddress(listen string) (string, er
 			localIPs = interfaceIPs
 		}
 		addresses, err := localIPs()
-		if err != nil {
-			return "", errors.New("local interface addresses are unavailable")
-		}
-		local := false
-		for _, address := range addresses {
-			if address.Equal(ip) {
-				local = true
-				break
+		if err == nil {
+			local := false
+			for _, address := range addresses {
+				if address.Equal(ip) {
+					local = true
+					break
+				}
+			}
+			if !local {
+				return "", errors.New("manager listen address is not assigned to this machine")
 			}
 		}
-		if !local {
-			return "", errors.New("manager listen address is not assigned to this machine")
-		}
+		// Enumerating interfaces needs a netlink socket the hardened unit
+		// may not allow. The address being probed came from the running
+		// service's own command line, read from /proc by this process, not
+		// from anything untrusted, so when the is-it-local confirmation is
+		// unavailable the probe proceeds without it. On hardware this
+		// refusal failed an update whose manager was already answering
+		// healthily on the new version, and then stamped the rollback
+		// recovery_required too (2026-08-12).
 	}
 	return net.JoinHostPort(ip.String(), port), nil
 }

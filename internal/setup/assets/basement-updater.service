@@ -30,7 +30,7 @@ RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadWritePaths=/usr/lib/basement /var/lib/basement/updates /var/lib/basement-updater
 
 [Install]
