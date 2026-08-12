@@ -38,7 +38,15 @@ func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if s.updateResult != nil && time.Since(s.updateFetched) < time.Hour {
+	// The hour-long cache paces the unattended background poll. A person
+	// pressing the check control means it: a release published a minute
+	// after the last poll must be findable without waiting the hour out.
+	// Hardware proved the cost twice in one day (2026-08-12): both times
+	// the answer was a stale "up to date" recorded minutes before the
+	// release went live, and nothing in the console could refresh it. A
+	// short floor between forced fetches still protects the release host.
+	forced := r.URL.Query().Has("refresh") && time.Since(s.updateFetched) >= 30*time.Second
+	if !forced && s.updateResult != nil && time.Since(s.updateFetched) < time.Hour {
 		s.updateResult["fleet_role"] = fleetRole
 		s.updateResult["fleet_node_count"] = fleetNodeCount
 		writeJSON(w, http.StatusOK, s.updateResult)

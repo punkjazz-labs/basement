@@ -235,7 +235,8 @@ function ManagerUpdateBody({
     setError('')
     setRefusal(null)
     try {
-      const next = await api<UpdateInfo>('/api/v1/update')
+      // A person pressing this control means now, not the hourly cache.
+      const next = await api<UpdateInfo>('/api/v1/update?refresh=1')
       onInfoChange(next)
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : 'Could not check for updates')

@@ -282,6 +282,40 @@ func TestSingleNodeLocalUpdatePathUnaffectedByFleetUpgrade(t *testing.T) {
 	}
 }
 
+// A person pressing the check control means now. Twice in one day the cached
+// answer was a stale "up to date" recorded minutes before a release went
+// live, and nothing in the console could refresh it inside the hour.
+func TestUpdateCheckRefreshBypassesTheHourlyCache(t *testing.T) {
+	server := &Server{version: "dev"}
+	fetch := func(target string) map[string]any {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		response := httptest.NewRecorder()
+		server.updateCheck(response, request)
+		var body map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	fetch("http://console.test/api/v1/update")
+	server.updateFetched = time.Now().Add(-2 * time.Minute)
+	server.updateResult["note"] = "stale cached answer"
+
+	if body := fetch("http://console.test/api/v1/update"); body["note"] != "stale cached answer" {
+		t.Fatalf("an unforced check must serve the cache, got note=%v", body["note"])
+	}
+	if body := fetch("http://console.test/api/v1/update?refresh=1"); body["note"] == "stale cached answer" {
+		t.Fatal("a forced check served the stale cache")
+	}
+
+	server.updateFetched = time.Now().Add(-10 * time.Second)
+	server.updateResult["note"] = "stale cached answer"
+	if body := fetch("http://console.test/api/v1/update?refresh=1"); body["note"] != "stale cached answer" {
+		t.Fatalf("forced checks inside the floor must not hammer the release host, got note=%v", body["note"])
+	}
+}
+
 func TestUpdateCheckReportsFleetScope(t *testing.T) {
 	t.Run("controller", func(t *testing.T) {
 		server, manager, _ := membershipTestServer(t)

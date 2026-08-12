@@ -113,7 +113,8 @@ export default function App() {
 
   const refreshAfterManagerUpdate = useCallback(() => {
     void refresh()
-    void api<UpdateInfo>('/api/v1/update').then(setUpdate).catch(() => {})
+    // The cached answer necessarily predates the update that just applied.
+    void api<UpdateInfo>('/api/v1/update?refresh=1').then(setUpdate).catch(() => {})
   }, [refresh])
 
   const openManagerUpdate = useCallback(() => {
