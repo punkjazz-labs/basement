@@ -662,6 +662,76 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .composer .send:hover { filter: brightness(1.05); }
 .composer .send:disabled { background: var(--surface-2); color: var(--faint); cursor: default; filter: none; }
 
+/* ---- Council ------------------------------------------------------------- */
+/* One segmented control naming who answers, and the work behind a council
+   answer, hidden until it is asked for. */
+
+.modelsel {
+  margin-left: auto; display: flex; align-items: center;
+  border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; font-size: 12px;
+}
+.modelsel button { background: none; border: 0; color: var(--muted); padding: 5px 12px; }
+.modelsel button:hover { color: var(--ink); }
+.modelsel button.on { background: var(--surface-2); color: var(--ink); font-weight: 550; }
+.modelsel .n { color: var(--faint); font-size: 11px; margin-left: 5px; }
+
+/* A council answer carries its own attribution, so it is given the full
+   width the panel below it needs. */
+.msg.assistant:has(.byline) { max-width: 100%; }
+.byline {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--faint); margin-top: 2px; white-space: normal;
+}
+.byline .mono { color: var(--muted); }
+.byline button {
+  background: none; border: 0; color: var(--faint); text-decoration: underline;
+  padding: 0; font-size: 11.5px;
+}
+.byline button:hover { color: var(--muted); }
+
+.work {
+  margin-top: 10px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel); overflow: hidden;
+}
+.work-head {
+  padding: 9px 14px; border-bottom: 1px solid var(--line); display: flex;
+  font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.08em;
+}
+.work-head .anon { margin-left: auto; text-transform: none; letter-spacing: 0; }
+/* Three columns at three models, and the same shape at two or four rather
+   than a fixed grid that would leave a gap or overflow. */
+.drafts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+.draft { padding: 12px 14px; border-right: 1px solid var(--line); min-width: 0; }
+.draft:last-child { border-right: 0; }
+.draft .who {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  margin-bottom: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.draft .who .win { color: var(--live); }
+.draft p {
+  margin: 0; font-size: 12px; color: var(--muted); line-height: 1.6; white-space: normal;
+  display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden;
+}
+.ranks { border-top: 1px solid var(--line); padding: 10px 14px; display: grid; gap: 5px; font-size: 12px; }
+.rank { display: flex; gap: 10px; align-items: baseline; }
+.rank .who { font-family: var(--mono); font-size: 11px; color: var(--faint); width: 150px; flex: none; }
+.rank .order { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+
+.progress { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); white-space: normal; }
+.progress .stage { display: flex; gap: 6px; align-items: center; }
+.progress .s { color: var(--faint); }
+.progress .s.done { text-decoration: line-through; }
+.progress .s.now { color: var(--ink); }
+.spin {
+  width: 10px; height: 10px; flex: none; border-radius: 50%;
+  border: 2px solid var(--line-strong); border-top-color: var(--accent-deep);
+  animation: turn 1s linear infinite;
+}
+@keyframes turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+}
+
 /* ---- Generate ------------------------------------------------------------ */
 
 .gen-layout {

@@ -18,6 +18,7 @@ import ManagerUpdateDialog, { ManagerUpdateSidebar } from './views/ManagerUpdate
 import DeploymentDialog from './views/Deployment'
 import { ConfirmHost } from './confirm'
 import { initialManagerUpdateDialogState, managerUpdateDialogReducer } from './managerUpdate'
+import { servingChatModels } from './council'
 
 const TABS = ['Models', 'Roles', 'Playground', 'Generate', 'Redactor', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
 type Tab = (typeof TABS)[number]
@@ -257,6 +258,21 @@ export default function App() {
     [recipes, activeModel],
   )
   const activeMedia = Boolean(activeModel?.status === 'ready' && activeRecipe?.media_generation)
+  // Every text model answering right now, which is all the playground needs
+  // to know to decide whether a council is on offer. One model or none and
+  // it behaves exactly as it always has.
+  const chatModels = useMemo(
+    () => servingChatModels(models.map(model => {
+      const recipe = recipes.find(item => item.id === model.recipe_id)
+      return {
+        serving: model.active && model.status === 'ready',
+        id: recipe?.service.served_model_id,
+        name: recipe?.display_name,
+        media: Boolean(recipe?.media_generation),
+      }
+    })),
+    [models, recipes],
+  )
   const visibleTabs = TABS.filter(name =>
     name === 'Generate' ? activeMedia : name === 'Playground' ? !activeMedia : true,
   )
@@ -337,6 +353,7 @@ export default function App() {
               modelID={activeRecipe?.service.served_model_id}
               modelName={activeRecipe?.display_name}
               recipeID={activeRecipe?.id}
+              chatModels={chatModels}
             />
           </div>
           {tab === 'Generate' && activeRecipe?.media_generation && (
