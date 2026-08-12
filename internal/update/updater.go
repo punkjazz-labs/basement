@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -209,7 +210,12 @@ func (updater *Updater) prepareAndApply(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	if previousSlot != request.RunningVersion {
+	// A bootstrap slot carries no version in its name, so this agreement
+	// check only applies to slots this updater itself installed. The
+	// running version is still cross-checked: the manager validated the
+	// candidate against it and this process re-verified the signed
+	// manifest before reaching here.
+	if _, err := ParseVersion(previousSlot); err == nil && previousSlot != request.RunningVersion {
 		return errors.New("selected slot no longer matches the running manager version")
 	}
 	temporarySlot, err := updater.prepareSlot(transactionDir, manifest)
@@ -439,7 +445,7 @@ func (updater *Updater) prepareSlot(transactionDir string, manifest Manifest) (s
 }
 
 func (updater *Updater) selectSlot(slot string) error {
-	if _, err := ParseVersion(slot); err != nil {
+	if !validSlotName(slot) {
 		return errors.New("selected manager slot name is invalid")
 	}
 	if err := os.MkdirAll(updater.Paths.InstallRoot, 0o755); err != nil {
@@ -456,6 +462,20 @@ func (updater *Updater) selectSlot(slot string) error {
 	return syncDirectory(updater.Paths.InstallRoot)
 }
 
+// bootstrapSlotPattern names the content-addressed slots the installer
+// creates. Every machine starts on one, because the installer is how the
+// manager arrives, so the updater must treat them as legitimate previous
+// slots: refusing them refused the first console update any freshly
+// installed machine ever attempted (proven on hardware, 2026-08-12).
+var bootstrapSlotPattern = regexp.MustCompile(`^bootstrap-[0-9a-f]{64}$`)
+
+func validSlotName(slot string) bool {
+	if _, err := ParseVersion(slot); err == nil {
+		return true
+	}
+	return bootstrapSlotPattern.MatchString(slot)
+}
+
 func (updater *Updater) currentSlot() (string, error) {
 	target, err := os.Readlink(updater.Paths.CurrentLink)
 	if err != nil {
@@ -465,8 +485,8 @@ func (updater *Updater) currentSlot() (string, error) {
 		return "", errors.New("selected manager slot link is invalid")
 	}
 	slot := filepath.Base(target)
-	if _, err := ParseVersion(slot); err != nil {
-		return "", errors.New("selected manager slot is not a stable release")
+	if !validSlotName(slot) {
+		return "", errors.New("selected manager slot is neither a stable release nor an installer bootstrap slot")
 	}
 	return slot, nil
 }

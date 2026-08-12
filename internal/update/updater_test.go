@@ -58,6 +58,68 @@ func TestUpdaterSwitchesToHealthyTarget(t *testing.T) {
 	}
 }
 
+// rehomeToBootstrapSlot moves the fixture's previous slot to the
+// content-addressed name the installer really creates. Every machine starts
+// on one of these, because the installer is how the manager arrives.
+func rehomeToBootstrapSlot(t *testing.T, paths Paths) string {
+	t.Helper()
+	slot := "bootstrap-" + strings.Repeat("ab12", 16)
+	if err := os.Rename(filepath.Join(paths.VersionsDir, "v1.0.0"), filepath.Join(paths.VersionsDir, slot)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(paths.CurrentLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("versions", slot), paths.CurrentLink); err != nil {
+		t.Fatal(err)
+	}
+	return slot
+}
+
+func TestUpdaterUpdatesFromAnInstallerBootstrapSlot(t *testing.T) {
+	// The exact hardware state of 2026-08-12: a machine installed by the
+	// real installer, whose current slot is content-addressed. The updater
+	// refused it as "not a stable release", which meant no freshly
+	// installed machine could ever take its first console update.
+	updater, paths := updaterFixture(t, nil)
+	rehomeToBootstrapSlot(t, paths)
+	if err := updater.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertSelectedSlot(t, paths, "v2.0.0")
+	var journal Journal
+	if err := readJSONFile(paths.journalPath(), 64<<10, &journal); err != nil {
+		t.Fatal(err)
+	}
+	if journal.State != JournalTargetHealthy {
+		t.Fatalf("journal state = %q", journal.State)
+	}
+}
+
+func TestUpdaterRollsBackToTheBootstrapSlotWhenTargetIsUnhealthy(t *testing.T) {
+	updater, paths := updaterFixture(t, nil)
+	slot := rehomeToBootstrapSlot(t, paths)
+	updater.Health = healthCheckFunc(func(_ context.Context, version, _ string) error {
+		if version == "v2.0.0" {
+			return errors.New("target refuses to serve")
+		}
+		return nil
+	})
+	// A completed rollback reports through the receipt, not an error: the
+	// machine is healthy again, and that is the outcome that counts.
+	if err := updater.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertSelectedSlot(t, paths, slot)
+	var receipt Receipt
+	if err := readJSONFile(paths.receiptPath(), 64<<10, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.State != "rolled_back" {
+		t.Fatalf("receipt state = %q, want rolled_back onto the bootstrap slot", receipt.State)
+	}
+}
+
 func TestUpdaterRollsBackWhenTargetIsUnhealthy(t *testing.T) {
 	updater, paths := updaterFixture(t, nil)
 	updater.Health = healthCheckFunc(func(_ context.Context, version, _ string) error {

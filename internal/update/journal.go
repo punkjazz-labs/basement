@@ -177,7 +177,10 @@ func validateJournal(journal Journal) error {
 	if _, err := ParseVersion(journal.PreviousVersion); err != nil {
 		return errors.New("updater journal previous version is invalid")
 	}
-	if journal.PreviousSlot != journal.PreviousVersion || !hexDigestPattern.MatchString(journal.ManifestSHA256) {
+	// The previous slot is version-named when this updater installed it and
+	// bootstrap-named when the installer did; both are places a rollback can
+	// legitimately return to.
+	if (journal.PreviousSlot != journal.PreviousVersion && !bootstrapSlotPattern.MatchString(journal.PreviousSlot)) || !hexDigestPattern.MatchString(journal.ManifestSHA256) {
 		return errors.New("updater journal slot identity is invalid")
 	}
 	switch journal.State {
