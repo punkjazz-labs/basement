@@ -145,6 +145,33 @@ func (s *Server) docredactSessionAction(w http.ResponseWriter, r *http.Request) 
 		defer session.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"findings": session.doc.Findings})
 
+	// Adding a finding by hand: the owner selected text in the preview that
+	// no detector claimed. The category is optional and unknown names are
+	// not an error -- selected text is a phrase until the caller names a
+	// category this build knows.
+	case len(parts) == 2 && parts[1] == "findings" && r.Method == http.MethodPost:
+		if err := s.auth.AuthorizeMutation(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+		var request struct {
+			Literal  string `json:"literal"`
+			Category string `json:"category"`
+		}
+		if err := decodeBody(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		category, _ := docredact.ParseCategory(request.Category)
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		finding, err := session.doc.AddManual(request.Literal, category)
+		if err != nil {
+			writeError(w, docredactAddStatus(err), err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"finding": finding, "findings": session.doc.Findings})
+
 	case len(parts) == 4 && parts[1] == "findings" && parts[3] == "toggle" && r.Method == http.MethodPost:
 		if err := s.auth.AuthorizeMutation(r); err != nil {
 			writeError(w, http.StatusForbidden, err)
@@ -192,6 +219,19 @@ func (s *Server) docredactSessionAction(w http.ResponseWriter, r *http.Request) 
 
 	default:
 		methodNotAllowed(w)
+	}
+}
+
+// docredactAddStatus separates a request that was wrong from one the
+// document simply cannot honour. A literal that is already hidden, under its
+// own name or inside a longer one, is a conflict with the document's current
+// state rather than a malformed request.
+func docredactAddStatus(err error) int {
+	switch {
+	case errors.Is(err, docredact.ErrLiteralKnown), errors.Is(err, docredact.ErrLiteralCovered):
+		return http.StatusConflict
+	default:
+		return http.StatusBadRequest
 	}
 }
 

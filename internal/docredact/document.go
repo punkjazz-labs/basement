@@ -31,6 +31,19 @@ type Document struct {
 
 	spans     []Match // resolved, sorted by Start, non-overlapping
 	byLiteral map[string]*Finding
+	manual    []manualLiteral // literals the owner added by hand, in the order added
+	// counters never go down, so a pseudonym number is never handed to a
+	// second literal within one session even if the first one stops
+	// appearing.
+	counters map[Category]int
+}
+
+// manualLiteral is one exact string the owner asked to hide. It is kept
+// rather than turned straight into a finding because every recompute has to
+// re-resolve it against the detectors' spans from scratch.
+type manualLiteral struct {
+	literal  string
+	category Category
 }
 
 // Analyze runs every registered pattern detector over text, resolves
@@ -45,36 +58,61 @@ type Document struct {
 // document order decides the finding's category -- deterministic, if not
 // necessarily the "right" one for that edge case.
 func Analyze(text string) *Document {
-	matches := DetectAll(text)
-	resolved := ResolveOverlaps(matches)
-
 	doc := &Document{
 		Text:      text,
-		spans:     resolved,
 		byLiteral: make(map[string]*Finding),
+		counters:  make(map[Category]int),
 	}
+	doc.recompute()
+	return doc
+}
 
-	counters := make(map[Category]int)
+// recompute re-runs detection over the whole text, folds in every manual
+// literal, and regroups the survivors. It is the only place findings are
+// built, so a manual literal is resolved against detector spans by exactly
+// the same longest-literal-wins rule as any two detectors.
+//
+// Findings that survive keep their identity: the same pointer, so the same
+// pseudonym, category and enabled state. A finding whose literal no longer
+// appears at all -- because a longer manual literal swallowed every
+// occurrence -- leaves the list, since there is nothing left in the document
+// for its toggle to govern. Its pseudonym number is not reused.
+func (d *Document) recompute() {
+	matches := DetectAll(d.Text)
+	for _, m := range d.manual {
+		matches = append(matches, manualMatches(d.Text, m.literal, m.category)...)
+	}
+	resolved := ResolveOverlaps(matches)
+
+	next := make(map[string]*Finding, len(resolved))
+	var ordered []*Finding
 	for _, m := range resolved {
-		f, ok := doc.byLiteral[m.Text]
-		if !ok {
-			counters[m.Category]++
-			n := counters[m.Category]
-			f = &Finding{
-				ID:       fmt.Sprintf("%s_%d", m.Category.Prefix(), n),
-				Token:    fmt.Sprintf("[%s_%d]", m.Category.Prefix(), n),
-				Literal:  m.Text,
-				Category: m.Category,
-				Source:   m.Source,
-				Enabled:  true,
+		f, seen := next[m.Text]
+		if !seen {
+			if existing, ok := d.byLiteral[m.Text]; ok {
+				f = existing
+				f.Occurrences = 0
+			} else {
+				d.counters[m.Category]++
+				n := d.counters[m.Category]
+				f = &Finding{
+					ID:       fmt.Sprintf("%s_%d", m.Category.Prefix(), n),
+					Token:    fmt.Sprintf("[%s_%d]", m.Category.Prefix(), n),
+					Literal:  m.Text,
+					Category: m.Category,
+					Source:   m.Source,
+					Enabled:  true,
+				}
 			}
-			doc.byLiteral[m.Text] = f
-			doc.Findings = append(doc.Findings, f)
+			next[m.Text] = f
+			ordered = append(ordered, f)
 		}
 		f.Occurrences++
 	}
 
-	return doc
+	d.spans = resolved
+	d.byLiteral = next
+	d.Findings = ordered
 }
 
 // Toggle sets a finding's enabled state by ID. It reports whether a

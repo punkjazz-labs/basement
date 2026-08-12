@@ -82,6 +82,24 @@ mod-97; a country not in that table still gets mod-97 and the generic 15-34 char
 bound. This is an accuracy aid, not the locale list -- it can grow independently of which
 national-identifier detectors exist.
 
+**Text the owner selects becomes a finding through the same resolution as every
+detector.** `Document.AddManual` does not append a finding: it records the literal and
+re-runs detection, overlap resolution and grouping over the whole document
+(`Document.recompute`). So a hand-picked phrase that contains a detected literal beats it
+by exactly the same longest-literal-wins rule two detectors meet under, and the counting
+of occurrences is done once, in one place, for every source. Findings that survive a
+recompute keep their pointer, and with it their pseudonym, category and enabled state; a
+finding whose every occurrence was swallowed by a longer literal leaves the list, because
+its toggle would govern nothing. Pseudonym numbers are never reused within a session.
+
+**A manual literal is a phrase unless the caller names a known category.** Selected text
+has no pattern and no checksum behind it, so `CategoryPhrase` (`[PHRASE_n]`) is the
+honest default and `ParseCategory` treats an unknown name as one rather than as an error:
+the console cannot know what a person meant by a selection, and guessing a category would
+be inventing a fact about the text. Adding is refused, rather than silently doing
+nothing, when the literal is empty, absent from the document, already a finding, or
+entirely inside a longer one; the last two are `409`, the first two `400`.
+
 **Locales default to IT and US**, per the spec's own naming, and are recorded as a
 pending default rather than a considered final answer in `docredact.Locales` -- the spec
 leaves "which locales ship first" as an open question for the owner.
@@ -105,6 +123,8 @@ and is not part of this codebase.
 - `POST /api/v1/docredact/analyze` -- run the pattern pass over submitted text, start a
   session.
 - `GET /api/v1/docredact/sessions/{id}/findings` -- list findings.
+- `POST /api/v1/docredact/sessions/{id}/findings` -- add one finding by exact literal,
+  source `manual`, with an optional category.
 - `POST /api/v1/docredact/sessions/{id}/findings/{findingId}/toggle` -- enable or disable
   a finding.
 - `GET /api/v1/docredact/sessions/{id}/preview` -- the document with enabled findings

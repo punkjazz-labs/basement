@@ -11,10 +11,18 @@
 // log lines. This package does not use it and does not extend it.
 package docredact
 
-// Source identifies which pass produced a match. This package only ever
-// produces "pattern"; a later model pass (spec step 3) would tag its own
-// matches "model".
+import "strings"
+
+// Source identifies which pass produced a match. The detectors here only
+// ever produce "pattern"; text the owner selected in the console is added
+// through AddManual and carries SourceManual; a later model pass (spec step
+// 3) would tag its own matches "model".
 const Source = "pattern"
+
+// SourceManual marks a literal the owner picked out by hand rather than one
+// any detector found. It is a fact about where the finding came from, so it
+// travels all the way into the exported mapping.
+const SourceManual = "manual"
 
 // Category is a short, stable identifier for a kind of sensitive literal.
 // It doubles as the pseudonym prefix (uppercased) used in replacement
@@ -31,6 +39,11 @@ const (
 	CategoryDOB   Category = "dob"
 	CategoryITCF  Category = "it_codice_fiscale"
 	CategoryUSSSN Category = "us_ssn"
+
+	// CategoryPhrase is the category of a literal no detector claims: a
+	// phrase the owner selected in the preview. It has no pattern and no
+	// checksum, so it is deliberately not a Detector category.
+	CategoryPhrase Category = "phrase"
 )
 
 // Prefix returns the uppercase token used in a pseudonym, e.g. "EMAIL" for
@@ -56,8 +69,25 @@ func (c Category) Prefix() string {
 		return "ITCF"
 	case CategoryUSSSN:
 		return "SSN"
+	case CategoryPhrase:
+		return "PHRASE"
 	default:
 		return "MATCH"
+	}
+}
+
+// ParseCategory maps a caller-supplied category name to a known Category. An
+// unknown or empty name is not an error: text the owner selected by hand is a
+// phrase until something says otherwise, so it falls back to CategoryPhrase
+// and reports that it did.
+func ParseCategory(name string) (Category, bool) {
+	candidate := Category(strings.ToLower(strings.TrimSpace(name)))
+	switch candidate {
+	case CategoryEmail, CategoryPhone, CategoryIBAN, CategoryCard, CategoryIPv4,
+		CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN, CategoryPhrase:
+		return candidate, true
+	default:
+		return CategoryPhrase, false
 	}
 }
 
