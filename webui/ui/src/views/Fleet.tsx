@@ -11,9 +11,10 @@ import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
 import {
   fleetInvitations, fleetNodeFor, fleetSize, fleetStatusNote, fleetSummary, foundLine, foundSparks,
   invitationBody, invitationTitle, inviteBody, inviteName, inviteOutcome, inviteSettled, inviteTitle,
-  inviteWaitLine, isFleetInviteProgress, joinedBadge, joinedFacts, localRoleLine, peerRoleLine,
+  inviteWaitLine, isFleetInviteProgress, joinedBadge, joinedFacts, localRoleLine, membershipRows,
+  nodeFacts, nodeHostname, nodeName, nodeReported, nodeServing, nodeStatus, peerRoleLine,
   readIgnored, rememberIgnored, shouldSweepForSparks, sparkSubline,
-  INVITATION_POLL_MS, INVITE_POLL_MS,
+  INVITATION_POLL_MS, INVITE_POLL_MS, MEMBERSHIP_POLL_MS,
 } from '../fleetInvite'
 
 interface FleetProps extends AppState {
@@ -160,6 +161,28 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     () => foundSparks(swept, peers, membership ?? null, ignored, window.location.origin),
     [swept, peers, membership, ignored],
   )
+
+  // Every Spark in the fleet that no peer row already speaks for: one added
+  // the two-click way was never a peer of this console, and had no row here
+  // at all until now.
+  const memberRows = useMemo(
+    () => membershipRows(membership ?? null, peers, window.location.origin),
+    [membership, peers],
+  )
+
+  // These rows do not poll the machines they describe: their freshness is the
+  // membership summary's, so the summary is what gets re-read, once for the
+  // whole fleet and only while a row depends on it.
+  const memberRowCount = memberRows.length
+  useEffect(() => {
+    if (memberRowCount === 0) return
+    const poll = () => {
+      if (document.hidden) return
+      void refreshMembership()
+    }
+    const timer = setInterval(poll, MEMBERSHIP_POLL_MS)
+    return () => clearInterval(timer)
+  }, [memberRowCount, refreshMembership])
 
   // The tab is opened from the click itself: a browser blocks a window opened
   // after an await, and the dialog promises that tab is already there.
@@ -435,7 +458,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
 
   return (
     <div className="stack">
-      {peers.length === 0 ? (
+      {peers.length === 0 && memberRows.length === 0 ? (
         // One peer is what basement supports today, so both ways in live
         // here and both disappear once a second Spark exists.
         <div className="empty">
@@ -566,6 +589,98 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                       )}
                       <button className="danger" onClick={() => remove(peer)}>Remove</button>
                     </div>
+                  </div>
+                )}
+              </Fragment>
+            )
+          })}
+
+          {/* A Spark that joined the fleet itself. Every number in its row is
+              one it reported in its own heartbeat, and n/a means it has not
+              reported that yet rather than that it has none. */}
+          {memberRows.map(node => {
+            const key = `node:${node.node_id}`
+            const open = expanded === key
+            const toggle = () => setExpanded(open ? '' : key)
+            const status = nodeStatus(node)
+            const serving = nodeServing(node)
+            const servingRecipe = recipes.find(recipe => recipe.id === serving?.recipe_id)
+            const fleetNote = fleetStatusNote(node)
+            return (
+              <Fragment key={key}>
+                <div
+                  className={`mrow ${open ? 'open' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={open}
+                  onClick={toggle}
+                  onKeyDown={event => {
+                    if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                      event.preventDefault()
+                      toggle()
+                    }
+                  }}
+                >
+                  <div className="m-id">
+                    <div>
+                      <div className="nm">{nodeName(node)}</div>
+                      <div className="use">
+                        {sparkSubline(nodeHostname(node), peerRoleLine(membership ?? null, node))}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="m-id">
+                    {serving ? (
+                      <>
+                        <img src={logoFor([serving.recipe_id])} alt="" width="24" height="24" />
+                        {/* Named by this console's catalog when it knows the
+                            recipe, and by the id that Spark sent when it does
+                            not. */}
+                        <div className="nm" style={{ fontSize: 13 }}>
+                          {servingRecipe?.display_name ?? serving.recipe_id}
+                        </div>
+                      </>
+                    ) : (
+                      <span className="faint">{nodeReported(node) ? 'Idle' : 'n/a'}</span>
+                    )}
+                  </div>
+                  <div className="m-num"><span className="n">{formatBytes(node.inventory?.memory_available_bytes)}</span></div>
+                  <div className="m-num"><span className="n">{node.manager_version || 'n/a'}</span></div>
+                  <div className="m-status">
+                    <span className={`sdot ${status.dot}`} aria-hidden="true" />
+                    <span>
+                      {status.word}
+                      {fleetNote && <span className="peer-note">{fleetNote}</span>}
+                    </span>
+                  </div>
+                  <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
+                    <button
+                      className="ghost"
+                      onClick={event => {
+                        event.stopPropagation()
+                        window.open(node.console_url, '_blank', 'noopener,noreferrer')
+                      }}
+                    >
+                      Open console
+                    </button>
+                  </div>
+                  <span className={`m-caret ${open ? 'open' : ''}`} aria-hidden="true">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+                  </span>
+                </div>
+                {open && (
+                  <div className="mdetail">
+                    <dl className="facts">
+                      {nodeFacts(node, Date.now()).map(fact => (
+                        <Fragment key={fact.label}>
+                          <dt>{fact.label}</dt>
+                          <dd>{fact.label === 'Address' ? <code>{fact.value}</code> : fact.value}</dd>
+                        </Fragment>
+                      ))}
+                    </dl>
+                    {/* No Remove here: this Spark is a member of the fleet,
+                        and the manager has no endpoint that takes one out.
+                        A button that could not do it would be a lie. */}
                   </div>
                 )}
               </Fragment>

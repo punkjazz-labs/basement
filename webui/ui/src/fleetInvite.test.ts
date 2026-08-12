@@ -4,7 +4,8 @@ import {
   consoleKey, fleetInvitations, fleetNodeFor, fleetSize, fleetStatusNote, fleetSummary,
   foundLine, foundSparks, invitationBody, invitationTitle, inviteBody, inviteName,
   inviteOutcome, inviteSettled, inviteTitle, inviteWaitLine, isFleetInviteProgress,
-  joinedBadge, joinedFacts, localRoleLine, peerRoleLine, readIgnored, rememberIgnored,
+  joinedBadge, joinedFacts, localRoleLine, membershipRows, nodeFacts, nodeHostname, nodeName,
+  nodeReported, nodeServing, nodeStatus, peerRoleLine, readIgnored, rememberIgnored,
   shouldSweepForSparks, sparkSubline,
 } from './fleetInvite'
 
@@ -257,5 +258,112 @@ describe('reading the membership summary', () => {
     expect(fleetSummary({ role: 'standalone', nodes: [] })?.nodes).toEqual([])
     expect(fleetSummary({ role: 'controller' })).toBeNull()
     expect(fleetSummary(null)).toBeNull()
+  })
+})
+
+describe('a Spark that joined the fleet without ever being a peer', () => {
+  const SELF = 'http://attic.local:7070'
+  const loft = (overrides: Partial<FleetNodeSummary> = {}): FleetNodeSummary => node({
+    node_id: 'node-loft',
+    display_name: 'loft',
+    role: 'member',
+    status: 'fresh',
+    console_url: 'http://loft.local:7070',
+    node_url: 'https://loft.local:7071',
+    last_heartbeat_at: '2026-08-12T11:59:30Z',
+    inventory: {
+      hostname: 'loft-gb10',
+      product_name: 'DGX Spark',
+      dgx_spark: true,
+      memory_total_bytes: 128_000_000_000,
+      memory_available_bytes: 96_000_000_000,
+      storage_total_bytes: 4_000_000_000_000,
+      storage_available_bytes: 3_000_000_000_000,
+    },
+    installed_models: [
+      { recipe_id: 'qwen36-27b-nvfp4-1s', recipe_version: 2, status: 'ready', active: true },
+      { recipe_id: 'qwen36-35b-a3b-nvfp4-1s', recipe_version: 3, status: 'stopped', active: false },
+    ],
+    ...overrides,
+  })
+  const both = (extra: Partial<FleetNodeSummary> = {}) => summary({ nodes: [node(), loft(extra)] })
+
+  it('gives a member with no peer row a row of its own', () => {
+    expect(membershipRows(both(), [], SELF).map(entry => entry.node_id)).toEqual(['node-loft'])
+  })
+
+  it('never draws a second row for a Spark a peer row already speaks for', () => {
+    expect(membershipRows(both(), [peer('loft', 'HTTP://Loft.local:7070/')], SELF)).toEqual([])
+  })
+
+  it('never draws a second row for this console itself', () => {
+    // As the Spark that leads the fleet, by its own console URL while it
+    // follows another, and as the only node of a standalone summary.
+    expect(membershipRows(summary({ nodes: [node()] }), [], SELF)).toEqual([])
+    const asMember = summary({
+      role: 'member',
+      controller_node_id: 'node-loft',
+      nodes: [node({ node_id: 'node-attic', role: 'member' }), loft({ role: 'controller' })],
+    })
+    expect(membershipRows(asMember, [], SELF).map(entry => entry.node_id)).toEqual(['node-loft'])
+    const alone = summary({ role: 'standalone', nodes: [node({ role: 'standalone', console_url: 'http://elsewhere:7070' })] })
+    expect(membershipRows(alone, [], SELF)).toEqual([])
+  })
+
+  it('leaves out a node it could neither open nor tell apart, and repeats none', () => {
+    expect(membershipRows(both({ console_url: '' }), [], SELF)).toEqual([])
+    const twice = summary({ nodes: [node(), loft(), loft({ node_id: 'node-loft-again' })] })
+    expect(membershipRows(twice, [], SELF).map(entry => entry.node_id)).toEqual(['node-loft'])
+    expect(membershipRows(null, [], SELF)).toEqual([])
+  })
+
+  it('names it as it calls itself, and falls back rather than showing nothing', () => {
+    expect(nodeName(loft())).toBe('loft')
+    expect(nodeHostname(loft())).toBe('loft-gb10')
+    expect(nodeName(loft({ display_name: '', inventory: undefined }))).toBe('loft.local')
+    expect(nodeHostname(loft({ inventory: undefined }))).toBe('loft.local')
+  })
+
+  it('reads what it is serving from its own heartbeat', () => {
+    expect(nodeServing(loft())?.recipe_id).toBe('qwen36-27b-nvfp4-1s')
+    expect(nodeServing(loft({ installed_models: [] }))).toBeUndefined()
+    expect(nodeServing(loft({
+      installed_models: [{ recipe_id: 'qwen36-27b-nvfp4-1s', recipe_version: 2, status: 'starting', active: true }],
+    }))).toBeUndefined()
+  })
+
+  it('tells a Spark with nothing running from one that has reported nothing', () => {
+    expect(nodeReported(loft())).toBe(true)
+    expect(nodeReported(loft({ inventory: undefined }))).toBe(false)
+  })
+
+  it('says what it is doing in the words the rest of the table uses', () => {
+    expect(nodeStatus(loft())).toEqual({ word: 'Serving', dot: 'on' })
+    expect(nodeStatus(loft({ installed_models: [] }))).toEqual({ word: 'Idle', dot: '' })
+    expect(nodeStatus(loft({ status: 'stale' }))).toEqual({ word: 'Not answering', dot: '' })
+    expect(nodeStatus(loft({ status: 'unreachable' }))).toEqual({ word: 'Unreachable', dot: 'fail' })
+    expect(nodeStatus(loft({ status: 'version-mismatch' }))).toEqual({ word: 'Different version', dot: '' })
+    expect(nodeStatus(loft({ status: 'adopting' }))).toEqual({ word: 'Joining', dot: 'busy' })
+    // A state this console has never heard of keeps its own word.
+    expect(nodeStatus(loft({ status: 'quarantined' }))).toEqual({ word: 'quarantined', dot: '' })
+  })
+
+  it('marks it as really in the fleet, the same way a peer row is', () => {
+    expect(fleetStatusNote(loft())).toBe('In fleet')
+    expect(fleetStatusNote(loft({ status: 'adopting' }))).toBe('')
+  })
+
+  it('expands to what that Spark reported, and to n/a for what it did not', () => {
+    const now = Date.parse('2026-08-12T12:00:00Z')
+    expect(nodeFacts(loft(), now)).toEqual([
+      { label: 'Address', value: 'http://loft.local:7070' },
+      { label: 'Version', value: 'v0.5.11' },
+      { label: 'Last heartbeat', value: 'just now' },
+      { label: 'Models installed', value: '2 models' },
+    ])
+    expect(nodeFacts(loft({ installed_models: [loft().installed_models![0]] }), now)[3].value).toBe('1 model')
+    const quiet = loft({ manager_version: '', last_heartbeat_at: undefined, installed_models: undefined })
+    expect(nodeFacts(quiet, now).map(fact => fact.value))
+      .toEqual(['http://loft.local:7070', 'n/a', 'n/a', 'n/a'])
   })
 })

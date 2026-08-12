@@ -493,6 +493,38 @@ export interface FleetNodeSummary {
   node_url: string
   manager_version: string
   last_heartbeat_at?: string
+  manager_build_identity?: string
+  catalogue_digest?: string
+  clock_skew?: boolean
+  // Both come from that Spark's last signed heartbeat, so both are absent
+  // until it has sent one. Absent is not empty: a node with no inventory has
+  // not reported its machine, which is different from a node reporting no
+  // memory free.
+  inventory?: NodeInventory
+  installed_models?: FleetModelSnapshot[]
+}
+
+// A node's own reading of its machine, as it rides inside the membership
+// summary. It is the same block /api/v1/system wraps, without any of the
+// manager fields that wrapper adds, so only what a node really reports is
+// declared here.
+export interface NodeInventory {
+  hostname: string
+  product_name: string
+  dgx_spark: boolean
+  memory_total_bytes: number
+  memory_available_bytes: number
+  storage_total_bytes: number
+  storage_available_bytes: number
+}
+
+// One model on another Spark, as its heartbeat reported it. Narrower than
+// InstalledModel on purpose: a heartbeat carries no measurements.
+export interface FleetModelSnapshot {
+  recipe_id: string
+  recipe_version: number
+  status: string
+  active: boolean
 }
 
 export interface FleetSummary {

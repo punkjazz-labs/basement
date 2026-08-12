@@ -1,6 +1,9 @@
+import { bareHost } from './api'
 import type {
-  FleetCandidate, FleetInvitation, FleetInviteProgress, FleetNodeSummary, FleetSummary, Peer,
+  FleetCandidate, FleetInvitation, FleetInviteProgress, FleetModelSnapshot, FleetNodeSummary,
+  FleetSummary, Peer,
 } from './api'
+import { relativeTime } from './feed'
 
 // The console half of adding a Spark in two clicks (ADR 0019). Everything
 // here is pure: what one poll answer means, which rows can still be added,
@@ -106,6 +109,107 @@ export const sparkSubline = (hostname: string, roleLine: string): string =>
 
 // The word a row's status cell adds for a Spark that is really in the fleet.
 export const fleetStatusNote = (node?: FleetNodeSummary): string => (inFleet(node) ? 'In fleet' : '')
+
+// ---- Every Spark in the fleet gets a row ------------------------------------
+// A Spark added the two-click way was never a peer of this console, so it has
+// no peer row to hang facts on. Its row is built from the membership summary
+// instead, which is also where its freshness comes from: nothing below polls
+// that machine, and nothing below claims anything it has not reported.
+
+// How often the membership summary is re-read while rows depend on it. The
+// same pace as the peer poll, but one request for the whole fleet.
+export const MEMBERSHIP_POLL_MS = 10000
+
+// This console's own machine, which already has the row at the top of the
+// table. A standalone summary describes only this Spark; a controller knows
+// its own node id; and in every other shape the console URL is what says so.
+export function isLocalNode(
+  summary: FleetSummary,
+  node: FleetNodeSummary,
+  selfConsoleURL: string,
+): boolean {
+  if (node.role === 'standalone') return true
+  if (summary.role === 'controller' && node.node_id === summary.controller_node_id) return true
+  const self = consoleKey(selfConsoleURL)
+  return self !== '' && consoleKey(node.console_url) === self
+}
+
+// The Sparks in the fleet that no peer row already speaks for. A node with no
+// console URL is left out: it cannot be told apart from this machine, cannot
+// be opened, and a row that can do neither would be a row about nothing.
+export function membershipRows(
+  summary: FleetSummary | null,
+  peers: Peer[],
+  selfConsoleURL: string,
+): FleetNodeSummary[] {
+  if (!summary) return []
+  const taken = new Set(peers.map(peer => consoleKey(peer.base_url)))
+  const rows: FleetNodeSummary[] = []
+  for (const node of summary.nodes) {
+    const key = consoleKey(node.console_url)
+    if (key === '' || taken.has(key)) continue
+    if (isLocalNode(summary, node, selfConsoleURL)) continue
+    taken.add(key)
+    rows.push(node)
+  }
+  return rows
+}
+
+// What the row calls that Spark, and the network name under it. The node's
+// own hostname is preferred because that is what the machine calls itself;
+// without one, the host in its console URL is the only name in hand.
+export const nodeName = (node: FleetNodeSummary): string =>
+  node.display_name || node.inventory?.hostname || bareHost(node.console_url)
+
+export const nodeHostname = (node: FleetNodeSummary): string =>
+  node.inventory?.hostname || bareHost(node.console_url)
+
+// Whether that Spark has ever sent a heartbeat this summary could read. Until
+// it has, the row says n/a rather than reporting an empty machine as an idle
+// one.
+export const nodeReported = (node: FleetNodeSummary): boolean => node.inventory !== undefined
+
+export const nodeServing = (node: FleetNodeSummary): FleetModelSnapshot | undefined =>
+  node.installed_models?.find(model => model.active && model.status === 'ready')
+
+export interface NodeStatus {
+  word: string
+  dot: string
+}
+
+// The status cell, in the words the rest of the console already uses. Every
+// answer traces to the membership state the manager stored: a state this
+// console does not know is shown as it arrived rather than guessed at.
+export function nodeStatus(node: FleetNodeSummary): NodeStatus {
+  if (PENDING_MEMBERSHIP.has(node.status)) return { word: 'Joining', dot: 'busy' }
+  switch (node.status) {
+    case 'fresh':
+      return nodeServing(node) ? { word: 'Serving', dot: 'on' } : { word: 'Idle', dot: '' }
+    case 'stale':
+      return { word: 'Not answering', dot: '' }
+    case 'unreachable':
+      return { word: 'Unreachable', dot: 'fail' }
+    case 'version-mismatch':
+      return { word: 'Different version', dot: '' }
+    default:
+      return { word: node.status, dot: '' }
+  }
+}
+
+// The expanded row: only facts that Spark reported about itself, with n/a
+// wherever it has reported nothing yet.
+export function nodeFacts(node: FleetNodeSummary, nowMs: number): JoinedFact[] {
+  const models = node.installed_models
+  return [
+    { label: 'Address', value: node.console_url },
+    { label: 'Version', value: node.manager_version || 'n/a' },
+    { label: 'Last heartbeat', value: relativeTime(node.last_heartbeat_at, nowMs) || 'n/a' },
+    {
+      label: 'Models installed',
+      value: models ? `${models.length} ${models.length === 1 ? 'model' : 'models'}` : 'n/a',
+    },
+  ]
+}
 
 export interface FoundSpark {
   name: string
