@@ -1,12 +1,20 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   adoptedName, api, bareHost, copyText, formatBytes, rankCandidates,
-  type AdoptStatus, type FleetCandidate, type Peer, type PeerSummary,
+  type AdoptStatus, type FleetCandidate, type FleetInvitation, type FleetInviteProgress,
+  type FleetSummary, type Peer, type PeerSummary,
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { logoFor } from '../catalog'
 import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
+import {
+  fleetInvitations, fleetNodeFor, fleetSize, fleetStatusNote, fleetSummary, foundLine, foundSparks,
+  invitationBody, invitationTitle, inviteBody, inviteName, inviteOutcome, inviteSettled, inviteTitle,
+  inviteWaitLine, isFleetInviteProgress, joinedBadge, joinedFacts, localRoleLine, peerRoleLine,
+  readIgnored, rememberIgnored, shouldSweepForSparks, sparkSubline,
+  INVITATION_POLL_MS, INVITE_POLL_MS,
+} from '../fleetInvite'
 
 interface FleetProps extends AppState {
   liveTPS: number | null
@@ -65,6 +73,19 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   // the dialog moved on while it was in flight.
   const scanToken = useRef(0)
 
+  // Adding a Spark in two clicks (ADR 0019). undefined means the membership
+  // summary has not answered yet, which is not the same as no fleet: the
+  // quiet sweep waits for it rather than sweeping on a guess.
+  const [membership, setMembership] = useState<FleetSummary | null | undefined>(undefined)
+  const [swept, setSwept] = useState<FleetCandidate[]>([])
+  const [ignored, setIgnored] = useState<string[]>(() => readIgnored(sessionStorage))
+  const [addTarget, setAddTarget] = useState<{ consoleURL: string; name: string } | null>(null)
+  const [attempt, setAttempt] = useState<FleetInviteProgress | null>(null)
+  const [inviteError, setInviteError] = useState('')
+  const [inviteOpen, setInviteOpen] = useState(false)
+  const inviteRef = useRef<HTMLDialogElement>(null)
+  const sweptOnce = useRef(false)
+
   // The password is only ever in this component's state and in the one
   // request that carries it. Leaving the view drops it.
   useEffect(() => () => setPassword(''), [])
@@ -96,6 +117,107 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
       clearInterval(timer)
     }
   }, [peers])
+
+  // Which Spark leads this fleet and which ones are really in it. Every row
+  // reads its own words from here, so nothing on screen guesses a role.
+  const refreshMembership = useCallback(async () => {
+    try {
+      setMembership(fleetSummary(await api<unknown>('/api/v1/fleet')))
+    } catch {
+      setMembership(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshMembership()
+  }, [refreshMembership])
+
+  // One quiet sweep per visit to this screen, and only while the fleet is
+  // small enough that a person is still assembling it. It reuses the same
+  // discovery the Find dialog runs and says nothing when it finds nothing.
+  useEffect(() => {
+    if (membership === undefined || sweptOnce.current) return
+    if (!shouldSweepForSparks(fleetSize(membership, peers))) return
+    sweptOnce.current = true
+    let cancelled = false
+    void (async () => {
+      try {
+        const found = await api<{ candidates: FleetCandidate[] }>('/api/v1/fleet/discover', {
+          method: 'POST',
+          body: '{}',
+        })
+        if (!cancelled) setSwept(found.candidates ?? [])
+      } catch {
+        /* a quiet sweep that fails stays quiet */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [membership, peers])
+
+  const found = useMemo(
+    () => foundSparks(swept, peers, membership ?? null, ignored, window.location.origin),
+    [swept, peers, membership, ignored],
+  )
+
+  // The tab is opened from the click itself: a browser blocks a window opened
+  // after an await, and the dialog promises that tab is already there.
+  const addToFleet = (consoleURL: string, name: string, displayName = '') => {
+    window.open(consoleURL, '_blank', 'noopener,noreferrer')
+    setAddTarget({ consoleURL, name })
+    setAttempt(null)
+    setInviteError('')
+    setInviteOpen(true)
+    inviteRef.current?.showModal()
+    void (async () => {
+      try {
+        const answer = await api<unknown>('/api/v1/fleet/invite', {
+          method: 'POST',
+          body: JSON.stringify({ console_url: consoleURL, display_name: displayName }),
+        })
+        if (isFleetInviteProgress(answer)) setAttempt(answer)
+      } catch (problem) {
+        setInviteError(problem instanceof Error ? problem.message : 'Could not ask that Spark to join')
+      }
+    })()
+  }
+
+  // Reading the status is what advances the addition, including running the
+  // adoption once the owner has approved it, so this poll is the flow rather
+  // than a view of it. It stops the moment the attempt has an answer.
+  useEffect(() => {
+    if (!inviteOpen || !addTarget || inviteError) return
+    if (attempt && inviteSettled(attempt.state)) return
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const answer = await api<unknown>(
+          `/api/v1/fleet/invite/status?console_url=${encodeURIComponent(addTarget.consoleURL)}`,
+        )
+        if (cancelled || !isFleetInviteProgress(answer)) return
+        setAttempt(answer)
+        if (answer.state === 'done') {
+          await refreshPeers()
+          await refreshMembership()
+        }
+      } catch {
+        /* the next tick asks again */
+      }
+    }
+    const timer = setInterval(poll, INVITE_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [inviteOpen, addTarget, inviteError, attempt, refreshPeers, refreshMembership])
+
+  const closeInvite = () => {
+    setInviteOpen(false)
+    setAddTarget(null)
+    setAttempt(null)
+    setInviteError('')
+  }
 
   const openAdd = (prefill?: Partial<AddForm>) => {
     setForm({ ...EMPTY_FORM, ...prefill })
@@ -304,6 +426,10 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const setupHost = status?.address || (target ? bareHost(target.address) : '')
   const result = status?.result
   const newName = adoptedName(result) || target?.name || 'Your second Spark'
+  // The Spark being added calls itself something; until it has answered, the
+  // row or the sweep's own label stands in.
+  const targetName = inviteName(attempt, addTarget?.name ?? '')
+  const inviteState = attempt?.state ?? 'waiting'
   // Only claimed when the catalog actually carries a two-Spark recipe.
   const hasTwoSparkRecipe = recipes.some(recipe => recipe.topology.spark_count === 2)
 
@@ -326,7 +452,12 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
           </div>
 
           <div className="mrow">
-            <div className="m-id"><div><div className="nm">This Spark</div><div className="use">{system?.hostname ?? 'n/a'}</div></div></div>
+            <div className="m-id">
+              <div>
+                <div className="nm">This Spark</div>
+                <div className="use">{sparkSubline(system?.hostname ?? '', localRoleLine(membership ?? null))}</div>
+              </div>
+            </div>
             <div className="m-id">
               {thisRecipe ? (
                 <>
@@ -358,6 +489,11 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
             const toggle = () => setExpanded(open ? '' : peer.id)
             const statusLabel = !summary ? 'Checking' : !reachable ? 'Unreachable' : peerActive ? 'Serving' : 'Idle'
             const dotClass = !summary ? '' : !reachable ? 'fail' : peerActive ? 'on' : ''
+            // A peer this console only polls over its API and a peer that is
+            // really in the fleet are the same row; only membership decides
+            // whether it can still be added.
+            const memberNode = fleetNodeFor(membership ?? null, peer.base_url)
+            const fleetNote = fleetStatusNote(memberNode)
             return (
               <Fragment key={peer.id}>
                 <div
@@ -373,7 +509,14 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                     }
                   }}
                 >
-                  <div className="m-id"><div><div className="nm">{peer.name}</div><div className="use">{summary?.system?.hostname ?? 'n/a'}</div></div></div>
+                  <div className="m-id">
+                    <div>
+                      <div className="nm">{peer.name}</div>
+                      <div className="use">
+                        {sparkSubline(summary?.system?.hostname ?? '', peerRoleLine(membership ?? null, memberNode))}
+                      </div>
+                    </div>
+                  </div>
                   <div className="m-id">
                     {peerRecipe ? (
                       <>
@@ -388,7 +531,10 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                   <div className="m-num"><span className="n">{reachable ? (summary?.system?.manager_version || 'n/a') : 'n/a'}</span></div>
                   <div className="m-status">
                     <span className={`sdot ${dotClass}`} aria-hidden="true" />
-                    {statusLabel}
+                    <span>
+                      {statusLabel}
+                      {fleetNote && <span className="peer-note">{fleetNote}</span>}
+                    </span>
                   </div>
                   <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
                     <button
@@ -411,6 +557,13 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                       <dt>Address</dt><dd><code>{peer.base_url}</code></dd>
                     </dl>
                     <div className="row-tools">
+                      {/* One verb for every Spark that is not in the fleet
+                          yet, whichever way it was added to this console. */}
+                      {!fleetNote && (
+                        <button className="primary" onClick={() => addToFleet(peer.base_url, peer.name, peer.name)}>
+                          Add to fleet
+                        </button>
+                      )}
                       <button className="danger" onClick={() => remove(peer)}>Remove</button>
                     </div>
                   </div>
@@ -420,6 +573,21 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
           })}
         </div>
       )}
+
+      {/* A machine already running basement that this fleet has never met.
+          Ignoring it says not now, for this session only. */}
+      {found.map(spark => (
+        <div key={spark.consoleURL} className="found">
+          <div className="grow">
+            <strong>{spark.name} is on this network</strong>
+            <span>{foundLine(spark)}</span>
+          </div>
+          <button className="primary" onClick={() => addToFleet(spark.consoleURL, spark.name)}>Add to fleet</button>
+          <button className="quiet" onClick={() => setIgnored(rememberIgnored(sessionStorage, spark.consoleURL))}>
+            Ignore
+          </button>
+        </div>
+      ))}
 
       <dialog
         ref={dialogRef}
@@ -749,6 +917,144 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
         </div>
         )}
       </dialog>
+
+      {/* The addition itself: one sentence about what to do on the other
+          machine, then what happened. Nothing here is typed or copied. */}
+      <dialog ref={inviteRef} onClose={closeInvite} aria-label="Add to fleet">
+        {inviteOpen && (
+        <div className="dialog-pad">
+          <div className="dialog-head">
+            <div>
+              <p className="kicker">Fleet</p>
+              <h2>{inviteError ? `Could not add ${targetName}` : inviteTitle(inviteState, targetName)}</h2>
+            </div>
+            <button type="button" className="dialog-close" onClick={() => inviteRef.current?.close()} aria-label="Close">×</button>
+          </div>
+
+          {inviteError ? (
+            <>
+              <div className="error-note">
+                <strong>That Spark could not be asked to join</strong>
+                <p>{inviteError}</p>
+              </div>
+              <div className="dialog-foot">
+                <button type="button" className="ghost" onClick={() => inviteRef.current?.close()}>Close</button>
+              </div>
+            </>
+          ) : inviteState === 'done' ? (
+            <>
+              <p className="join-line">
+                <span className="sdot on" aria-hidden="true" />
+                {joinedBadge(attempt?.node?.manager_version ?? '')}
+              </p>
+              <dl className="facts">
+                {joinedFacts(fleetSize(membership ?? null, peers), targetName).map(fact => (
+                  <Fragment key={fact.label}>
+                    <dt>{fact.label}</dt><dd>{fact.value}</dd>
+                  </Fragment>
+                ))}
+              </dl>
+              <div className="dialog-foot">
+                <button type="button" className="primary" onClick={() => inviteRef.current?.close()}>Done</button>
+              </div>
+            </>
+          ) : inviteSettled(inviteState) && attempt ? (
+            <>
+              <p className="muted dialog-note">{inviteOutcome(attempt, targetName)}</p>
+              <div className="dialog-foot">
+                <button type="button" className="ghost" onClick={() => inviteRef.current?.close()}>Close</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="muted dialog-note">{inviteBody(targetName)}</p>
+              <p className="join-line">
+                <span className="sdot busy" aria-hidden="true" />
+                {inviteWaitLine(inviteState)}
+              </p>
+              <div className="dialog-foot">
+                <button type="button" className="quiet" onClick={() => inviteRef.current?.close()}>Cancel</button>
+              </div>
+            </>
+          )}
+        </div>
+        )}
+      </dialog>
     </div>
+  )
+}
+
+// Every console asks whether a Spark wants to adopt it, because the machine
+// being added is where the owner says yes. The answer is an owner session
+// here and nothing else: no code is read, and none is shown.
+export function FleetInvitationPrompt({ onAnswered }: { onAnswered: () => void }) {
+  const [invitation, setInvitation] = useState<FleetInvitation | null>(null)
+  const [answering, setAnswering] = useState(false)
+  const [error, setError] = useState('')
+  const ref = useRef<HTMLDialogElement>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      if (document.hidden) return
+      try {
+        const waiting = fleetInvitations(await api<unknown>('/api/v1/fleet/invitations'))
+        if (!cancelled) setInvitation(waiting[0] ?? null)
+      } catch {
+        /* nothing waiting is the ordinary answer */
+      }
+    }
+    void poll()
+    const timer = setInterval(poll, INVITATION_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  useEffect(() => {
+    const dialog = ref.current
+    if (!dialog) return
+    if (invitation && !dialog.open) dialog.showModal()
+    if (!invitation && dialog.open) dialog.close()
+  }, [invitation])
+
+  const answer = async (action: 'approve' | 'deny') => {
+    if (!invitation) return
+    setAnswering(true)
+    setError('')
+    try {
+      await api(`/api/v1/fleet/invitations/${encodeURIComponent(invitation.id)}/${action}`, {
+        method: 'POST',
+        body: '{}',
+      })
+      setInvitation(null)
+      onAnswered()
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : 'That answer did not go through')
+    } finally {
+      setAnswering(false)
+    }
+  }
+
+  return (
+    <dialog ref={ref} onClose={() => setInvitation(null)} aria-label="A Spark wants to add this one">
+      {invitation && (
+        <div className="dialog-pad">
+          <div className="dialog-head">
+            <div>
+              <p className="kicker">Fleet</p>
+              <h2>{invitationTitle(invitation)}</h2>
+            </div>
+          </div>
+          <p className="muted dialog-note">{invitationBody(invitation)}</p>
+          {error && <p className="error-text dialog-note" role="alert">{error}</p>}
+          <div className="dialog-foot">
+            <button type="button" className="quiet" disabled={answering} onClick={() => answer('deny')}>Deny</button>
+            <button type="button" className="primary" disabled={answering} onClick={() => answer('approve')}>Approve</button>
+          </div>
+        </div>
+      )}
+    </dialog>
   )
 }

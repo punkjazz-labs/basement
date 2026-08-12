@@ -1001,3 +1001,15 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   .update-signed { display: none; }
   .update-blocker { grid-template-columns: 1fr; }
 }
+
+/* ---- Adding a Spark ------------------------------------------------------- */
+
+/* A machine on the network that is not in the fleet yet: dashed, because it is
+   an offer rather than a row this console owns. */
+.found { display: flex; align-items: center; gap: 12px; border: 1px dashed var(--line-strong); border-radius: 10px; padding: 13px 16px; }
+.found .grow { flex: 1; min-width: 0; }
+.found strong { display: block; font-size: 13.5px; font-weight: 600; }
+.found span { color: var(--faint); font-size: 12px; }
+/* The dot carries the state of the addition, so the line beside it stays a
+   plain sentence. */
+.join-line { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 13px; color: var(--muted); }

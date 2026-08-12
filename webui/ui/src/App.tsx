@@ -10,7 +10,7 @@ import Playground from './views/Playground'
 import Generate from './views/Generate'
 import Connect from './views/Connect'
 import Monitor from './views/Monitor'
-import Fleet from './views/Fleet'
+import Fleet, { FleetInvitationPrompt } from './views/Fleet'
 import Storage from './views/Storage'
 import Activity from './views/Activity'
 import ManagerUpdateDialog, { ManagerUpdateSidebar } from './views/ManagerUpdate'
@@ -380,6 +380,9 @@ export default function App() {
           refreshModelsAndJobs().then(() => setTab('Generate'))
         }}
       />
+      {/* A Spark asking to adopt this one is answered wherever the owner
+          happens to be in the console, not only on the Fleet tab. */}
+      <FleetInvitationPrompt onAnswered={refresh} />
       <ConfirmHost />
     </div>
   )

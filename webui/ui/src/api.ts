@@ -268,11 +268,14 @@ export interface Role {
 // One machine the network sweep answered for. gb10_hint and basement are the
 // sweep's own findings, never a guess made here: they rank the list the
 // console shows and never remove anything from it.
+// running and version come from the sweep's own health check on that console
+// a moment ago: running means a manager answered, so the machine can be added
+// rather than installed on. Both are absent for a sweep that only saw a port.
 export interface FleetCandidate {
   name: string
   address: string
   gb10_hint: boolean
-  basement: { base_url: string } | null
+  basement: { base_url: string; running?: boolean; version?: string } | null
 }
 
 // One line of the adoption run, as the manager stored it. The six keys are
@@ -448,6 +451,64 @@ export interface FleetUpgradeRun {
   created_at: string
   updated_at: string
   nodes: FleetUpgradeNode[]
+}
+
+// ---- Fleet membership -------------------------------------------------------
+// One Spark as the membership summary reports it. status is the stored
+// membership state while the node is still being admitted, and how fresh its
+// heartbeat is once it is in; console_url is what joins this row to a peer
+// row and to a discovered machine.
+export interface FleetNodeSummary {
+  node_id: string
+  display_name: string
+  role: string
+  status: string
+  console_url: string
+  node_url: string
+  manager_version: string
+  last_heartbeat_at?: string
+}
+
+export interface FleetSummary {
+  fleet_id: string
+  role: string
+  controller_node_id: string
+  controller_console_url: string
+  migration_state: string
+  nodes: FleetNodeSummary[]
+}
+
+// The stored node one finished addition produced.
+export interface FleetNode {
+  node_id: string
+  display_name: string
+  console_url: string
+  node_url: string
+  manager_version: string
+  membership_state: string
+}
+
+// One addition in flight (ADR 0019). state is waiting, adopting, done,
+// denied, expired or failed; node is filled only once the adoption really
+// finished. Reading the status is what advances the attempt.
+export interface FleetInviteProgress {
+  console_url: string
+  node_url: string
+  display_name: string
+  node_id: string
+  state: string
+  reason: string
+  expires_at: string
+  node: FleetNode | null
+}
+
+// One request waiting for this Spark's owner to answer. It carries no code
+// and no fingerprint: the answer is a yes or a no about a named machine.
+export interface FleetInvitation {
+  id: string
+  controller_name: string
+  controller_console_url: string
+  expires_at: string
 }
 
 let csrf = ''
