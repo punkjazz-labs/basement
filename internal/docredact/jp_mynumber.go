@@ -1,80 +1,91 @@
 package docredact
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
-// myNumberPattern matches only the grouped written form of a Japanese My
-// Number, NNNN NNNN NNNN with a single space or hyphen between each group
-// (the two separators need not match each other). A bare 12-digit run is
-// deliberately not matched: without separators it is indistinguishable
-// from any other 12-digit number in a document, the same reasoning as the
-// US SSN's hyphenated-only decision -- see ssnPattern's comment in
-// us_ssn.go. jpCheckDigit and jpHasAdjacentGroup are the real validators.
-var myNumberPattern = regexp.MustCompile(`\b(\d{4})[ -](\d{4})[ -](\d{4})\b`)
+// jpSpaceGroupRun and jpHyphenGroupRun each match a maximal run of 4-digit
+// groups joined by one single, consistent separator -- either all spaces
+// or all hyphens, never mixed within one run. A run stops the instant the
+// separator changes or repeats (a double space, or a hyphen appearing
+// where the run has so far used spaces), because the trailing `*` can only
+// keep matching its own literal separator.
+var jpSpaceGroupRun = regexp.MustCompile(`\b\d{4}(?: \d{4})*\b`)
+var jpHyphenGroupRun = regexp.MustCompile(`\b\d{4}(?:-\d{4})*\b`)
 
+// JPMyNumberDetector finds Japanese My Numbers written only in their
+// grouped form, NNNN NNNN NNNN with a consistent single space or hyphen
+// separator. A bare 12-digit run is deliberately not matched: without
+// separators it is indistinguishable from any other 12-digit number in a
+// document, the same reasoning as the US SSN's hyphenated-only decision --
+// see ssnPattern's comment in us_ssn.go.
+//
+// A My Number directly adjacent to another grouped run of 4-digit groups
+// is genuinely ambiguous, and this package refuses to guess at a boundary
+// it cannot anchor with a checksum: see jpCandidatesFromRuns for the exact
+// rule. Two consequences worth stating plainly:
+//   - Two My Numbers written back-to-back with nothing between them (six
+//     groups total) are both found, each validated on its own -- the run
+//     splits cleanly into two aligned triples.
+//   - A real My Number with one unrelated 4-digit group glued onto it (five
+//     groups total) is not found at all. There is no checksum-anchored way
+//     to tell which three of those five groups are the real number without
+//     guessing, so the whole run is left alone rather than risk either a
+//     false positive or a false negative on the wrong half.
+//
+// A 4x4-formatted 16-digit number (a card number, for instance) never
+// splits into a whole number of triples and so is never mistaken for a My
+// Number, whatever its own digits happen to be.
 type JPMyNumberDetector struct{}
 
 func (JPMyNumberDetector) Name() string { return "jp_my_number" }
 
 func (JPMyNumberDetector) Detect(text string) []Match {
 	var out []Match
-	for _, loc := range myNumberPattern.FindAllStringSubmatchIndex(text, -1) {
-		if jpHasAdjacentGroup(text, loc[0], loc[1]) {
-			continue
-		}
-		g1 := text[loc[2]:loc[3]]
-		g2 := text[loc[4]:loc[5]]
-		g3 := text[loc[6]:loc[7]]
-		digits := g1 + g2 + g3
-		first11 := digits[:11]
-		checkDigit := int(digits[11] - '0')
-		if jpCheckDigit(first11) != checkDigit {
-			continue
-		}
-		out = append(out, Match{
-			Start:    loc[0],
-			End:      loc[1],
-			Text:     text[loc[0]:loc[1]],
-			Category: CategoryJPMyNumber,
-			Source:   Source,
-		})
-	}
+	out = append(out, jpCandidatesFromRuns(text, jpSpaceGroupRun, " ")...)
+	out = append(out, jpCandidatesFromRuns(text, jpHyphenGroupRun, "-")...)
 	return out
 }
 
-// jpHasAdjacentGroup reports whether the match at [start,end) sits inside a
-// longer run of separator-joined 4-digit groups -- a fourth group glued on
-// either side with the same kind of separator the pattern itself accepts.
-// A real My Number is always exactly three groups; a candidate that is
-// really a prefix or suffix window of some longer grouped number (a
-// 4x4-formatted 16-digit card number, for instance) is a false positive
-// the check-digit formula alone cannot rule out, since it only has an
-// 11-digit payload to work with and any given 11 digits satisfy it about
-// one time in eleven. This is the grouped-run analog of the plain
-// word-boundary discipline every other detector in this package already
-// applies to bare digit runs.
-func jpHasAdjacentGroup(text string, start, end int) bool {
-	if start >= 5 {
-		sep := text[start-1]
-		if (sep == ' ' || sep == '-') && jpAllDigits(text[start-5:start-1]) {
-			return true
+// jpCandidatesFromRuns finds every maximal run matched by runPattern (a
+// run of 4-digit groups joined by sep) and, for a run whose group count is
+// divisible by 3, emits one Match per aligned 12-digit triple of groups
+// (groups 0-2, 3-5, 6-8, ...) whose check digit (jpCheckDigit) validates.
+// A run whose group count is not a multiple of 3 -- including runs shorter
+// than three groups -- yields no candidates at all: there is no
+// principled way to pick out a real My Number from an ambiguous run, so
+// none of it is matched.
+func jpCandidatesFromRuns(text string, runPattern *regexp.Regexp, sep string) []Match {
+	var out []Match
+	for _, loc := range runPattern.FindAllStringIndex(text, -1) {
+		start := loc[0]
+		groups := strings.Split(text[start:loc[1]], sep)
+		if len(groups) < 3 || len(groups)%3 != 0 {
+			continue
+		}
+		pos := start
+		for i := 0; i < len(groups); i += 3 {
+			triple := groups[i] + sep + groups[i+1] + sep + groups[i+2]
+			tripleEnd := pos + len(triple)
+			first11 := groups[i] + groups[i+1] + groups[i+2][:3]
+			checkDigit := int(groups[i+2][3] - '0')
+			if jpCheckDigit(first11) == checkDigit {
+				out = append(out, Match{
+					Start:    pos,
+					End:      tripleEnd,
+					Text:     text[pos:tripleEnd],
+					Category: CategoryJPMyNumber,
+					Source:   Source,
+				})
+			}
+			pos = tripleEnd
+			if i+3 < len(groups) {
+				pos += len(sep) // skip the separator joining this triple to the next
+			}
 		}
 	}
-	if end+5 <= len(text) {
-		sep := text[end]
-		if (sep == ' ' || sep == '-') && jpAllDigits(text[end+1:end+5]) {
-			return true
-		}
-	}
-	return false
-}
-
-func jpAllDigits(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
+	return out
 }
 
 // jpCheckDigit applies the Digital Agency's published My Number

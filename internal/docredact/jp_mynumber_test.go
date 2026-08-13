@@ -133,6 +133,48 @@ func TestJPMyNumberAdjacentFourthGroupNotMatched(t *testing.T) {
 	}
 }
 
+// TestJPMyNumberBackToBackPairBothMatch is the reviewer's exact scenario:
+// two independently valid My Numbers written back-to-back with a single
+// space between them (six groups total, no other text separating them)
+// must both be found, each validated on its own -- the run splits cleanly
+// into two aligned triples rather than the two candidates suppressing each
+// other. First triple is the canonical payload (check digit 4); second is
+// the all-zero payload (check digit 0, per TestJPMyNumberAllZeroValid).
+func TestJPMyNumberBackToBackPairBothMatch(t *testing.T) {
+	const first = "1234 5678 9034"
+	const second = "0000 0000 0000"
+	text := "IDs on file: " + first + " " + second + " for the two applicants."
+	matches := JPMyNumberDetector{}.Detect(text)
+	if len(matches) != 2 {
+		t.Fatalf("got %d matches, want 2: %+v", len(matches), matches)
+	}
+	got := map[string]bool{matches[0].Text: true, matches[1].Text: true}
+	if !got[first] || !got[second] {
+		t.Errorf("matches = %+v, want texts %q and %q", matches, first, second)
+	}
+	for _, m := range matches {
+		if m.Category != CategoryJPMyNumber {
+			t.Errorf("Category = %q, want %q", m.Category, CategoryJPMyNumber)
+		}
+	}
+}
+
+// TestJPMyNumberAdjacentLoneGroupNotMatched pins the documented residual
+// from the file comment in jp_mynumber.go: a genuinely valid My Number
+// (the canonical payload, check digit 4) with one unrelated 4-digit group
+// glued onto it by the same single-space separator (five groups total) is
+// not matched at all. Five is not a multiple of three, so there is no
+// checksum-anchored way to tell which three of the five groups are the
+// real number -- matching either half would be a guess, and this package
+// refuses to guess.
+func TestJPMyNumberAdjacentLoneGroupNotMatched(t *testing.T) {
+	text := "IDs on file: 1234 5678 9034 4321 noted."
+	matches := JPMyNumberDetector{}.Detect(text)
+	if len(matches) != 0 {
+		t.Errorf("expected no match for a valid My Number with one adjacent lone group, got %+v", matches)
+	}
+}
+
 // TestJPMyNumberLongerDigitRunNotMatched checks word-boundary discipline:
 // the valid grouped literal preceded by an extra digit with no separator
 // must not be matched.
