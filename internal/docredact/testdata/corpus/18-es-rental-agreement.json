@@ -1,7 +1,7 @@
 {
   "name": "es-rental-agreement",
   "locale": "ES",
-  "text": "CONTRATO DE ARRENDAMIENTO DE VIVIENDA\n\nEn Valencia, en el mes de septiembre de 2026.\n\nREUNIDOS\n\nDe una parte, don Alberto Sanchis Peiró, mayor de edad, con DNI 48291755N\ny domicilio en Calle del Puerto 22, 46023 Valencia, en calidad de\narrendador.\n\nDe otra parte, doña Irina Kovalenko, nacida el 12 de marzo de 1985, con\nNIE Y1234567X y domicilio actual en Avenida del Mar 9, 46011 Valencia, en\ncalidad de arrendataria.\n\nAmbas partes se reconocen capacidad legal suficiente para contratar y\nobligarse, y a tal efecto\n\nEXPONEN\n\nQue el arrendador es propietario de la vivienda sita en Calle del Puerto\n22, planta tercera, puerta B, y que la cede en arrendamiento para uso de\nvivienda habitual de la arrendataria.\n\nCLÁUSULAS\n\nPrimera. La duración del contrato será de cinco años, prorrogable en los\ntérminos previstos en la legislación de arrendamientos urbanos.\n\nSegunda. La renta mensual se fija en 850,00 euros, que la arrendataria\nabonará dentro de los cinco primeros días de cada mes mediante\ntransferencia a la cuenta IBAN ES42 9999 9999 1234 5678 9012.\n\nTercera. La arrendataria presta servicios como Técnica de Laboratorio y\nacredita ingresos suficientes para atender la renta pactada.\n\nCuarta. A efectos de notificaciones, la arrendataria señala el correo\nelectrónico irina.kovalenko@example.es y el teléfono +34 600 555 011.\n\nY en prueba de conformidad, ambas partes firman el presente contrato por\nduplicado en el lugar y fecha arriba indicados.",
+  "text": "CONTRATO DE ARRENDAMIENTO DE VIVIENDA\n\nEn Valencia, en el mes de septiembre de 2026.\n\nREUNIDOS\n\nDe una parte, don Alberto Sanchis Peiró, mayor de edad, con DNI 48291755N\ny domicilio en Calle del Puerto 22, 46023 Valencia, en calidad de\narrendador.\n\nDe otra parte, doña Irina Kovalenko, nacida el 26 de septiembre de 1990,\ncon NIE Y1234567X y domicilio actual en Avenida del Mar 9, 46011 Valencia,\nen calidad de arrendataria.\n\nAmbas partes se reconocen capacidad legal suficiente para contratar y\nobligarse, y a tal efecto\n\nEXPONEN\n\nQue el arrendador es propietario de la vivienda sita en\nCalle del Puerto 22, planta tercera, puerta B, y que la cede en\narrendamiento para uso de vivienda habitual de la arrendataria.\n\nCLÁUSULAS\n\nPrimera. La duración del contrato será de cinco años, prorrogable en los\ntérminos previstos en la legislación de arrendamientos urbanos.\n\nSegunda. La renta mensual se fija en 850,00 euros, que la arrendataria\nabonará dentro de los cinco primeros días de cada mes mediante\ntransferencia a la cuenta IBAN ES42 9999 9999 1234 5678 9012.\n\nTercera. La arrendataria presta servicios como Técnica de Laboratorio y\nacredita ingresos suficientes para atender la renta pactada.\n\nCuarta. A efectos de notificaciones, la arrendataria señala el correo\nelectrónico irina.kovalenko@example.es y el teléfono +34 600 555 011.\n\nY en prueba de conformidad, ambas partes firman el presente contrato por\nduplicado en el lugar y fecha arriba indicados.",
   "gold": [
     {
       "literal": "Alberto Sanchis Peiró",
@@ -20,7 +20,7 @@
       "category": "person"
     },
     {
-      "literal": "12 de marzo de 1985",
+      "literal": "26 de septiembre de 1990",
       "category": "dob"
     },
     {
@@ -29,6 +29,10 @@
     },
     {
       "literal": "Avenida del Mar 9, 46011 Valencia",
+      "category": "address"
+    },
+    {
+      "literal": "Calle del Puerto 22, planta tercera, puerta B",
       "category": "address"
     },
     {

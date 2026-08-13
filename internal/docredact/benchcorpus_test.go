@@ -39,7 +39,10 @@ func TestCorpusInvariants(t *testing.T) {
 		for _, g := range doc.Gold {
 			switch g.Category {
 			case CategoryEmail, CategoryPhone, CategoryIBAN, CategoryCard,
-				CategoryIPv4, CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN:
+				CategoryIPv4, CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN,
+				CategoryFRNIR, CategoryESDNI, CategoryPTNIF, CategoryDESteuerID,
+				CategoryNLBSN, CategoryUKNINO, CategoryBRCPF, CategoryCNResidentID,
+				CategoryJPMyNumber:
 				if !found[g.Literal] {
 					t.Fatalf("%s: pattern gold %q (%s) not detected", doc.Name, g.Literal, g.Category)
 				}
@@ -154,6 +157,9 @@ func TestLoadCorpusAllCategoriesCovered(t *testing.T) {
 	want := []Category{
 		CategoryEmail, CategoryPhone, CategoryIBAN, CategoryCard, CategoryIPv4,
 		CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN,
+		CategoryFRNIR, CategoryESDNI, CategoryPTNIF, CategoryDESteuerID,
+		CategoryNLBSN, CategoryUKNINO, CategoryBRCPF, CategoryCNResidentID,
+		CategoryJPMyNumber,
 		CategoryPerson, CategoryOrg, CategoryAddress, CategoryJobTitle, CategoryAmount,
 	}
 	seen := map[Category]bool{}

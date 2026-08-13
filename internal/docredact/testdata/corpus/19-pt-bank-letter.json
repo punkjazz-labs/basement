@@ -1,7 +1,7 @@
 {
   "name": "pt-bank-letter",
   "locale": "PT",
-  "text": "Banco Atlântico Exemplo, S.A.\nBalcão de Coimbra - Rua da Sofia 118, 3000-389 Coimbra\n\nExma. Senhora\nDona Marta Nogueira Pinto\nTravessa das Oliveiras 27, 3030-142 Coimbra\n\nAssunto: revisão das condições da sua conta à ordem\n\nExma. Senhora,\n\nVimos por este meio informar V. Exa. de que, na sequência da revisão anual\ndas condições contratuais, a comissão de manutenção da conta à ordem\nassociada ao IBAN PT81999999991234567890123 passará a ser isenta enquanto\nse mantiver a domiciliação do seu vencimento.\n\nO saldo disponível à data desta comunicação é de 12.480,35 EUR. Não foram\nregistados movimentos não reconhecidos no último trimestre, pelo que\nnenhuma acção lhe é exigida quanto à segurança da conta.\n\nOs elementos que constam do seu processo são a data de nascimento\n12 de março de 1985, o número de identificação fiscal 248155032 e a\nprofissão declarada de Engenheira Civil. Agradecemos que confirme estes\ndados caso tenham sofrido alterações, uma vez que são utilizados nas\ncomunicações obrigatórias à administração fiscal.\n\nPara qualquer esclarecimento adicional, poderá contactar o seu gestor de\nconta através do endereço gestor.conta@bancoatlantico.example.pt ou do\nnúmero +351 21 555 0134.\n\nCom os melhores cumprimentos,",
+  "text": "Banco Atlântico Exemplo, S.A.\nBalcão de Coimbra - Rua da Sofia 118, 3000-389 Coimbra\n\nExma. Senhora\nDona Marta Nogueira Pinto\nTravessa das Oliveiras 27, 3030-142 Coimbra\n\nAssunto: revisão das condições da sua conta à ordem\n\nExma. Senhora,\n\nVimos por este meio informar V. Exa. de que, na sequência da revisão anual\ndas condições contratuais, a comissão de manutenção da conta à ordem\nassociada ao IBAN PT81999999991234567890123 passará a ser isenta enquanto\nse mantiver a domiciliação do seu vencimento.\n\nO saldo disponível à data desta comunicação é de 12.480,35 EUR. Não foram\nregistados movimentos não reconhecidos no último trimestre, pelo que\nnenhuma ação lhe é exigida quanto à segurança da conta.\n\nOs elementos que constam do seu processo são a data de nascimento\n4 de fevereiro de 1978, o número de identificação fiscal 248155032 e a\nprofissão declarada de Engenheira Civil. Agradecemos que confirme estes\ndados caso tenham sofrido alterações, uma vez que são utilizados nas\ncomunicações obrigatórias à administração fiscal.\n\nPara qualquer esclarecimento adicional, poderá contactar o seu gestor de\nconta através do endereço gestor.conta@bancoatlantico.example.pt ou do\nnúmero +351 239 555 013.\n\nCom os melhores cumprimentos,",
   "gold": [
     {
       "literal": "Banco Atlântico Exemplo, S.A.",
@@ -28,7 +28,7 @@
       "category": "amount"
     },
     {
-      "literal": "12 de março de 1985",
+      "literal": "4 de fevereiro de 1978",
       "category": "dob"
     },
     {
@@ -44,7 +44,7 @@
       "category": "email"
     },
     {
-      "literal": "+351 21 555 0134",
+      "literal": "+351 239 555 013",
       "category": "phone"
     }
   ]

@@ -1,7 +1,7 @@
 {
   "name": "de-hr-letter",
   "locale": "DE",
-  "text": "Norddeutsche Werkzeugbau GmbH\nPersonalabteilung\nAm Alten Hafen 3, 28217 Bremen\n\nHerrn Matthias Wenzel\nRosenstraße 41, 28203 Bremen\n\nBetreff: Änderung Ihres Arbeitsvertrags zum Beginn des kommenden Quartals\n\nSehr geehrter Herr Wenzel,\n\nwie in unserem Personalgespräch besprochen, bestätigen wir Ihnen hiermit\ndie Änderung Ihrer Tätigkeit. Sie übernehmen künftig die Position\nLeiter Qualitätssicherung und berichten in dieser Funktion unmittelbar\nan die Werkleitung. Die fachliche Verantwortung für die Prüfmittelüberwachung\ngeht zum selben Zeitpunkt auf Sie über.\n\nFür unsere Personalakte haben wir Ihre Angaben wie folgt erfasst: geboren\nam 12. März 1985, steuerliche Identifikationsnummer 47 110 983 267. Bitte\nprüfen Sie diese Angaben und teilen Sie uns Abweichungen umgehend mit,\ndamit die Meldung an die Lohnbuchhaltung fristgerecht erfolgen kann.\n\nIhr Jahresbruttogehalt beträgt künftig 68.400,00 EUR und wird unverändert\nauf das uns bekannte Konto überwiesen. Die übrigen Bestandteile Ihres\nArbeitsvertrags bleiben unberührt.\n\nBei Fragen wenden Sie sich bitte an Frau Kerstin Vogt in der\nPersonalabteilung, erreichbar unter kerstin.vogt@nwb-example.de oder\ntelefonisch unter +49 421 555 0198.\n\nWir freuen uns auf die weitere Zusammenarbeit.\n\nMit freundlichen Grüßen",
+  "text": "Norddeutsche Werkzeugbau GmbH\nPersonalabteilung\nAm Alten Hafen 3, 28217 Bremen\n\nHerrn Matthias Wenzel\nRosenstraße 41, 28203 Bremen\n\nBetreff: Änderung Ihres Arbeitsvertrags zum Beginn des kommenden Quartals\n\nSehr geehrter Herr Wenzel,\n\nwie in unserem Personalgespräch besprochen, bestätigen wir Ihnen hiermit\ndie Änderung Ihrer Tätigkeit. Sie übernehmen künftig die Position\nLeiter Qualitätssicherung und berichten in dieser Funktion unmittelbar\nan die Werkleitung. Die fachliche Verantwortung für die Prüfmittelüberwachung\ngeht zum selben Zeitpunkt auf Sie über.\n\nFür unsere Personalakte haben wir Ihre Angaben wie folgt erfasst: geboren\nam 7. Oktober 1981, steuerliche Identifikationsnummer 47 110 983 267. Bitte\nprüfen Sie diese Angaben und teilen Sie uns Abweichungen umgehend mit,\ndamit die Meldung an die Lohnbuchhaltung fristgerecht erfolgen kann.\n\nIhr Jahresbruttogehalt beträgt künftig 68.400,00 EUR und wird unverändert\nauf das uns bekannte Konto überwiesen. Die übrigen Bestandteile Ihres\nArbeitsvertrags bleiben unberührt.\n\nBei Fragen wenden Sie sich bitte an Frau Kerstin Vogt in der\nPersonalabteilung, erreichbar unter kerstin.vogt@personal.example.de oder\ntelefonisch unter +49 421 555 0198.\n\nWir freuen uns auf die weitere Zusammenarbeit.\n\nMit freundlichen Grüßen",
   "gold": [
     {
       "literal": "Norddeutsche Werkzeugbau GmbH",
@@ -24,7 +24,7 @@
       "category": "job_title"
     },
     {
-      "literal": "12. März 1985",
+      "literal": "7. Oktober 1981",
       "category": "dob"
     },
     {
@@ -40,7 +40,7 @@
       "category": "person"
     },
     {
-      "literal": "kerstin.vogt@nwb-example.de",
+      "literal": "kerstin.vogt@personal.example.de",
       "category": "email"
     },
     {

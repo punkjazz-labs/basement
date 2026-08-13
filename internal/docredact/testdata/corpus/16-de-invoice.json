@@ -36,6 +36,14 @@
       "category": "de_steuer_id"
     },
     {
+      "literal": "6.840,00",
+      "category": "amount"
+    },
+    {
+      "literal": "410,00",
+      "category": "amount"
+    },
+    {
       "literal": "7.250,00",
       "category": "amount"
     },
