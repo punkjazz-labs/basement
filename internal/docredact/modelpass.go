@@ -6,9 +6,8 @@ import (
 	"strings"
 )
 
-// Completer is one round to a model: system+user prompt in, raw text reply
-// out. Task 5 implements the concrete HTTP client; this package only needs
-// the ability to ask and receive text, never the transport underneath it.
+// Completer is one round to a model: system and user prompt in, raw text
+// reply out. This package never sees the transport underneath it.
 type Completer interface {
 	Complete(ctx context.Context, system, user string, structured bool) (string, error)
 }
