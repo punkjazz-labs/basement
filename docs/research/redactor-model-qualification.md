@@ -1,6 +1,8 @@
 # Qualifying a redaction model
 
-Date: 2026-08-13. Status: method agreed, pattern-only baseline measured, no model arm run yet.
+Date: 2026-08-13. Status: method agreed, pattern-only baseline measured 2026-08-13, three
+candidate arms measured 2026-08-14 on the Mac Studio. Quality ranking exists; the winner
+still needs confirmation on a Spark at the quantization it would actually ship with.
 
 ## Why this document exists
 
@@ -147,12 +149,59 @@ Memory is not something the bench measures. Read it off the node while the arm i
 | Arm | Gold | Leaked | Leak% | Over-redacted | Hallucinated | Chunks failed | Docs failed | Avg time/scored doc |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | pattern-only (baseline) | 242 | 142 | 58.7% | 0 | 0 | 0 | 0 | 1ms |
-| candidate 1 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| candidate 2 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| candidate 3 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| redact-qwen35 | 242 | 37 | 15.3% | 2 | 0 | 9 | 0 | 1m14.848s |
+| redact-ministral3 | 242 | 35 | 14.5% | 6 | 2 | 0 | 0 | 1.521s |
+| redact-qwen3 | 242 | 6 | 2.5% | 32 | 5 | 0 | 0 | 2.701s |
 
-The pattern-only row is measured, from `go run ./cmd/docredact-bench` on the corpus
-described below. No model arm has been run yet, so those rows stay `n/a`.
+The pattern-only row is from `go run ./cmd/docredact-bench` on 2026-08-13. The three model
+arms were measured on 2026-08-14 against Ollama 0.32.3 on the Mac Studio
+(`192.168.10.131:11434`), one arm at a time, from a laptop on the same LAN. Each arm name
+is a derived Ollama model created for the run with `num_ctx 16384`, so no chunk could be
+silently truncated by Ollama's default context window; the bases are q8_0 GGUF quants, the
+near-lossless quantization, chosen so the comparison ranks the models rather than their
+quantizers:
+
+- `redact-qwen35` = `qwen3.5:4b-q8_0`
+- `redact-ministral3` = `ministral-3:3b-instruct-2512-q8_0`
+- `redact-qwen3` = `qwen3:4b-instruct-2507-q8_0`
+
+**`redact-qwen3` (Qwen3-4B-Instruct-2507, the control arm) wins outright**: 6 leaks out of
+242 against 35 and 37 for the other two, with zero failed chunks. Its 32 over-redactions
+and 5 hallucinated spans mark it as the most aggressive of the three, which is the right
+direction for a leak-first metric with a review-everything UI; the hallucinations never
+reach output by construction. Its per-category table is the only one with `person` and
+`address` at zero.
+
+The other two arms lose for different reasons. `redact-qwen35` (Qwen3.5-4B) is a thinking
+model: it spent 75 seconds per document against 2.7 for the winner, and 9 of its 27 chunks
+failed outright, which by bar 4 disqualifies it regardless of quality — and since every
+corpus document is a single chunk, those 9 failures mean 9 documents fell back to
+pattern-only, which is where most of its 37 leaks come from. `redact-ministral3`
+(Ministral-3-3B) answered everything quickly but leaked 53.8% of `org` literals, the worst
+model-category cell measured on any arm.
+
+Public benchmark expectations from the research note were inverted by measurement:
+Qwen3.5-4B's IFEval 89.8 did not survive contact with a thinking-mode extraction task, and
+the arm with the least impressive paper numbers won. The corpus was the acceptance metric,
+exactly as intended.
+
+Leaks in the five model categories, the only categories where any arm leaked at all (every
+pattern category was 0 leaks on every arm, so bar 2, never making the deterministic result
+worse, held everywhere):
+
+| Category | Gold | redact-qwen35 | redact-ministral3 | redact-qwen3 |
+| --- | --- | --- | --- | --- |
+| person | 38 | 10 | 3 | 0 |
+| address | 30 | 7 | 8 | 0 |
+| job_title | 28 | 7 | 7 | 3 |
+| org | 26 | 8 | 14 | 2 |
+| amount | 20 | 5 | 3 | 1 |
+
+What this run does not settle: latency and memory on a GB10, co-residency next to a
+primary model, and behaviour at NVFP4 (W4A16), the quantization a pinned Spark recipe
+would actually use. Those are the Spark measurements this document already describes, to
+be run when a machine is free. The quality ranking on q8_0 GGUF picks the candidate to
+carry into that confirmation; it does not by itself pin the recipe.
 
 Per-category leak breakdown for the pattern-only baseline, copied from the bench output on
 2026-08-13:
