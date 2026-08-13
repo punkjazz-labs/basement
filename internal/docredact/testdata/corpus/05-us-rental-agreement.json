@@ -1,0 +1,47 @@
+{
+  "name": "us-rental-agreement",
+  "locale": "US",
+  "text": "RESIDENTIAL LEASE AGREEMENT\n\nThis lease is entered into between Northfield Property Management LLC (\"Landlord\") and David Chen (\"Tenant\") for the property located at 88 Birchwood Lane, Denver, CO 80202.\n\nTenant date of birth (for background screening only): March 22, 1991. Tenant email: david.chen@example.com. Tenant phone: (720) 555-0173.\n\nMonthly rent is set at $1,650.00, due on the first day of each month. A security deposit of $1,650.00 was collected at signing, charged to the card on file, 5500 0055 5555 5559. The deposit will be returned within 30 days of move-out, less any deductions for damage beyond normal wear.\n\nQuestions about this lease should be directed to Emily Johnson, Property Manager, at Northfield Property Management LLC.",
+  "gold": [
+    {
+      "literal": "Northfield Property Management LLC",
+      "category": "org"
+    },
+    {
+      "literal": "David Chen",
+      "category": "person"
+    },
+    {
+      "literal": "88 Birchwood Lane, Denver, CO 80202",
+      "category": "address"
+    },
+    {
+      "literal": "March 22, 1991",
+      "category": "dob"
+    },
+    {
+      "literal": "david.chen@example.com",
+      "category": "email"
+    },
+    {
+      "literal": "(720) 555-0173",
+      "category": "phone"
+    },
+    {
+      "literal": "$1,650.00",
+      "category": "amount"
+    },
+    {
+      "literal": "5500 0055 5555 5559",
+      "category": "card"
+    },
+    {
+      "literal": "Emily Johnson",
+      "category": "person"
+    },
+    {
+      "literal": "Property Manager",
+      "category": "job_title"
+    }
+  ]
+}

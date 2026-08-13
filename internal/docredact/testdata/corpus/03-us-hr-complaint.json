@@ -1,0 +1,47 @@
+{
+  "name": "us-hr-complaint",
+  "locale": "US",
+  "text": "COBALT RIDGE SOFTWARE INC.\nHuman Resources Department -- Internal Complaint Record\n\nComplainant: Sarah Mitchell, Senior Software Engineer\nEmployee SSN on file: 512-34-6789\nHome address: 742 Maple Street, Springfield, IL 62704\nEmail: sarah.mitchell@example.com\nPhone: (312) 555-0148\n\nOn the afternoon of August 6th, Ms. Mitchell reported to Human\nResources that she had been passed over for a promotion she believes\nshe was qualified for, and that the decision was communicated to her\nin a manner she found dismissive. She is requesting a formal review of\nthe promotion process and back pay of $4,250.00 corresponding to the\nsalary differential since the position was filled.\n\nThis complaint was received and logged by Jennifer Park, HR Business Partner, on behalf of Cobalt Ridge Software Inc. A follow-up meeting has been scheduled with the employee's manager and the HR director.",
+  "gold": [
+    {
+      "literal": "Cobalt Ridge Software Inc.",
+      "category": "org"
+    },
+    {
+      "literal": "Sarah Mitchell",
+      "category": "person"
+    },
+    {
+      "literal": "Senior Software Engineer",
+      "category": "job_title"
+    },
+    {
+      "literal": "512-34-6789",
+      "category": "us_ssn"
+    },
+    {
+      "literal": "742 Maple Street, Springfield, IL 62704",
+      "category": "address"
+    },
+    {
+      "literal": "sarah.mitchell@example.com",
+      "category": "email"
+    },
+    {
+      "literal": "(312) 555-0148",
+      "category": "phone"
+    },
+    {
+      "literal": "$4,250.00",
+      "category": "amount"
+    },
+    {
+      "literal": "Jennifer Park",
+      "category": "person"
+    },
+    {
+      "literal": "HR Business Partner",
+      "category": "job_title"
+    }
+  ]
+}

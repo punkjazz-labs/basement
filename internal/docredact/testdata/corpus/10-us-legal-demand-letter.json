@@ -1,0 +1,43 @@
+{
+  "name": "us-legal-demand-letter",
+  "locale": "US",
+  "text": "HARLOW \u0026 VOSS LEGAL GROUP\n551 Ocean View Drive, San Diego, CA 92101\n\nVIA CERTIFIED MAIL\n\nRe: Demand for Payment -- Disputed Charge, Card 4012 8888 8888 1881\n\nTo Whom It May Concern:\n\nThis firm represents Laura Bennett (SSN on file: 244-08-1357) in connection\nwith an unauthorized charge on the card referenced above. Despite\nrepeated attempts to resolve this matter informally, the disputed\namount of $18,500.00 remains unpaid.\n\nDemand is hereby made for full payment within thirty (30) days of the\ndate of this letter. Failure to remit payment within that period will\nresult in the filing of a civil action without further notice.\n\nPlease direct all correspondence regarding this matter to the\nundersigned at l.bennett@example.com or by telephone at\n(619) 555-0187.\n\nSincerely,\nLaura Bennett\nSenior Litigation Counsel\nHarlow \u0026 Voss Legal Group",
+  "gold": [
+    {
+      "literal": "Harlow \u0026 Voss Legal Group",
+      "category": "org"
+    },
+    {
+      "literal": "551 Ocean View Drive, San Diego, CA 92101",
+      "category": "address"
+    },
+    {
+      "literal": "Laura Bennett",
+      "category": "person"
+    },
+    {
+      "literal": "244-08-1357",
+      "category": "us_ssn"
+    },
+    {
+      "literal": "4012 8888 8888 1881",
+      "category": "card"
+    },
+    {
+      "literal": "$18,500.00",
+      "category": "amount"
+    },
+    {
+      "literal": "l.bennett@example.com",
+      "category": "email"
+    },
+    {
+      "literal": "(619) 555-0187",
+      "category": "phone"
+    },
+    {
+      "literal": "Senior Litigation Counsel",
+      "category": "job_title"
+    }
+  ]
+}

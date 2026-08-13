@@ -1,0 +1,39 @@
+{
+  "name": "it-meeting-minutes",
+  "locale": "IT",
+  "text": "TecnoRete S.r.l. -- Verbale riunione infrastruttura, 13 agosto\n\nPresenti: Paolo Neri (Direttore Operativo), Chiara Galli.\n\n1. Stato dei server. Chiara Galli ha segnalato che il server interno\n   di staging risponde all'indirizzo 10.20.30.40 e che il nuovo nodo\n   di backup e raggiungibile all'indirizzo IPv6\n   2001:db8:85a3::8a2e:370:7334. Entrambi risultano operativi dopo la\n   manutenzione del fine settimana.\n\n2. Budget. Paolo Neri ha approvato uno stanziamento di EUR 12.000,00\n   per il rinnovo dell'hardware del server principale nel prossimo\n   trimestre.\n\n3. Varie. Il verbale della riunione sara distribuito a tutti i\n   partecipanti via email all'indirizzo verbali@tecnorete.example.it\n   entro la fine della settimana.\n\nVerbale chiuso alle ore 11:30.",
+  "gold": [
+    {
+      "literal": "TecnoRete S.r.l.",
+      "category": "org"
+    },
+    {
+      "literal": "Paolo Neri",
+      "category": "person"
+    },
+    {
+      "literal": "Direttore Operativo",
+      "category": "job_title"
+    },
+    {
+      "literal": "Chiara Galli",
+      "category": "person"
+    },
+    {
+      "literal": "10.20.30.40",
+      "category": "ipv4"
+    },
+    {
+      "literal": "2001:db8:85a3::8a2e:370:7334",
+      "category": "ipv6"
+    },
+    {
+      "literal": "12.000,00",
+      "category": "amount"
+    },
+    {
+      "literal": "verbali@tecnorete.example.it",
+      "category": "email"
+    }
+  ]
+}

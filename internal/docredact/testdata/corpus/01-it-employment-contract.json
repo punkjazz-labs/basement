@@ -1,0 +1,51 @@
+{
+  "name": "it-employment-contract",
+  "locale": "IT",
+  "text": "CONTRATTO INDIVIDUALE DI LAVORO A TEMPO INDETERMINATO\n\nTra Officine Meccaniche Russo S.r.l., con sede legale in Via Torino 3, 10121 Torino (TO), in qualita di datore di lavoro, e la Sig.ra Maria Bianchi, nata a Roma il 15/04/1988, codice fiscale BNCMRA88D55H501G, residente in Via Napoli 8, 80100 Napoli (NA), si conviene quanto segue.\n\nLa Sig.ra Bianchi viene assunta con la qualifica di Ingegnere di Produzione a decorrere dalla data di sottoscrizione del presente contratto. La retribuzione annua lorda concordata e pari a EUR 38.500,00, corrisposta in quattordici mensilita e accreditata sul conto corrente le cui coordinate sono indicate di seguito: IBAN IT19 X030 0203 2801 2345 6789 012.\n\nPer qualsiasi comunicazione relativa al presente rapporto di lavoro, la Sig.ra Bianchi potra essere contattata all'indirizzo email maria.bianchi@example.it o al numero di cellulare +39 347 220 1188.\n\nIl presente contratto e regolato dal CCNL Metalmeccanico Industria e sara conservato agli atti presso l'ufficio del personale.\n\nLetto, confermato e sottoscritto.",
+  "gold": [
+    {
+      "literal": "Officine Meccaniche Russo S.r.l.",
+      "category": "org"
+    },
+    {
+      "literal": "Via Torino 3, 10121 Torino (TO)",
+      "category": "address"
+    },
+    {
+      "literal": "Maria Bianchi",
+      "category": "person"
+    },
+    {
+      "literal": "15/04/1988",
+      "category": "dob"
+    },
+    {
+      "literal": "BNCMRA88D55H501G",
+      "category": "it_codice_fiscale"
+    },
+    {
+      "literal": "Via Napoli 8, 80100 Napoli (NA)",
+      "category": "address"
+    },
+    {
+      "literal": "Ingegnere di Produzione",
+      "category": "job_title"
+    },
+    {
+      "literal": "38.500,00",
+      "category": "amount"
+    },
+    {
+      "literal": "IT19 X030 0203 2801 2345 6789 012",
+      "category": "iban"
+    },
+    {
+      "literal": "maria.bianchi@example.it",
+      "category": "email"
+    },
+    {
+      "literal": "+39 347 220 1188",
+      "category": "phone"
+    }
+  ]
+}

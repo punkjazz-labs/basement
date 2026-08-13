@@ -1,0 +1,19 @@
+{
+  "name": "us-negative-order-memo",
+  "locale": "US",
+  "text": "Example Fulfillment Co. -- Order Confirmation\n\nThank you for your order. Your confirmation number is 4829175533; this\nis an internal reference only, not a phone number or a payment card\nnumber, and it will not match either shape.\n\nWarehouse firmware currently deployed on the packing line reads\nversion 12.500.3.1 -- this looks like a network address at a glance\nbut is not one, since no octet in an IPv4 address may exceed 255.\n\nThe Example Fulfillment Co. warehouse used for this order was\noriginally built in 1948 and has been in continuous operation since,\nlong before the current inventory system was installed. Current\nestimated ship date on the label queue is 2099-01-01, a placeholder\nvalue used by the label printer when a real ship date has not yet been\nassigned -- not anyone's birth date.\n\nIf you have questions about this order, contact us at\norders@example.com or call our support line at (800) 555-0134.",
+  "gold": [
+    {
+      "literal": "Example Fulfillment Co.",
+      "category": "org"
+    },
+    {
+      "literal": "orders@example.com",
+      "category": "email"
+    },
+    {
+      "literal": "(800) 555-0134",
+      "category": "phone"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "it-negative-technical-memo",
+  "locale": "IT",
+  "text": "TecnoRete S.r.l. -- Comunicato interno tecnico\n\nLa pratica di manutenzione con numero di riferimento 0345598821 e\nstata chiusa; si tratta di un identificativo interno e non va confuso\ncon un numero di telefono, poiche non contiene alcun separatore.\n\nDurante il deploy e stata rilevata una stringa di versione anomala nel\nchangelog del firmware, 7.0.512.3, che a prima vista sembra un\nindirizzo di rete ma non lo e: nessun ottetto di un indirizzo IPv4 puo\nsuperare il valore 255.\n\nIl contratto di fornitura originario con il fornitore storico risale\nal 1899-05-01, data ben precedente a qualsiasi possibile data di\nnascita di un dipendente attuale e quindi non rilevante ai fini della\nprivacy dei dati anagrafici.\n\nPer informazioni tecniche scrivere a ufficio.tecnico@example.it o\ntelefonare al numero 011 2233445.",
+  "gold": [
+    {
+      "literal": "TecnoRete S.r.l.",
+      "category": "org"
+    },
+    {
+      "literal": "ufficio.tecnico@example.it",
+      "category": "email"
+    },
+    {
+      "literal": "011 2233445",
+      "category": "phone"
+    }
+  ]
+}

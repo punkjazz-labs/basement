@@ -1,0 +1,47 @@
+{
+  "name": "it-medical-referral-letter",
+  "locale": "IT",
+  "text": "Clinica San Raffaele Esempio\nAmbulatorio di Medicina Generale\n\nGentile Collega,\n\nLe invio in visita specialistica il paziente Luca Verdi, nato a Milano il 03/11/1979, codice fiscale VRDLCU79S03F205I, domiciliato in Corso Buenos Aires 45, 20124 Milano (MI).\n\nIl paziente lamenta da alcune settimane episodi di cefalea ricorrente e viene inviato per una valutazione neurologica di approfondimento. Nessun precedente di rilievo in anamnesi familiare.\n\nResto a disposizione per ogni chiarimento clinico al numero 02 87654321 o via email a prenotazioni@clinicasanraffaele.example.it. La visita di controllo ha un costo di EUR 120,00 a carico del paziente.\n\nCordiali saluti,\nDott.ssa Anna Colombo\nMedico di Medicina Generale",
+  "gold": [
+    {
+      "literal": "Clinica San Raffaele Esempio",
+      "category": "org"
+    },
+    {
+      "literal": "Luca Verdi",
+      "category": "person"
+    },
+    {
+      "literal": "03/11/1979",
+      "category": "dob"
+    },
+    {
+      "literal": "VRDLCU79S03F205I",
+      "category": "it_codice_fiscale"
+    },
+    {
+      "literal": "Corso Buenos Aires 45, 20124 Milano (MI)",
+      "category": "address"
+    },
+    {
+      "literal": "02 87654321",
+      "category": "phone"
+    },
+    {
+      "literal": "prenotazioni@clinicasanraffaele.example.it",
+      "category": "email"
+    },
+    {
+      "literal": "120,00",
+      "category": "amount"
+    },
+    {
+      "literal": "Anna Colombo",
+      "category": "person"
+    },
+    {
+      "literal": "Medico di Medicina Generale",
+      "category": "job_title"
+    }
+  ]
+}

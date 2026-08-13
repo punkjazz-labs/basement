@@ -1,0 +1,51 @@
+{
+  "name": "it-bank-letter",
+  "locale": "IT",
+  "text": "Banca di Esempio S.p.A.\nFiliale di Napoli -- Piazza Garibaldi 5, 80142 Napoli (NA)\n\nGentile Sig.ra Giulia Ferrari,\nCodice fiscale: FRRGLI90L62F839K\n\nLa informiamo che il saldo disponibile sul conto corrente ad oggi\nassociato alle sue coordinate IBAN IT84 Z020 0812 3450 0009 8765 432 risulta pari a EUR\n2.340,50. La carta di debito collegata al conto, numero 4111 1111 1111 1111,\nrisulta regolarmente attiva e senza blocchi.\n\nPer qualsiasi necessita puo contattare la sua filiale di riferimento\nal numero 06 55443322 oppure scrivere a\nservizioclienti@bancaesempio.example.it.\n\nDistinti saluti,\nRoberto Galli\nDirettore di Filiale",
+  "gold": [
+    {
+      "literal": "Banca di Esempio S.p.A.",
+      "category": "org"
+    },
+    {
+      "literal": "Piazza Garibaldi 5, 80142 Napoli (NA)",
+      "category": "address"
+    },
+    {
+      "literal": "Giulia Ferrari",
+      "category": "person"
+    },
+    {
+      "literal": "FRRGLI90L62F839K",
+      "category": "it_codice_fiscale"
+    },
+    {
+      "literal": "IT84 Z020 0812 3450 0009 8765 432",
+      "category": "iban"
+    },
+    {
+      "literal": "2.340,50",
+      "category": "amount"
+    },
+    {
+      "literal": "4111 1111 1111 1111",
+      "category": "card"
+    },
+    {
+      "literal": "06 55443322",
+      "category": "phone"
+    },
+    {
+      "literal": "servizioclienti@bancaesempio.example.it",
+      "category": "email"
+    },
+    {
+      "literal": "Roberto Galli",
+      "category": "person"
+    },
+    {
+      "literal": "Direttore di Filiale",
+      "category": "job_title"
+    }
+  ]
+}

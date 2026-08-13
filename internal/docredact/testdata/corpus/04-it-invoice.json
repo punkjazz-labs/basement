@@ -1,0 +1,47 @@
+{
+  "name": "it-invoice",
+  "locale": "IT",
+  "text": "Studio Legale Ferrari\nFattura n. 2026/0341\n\nSpett.le\nMarco Russo\nCodice fiscale: RSSMRC85A09L219O\nVia Roma 12, 00100 Roma (RM)\n\nOggetto: consulenza legale prestata nel mese di luglio 2026.\n\nSi rimette fattura per l'attivita di consulenza svolta, per un importo\ncomplessivo di EUR 1.850,00 IVA inclusa. Si prega di effettuare il\npagamento entro 30 giorni dalla data di emissione tramite bonifico\nbancario sul seguente IBAN: IT70 Y010 0503 2000 0001 2345 678.\n\nPer informazioni relative alla presente fattura contattare\nl'amministrazione allo 06 33445566 oppure scrivere a\nfatturazione@studiolegaleferrari.example.it.\n\nDistinti saluti,\nAvv. Elena Ferrari\nAvvocato Titolare",
+  "gold": [
+    {
+      "literal": "Studio Legale Ferrari",
+      "category": "org"
+    },
+    {
+      "literal": "Marco Russo",
+      "category": "person"
+    },
+    {
+      "literal": "RSSMRC85A09L219O",
+      "category": "it_codice_fiscale"
+    },
+    {
+      "literal": "Via Roma 12, 00100 Roma (RM)",
+      "category": "address"
+    },
+    {
+      "literal": "1.850,00",
+      "category": "amount"
+    },
+    {
+      "literal": "IT70 Y010 0503 2000 0001 2345 678",
+      "category": "iban"
+    },
+    {
+      "literal": "06 33445566",
+      "category": "phone"
+    },
+    {
+      "literal": "fatturazione@studiolegaleferrari.example.it",
+      "category": "email"
+    },
+    {
+      "literal": "Elena Ferrari",
+      "category": "person"
+    },
+    {
+      "literal": "Avvocato Titolare",
+      "category": "job_title"
+    }
+  ]
+}

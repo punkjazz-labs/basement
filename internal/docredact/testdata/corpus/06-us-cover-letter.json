@@ -1,0 +1,31 @@
+{
+  "name": "us-cover-letter",
+  "locale": "US",
+  "text": "Robert Alvarez\n14 Ashgrove Court, Boulder, CO 80301\nrobert.alvarez@example.com\n(303) 555-0199\n\nDear Hiring Committee,\n\nI am writing to express my interest in the Data Platform Engineer\nposition at Meridian Analytics Corp, which I learned about through a\nformer colleague on your infrastructure team. Over the past six years\nI have built and operated large-scale data pipelines, most recently\nleading a migration that cut our nightly batch processing time by\nhalf.\n\nI would welcome the opportunity to discuss how my background in\ndistributed systems could contribute to Meridian Analytics Corp's\ndata platform roadmap. Thank you for your time and consideration.\n\nSincerely,\nRobert Alvarez",
+  "gold": [
+    {
+      "literal": "Robert Alvarez",
+      "category": "person"
+    },
+    {
+      "literal": "14 Ashgrove Court, Boulder, CO 80301",
+      "category": "address"
+    },
+    {
+      "literal": "robert.alvarez@example.com",
+      "category": "email"
+    },
+    {
+      "literal": "(303) 555-0199",
+      "category": "phone"
+    },
+    {
+      "literal": "Data Platform Engineer",
+      "category": "job_title"
+    },
+    {
+      "literal": "Meridian Analytics Corp",
+      "category": "org"
+    }
+  ]
+}

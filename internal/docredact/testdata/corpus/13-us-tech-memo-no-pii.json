@@ -1,0 +1,6 @@
+{
+  "name": "us-tech-memo-no-pii",
+  "locale": "US",
+  "text": "Build Pipeline Migration -- Internal Engineering Memo\n\nThis memo summarizes the plan to migrate our continuous integration\npipeline from the legacy job runner to the new containerized build\nfarm over the coming quarter.\n\nThe current pipeline suffers from long queue times during peak hours\nand lacks reproducible build environments, which has led to a class of\nfailures that only reproduce on specific runner hosts. The new\narchitecture standardizes every build inside a pinned container image,\neliminating host-specific drift entirely.\n\nRollout will proceed in three stages: first, mirroring a subset of\njobs onto the new farm while leaving the legacy runner authoritative;\nsecond, flipping the default for new jobs while keeping the legacy\npath available as a fallback; third, decommissioning the legacy runner\nonce error rates on the new farm have remained flat for two full\nrelease cycles.\n\nNo changes to source control workflows, branch protection rules, or\nrelease tagging conventions are required as part of this migration.\nEngineers should not need to change how they open or merge pull\nrequests at any point during the rollout.",
+  "gold": null
+}

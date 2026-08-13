@@ -1,0 +1,47 @@
+{
+  "name": "us-support-email-thread",
+  "locale": "US",
+  "text": "From: michael.thompson@example.com\nTo: support@example.com\nSubject: Cannot reach the staging endpoint\n\nHi team,\n\nSince this morning our staging environment at 203.0.113.42 has been\nunreachable from our office network. We also see the same timeout\nfrom our IPv6-only test host at 2001:db8::1f3. Nothing changed on our\nside, so I suspect something on your end.\n\nCan someone take a look? You can reach me directly at (206) 555-0142\nif it's faster than email.\n\nThanks,\nMichael Thompson\n\n---\n\nFrom: Alex Rivera, Support Engineer, Example Cloud Services Inc.\nTo: michael.thompson@example.com\n\nHi Michael,\n\nThanks for the report -- we can confirm a routing issue affecting\n203.0.113.42 and have applied a fix. As a goodwill gesture we have\nissued a refund of $29.99 for last month's overage charge to the card\non file. Let us know if the issue persists.\n\nBest,\nAlex Rivera",
+  "gold": [
+    {
+      "literal": "michael.thompson@example.com",
+      "category": "email"
+    },
+    {
+      "literal": "support@example.com",
+      "category": "email"
+    },
+    {
+      "literal": "203.0.113.42",
+      "category": "ipv4"
+    },
+    {
+      "literal": "2001:db8::1f3",
+      "category": "ipv6"
+    },
+    {
+      "literal": "(206) 555-0142",
+      "category": "phone"
+    },
+    {
+      "literal": "Michael Thompson",
+      "category": "person"
+    },
+    {
+      "literal": "Alex Rivera",
+      "category": "person"
+    },
+    {
+      "literal": "Support Engineer",
+      "category": "job_title"
+    },
+    {
+      "literal": "Example Cloud Services Inc.",
+      "category": "org"
+    },
+    {
+      "literal": "$29.99",
+      "category": "amount"
+    }
+  ]
+}
