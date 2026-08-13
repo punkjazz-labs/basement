@@ -107,12 +107,11 @@ func TestScoreDocumentPatternOnlyLeaksEveryModelCategoryLiteral(t *testing.T) {
 	}
 }
 
-// TestScoreDocumentLongerFindingCoveringGoldSpanIsNotOverRedacted checks the
-// brief's explicit edge case: a gold literal whose every occurrence sat
-// inside a longer accepted finding is not a leak (the span check in
-// ScoreDocument reads Redacted(), and the token replaces the whole span), and
-// the longer finding itself is not an over-redaction because its span does
-// intersect the gold occurrence.
+// TestScoreDocumentLongerFindingCoveringGoldSpanIsNotOverRedacted checks that
+// a gold literal whose every occurrence sat inside a longer accepted finding
+// is not a leak (the span check in ScoreDocument reads Redacted(), and the
+// token replaces the whole span), and that the longer finding itself is not
+// an over-redaction because its span does intersect the gold occurrence.
 func TestScoreDocumentLongerFindingCoveringGoldSpanIsNotOverRedacted(t *testing.T) {
 	doc := Analyze("Reach out to mario.rossi@example.com for details.")
 	if _, err := doc.AddManual("to mario.rossi@example.com for", CategoryPhrase); err != nil {

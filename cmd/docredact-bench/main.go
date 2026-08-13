@@ -68,7 +68,11 @@ type armResult struct {
 	OverRedacted int                        `json:"over_redacted"`
 	Hallucinated int                        `json:"hallucinated"`
 	ChunksFailed int                        `json:"chunks_failed"`
-	WallTime     time.Duration              `json:"wall_time_ns"`
+	// WallTime only sums elapsed time for the Docs that were actually
+	// scored: a doc that hit DocsFailed contributes nothing here, so
+	// WallTime/Docs is never inflated by the timeouts it is trying to
+	// report on.
+	WallTime time.Duration `json:"wall_time_ns"`
 }
 
 func run(corpusDir, baseURL, modelList, apiKey, jsonPath string, timeout time.Duration, out io.Writer) error {
@@ -140,8 +144,10 @@ func scoreArm(a arm, corpus []docredact.CorpusDoc, timeout time.Duration) armRes
 			p, err := doc.ApplyModelPass(ctx, a.client)
 			cancel()
 			if err != nil {
+				// Excluded from WallTime too, not just from the score
+				// totals: a doc that never finished must not drag the
+				// average time of the docs that did finish upward.
 				result.DocsFailed++
-				result.WallTime += time.Since(start)
 				continue
 			}
 			pass = p
@@ -170,7 +176,7 @@ func scoreArm(a arm, corpus []docredact.CorpusDoc, timeout time.Duration) armRes
 // every number is a direct count or a rate over one, never an estimate.
 func printTable(out io.Writer, results []armResult) {
 	w := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "ARM\tGOLD\tLEAKED\tLEAK%\tOVER-REDACTED\tHALLUCINATED\tCHUNKS FAILED\tDOCS FAILED\tAVG TIME/DOC")
+	fmt.Fprintln(w, "ARM\tGOLD\tLEAKED\tLEAK%\tOVER-REDACTED\tHALLUCINATED\tCHUNKS FAILED\tDOCS FAILED\tAVG TIME/SCORED DOC")
 	for _, r := range results {
 		fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%d\t%d\t%d\t%d\t%s\n",
 			r.Name, r.Gold, r.Leaked, percent(r.Leaked, r.Gold),
@@ -212,7 +218,8 @@ func percent(n, total int) string {
 }
 
 // avgDuration formats total/docs rounded to the millisecond, or "n/a" when
-// no document was scored.
+// no document was scored. total must already exclude any doc that failed --
+// this only ever averages over the docs it was actually timed for.
 func avgDuration(total time.Duration, docs int) string {
 	if docs == 0 {
 		return "n/a"
