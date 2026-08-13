@@ -43,6 +43,9 @@ const (
 	CategoryDOB   Category = "dob"
 	CategoryITCF  Category = "it_codice_fiscale"
 	CategoryUSSSN Category = "us_ssn"
+	CategoryFRNIR Category = "fr_nir"
+	CategoryESDNI Category = "es_dni"
+	CategoryPTNIF Category = "pt_nif"
 
 	// CategoryPhrase is the category of a literal no detector claims: a
 	// phrase the owner selected in the preview. It has no pattern and no
@@ -83,6 +86,12 @@ func (c Category) Prefix() string {
 		return "ITCF"
 	case CategoryUSSSN:
 		return "SSN"
+	case CategoryFRNIR:
+		return "NIR"
+	case CategoryESDNI:
+		return "DNI"
+	case CategoryPTNIF:
+		return "NIF"
 	case CategoryPhrase:
 		return "PHRASE"
 	case CategoryPerson:
@@ -108,7 +117,8 @@ func ParseCategory(name string) (Category, bool) {
 	candidate := Category(strings.ToLower(strings.TrimSpace(name)))
 	switch candidate {
 	case CategoryEmail, CategoryPhone, CategoryIBAN, CategoryCard, CategoryIPv4,
-		CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN, CategoryPhrase,
+		CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN, CategoryFRNIR,
+		CategoryESDNI, CategoryPTNIF, CategoryPhrase,
 		CategoryPerson, CategoryOrg, CategoryAddress, CategoryJobTitle, CategoryAmount:
 		return candidate, true
 	default:
@@ -121,7 +131,7 @@ func ParseCategory(name string) (Category, bool) {
 // "which locales ship first"), not a considered final answer -- IT and US
 // were picked because the spec named them first. Add an entry here and a
 // matching Detector to extend it.
-var Locales = []string{"IT", "US"}
+var Locales = []string{"IT", "US", "FR", "ES", "PT"}
 
 // Match is one exact occurrence of a literal found by a detector. Start and
 // End are byte offsets into the text the detector scanned, and Text is the
@@ -159,6 +169,9 @@ func Registry() []Detector {
 		DOBDetector{},
 		ITCodiceFiscaleDetector{}, // locale: IT
 		USSSNDetector{},           // locale: US
+		FRNIRDetector{},           // locale: FR
+		ESDNIDetector{},           // locale: ES
+		PTNIFDetector{},           // locale: PT
 	}
 }
 

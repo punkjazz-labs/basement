@@ -20,7 +20,7 @@ var ibanPattern = regexp.MustCompile(`\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{2,4}){3,8}\
 // matter; it is not the locale list (see Locales), just an accuracy aid.
 var ibanLength = map[string]int{
 	"IT": 27, "DE": 22, "FR": 27, "ES": 24, "GB": 22, "NL": 18, "CH": 21,
-	"BE": 16, "AT": 20, "PT": 25, "IE": 22, "PL": 28,
+	"BE": 16, "AT": 20, "PT": 25, "IE": 22, "PL": 28, "BR": 29,
 }
 
 type IBANDetector struct{}
