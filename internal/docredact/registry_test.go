@@ -23,7 +23,7 @@ func TestCategoryPrefix(t *testing.T) {
 }
 
 func TestLocalesRegistered(t *testing.T) {
-	want := []string{"IT", "US", "FR", "ES", "PT", "DE", "NL", "UK"}
+	want := []string{"IT", "US", "FR", "ES", "PT", "DE", "NL", "UK", "BR", "CN", "JP"}
 	if len(Locales) != len(want) {
 		t.Fatalf("Locales = %v, want %v", Locales, want)
 	}

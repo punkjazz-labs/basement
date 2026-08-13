@@ -34,21 +34,24 @@ const SourceModel = "model"
 type Category string
 
 const (
-	CategoryEmail      Category = "email"
-	CategoryPhone      Category = "phone"
-	CategoryIBAN       Category = "iban"
-	CategoryCard       Category = "card"
-	CategoryIPv4       Category = "ipv4"
-	CategoryIPv6       Category = "ipv6"
-	CategoryDOB        Category = "dob"
-	CategoryITCF       Category = "it_codice_fiscale"
-	CategoryUSSSN      Category = "us_ssn"
-	CategoryFRNIR      Category = "fr_nir"
-	CategoryESDNI      Category = "es_dni"
-	CategoryPTNIF      Category = "pt_nif"
-	CategoryDESteuerID Category = "de_steuer_id"
-	CategoryNLBSN      Category = "nl_bsn"
-	CategoryUKNINO     Category = "uk_nino"
+	CategoryEmail        Category = "email"
+	CategoryPhone        Category = "phone"
+	CategoryIBAN         Category = "iban"
+	CategoryCard         Category = "card"
+	CategoryIPv4         Category = "ipv4"
+	CategoryIPv6         Category = "ipv6"
+	CategoryDOB          Category = "dob"
+	CategoryITCF         Category = "it_codice_fiscale"
+	CategoryUSSSN        Category = "us_ssn"
+	CategoryFRNIR        Category = "fr_nir"
+	CategoryESDNI        Category = "es_dni"
+	CategoryPTNIF        Category = "pt_nif"
+	CategoryDESteuerID   Category = "de_steuer_id"
+	CategoryNLBSN        Category = "nl_bsn"
+	CategoryUKNINO       Category = "uk_nino"
+	CategoryBRCPF        Category = "br_cpf"
+	CategoryCNResidentID Category = "cn_resident_id"
+	CategoryJPMyNumber   Category = "jp_my_number"
 
 	// CategoryPhrase is the category of a literal no detector claims: a
 	// phrase the owner selected in the preview. It has no pattern and no
@@ -101,6 +104,12 @@ func (c Category) Prefix() string {
 		return "BSN"
 	case CategoryUKNINO:
 		return "NINO"
+	case CategoryBRCPF:
+		return "CPF"
+	case CategoryCNResidentID:
+		return "CNID"
+	case CategoryJPMyNumber:
+		return "MYNUM"
 	case CategoryPhrase:
 		return "PHRASE"
 	case CategoryPerson:
@@ -128,6 +137,7 @@ func ParseCategory(name string) (Category, bool) {
 	case CategoryEmail, CategoryPhone, CategoryIBAN, CategoryCard, CategoryIPv4,
 		CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN, CategoryFRNIR,
 		CategoryESDNI, CategoryPTNIF, CategoryDESteuerID, CategoryNLBSN, CategoryUKNINO,
+		CategoryBRCPF, CategoryCNResidentID, CategoryJPMyNumber,
 		CategoryPhrase,
 		CategoryPerson, CategoryOrg, CategoryAddress, CategoryJobTitle, CategoryAmount:
 		return candidate, true
@@ -141,7 +151,7 @@ func ParseCategory(name string) (Category, bool) {
 // "which locales ship first"), not a considered final answer -- IT and US
 // were picked because the spec named them first. Add an entry here and a
 // matching Detector to extend it.
-var Locales = []string{"IT", "US", "FR", "ES", "PT", "DE", "NL", "UK"}
+var Locales = []string{"IT", "US", "FR", "ES", "PT", "DE", "NL", "UK", "BR", "CN", "JP"}
 
 // Match is one exact occurrence of a literal found by a detector. Start and
 // End are byte offsets into the text the detector scanned, and Text is the
@@ -185,6 +195,9 @@ func Registry() []Detector {
 		DESteuerIDDetector{},      // locale: DE
 		NLBSNDetector{},           // locale: NL
 		UKNINODetector{},          // locale: UK
+		BRCPFDetector{},           // locale: BR
+		CNResidentIDDetector{},    // locale: CN
+		JPMyNumberDetector{},      // locale: JP
 	}
 }
 
