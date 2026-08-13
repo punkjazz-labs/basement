@@ -28,9 +28,9 @@ var jpHyphenGroupRun = regexp.MustCompile(`\b\d{4}(?:-\d{4})*\b`)
 //   - Two My Numbers written back-to-back with nothing between them (six
 //     groups total) are both found, each validated on its own -- the run
 //     splits cleanly into two aligned triples.
-//   - A real My Number with one unrelated 4-digit group glued onto it (five
+//   - A real My Number with one unrelated 4-digit group glued onto it (four
 //     groups total) is not found at all. There is no checksum-anchored way
-//     to tell which three of those five groups are the real number without
+//     to tell which three of those four groups are the real number without
 //     guessing, so the whole run is left alone rather than risk either a
 //     false positive or a false negative on the wrong half.
 //

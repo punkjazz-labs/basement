@@ -204,10 +204,12 @@ arm is measured, recall on `person`, `org`, `address`, `job_title` and `amount` 
 comparable per language, not just pooled across the whole corpus, by filtering scored
 documents on their `locale` field. Four locales are the exception, each missing gold in one
 or two of the five: CN has no `amount` or `job_title` gold, ES has no `org` gold, and JP and
-NL each have no `amount` gold. `person`, `address`, `dob`, `email` and `phone` are the
-categories every locale actually covers; a per-language `amount`, `org`, or `job_title`
-comparison involving CN, ES, JP or NL should be read as missing that cell rather than as a
-true zero, until the corpus grows a document supplying it. RU and AR have no
+NL each have no `amount` gold. `person`, `address`, `email` and `phone` are the categories
+every locale actually covers; `dob` is covered by every locale except BR, whose single
+document (`22-br-invoice.json`) has no `dob` gold. A per-language `amount`, `org`, or
+`job_title` comparison involving CN, ES, JP or NL, or a `dob` comparison involving BR, should
+be read as missing that cell rather than as a true zero, until the corpus grows a document
+supplying it. RU and AR have no
 national-identifier detector: `docredact.Registry()` runs no RU or AR-specific detector, so
 their two documents carry gold literals only in the universal pattern categories (`dob`,
 `email`, `phone`) and the five model categories, all five of which they do cover. A leak in

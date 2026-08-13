@@ -30,11 +30,13 @@ func TestCorpusInvariants(t *testing.T) {
 				t.Fatalf("%s: gold literal %q not in text", doc.Name, g.Literal)
 			}
 		}
-		// every pattern-category gold literal must be found by the pattern pass:
-		// the corpus may not claim the deterministic pass finds things it does not.
-		found := map[string]bool{}
+		// every pattern-category gold literal must be found by the pattern pass,
+		// under its own gold category: the corpus may not claim the deterministic
+		// pass finds things it does not, and a finding that matches a gold literal
+		// but under the wrong category does not count as detecting it.
+		found := map[string]Category{}
 		for _, f := range Analyze(doc.Text).Findings {
-			found[f.Literal] = true
+			found[f.Literal] = f.Category
 		}
 		for _, g := range doc.Gold {
 			switch g.Category {
@@ -43,8 +45,12 @@ func TestCorpusInvariants(t *testing.T) {
 				CategoryFRNIR, CategoryESDNI, CategoryPTNIF, CategoryDESteuerID,
 				CategoryNLBSN, CategoryUKNINO, CategoryBRCPF, CategoryCNResidentID,
 				CategoryJPMyNumber:
-				if !found[g.Literal] {
+				gotCategory, ok := found[g.Literal]
+				if !ok {
 					t.Fatalf("%s: pattern gold %q (%s) not detected", doc.Name, g.Literal, g.Category)
+				}
+				if gotCategory != g.Category {
+					t.Fatalf("%s: pattern gold %q found as category %s, want %s", doc.Name, g.Literal, gotCategory, g.Category)
 				}
 			}
 		}

@@ -162,9 +162,9 @@ func TestJPMyNumberBackToBackPairBothMatch(t *testing.T) {
 // TestJPMyNumberAdjacentLoneGroupNotMatched pins the documented residual
 // from the file comment in jp_mynumber.go: a genuinely valid My Number
 // (the canonical payload, check digit 4) with one unrelated 4-digit group
-// glued onto it by the same single-space separator (five groups total) is
-// not matched at all. Five is not a multiple of three, so there is no
-// checksum-anchored way to tell which three of the five groups are the
+// glued onto it by the same single-space separator (four groups total) is
+// not matched at all. Four is not a multiple of three, so there is no
+// checksum-anchored way to tell which three of the four groups are the
 // real number -- matching either half would be a guess, and this package
 // refuses to guess.
 func TestJPMyNumberAdjacentLoneGroupNotMatched(t *testing.T) {
