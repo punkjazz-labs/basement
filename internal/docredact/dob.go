@@ -33,26 +33,81 @@ var numericDatePattern = regexp.MustCompile(`\b(\d{1,2})([/\-])(\d{1,2})[/\-](\d
 // isoDatePattern matches YYYY-MM-DD, unambiguous by construction.
 var isoDatePattern = regexp.MustCompile(`\b(\d{4})-(\d{2})-(\d{2})\b`)
 
+// dottedDatePattern matches D.M.YYYY or DD.MM.YYYY, the German/European
+// dotted numeric form, with the same either-reading-could-be-day-or-month
+// ambiguity numericDatePattern resolves for the slash/dash form: Detect
+// tries both orderings and accepts whichever is a real calendar date.
+var dottedDatePattern = regexp.MustCompile(`\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b`)
+
+// cjkDatePattern matches YYYY年M月D日, used in both zh and ja documents.
+// \b is ASCII-word-boundary based and doesn't do anything useful next to
+// 年/月/日 (they're outside \b's \w class regardless), so this pattern
+// doesn't lean on \b there at all -- the ideographs themselves are exact,
+// unambiguous anchors, stronger than a boundary check would be. The
+// leading \b is still meaningful: it's checked between two ASCII digits
+// (a would-be preceding digit and the year's first digit), and it's what
+// keeps a match from starting mid-way through a longer digit run.
+var cjkDatePattern = regexp.MustCompile(`\b(\d{4})年(\d{1,2})月(\d{1,2})日`)
+
+// monthNames is every literal month-name spelling the written-date
+// patterns below recognize, across every language this detector
+// currently supports: English, Italian, French, German, Spanish,
+// Portuguese, Dutch, and Russian (nominative and genitive -- Russian
+// dates are written in the genitive, "12 марта", so that's the form that
+// actually needs to match, but the nominative is included too since it's
+// the form most likely to appear as a bare month reference). Some
+// spellings coincide across languages (Italian and Spanish both write
+// "marzo"); that's harmless duplication since both resolve to the same
+// month number below.
 var monthNames = []string{
+	// English
 	"January", "February", "March", "April", "May", "June",
 	"July", "August", "September", "October", "November", "December",
+	// Italian
+	"gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+	"luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+	// French
+	"janvier", "février", "mars", "avril", "mai", "juin",
+	"juillet", "août", "septembre", "octobre", "novembre", "décembre",
+	// German
+	"Januar", "Februar", "März", "April", "Mai", "Juni",
+	"Juli", "August", "September", "Oktober", "November", "Dezember",
+	// Spanish
+	"enero", "febrero", "marzo", "abril", "mayo", "junio",
+	"julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+	// Portuguese
+	"janeiro", "fevereiro", "março", "abril", "maio", "junho",
+	"julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+	// Dutch
+	"januari", "februari", "maart", "april", "mei", "juni",
+	"juli", "augustus", "september", "oktober", "november", "december",
+	// Russian, nominative
+	"январь", "февраль", "март", "апрель", "май", "июнь",
+	"июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+	// Russian, genitive (the form used in dates, e.g. "12 марта")
+	"января", "февраля", "марта", "апреля", "мая", "июня",
+	"июля", "августа", "сентября", "октября", "ноября", "декабря",
 }
 
 var monthByName = func() map[string]int {
 	m := make(map[string]int, len(monthNames))
 	for i, name := range monthNames {
-		m[strings.ToLower(name)] = i + 1
+		m[strings.ToLower(name)] = i%12 + 1
 	}
 	return m
 }()
 
-// monthWord is "January|February|...|December", used in both written-month
+// monthWord is "January|February|...|декабря", used in both written-month
 // patterns below.
 var monthWord = strings.Join(monthNames, "|")
 
-// writtenDayMonthYear matches "12 March 1990" or "12th March, 1990".
+// writtenDayMonthYear matches "12 March 1990", "12th March, 1990", the
+// German "12. März 1990" (a dot after the day, not just after the month),
+// and the Spanish/Portuguese connective form "12 de marzo de 1990" / "12
+// de março de 1990" (both "de"s optional so the plain non-connective
+// languages keep matching unchanged).
 var writtenDayMonthYear = regexp.MustCompile(
-	`(?i)\b(\d{1,2})(?:st|nd|rd|th)?\s+(` + monthWord + `)\.?,?\s+(\d{4})\b`,
+	`(?i)\b(\d{1,2})(?:st|nd|rd|th)?\.?\s+(?:de\s+)?(` + monthWord + `)\.?,?\s+(?:de\s+)?(\d{4})\b`,
 )
 
 // writtenMonthDayYear matches "March 12, 1990" or "March 12 1990".
@@ -92,6 +147,40 @@ func (DOBDetector) Detect(text string) []Match {
 		}
 	}
 
+	for _, loc := range dottedDatePattern.FindAllStringSubmatchIndex(text, -1) {
+		// \b sits happily between the trailing year digit and a
+		// following ".", so on its own it doesn't stop this pattern
+		// from matching just the "1.2.2020" slice of the longer,
+		// non-date run "1.2.2020.3". Only treat a following "." as
+		// disqualifying when another digit follows it -- that's the
+		// shape of more dotted-number noise, not of a date followed
+		// by an ordinary sentence-final period.
+		if loc[1] < len(text) && text[loc[1]] == '.' &&
+			loc[1]+1 < len(text) && isASCIIDigit(text[loc[1]+1]) {
+			continue
+		}
+		if loc[0] >= 2 && text[loc[0]-1] == '.' && isASCIIDigit(text[loc[0]-2]) {
+			continue
+		}
+		day, _ := strconv.Atoi(text[loc[2]:loc[3]])
+		month, _ := strconv.Atoi(text[loc[4]:loc[5]])
+		year, _ := strconv.Atoi(text[loc[6]:loc[7]])
+		if isCalendarDate(day, month, year) || isCalendarDate(month, day, year) {
+			if plausibleBirthYear(year) {
+				out = append(out, newDateMatch(text, loc[0], loc[1]))
+			}
+		}
+	}
+
+	for _, loc := range cjkDatePattern.FindAllStringSubmatchIndex(text, -1) {
+		year, _ := strconv.Atoi(text[loc[2]:loc[3]])
+		month, _ := strconv.Atoi(text[loc[4]:loc[5]])
+		day, _ := strconv.Atoi(text[loc[6]:loc[7]])
+		if isCalendarDate(day, month, year) && plausibleBirthYear(year) {
+			out = append(out, newDateMatch(text, loc[0], loc[1]))
+		}
+	}
+
 	for _, loc := range writtenDayMonthYear.FindAllStringSubmatchIndex(text, -1) {
 		day, _ := strconv.Atoi(text[loc[2]:loc[3]])
 		month := monthByName[strings.ToLower(text[loc[4]:loc[5]])]
@@ -115,6 +204,13 @@ func (DOBDetector) Detect(text string) []Match {
 
 func newDateMatch(text string, start, end int) Match {
 	return Match{Start: start, End: end, Text: text[start:end], Category: CategoryDOB, Source: Source}
+}
+
+// isASCIIDigit reports whether b is an ASCII '0'-'9' digit -- used by
+// Detect's dotted-date guard, which inspects a single byte just outside a
+// match and needs a plain digit test, not a full number parse.
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
 }
 
 // isCalendarDate reports whether day/month/year is a real date -- it
