@@ -1,0 +1,47 @@
+{
+  "name": "br-invoice",
+  "locale": "BR",
+  "text": "Oficina Aurora Digital ME\nRua das Palmeiras 145, Sala 3 - Pinheiros, São Paulo/SP\n\nFATURA DE SERVIÇOS - Nº 2026/0184\n\nTomador do serviço:\nRicardo Almeida Nunes\nCPF 482.917.553-29\nAvenida das Nações 908, apto 71 - Moema, São Paulo/SP\n\nDescrição dos serviços prestados no período de julho de 2026:\n\n  Manutenção preventiva de dois servidores de aplicação, incluindo troca\n  de discos e revisão das rotinas de backup.\n\n  Migração do banco de dados para ambiente com replicação, com janela de\n  indisponibilidade de duas horas acordada previamente.\n\n  Suporte remoto sob demanda, dezoito horas efetivamente utilizadas no\n  período.\n\nValor total dos serviços .......... R$ 6.450,00\n\nO pagamento deverá ser realizado por transferência bancária para a conta\nabaixo, em nome da prestadora, no prazo de dez dias corridos:\n\nIBAN BR1399999999999991234567890P1\n\nO responsável técnico pelo atendimento é o Analista de Infraestrutura da\nnossa equipe, que permanece à disposição pelo e-mail\nfinanceiro@auroradigital.example.br ou pelo telefone +55 11 5555 0134.\n\nAgradecemos a preferência e permanecemos à disposição.",
+  "gold": [
+    {
+      "literal": "Oficina Aurora Digital ME",
+      "category": "org"
+    },
+    {
+      "literal": "Rua das Palmeiras 145, Sala 3 - Pinheiros, São Paulo/SP",
+      "category": "address"
+    },
+    {
+      "literal": "Ricardo Almeida Nunes",
+      "category": "person"
+    },
+    {
+      "literal": "482.917.553-29",
+      "category": "br_cpf"
+    },
+    {
+      "literal": "Avenida das Nações 908, apto 71 - Moema, São Paulo/SP",
+      "category": "address"
+    },
+    {
+      "literal": "6.450,00",
+      "category": "amount"
+    },
+    {
+      "literal": "BR1399999999999991234567890P1",
+      "category": "iban"
+    },
+    {
+      "literal": "Analista de Infraestrutura",
+      "category": "job_title"
+    },
+    {
+      "literal": "financeiro@auroradigital.example.br",
+      "category": "email"
+    },
+    {
+      "literal": "+55 11 5555 0134",
+      "category": "phone"
+    }
+  ]
+}

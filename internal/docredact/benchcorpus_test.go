@@ -21,8 +21,8 @@ func TestCorpusInvariants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(docs) < 12 {
-		t.Fatalf("corpus has %d docs, want at least 12", len(docs))
+	if len(docs) < 27 {
+		t.Fatalf("corpus has %d docs, want at least 27", len(docs))
 	}
 	for _, doc := range docs {
 		for _, g := range doc.Gold {
@@ -83,9 +83,18 @@ func TestLoadCorpusSortsByFilename(t *testing.T) {
 	}
 }
 
-// TestLoadCorpusLocales requires both locales named in the brief to be
-// represented, and only those two: a doc with a typo'd or unregistered
-// locale would silently pass every other check while being useless for a
+// corpusLocales is every locale string a corpus document may claim: the
+// locales this build registers a national-identifier detector for
+// (Locales), plus RU and AR. Those last two are corpus-only languages --
+// no detector claims a Russian or Arabic national identifier, so their
+// locale string is a fact about the prose the document is written in, not
+// a detector claim. Every one of them must have at least one document, or
+// the per-locale benchmark breakdown has a blind spot.
+var corpusLocales = append(append([]string{}, Locales...), "RU", "AR")
+
+// TestLoadCorpusLocales requires every locale in corpusLocales to be
+// represented, and no others: a doc with a typo'd or unregistered locale
+// would silently pass every other check while being useless for a
 // per-locale benchmark breakdown.
 func TestLoadCorpusLocales(t *testing.T) {
 	docs, err := LoadCorpus("testdata/corpus")
@@ -96,11 +105,15 @@ func TestLoadCorpusLocales(t *testing.T) {
 	for _, doc := range docs {
 		seen[doc.Locale]++
 	}
-	if seen["IT"] == 0 || seen["US"] == 0 {
-		t.Fatalf("locales present = %v, want both IT and US represented", seen)
+	allowed := map[string]bool{}
+	for _, locale := range corpusLocales {
+		allowed[locale] = true
+		if seen[locale] == 0 {
+			t.Errorf("locale %q has no corpus document (locales present = %v)", locale, seen)
+		}
 	}
 	for locale := range seen {
-		if locale != "IT" && locale != "US" {
+		if !allowed[locale] {
 			t.Fatalf("doc has unregistered locale %q", locale)
 		}
 	}
@@ -153,6 +166,52 @@ func TestLoadCorpusAllCategoriesCovered(t *testing.T) {
 		if !seen[c] {
 			t.Errorf("category %q never appears in corpus gold", c)
 		}
+	}
+}
+
+// TestNegativeDocsProduceNoSpuriousFindings is the other half of the
+// corpus oracle. TestCorpusInvariants proves the pattern pass finds every
+// literal the corpus says it should; this proves it finds nothing else in
+// the three documents written specifically to bait it -- an order number
+// shaped like a card, a version string shaped like an IPv4 address, an ISO
+// timestamp and a placeholder date shaped like a birth date. Those
+// documents are the corpus's false-positive floor, so a new detector (or a
+// loosened pattern in an old one) that starts flagging ordinary technical
+// prose fails here rather than quietly inflating the benchmark's
+// over-redaction column.
+//
+// The negative documents are named, not counted: adding a fourth would
+// have to name it here too, which is exactly the review moment that
+// "quietly landed a new negative doc nobody checks" needs.
+func TestNegativeDocsProduceNoSpuriousFindings(t *testing.T) {
+	docs, err := LoadCorpus("testdata/corpus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	negatives := map[string]bool{
+		"us-negative-order-memo":     true,
+		"it-negative-technical-memo": true,
+		"de-negative-changelog":      true,
+	}
+	seen := 0
+	for _, doc := range docs {
+		if !negatives[doc.Name] {
+			continue
+		}
+		seen++
+		gold := map[string]bool{}
+		for _, g := range doc.Gold {
+			gold[g.Literal] = true
+		}
+		for _, f := range Analyze(doc.Text).Findings {
+			if !gold[f.Literal] {
+				t.Errorf("%s: Analyze found %q (%s), which is not gold: the pattern pass invented a finding in a negative document",
+					doc.Name, f.Literal, f.Category)
+			}
+		}
+	}
+	if seen != len(negatives) {
+		t.Fatalf("found %d of the %d named negative documents in the corpus", seen, len(negatives))
 	}
 }
 

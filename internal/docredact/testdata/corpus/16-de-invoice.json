@@ -1,0 +1,55 @@
+{
+  "name": "de-invoice",
+  "locale": "DE",
+  "text": "Personalservice Musterhain GmbH\nLindenweg 24, 40213 Düsseldorf\nUSt-IdNr.: DE999999999\n\nRECHNUNG Nr. RE-2026-0451\n\nRechnungsempfänger:\nBauunternehmung Nordlicht GmbH\nHafenstraße 7, 20457 Hamburg\n\nLeistungszeitraum: Juli 2026\n\nVermittelte Fachkraft: Herr Tobias Krämer, geboren am 04.11.1979,\neingesetzt als Elektroniker für Betriebstechnik im Werk Hamburg-Waltershof.\nSteuerliche Identifikationsnummer: 86 152 471 935\n\nPos. 1  Arbeitnehmerüberlassung, 152 Stunden          6.840,00 EUR\nPos. 2  Zuschlag Nachtschicht, 20 Stunden               410,00 EUR\n                                     Gesamtbetrag     7.250,00 EUR\n\nDer ausgewiesene Betrag enthält die gesetzliche Umsatzsteuer. Der\nRechnungsbetrag ist ohne Abzug innerhalb von vierzehn Tagen nach\nRechnungseingang auf folgendes Konto zu überweisen:\nIBAN DE66 9999 9999 1234 5678 90\n\nBitte geben Sie bei der Überweisung die Rechnungsnummer als\nVerwendungszweck an, damit wir die Zahlung ohne Rückfrage zuordnen\nkönnen.\n\nFür Rückfragen erreichen Sie unsere Buchhaltung unter\nbuchhaltung@musterhain.example.de oder +49 30 555 0134.",
+  "gold": [
+    {
+      "literal": "Personalservice Musterhain GmbH",
+      "category": "org"
+    },
+    {
+      "literal": "Lindenweg 24, 40213 Düsseldorf",
+      "category": "address"
+    },
+    {
+      "literal": "Bauunternehmung Nordlicht GmbH",
+      "category": "org"
+    },
+    {
+      "literal": "Hafenstraße 7, 20457 Hamburg",
+      "category": "address"
+    },
+    {
+      "literal": "Tobias Krämer",
+      "category": "person"
+    },
+    {
+      "literal": "04.11.1979",
+      "category": "dob"
+    },
+    {
+      "literal": "Elektroniker für Betriebstechnik",
+      "category": "job_title"
+    },
+    {
+      "literal": "86 152 471 935",
+      "category": "de_steuer_id"
+    },
+    {
+      "literal": "7.250,00",
+      "category": "amount"
+    },
+    {
+      "literal": "DE66 9999 9999 1234 5678 90",
+      "category": "iban"
+    },
+    {
+      "literal": "buchhaltung@musterhain.example.de",
+      "category": "email"
+    },
+    {
+      "literal": "+49 30 555 0134",
+      "category": "phone"
+    }
+  ]
+}

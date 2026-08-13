@@ -1,0 +1,47 @@
+{
+  "name": "fr-medical-letter",
+  "locale": "FR",
+  "text": "Cabinet de Cardiologie Exemple\n14 boulevard Saint-Michel, 33000 Bordeaux\nTél. +33 5 39 98 24 10 - secretariat@cardio-exemple.example.fr\n\nBordeaux, le 1er septembre 2026\n\nCher Confrère,\n\nJe vous adresse Monsieur Julien Lefèvre, né le 9 juillet 1974, numéro de\nsécurité sociale 1 74 07 33 216 401 13, que je suis depuis plusieurs\nannées pour une hypertension artérielle ancienne, aujourd'hui déséquilibrée\nmalgré une bithérapie bien conduite et une observance qui me paraît\nsatisfaisante.\n\nL'examen clinique retrouve une pression artérielle mesurée à 168/104 mmHg\naux deux bras, sans souffle vasculaire ni signe d'insuffisance cardiaque.\nL'électrocardiogramme est en rythme sinusal régulier, sans trouble de la\nrepolarisation ni hypertrophie ventriculaire gauche électrique.\n\nJe vous serais reconnaissant de bien vouloir le recevoir en consultation\nafin de compléter le bilan par une échographie cardiaque transthoracique\net une mesure ambulatoire de la pression artérielle sur vingt-quatre\nheures. Une recherche d'hypertension secondaire me semble également\njustifiée compte tenu de la résistance au traitement.\n\nLe patient exerce la profession de Chef de Chantier, avec des horaires\nirréguliers qu'il faudra prendre en compte dans l'organisation du suivi.\nIl souhaite reprendre son activité dans les meilleurs délais.\n\nVous remerciant par avance, je vous prie d'agréer, Cher Confrère,\nl'expression de mes salutations confraternelles.\n\nDocteur Anne Delaunay\nMédecin Généraliste",
+  "gold": [
+    {
+      "literal": "Cabinet de Cardiologie Exemple",
+      "category": "org"
+    },
+    {
+      "literal": "14 boulevard Saint-Michel, 33000 Bordeaux",
+      "category": "address"
+    },
+    {
+      "literal": "+33 5 39 98 24 10",
+      "category": "phone"
+    },
+    {
+      "literal": "secretariat@cardio-exemple.example.fr",
+      "category": "email"
+    },
+    {
+      "literal": "Julien Lefèvre",
+      "category": "person"
+    },
+    {
+      "literal": "9 juillet 1974",
+      "category": "dob"
+    },
+    {
+      "literal": "1 74 07 33 216 401 13",
+      "category": "fr_nir"
+    },
+    {
+      "literal": "Chef de Chantier",
+      "category": "job_title"
+    },
+    {
+      "literal": "Anne Delaunay",
+      "category": "person"
+    },
+    {
+      "literal": "Médecin Généraliste",
+      "category": "job_title"
+    }
+  ]
+}

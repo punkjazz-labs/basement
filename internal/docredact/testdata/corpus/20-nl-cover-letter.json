@@ -1,0 +1,47 @@
+{
+  "name": "nl-cover-letter",
+  "locale": "NL",
+  "text": "Lisanne de Vries\nKeizersgracht 214, 1016 DZ Amsterdam\nlisanne.devries@example.nl - +31 6 5555 0119\n\nAan: Stichting Havenzicht Onderwijs\nPostbus 88, 3011 AA Rotterdam\n\nBetreft: sollicitatie naar de functie van Beleidsadviseur Onderwijs\n\nGeachte heer, mevrouw,\n\nMet veel belangstelling reageer ik op uw vacature. In mijn huidige rol\ncombineer ik beleidsontwikkeling met het begeleiden van scholen bij de\ninvoering van nieuwe kwaliteitskaders, en ik merk dat juist die\ncombinatie mij de meeste energie geeft.\n\nDe afgelopen vier jaar heb ik gewerkt aan regionale programma's rond\nlaaggeletterdheid. Ik schreef de bestuurlijke adviezen, voerde de\ngesprekken met schoolbesturen en hield de voortgang zichtbaar in\nkwartaalrapportages. Wat ik daarvan meeneem is vooral geduld: een\nkaderwijziging landt pas als de mensen die ermee werken hem zelf kunnen\nuitleggen.\n\nUw organisatie spreekt mij aan omdat u het onderwijsveld niet als\nafnemer maar als medeopdrachtgever behandelt. Dat sluit aan bij de\nmanier waarop ik zelf het liefst werk.\n\nOmdat u in de vacaturetekst vraagt om de gegevens die nodig zijn voor de\nloonadministratie, vermeld ik ze hierbij alvast: geboortedatum\n12 maart 1985, burgerservicenummer 046986212 en het rekeningnummer\nNL74 EXMP 0123 4567 89.\n\nGraag licht ik mijn motivatie persoonlijk toe.\n\nMet vriendelijke groet,\nLisanne de Vries",
+  "gold": [
+    {
+      "literal": "Lisanne de Vries",
+      "category": "person"
+    },
+    {
+      "literal": "Keizersgracht 214, 1016 DZ Amsterdam",
+      "category": "address"
+    },
+    {
+      "literal": "lisanne.devries@example.nl",
+      "category": "email"
+    },
+    {
+      "literal": "+31 6 5555 0119",
+      "category": "phone"
+    },
+    {
+      "literal": "Stichting Havenzicht Onderwijs",
+      "category": "org"
+    },
+    {
+      "literal": "Postbus 88, 3011 AA Rotterdam",
+      "category": "address"
+    },
+    {
+      "literal": "Beleidsadviseur Onderwijs",
+      "category": "job_title"
+    },
+    {
+      "literal": "12 maart 1985",
+      "category": "dob"
+    },
+    {
+      "literal": "046986212",
+      "category": "nl_bsn"
+    },
+    {
+      "literal": "NL74 EXMP 0123 4567 89",
+      "category": "iban"
+    }
+  ]
+}

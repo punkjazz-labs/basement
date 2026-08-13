@@ -1,0 +1,51 @@
+{
+  "name": "fr-employment-contract",
+  "locale": "FR",
+  "text": "CONTRAT DE TRAVAIL À DURÉE INDÉTERMINÉE\n\nEntre les soussignés :\n\nLa société Ateliers Lumière Exemple SARL, dont le siège social est situé\n12 rue des Peupliers, 69007 Lyon, représentée par sa gérante, ci-après\ndénommée « l'employeur »,\n\net Madame Sophie Moreau, née le 14 mars 1985, demeurant\n8 avenue Berthelot, 69003 Lyon, numéro de sécurité sociale\n2 85 03 75 116 401 62, ci-après dénommée « la salariée »,\n\nil a été convenu ce qui suit.\n\nArticle 1 - Engagement. La salariée est engagée en qualité de\nResponsable de Production, statut cadre, à compter du premier jour ouvré\nde septembre 2026. Elle exercera ses fonctions sous l'autorité de la direction\ntechnique et pourra être amenée à se déplacer sur les sites de production\ndu groupe.\n\nArticle 2 - Rémunération. La rémunération annuelle brute est fixée à\n42 000,00 euros, versée sur douze mensualités par virement sur le compte\ndont les coordonnées bancaires sont les suivantes :\nIBAN FR48 9999 9999 9912 3456 7890 112.\n\nArticle 3 - Période d'essai. Le présent contrat comporte une période\nd'essai de quatre mois, renouvelable une fois par accord écrit des deux\nparties.\n\nArticle 4 - Correspondance. Toute correspondance relative au présent\ncontrat sera adressée à sophie.moreau@example.fr ou au +33 6 39 98 12 34.\n\nFait à Lyon, en deux exemplaires originaux, dont un remis à la salariée.",
+  "gold": [
+    {
+      "literal": "Ateliers Lumière Exemple SARL",
+      "category": "org"
+    },
+    {
+      "literal": "12 rue des Peupliers, 69007 Lyon",
+      "category": "address"
+    },
+    {
+      "literal": "Sophie Moreau",
+      "category": "person"
+    },
+    {
+      "literal": "14 mars 1985",
+      "category": "dob"
+    },
+    {
+      "literal": "8 avenue Berthelot, 69003 Lyon",
+      "category": "address"
+    },
+    {
+      "literal": "2 85 03 75 116 401 62",
+      "category": "fr_nir"
+    },
+    {
+      "literal": "Responsable de Production",
+      "category": "job_title"
+    },
+    {
+      "literal": "42 000,00",
+      "category": "amount"
+    },
+    {
+      "literal": "FR48 9999 9999 9912 3456 7890 112",
+      "category": "iban"
+    },
+    {
+      "literal": "sophie.moreau@example.fr",
+      "category": "email"
+    },
+    {
+      "literal": "+33 6 39 98 12 34",
+      "category": "phone"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "name": "uk-hr-complaint",
+  "locale": "UK",
+  "text": "FORMAL GRIEVANCE -- CONFIDENTIAL\n\nTo: People Team, Harrowgate Logistics Ltd\nFrom: Eleanor Whitcombe, Warehouse Shift Supervisor\n\nI am writing to raise a formal grievance under the company grievance\nprocedure in respect of the handling of my shift allocation over the past\nthree months.\n\nSince the depot rota was reorganised, I have been moved onto night shifts\nat short notice on eleven occasions, on each occasion with less than the\nforty-eight hours' notice the rota policy requires. I raised this\ninformally with my line manager on two occasions and received no written\nresponse either time.\n\nThe practical effect has been a reduction in my shift premium of\napproximately 1,840.00 GBP over the quarter, and a pattern of rest days\nthat has made it difficult to arrange childcare. Colleagues on the same\ngrade have not been reallocated in the same way, which is the part I find\nhardest to accept.\n\nFor the avoidance of doubt, my personal details as held on file are: date\nof birth 12 March 1985, National Insurance number SR 55 01 34 C, home\naddress 47 Bramble Lane, Sheffield S11 8QT. My salary is paid to the\naccount held under IBAN GB65 EXMP 9999 9912 3456 78.\n\nI would be grateful for a grievance hearing within the ten working days\nset out in the procedure, and I would like to be accompanied by a\ncolleague at that hearing.\n\nI can be reached at e.whitcombe@example.co.uk or on +44 20 7946 0958.",
+  "gold": [
+    {
+      "literal": "Harrowgate Logistics Ltd",
+      "category": "org"
+    },
+    {
+      "literal": "Eleanor Whitcombe",
+      "category": "person"
+    },
+    {
+      "literal": "Warehouse Shift Supervisor",
+      "category": "job_title"
+    },
+    {
+      "literal": "1,840.00",
+      "category": "amount"
+    },
+    {
+      "literal": "12 March 1985",
+      "category": "dob"
+    },
+    {
+      "literal": "SR 55 01 34 C",
+      "category": "uk_nino"
+    },
+    {
+      "literal": "47 Bramble Lane, Sheffield S11 8QT",
+      "category": "address"
+    },
+    {
+      "literal": "GB65 EXMP 9999 9912 3456 78",
+      "category": "iban"
+    },
+    {
+      "literal": "e.whitcombe@example.co.uk",
+      "category": "email"
+    },
+    {
+      "literal": "+44 20 7946 0958",
+      "category": "phone"
+    }
+  ]
+}
