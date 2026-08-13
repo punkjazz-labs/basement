@@ -113,9 +113,14 @@ func TestDOBDetectorRussianCaseInsensitive(t *testing.T) {
 // surface but must never be flagged: a version string and a longer dotted-
 // digit run that only happen to contain a valid-shaped date as a slice of
 // themselves, a dotted date whose year is outside the plausible birth-year
-// window, and a real CJK calendar date whose year is likewise out of
-// window (1875, not the "born this year" edge case a low year like the
-// current year would be).
+// window, a real CJK calendar date whose year is likewise out of window
+// (1875, not the "born this year" edge case a low year like the current
+// year would be), and an item-number-then-period sentence fragment that
+// happens to be followed later by "Month YYYY" -- a regression caught in
+// review: the day-dot allowance was briefly shared across every language
+// in writtenDayMonthYear (instead of gated to German only), which made
+// "12." (an item number plus a sentence-ending period) combine with an
+// unrelated later "March 2020" into a false-positive match.
 var dobNegativeCases = []struct {
 	name string
 	text string
@@ -124,6 +129,7 @@ var dobNegativeCases = []struct {
 	{"dotted-run noise", "Reference number 1.2.2020.3 was issued."},
 	{"dotted date out of birth window", "Record dated 12.03.1875 in the ledger."},
 	{"cjk date out of birth window", "生年月日は1875年3月12日です。"},
+	{"item number plus period, not a German date", "See item 12. March 2020 pricing applies to everyone."},
 }
 
 func TestDOBDetectorNewFormatsNegatives(t *testing.T) {

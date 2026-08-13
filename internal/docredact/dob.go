@@ -101,18 +101,39 @@ var monthByName = func() map[string]int {
 // patterns below.
 var monthWord = strings.Join(monthNames, "|")
 
-// writtenDayMonthYear matches "12 March 1990", "12th March, 1990", the
-// German "12. März 1990" (a dot after the day, not just after the month),
-// and the Spanish/Portuguese connective form "12 de marzo de 1990" / "12
-// de março de 1990" (both "de"s optional so the plain non-connective
-// languages keep matching unchanged).
+// writtenDayMonthYear matches "12 March 1990", "12th March, 1990", and the
+// Spanish/Portuguese connective form "12 de marzo de 1990" / "12 de março
+// de 1990" (both "de"s optional so the plain non-connective languages keep
+// matching unchanged). It deliberately requires whitespace right after the
+// day digits -- see writtenDayMonthYearDeDot below for why the day-dot
+// form isn't folded in here.
 var writtenDayMonthYear = regexp.MustCompile(
-	`(?i)\b(\d{1,2})(?:st|nd|rd|th)?\.?\s+(?:de\s+)?(` + monthWord + `)\.?,?\s+(?:de\s+)?(\d{4})\b`,
+	`(?i)\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:de\s+)?(` + monthWord + `)\.?,?\s+(?:de\s+)?(\d{4})\b`,
 )
 
 // writtenMonthDayYear matches "March 12, 1990" or "March 12 1990".
 var writtenMonthDayYear = regexp.MustCompile(
 	`(?i)\b(` + monthWord + `)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b`,
+)
+
+// germanMonthWord is the German-only subset of monthNames, used solely by
+// writtenDayMonthYearDeDot below.
+var germanMonthWord = strings.Join([]string{
+	"Januar", "Februar", "März", "April", "Mai", "Juni",
+	"Juli", "August", "September", "Oktober", "November", "Dezember",
+}, "|")
+
+// writtenDayMonthYearDeDot matches the German day-dot ordinal form, "12.
+// März 1990" or "1. Dezember 1985" -- German prose puts a "." after the
+// day number the way English puts "th"/"nd"/"rd"/"st" there. This is
+// deliberately its own pattern, gated to German month names only, rather
+// than a shared "\.?" folded into writtenDayMonthYear: sharing it there
+// once caused a false positive on ordinary English sentences like "See
+// item 12. March 2020 pricing applies to everyone." -- an item number
+// followed by a sentence-ending period, with an unrelated "Month YYYY"
+// later in the same sentence, is not a German-style date.
+var writtenDayMonthYearDeDot = regexp.MustCompile(
+	`(?i)\b(\d{1,2})\.\s+(` + germanMonthWord + `)\.?,?\s+(\d{4})\b`,
 )
 
 type DOBDetector struct{}
@@ -182,6 +203,15 @@ func (DOBDetector) Detect(text string) []Match {
 	}
 
 	for _, loc := range writtenDayMonthYear.FindAllStringSubmatchIndex(text, -1) {
+		day, _ := strconv.Atoi(text[loc[2]:loc[3]])
+		month := monthByName[strings.ToLower(text[loc[4]:loc[5]])]
+		year, _ := strconv.Atoi(text[loc[6]:loc[7]])
+		if isCalendarDate(day, month, year) && plausibleBirthYear(year) {
+			out = append(out, newDateMatch(text, loc[0], loc[1]))
+		}
+	}
+
+	for _, loc := range writtenDayMonthYearDeDot.FindAllStringSubmatchIndex(text, -1) {
 		day, _ := strconv.Atoi(text[loc[2]:loc[3]])
 		month := monthByName[strings.ToLower(text[loc[4]:loc[5]])]
 		year, _ := strconv.Atoi(text[loc[6]:loc[7]])
