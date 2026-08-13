@@ -34,18 +34,21 @@ const SourceModel = "model"
 type Category string
 
 const (
-	CategoryEmail Category = "email"
-	CategoryPhone Category = "phone"
-	CategoryIBAN  Category = "iban"
-	CategoryCard  Category = "card"
-	CategoryIPv4  Category = "ipv4"
-	CategoryIPv6  Category = "ipv6"
-	CategoryDOB   Category = "dob"
-	CategoryITCF  Category = "it_codice_fiscale"
-	CategoryUSSSN Category = "us_ssn"
-	CategoryFRNIR Category = "fr_nir"
-	CategoryESDNI Category = "es_dni"
-	CategoryPTNIF Category = "pt_nif"
+	CategoryEmail      Category = "email"
+	CategoryPhone      Category = "phone"
+	CategoryIBAN       Category = "iban"
+	CategoryCard       Category = "card"
+	CategoryIPv4       Category = "ipv4"
+	CategoryIPv6       Category = "ipv6"
+	CategoryDOB        Category = "dob"
+	CategoryITCF       Category = "it_codice_fiscale"
+	CategoryUSSSN      Category = "us_ssn"
+	CategoryFRNIR      Category = "fr_nir"
+	CategoryESDNI      Category = "es_dni"
+	CategoryPTNIF      Category = "pt_nif"
+	CategoryDESteuerID Category = "de_steuer_id"
+	CategoryNLBSN      Category = "nl_bsn"
+	CategoryUKNINO     Category = "uk_nino"
 
 	// CategoryPhrase is the category of a literal no detector claims: a
 	// phrase the owner selected in the preview. It has no pattern and no
@@ -92,6 +95,12 @@ func (c Category) Prefix() string {
 		return "DNI"
 	case CategoryPTNIF:
 		return "NIF"
+	case CategoryDESteuerID:
+		return "IDNR"
+	case CategoryNLBSN:
+		return "BSN"
+	case CategoryUKNINO:
+		return "NINO"
 	case CategoryPhrase:
 		return "PHRASE"
 	case CategoryPerson:
@@ -118,7 +127,8 @@ func ParseCategory(name string) (Category, bool) {
 	switch candidate {
 	case CategoryEmail, CategoryPhone, CategoryIBAN, CategoryCard, CategoryIPv4,
 		CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN, CategoryFRNIR,
-		CategoryESDNI, CategoryPTNIF, CategoryPhrase,
+		CategoryESDNI, CategoryPTNIF, CategoryDESteuerID, CategoryNLBSN, CategoryUKNINO,
+		CategoryPhrase,
 		CategoryPerson, CategoryOrg, CategoryAddress, CategoryJobTitle, CategoryAmount:
 		return candidate, true
 	default:
@@ -131,7 +141,7 @@ func ParseCategory(name string) (Category, bool) {
 // "which locales ship first"), not a considered final answer -- IT and US
 // were picked because the spec named them first. Add an entry here and a
 // matching Detector to extend it.
-var Locales = []string{"IT", "US", "FR", "ES", "PT"}
+var Locales = []string{"IT", "US", "FR", "ES", "PT", "DE", "NL", "UK"}
 
 // Match is one exact occurrence of a literal found by a detector. Start and
 // End are byte offsets into the text the detector scanned, and Text is the
@@ -172,6 +182,9 @@ func Registry() []Detector {
 		FRNIRDetector{},           // locale: FR
 		ESDNIDetector{},           // locale: ES
 		PTNIFDetector{},           // locale: PT
+		DESteuerIDDetector{},      // locale: DE
+		NLBSNDetector{},           // locale: NL
+		UKNINODetector{},          // locale: UK
 	}
 }
 
