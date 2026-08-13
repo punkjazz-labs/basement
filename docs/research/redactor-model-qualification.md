@@ -1,6 +1,6 @@
 # Qualifying a redaction model
 
-Date: 2026-08-13. Status: method agreed, no measured run yet.
+Date: 2026-08-13. Status: method agreed, pattern-only baseline measured, no model arm run yet.
 
 ## Why this document exists
 
@@ -146,24 +146,68 @@ Memory is not something the bench measures. Read it off the node while the arm i
 
 | Arm | Gold | Leaked | Leak% | Over-redacted | Hallucinated | Chunks failed | Docs failed | Avg time/scored doc |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| pattern-only (baseline) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| pattern-only (baseline) | 242 | 142 | 58.7% | 0 | 0 | 0 | 0 | 1ms |
 | candidate 1 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
 | candidate 2 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
 | candidate 3 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
 
-No measured run has filled this table yet.
+The pattern-only row is measured, from `go run ./cmd/docredact-bench` on the corpus
+described below. No model arm has been run yet, so those rows stay `n/a`.
 
-Per-category leak breakdowns go underneath, one block per arm, copied from the bench
-output. Add a row per candidate as it is measured, and keep the arm name exactly as it was
-passed to `-model` so a result can be traced back to the model that produced it.
+Per-category leak breakdown for the pattern-only baseline, copied from the bench output on
+2026-08-13:
+
+| Category | Gold | Leaked | Leak% |
+| --- | --- | --- | --- |
+| address | 30 | 30 | 100.0% |
+| amount | 20 | 20 | 100.0% |
+| br_cpf | 1 | 0 | 0.0% |
+| card | 3 | 0 | 0.0% |
+| cn_resident_id | 1 | 0 | 0.0% |
+| de_steuer_id | 2 | 0 | 0.0% |
+| dob | 15 | 0 | 0.0% |
+| email | 26 | 0 | 0.0% |
+| es_dni | 2 | 0 | 0.0% |
+| fr_nir | 2 | 0 | 0.0% |
+| iban | 10 | 0 | 0.0% |
+| ipv4 | 2 | 0 | 0.0% |
+| ipv6 | 2 | 0 | 0.0% |
+| it_codice_fiscale | 4 | 0 | 0.0% |
+| job_title | 28 | 28 | 100.0% |
+| jp_my_number | 1 | 0 | 0.0% |
+| nl_bsn | 1 | 0 | 0.0% |
+| org | 26 | 26 | 100.0% |
+| person | 38 | 38 | 100.0% |
+| phone | 24 | 0 | 0.0% |
+| pt_nif | 1 | 0 | 0.0% |
+| uk_nino | 1 | 0 | 0.0% |
+| us_ssn | 2 | 0 | 0.0% |
+
+Every leak is in one of the five model categories (`address`, `amount`, `job_title`, `org`,
+`person`), exactly as expected: no detector looks for those, so the pattern-only arm leaks
+every one of them, and every pattern category, national-identifier or otherwise, leaks
+none. Add a row per candidate model arm as it is measured, and keep the arm name exactly as
+it was passed to `-model` so a result can be traced back to the model that produced it.
 
 ## What the corpus does and does not measure
 
-`internal/docredact/testdata/corpus` holds 13 synthetic documents, 6 IT and 7 US, labeled
-with every sensitive literal they contain across both the pattern categories and the five
-model categories. One document contains no sensitive literal at all, so a model that
-redacts on reflex has somewhere to be caught. They were written for this benchmark; no real
-person's data is in the repository.
+`internal/docredact/testdata/corpus` holds 27 synthetic documents across 13 locales,
+labeled with every sensitive literal they contain across both the pattern categories and
+the five model categories: 6 IT, 7 US, 3 DE, 2 FR, and 1 each of ES, PT, NL, UK, BR, CN,
+JP, RU and AR. Two documents (`13-us-tech-memo-no-pii.json` and
+`27-de-negative-changelog.json`) carry no gold literal at all, so a model that redacts on
+reflex has somewhere to be caught. They were written for this benchmark; no real person's
+data is in the repository.
+
+Every locale's documents carry gold literals in all five model categories, so once a model
+arm is measured, recall on `person`, `org`, `address`, `job_title` and `amount` is
+comparable per language, not just pooled across the whole corpus, by filtering scored
+documents on their `locale` field. RU and AR have no national-identifier detector:
+`docredact.Registry()` runs no RU or AR-specific detector, so their two documents carry
+gold literals only in the universal pattern categories (`dob`, `email`, `phone`) and the
+five model categories. A leak in an RU or AR document is either a model-category miss or a
+universal-pattern miss; it is never a missed national identifier, because none exists to
+miss.
 
 Known limits, which a reader of the results table should hold in mind:
 
@@ -174,8 +218,11 @@ Known limits, which a reader of the results table should hold in mind:
   a single chunk and a single model round. Chunking and overlap are covered by unit tests
   in `internal/docredact/chunk_test.go`, but nothing in this corpus exercises them, and
   nothing here says how a candidate behaves on a long document.
-- **Two locales.** IT and US, matching `docredact.Locales`, which is itself a pending
-  default rather than a settled answer.
+- **Thirteen locales.** IT, US, FR, ES, PT, DE, NL, UK, BR, CN, JP, RU and AR, matching
+  `docredact.Locales`, which the owner expanded from the IT/US default on 2026-08-13. RU
+  and AR have no checksummed or structural national-identifier detector behind them, by
+  design: they exist to measure the five model categories and the universal patterns in
+  those languages, not to qualify a new identifier format.
 - **The gold labels are a judgement.** They encode what the owner would want redacted in
   these documents. A candidate that flags something reasonable but unlabeled is scored as
   over-redaction, which is the right default for a leak-first metric and still worth

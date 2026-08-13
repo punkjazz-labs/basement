@@ -146,11 +146,11 @@ func ParseCategory(name string) (Category, bool) {
 	}
 }
 
-// Locales lists the national-identifier locales this build registers.
-// This is a default pending the owner's choice (spec's open question:
-// "which locales ship first"), not a considered final answer -- IT and US
-// were picked because the spec named them first. Add an entry here and a
-// matching Detector to extend it.
+// Locales lists the national-identifier locales this build registers. The
+// owner expanded this set from the IT/US default to its current form on
+// 2026-08-13 (docs/decisions/0022-doc-redactor-model-pass.md, amendment of
+// that date); it is a settled choice, not a placeholder. Add an entry here
+// and a matching Detector to extend it.
 var Locales = []string{"IT", "US", "FR", "ES", "PT", "DE", "NL", "UK", "BR", "CN", "JP"}
 
 // Match is one exact occurrence of a literal found by a detector. Start and

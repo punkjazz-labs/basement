@@ -189,3 +189,10 @@ console session auth and the same inline `AuthorizeMutation` on POST:
 `cmd/docredact-bench` is a developer command, not part of the API. It reads the corpus from
 disk, runs against any OpenAI-compatible base URL given to `-base-url`, and writes an
 aligned text table plus optional JSON. It is never invoked by the manager.
+
+## Amendment, 2026-08-13
+
+Locales expanded per owner directive 2026-08-13 with checksummed national-identifier
+detectors for FR, ES, PT, DE, NL, UK, BR, CN and JP (UK NINO is structure-only, no
+checksum; JP My Number matches the grouped form only); see
+`docs/superpowers/plans/2026-08-13-docredact-locale-expansion.md` for the detector list.
