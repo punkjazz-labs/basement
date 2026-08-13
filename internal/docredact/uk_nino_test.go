@@ -70,16 +70,33 @@ func TestUKNINOForbiddenSecondLetterRejected(t *testing.T) {
 }
 
 // TestUKNINOForbiddenPairRejected covers the prefix-pair rule
-// independently of the per-letter rules: neither G nor B is individually
-// forbidden in its position, but "GB" as a pair is never issued.
+// independently of the per-letter rules: none of B, G, N, K, T, or Z is
+// individually forbidden in its position, but these pairs are never
+// issued per HMRC's published allocation rules (NIM39110).
 func TestUKNINOForbiddenPairRejected(t *testing.T) {
-	cases := []string{"GB123456C", "BT123456C", "NK123456C", "ZZ123456C"}
+	cases := []string{"BG123456C", "GB123456C", "NK123456C", "ZZ123456C"}
 	for _, literal := range cases {
 		text := "NINO " + literal + " is not valid."
 		matches := UKNINODetector{}.Detect(text)
 		if len(matches) != 0 {
 			t.Errorf("%s: expected no match for forbidden pair, got %+v", literal, matches)
 		}
+	}
+}
+
+// TestUKNINOBTPrefixValid pins the fix for a brief/reality mismatch: the
+// task brief listed BT as a forbidden pair, but HMRC's published rules
+// (NIM39110) do not exclude it -- BG is the excluded B-prefix pair, not
+// BT. An otherwise-valid NINO starting "BT" must match.
+func TestUKNINOBTPrefixValid(t *testing.T) {
+	const literal = "BT123456C"
+	text := "NINO " + literal + " is valid."
+	matches := UKNINODetector{}.Detect(text)
+	if len(matches) != 1 {
+		t.Fatalf("got %d matches, want 1: %+v", len(matches), matches)
+	}
+	if matches[0].Text != literal {
+		t.Errorf("Text = %q, want %q", matches[0].Text, literal)
 	}
 }
 

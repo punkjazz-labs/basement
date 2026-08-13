@@ -137,6 +137,32 @@ func TestDESteuerIDAllDistinctDigitsRejected(t *testing.T) {
 	}
 }
 
+// TestDESteuerIDOtherDigitFourTimesAccepted pins a disclosed judgment
+// call rather than testing an intended rule: first10 "1100002345" has
+// digit '1' occurring exactly twice (the only value at frequency 2 or 3)
+// but digit '0' occurring four times. steuerIDDigitStructureOK implements
+// the brief's literal wording -- "exactly one digit value occurs two or
+// three times and at least one digit value is absent" -- which only
+// counts values at frequency 2 or 3, so a value at frequency 4 does not
+// disqualify this number and it is accepted. The fuller real-world
+// Steuer-ID rule ("every other digit that occurs, occurs at most once")
+// would reject it. This test pins the current (literal-brief) behavior
+// so a future refactor cannot silently drift either way without a
+// visible test change.
+func TestDESteuerIDOtherDigitFourTimesAccepted(t *testing.T) {
+	first10 := "1100002345"
+	check := steuerIDTestCheckDigit(t, first10)
+	literal := first10 + itoaT(check)
+	text := "ID " + literal + " on file."
+	matches := DESteuerIDDetector{}.Detect(text)
+	if len(matches) != 1 {
+		t.Fatalf("got %d matches, want 1 (pinning literal-brief acceptance): %+v", len(matches), matches)
+	}
+	if matches[0].Text != literal {
+		t.Errorf("Text = %q, want %q", matches[0].Text, literal)
+	}
+}
+
 func itoaT(n int) string {
 	return string(rune('0' + n))
 }

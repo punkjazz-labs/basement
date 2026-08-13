@@ -51,17 +51,16 @@ func (UKNINODetector) Detect(text string) []Match {
 // ninoForbiddenFirst and ninoForbiddenSecond are HMRC's published
 // letters that are never issued in the first or second prefix position
 // respectively (the sets differ: O is excluded only from the second
-// position). ninoForbiddenPairs is the published list of two-letter
-// prefixes that are never issued regardless of the individual letters --
-// GB and NK because they are reserved, BT/TN/NT because they collide
-// with other numbering schemes, and ZZ because it is used for
-// known-invalid placeholder numbers.
+// position). ninoForbiddenPairs is HMRC's published list (NIM39110) of
+// two-letter prefixes excluded from allocation regardless of the
+// individual letters. No checksum exists for a NINO, so this prefix
+// legality is the only validation available.
 const ninoForbiddenFirst = "DFIQUV"
 const ninoForbiddenSecond = "DFIOQUV"
 
 var ninoForbiddenPairs = map[string]bool{
+	"BG": true,
 	"GB": true,
-	"BT": true,
 	"NK": true,
 	"KN": true,
 	"TN": true,
