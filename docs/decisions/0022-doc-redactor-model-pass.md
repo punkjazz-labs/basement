@@ -104,7 +104,7 @@ overlap of at least one chunk. Boundary snapping, which walks back up to 200 byt
 for a newline or space, is tidiness on top of that guarantee and not part of it, which is
 why it is allowed to fail and find nothing. `ChunkText` panics when `size <= overlap`
 rather than looping forever, because that is a programmer error and not an input error, and
-it falls back to the unsnapped boundary in the one case where snapping would leave the
+it advances to the chunk's end, dropping the overlap, in the one case where snapping would leave the
 window unable to advance.
 
 **Structured output is preferred, and refused once means refused for the document.**

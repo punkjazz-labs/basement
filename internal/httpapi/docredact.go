@@ -104,8 +104,9 @@ func mimeForDocredactExt(ext string) string {
 }
 
 // docredactAnalyze runs the pattern pass over submitted text and starts a
-// session. There is no model pass yet (spec step 3) and no path field: the
-// manager runs on the Spark, not on the owner's laptop where the document
+// session. The pattern pass runs here; the model pass is a separate, explicit
+// request (modelpass) the owner triggers afterwards. There is no path field:
+// the manager runs on the Spark, not on the owner's laptop where the document
 // lives, so the browser sends the text itself rather than a local path for
 // this process to open.
 func (s *Server) docredactAnalyze(w http.ResponseWriter, r *http.Request) {

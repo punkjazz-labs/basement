@@ -56,8 +56,8 @@ func ChunkText(text string, size, overlap int) []string {
 
 		next := end - overlap
 		if next <= start {
-			// Snapping ate the whole window this iteration; fall back to
-			// the unsnapped boundary so start always advances.
+			// Snapping ate the whole window this iteration; advance to
+			// the chunk's end, dropping the overlap, so start always advances.
 			next = end
 		}
 		start = next
