@@ -83,6 +83,32 @@ func TestLuhnValid(t *testing.T) {
 	}
 }
 
+func TestModelCategories(t *testing.T) {
+	cases := []struct {
+		name   string
+		want   Category
+		prefix string
+	}{
+		{"person", CategoryPerson, "PERSON"},
+		{"org", CategoryOrg, "ORG"},
+		{"address", CategoryAddress, "ADDRESS"},
+		{"job_title", CategoryJobTitle, "TITLE"},
+		{"amount", CategoryAmount, "AMOUNT"},
+	}
+	for _, c := range cases {
+		got, known := ParseCategory(c.name)
+		if !known || got != c.want {
+			t.Fatalf("ParseCategory(%q) = %v, %v", c.name, got, known)
+		}
+		if c.want.Prefix() != c.prefix {
+			t.Fatalf("Prefix(%v) = %q, want %q", c.want, c.want.Prefix(), c.prefix)
+		}
+	}
+	if SourceModel != "model" {
+		t.Fatalf("SourceModel = %q", SourceModel)
+	}
+}
+
 func TestValidSSNRanges(t *testing.T) {
 	cases := []struct {
 		area, group, serial int

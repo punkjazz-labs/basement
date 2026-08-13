@@ -24,6 +24,10 @@ const Source = "pattern"
 // travels all the way into the exported mapping.
 const SourceManual = "manual"
 
+// SourceModel marks a literal the model pass (spec step 3) found rather than
+// a pattern detector or the owner's own selection.
+const SourceModel = "model"
+
 // Category is a short, stable identifier for a kind of sensitive literal.
 // It doubles as the pseudonym prefix (uppercased) used in replacement
 // tokens like [EMAIL_1].
@@ -44,6 +48,16 @@ const (
 	// phrase the owner selected in the preview. It has no pattern and no
 	// checksum, so it is deliberately not a Detector category.
 	CategoryPhrase Category = "phrase"
+
+	// The categories below are produced by the model pass (spec step 3) or
+	// picked by the owner -- no regex or checksum defines a person's name,
+	// an organization, a street address, a job title, or a free-form amount,
+	// so none of them has a Detector and Registry does not list them.
+	CategoryPerson   Category = "person"
+	CategoryOrg      Category = "org"
+	CategoryAddress  Category = "address"
+	CategoryJobTitle Category = "job_title"
+	CategoryAmount   Category = "amount"
 )
 
 // Prefix returns the uppercase token used in a pseudonym, e.g. "EMAIL" for
@@ -71,6 +85,16 @@ func (c Category) Prefix() string {
 		return "SSN"
 	case CategoryPhrase:
 		return "PHRASE"
+	case CategoryPerson:
+		return "PERSON"
+	case CategoryOrg:
+		return "ORG"
+	case CategoryAddress:
+		return "ADDRESS"
+	case CategoryJobTitle:
+		return "TITLE"
+	case CategoryAmount:
+		return "AMOUNT"
 	default:
 		return "MATCH"
 	}
@@ -84,7 +108,8 @@ func ParseCategory(name string) (Category, bool) {
 	candidate := Category(strings.ToLower(strings.TrimSpace(name)))
 	switch candidate {
 	case CategoryEmail, CategoryPhone, CategoryIBAN, CategoryCard, CategoryIPv4,
-		CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN, CategoryPhrase:
+		CategoryIPv6, CategoryDOB, CategoryITCF, CategoryUSSSN, CategoryPhrase,
+		CategoryPerson, CategoryOrg, CategoryAddress, CategoryJobTitle, CategoryAmount:
 		return candidate, true
 	default:
 		return CategoryPhrase, false
