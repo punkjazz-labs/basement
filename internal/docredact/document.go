@@ -32,6 +32,7 @@ type Document struct {
 	spans     []Match // resolved, sorted by Start, non-overlapping
 	byLiteral map[string]*Finding
 	manual    []manualLiteral // literals the owner added by hand, in the order added
+	model     []manualLiteral // literals the model pass accepted, in the order accepted
 	// counters never go down, so a pseudonym number is never handed to a
 	// second literal within one session even if the first one stops
 	// appearing.
@@ -81,6 +82,12 @@ func (d *Document) recompute() {
 	matches := DetectAll(d.Text)
 	for _, m := range d.manual {
 		matches = append(matches, manualMatches(d.Text, m.literal, m.category)...)
+	}
+	// Model matches are appended last: ResolveOverlaps breaks same-length
+	// ties by original order, so a pattern or manual literal always beats a
+	// model literal that claims the exact same span.
+	for _, m := range d.model {
+		matches = append(matches, modelMatches(d.Text, m.literal, m.category)...)
 	}
 	resolved := ResolveOverlaps(matches)
 

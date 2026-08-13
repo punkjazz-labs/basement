@@ -21,11 +21,11 @@ var (
 	ErrLiteralCovered = errors.New("that text is already inside a longer finding")
 )
 
-// manualMatches finds every non-overlapping occurrence of an exact literal,
-// left to right. Matching is exact and case sensitive: the owner selected
-// these characters, and replacing something they did not select would be a
-// different promise than the one the button makes.
-func manualMatches(text, literal string, category Category) []Match {
+// literalMatches finds every non-overlapping occurrence of an exact literal,
+// left to right, tagged with the given source. Matching is exact and case
+// sensitive: whoever supplied this literal meant these exact characters, and
+// replacing something else would be a different promise than the one made.
+func literalMatches(text, literal string, category Category, source string) []Match {
 	if literal == "" {
 		return nil
 	}
@@ -37,10 +37,16 @@ func manualMatches(text, literal string, category Category) []Match {
 		}
 		start := offset + index
 		end := start + len(literal)
-		out = append(out, Match{Start: start, End: end, Text: literal, Category: category, Source: SourceManual})
+		out = append(out, Match{Start: start, End: end, Text: literal, Category: category, Source: source})
 		offset = end
 	}
 	return out
+}
+
+// manualMatches finds every non-overlapping occurrence of a literal the
+// owner added by hand.
+func manualMatches(text, literal string, category Category) []Match {
+	return literalMatches(text, literal, category, SourceManual)
 }
 
 // AddManual hides one exact literal the owner picked out of the preview. The
