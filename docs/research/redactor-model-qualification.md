@@ -199,15 +199,20 @@ JP, RU and AR. Two documents (`13-us-tech-memo-no-pii.json` and
 reflex has somewhere to be caught. They were written for this benchmark; no real person's
 data is in the repository.
 
-Every locale's documents carry gold literals in all five model categories, so once a model
+Most locales' documents carry gold literals in all five model categories, so once a model
 arm is measured, recall on `person`, `org`, `address`, `job_title` and `amount` is
 comparable per language, not just pooled across the whole corpus, by filtering scored
-documents on their `locale` field. RU and AR have no national-identifier detector:
-`docredact.Registry()` runs no RU or AR-specific detector, so their two documents carry
-gold literals only in the universal pattern categories (`dob`, `email`, `phone`) and the
-five model categories. A leak in an RU or AR document is either a model-category miss or a
-universal-pattern miss; it is never a missed national identifier, because none exists to
-miss.
+documents on their `locale` field. Four locales are the exception, each missing gold in one
+or two of the five: CN has no `amount` or `job_title` gold, ES has no `org` gold, and JP and
+NL each have no `amount` gold. `person`, `address`, `dob`, `email` and `phone` are the
+categories every locale actually covers; a per-language `amount`, `org`, or `job_title`
+comparison involving CN, ES, JP or NL should be read as missing that cell rather than as a
+true zero, until the corpus grows a document supplying it. RU and AR have no
+national-identifier detector: `docredact.Registry()` runs no RU or AR-specific detector, so
+their two documents carry gold literals only in the universal pattern categories (`dob`,
+`email`, `phone`) and the five model categories, all five of which they do cover. A leak in
+an RU or AR document is either a model-category miss or a universal-pattern miss; it is
+never a missed national identifier, because none exists to miss.
 
 Known limits, which a reader of the results table should hold in mind:
 
@@ -218,11 +223,12 @@ Known limits, which a reader of the results table should hold in mind:
   a single chunk and a single model round. Chunking and overlap are covered by unit tests
   in `internal/docredact/chunk_test.go`, but nothing in this corpus exercises them, and
   nothing here says how a candidate behaves on a long document.
-- **Thirteen locales.** IT, US, FR, ES, PT, DE, NL, UK, BR, CN, JP, RU and AR, matching
-  `docredact.Locales`, which the owner expanded from the IT/US default on 2026-08-13. RU
-  and AR have no checksummed or structural national-identifier detector behind them, by
-  design: they exist to measure the five model categories and the universal patterns in
-  those languages, not to qualify a new identifier format.
+- **Thirteen locales in the corpus, eleven in `docredact.Locales`.** The corpus covers IT,
+  US, FR, ES, PT, DE, NL, UK, BR, CN, JP, RU and AR. `docredact.Locales`, which the owner
+  expanded from the IT/US default on 2026-08-13, lists only the eleven with a
+  national-identifier detector behind them (IT, US, FR, ES, PT, DE, NL, UK, BR, CN, JP); RU
+  and AR are corpus-only, by design, to measure the five model categories and the universal
+  patterns in those languages without a new identifier format to qualify.
 - **The gold labels are a judgement.** They encode what the owner would want redacted in
   these documents. A candidate that flags something reasonable but unlabeled is scored as
   over-redaction, which is the right default for a leak-first metric and still worth

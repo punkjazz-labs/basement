@@ -192,7 +192,7 @@ aligned text table plus optional JSON. It is never invoked by the manager.
 
 ## Amendment, 2026-08-13
 
-Locales expanded per owner directive 2026-08-13 with checksummed national-identifier
-detectors for FR, ES, PT, DE, NL, UK, BR, CN and JP (UK NINO is structure-only, no
-checksum; JP My Number matches the grouped form only); see
+Locales expanded per owner directive 2026-08-13 with eight checksummed national-identifier
+detectors, FR, ES, PT, DE, NL, BR, CN and JP (JP My Number matches the grouped form only),
+plus UK NINO, structure-only with no checksum; see
 `docs/superpowers/plans/2026-08-13-docredact-locale-expansion.md` for the detector list.
