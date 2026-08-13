@@ -1,0 +1,182 @@
+# Qualifying a redaction model
+
+Date: 2026-08-13. Status: method agreed, no measured run yet.
+
+## Why this document exists
+
+On 2026-08-13 the owner decided that document redaction uses a dedicated, pinned model
+rather than whichever model happens to be serving. The reason is controlled, repeatable
+quality: the same document should produce the same findings tomorrow, and a model swapped
+in for an unrelated reason should not quietly change what a redacted document leaks. ADR
+0022 records that decision and the code that encodes it, namely the `redactor` role coming
+first in the model pass endpoint's resolution order, with the fallback to the serving model
+as the visible interim state.
+
+This document is how that model gets chosen. It fixes the metric, the candidate classes,
+and the commands, before any number exists, so the choice is settled by measurement instead
+of by whichever model was easiest to try first.
+
+## The metric
+
+**A gold literal still visible in the redacted output is a leak.** That is the number that
+decides this. It is a product outcome, not span bookkeeping: `ScoreDocument` in
+`internal/docredact/benchscore.go` takes `Document.Redacted()` and searches it for each
+labeled literal, so it does not care which pass found what, or whether a literal was
+covered by a longer finding from a different source. A redacted document either still
+contains the person's name or it does not.
+
+The supporting columns exist to explain the leak count, not to compete with it:
+
+- **OVER-REDACTED**: enabled findings whose spans never touch a gold occurrence. A model
+  that drives leaks to zero by redacting most of the document has not solved the problem,
+  and this is where that shows up.
+- **HALLUCINATED**: literals the model named that do not appear in the document verbatim,
+  dropped by the engine and counted. A high count is a signal about the model's discipline
+  even though none of it reaches the output.
+- **CHUNKS FAILED** and **DOCS FAILED**: how often the model could not be parsed or could
+  not answer in time. A candidate that scores well only when it answers is not the same as
+  a candidate that answers.
+- **AVG TIME/SCORED DOC**: wall time per document, averaged only over documents that were
+  actually scored.
+
+The per-category leak breakdown printed under each arm is where the real comparison lives.
+The pattern-only arm is expected to leak every `person`, `org`, `address`, `job_title` and
+`amount` literal in the corpus, because no detector looks for those. Those five categories
+are the model's job, and a candidate is judged on them.
+
+## The bar
+
+The thresholds are set by the owner against the measured pattern-only baseline, once that
+baseline exists. Inventing them now would be inventing facts. The shape of the bar is
+agreed, though:
+
+1. A large reduction in leaks across the five model categories, compared with pattern-only.
+2. No meaningful increase in leaks in the pattern categories. The model pass must never
+   make the deterministic result worse, and the append-order rule in ADR 0022 is what is
+   supposed to guarantee it.
+3. Over-redaction that stays reviewable. The owner checks every finding before export, so
+   the question is whether the list is still worth reading, not whether it is perfect.
+4. Zero degraded documents, and a chunks-failed count near zero. A model that needs the
+   repair retry constantly is not a model this feature can pin.
+5. Time per document the owner will actually wait for, measured on the hardware the model
+   will run on, not on the gateway.
+
+## Candidates to measure
+
+No candidate has been chosen. These are the classes to put through the bench:
+
+**Very small open instruct models, roughly 0.5B to 4B parameters.** This is the class the
+decision points at, because the redaction model has to be affordable enough to sit
+alongside whatever primary model the owner actually uses. The task helps here: the model is
+not asked to reason, only to copy identifying substrings out of a short document into a JSON
+array, which is close to the smallest useful thing an instruct model does. Structured
+output support is worth noting per candidate but is not a requirement, since
+`ErrStructuredUnsupported` downgrades the whole document to lenient parsing on the first
+refusal.
+
+**GLiNER-class NER models, as a possible future third pass.** Spec 12 argued against a
+dedicated NER model up front and wrote its own exit clause: "if measurement shows recall is
+poor, a NER pass becomes a third pass, not a replacement, and it gets its own spec." This
+benchmark is that measurement. A token-classification model gives real offsets and is
+fast, but it does not speak the OpenAI-compatible `/v1` the `Completer` seam is built on,
+so it cannot be scored by `cmd/docredact-bench` as it stands and would need its own spec
+and its own harness. It is listed here so that the exit clause has somewhere to point.
+
+Whatever wins ships as a pinned recipe assigned to the `redactor` role. Whether it can run
+co-resident with a primary model on one node is a separate qualification belonging to the
+roles system, and is recorded there rather than in this document.
+
+## How to run it
+
+`cmd/docredact-bench` always runs the pattern-only arm first as the baseline, then one arm
+per model id, all against the same corpus in the same process. Flags: `-corpus`,
+`-base-url`, `-model`, `-api-key`, `-json`, `-timeout`. Run from the repository root, since
+the default corpus path is relative.
+
+**The baseline, no model involved:**
+
+```
+go run ./cmd/docredact-bench
+```
+
+**Quality numbers now, through a backend that already has the candidates.** `-model` is a
+comma-separated list, so several candidates are scored against the same corpus in one
+invocation, and `-base-url` must not include the `/v1` suffix, which `ModelClient` appends
+itself. Through the LiteLLM gateway on the Mac Mini:
+
+```
+go run ./cmd/docredact-bench \
+  -base-url http://192.168.10.129:4000 \
+  -model <candidate-a>,<candidate-b> \
+  -api-key <local-placeholder> \
+  -json /tmp/redactor-bench-gateway.json
+```
+
+Or straight at the Ollama host on the Mac Studio, whose OpenAI-compatible endpoint is on
+port 11434 by default:
+
+```
+go run ./cmd/docredact-bench \
+  -base-url http://192.168.10.131:11434 \
+  -model <candidate-a>,<candidate-b> \
+  -json /tmp/redactor-bench-studio.json
+```
+
+Concrete model ids are correct here rather than the `profile/` aliases: the whole point is
+to tell named models apart, which is exactly the benchmark and diagnosis carve-out the
+routing defaults make for physical routes. Verify the live addresses and ports before
+running; the machine table is a starting point, not an oracle.
+
+**Latency and memory, on a Spark, once one is free.** The gateway and the Studio answer the
+quality question, but not the one that decides whether this model can be pinned next to a
+primary model on a GB10. Point the bench at the Spark's own runtime port for the served
+model and raise `-timeout` if a candidate is slow enough to trip the default five minutes:
+
+```
+go run ./cmd/docredact-bench \
+  -base-url http://<spark-host>:<port> \
+  -model <served-model-id> \
+  -timeout 10m \
+  -json /tmp/redactor-bench-spark.json
+```
+
+Memory is not something the bench measures. Read it off the node while the arm is running.
+
+## Results
+
+| Arm | Gold | Leaked | Leak% | Over-redacted | Hallucinated | Chunks failed | Docs failed | Avg time/scored doc |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| pattern-only (baseline) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| candidate 1 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| candidate 2 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| candidate 3 | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+
+No measured run has filled this table yet.
+
+Per-category leak breakdowns go underneath, one block per arm, copied from the bench
+output. Add a row per candidate as it is measured, and keep the arm name exactly as it was
+passed to `-model` so a result can be traced back to the model that produced it.
+
+## What the corpus does and does not measure
+
+`internal/docredact/testdata/corpus` holds 13 synthetic documents, 6 IT and 7 US, labeled
+with every sensitive literal they contain across both the pattern categories and the five
+model categories. One document contains no sensitive literal at all, so a model that
+redacts on reflex has somewhere to be caught. They were written for this benchmark; no real
+person's data is in the repository.
+
+Known limits, which a reader of the results table should hold in mind:
+
+- **They are synthetic.** They measure the shape of the problem, not the mess of real
+  correspondence. A candidate that wins here has earned a trial on the owner's own
+  documents, not a conclusion.
+- **They are short.** Every document is well under the 6000-byte chunk size, so each one is
+  a single chunk and a single model round. Chunking and overlap are covered by unit tests
+  in `internal/docredact/chunk_test.go`, but nothing in this corpus exercises them, and
+  nothing here says how a candidate behaves on a long document.
+- **Two locales.** IT and US, matching `docredact.Locales`, which is itself a pending
+  default rather than a settled answer.
+- **The gold labels are a judgement.** They encode what the owner would want redacted in
+  these documents. A candidate that flags something reasonable but unlabeled is scored as
+  over-redaction, which is the right default for a leak-first metric and still worth
+  reading the actual findings for before dismissing a model.
