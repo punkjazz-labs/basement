@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -10,9 +11,26 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/punkjazz-labs/basement/internal/docredact"
+	"github.com/punkjazz-labs/basement/internal/recipe"
 )
+
+// docredactRoleName is the role a Spark gives its redaction model. A model
+// pass is not a client's inference request, so it never names a model in a
+// URL: the owner assigns one on the Roles page and every pass follows it.
+const docredactRoleName = "redactor"
+
+// docredactModelTimeout bounds one chat/completions round to the runtime. The
+// whole pass is bounded by the request context instead, because a document is
+// as many rounds as it has chunks.
+const docredactModelTimeout = 2 * time.Minute
+
+// noTextModelServing is what the console is told when the pass cannot run. It
+// says what did not happen and what is still true, because the pattern
+// findings on screen are untouched by a pass that never started.
+const noTextModelServing = "no text model is serving, so the model pass cannot run. The pattern findings are unchanged."
 
 // docredactSession is one analyzed document, kept in memory only. The
 // document itself, and the file it may have come from, never touch this
@@ -192,6 +210,58 @@ func (s *Server) docredactSessionAction(w http.ResponseWriter, r *http.Request) 
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"findings": session.doc.Findings})
 
+	// The model pass: the owner asks whichever model is serving to name what
+	// the patterns missed. A model that answers badly is data, not a failure
+	// (docredact.ModelPassResult.Degraded), so this answers 200 with the
+	// tally and the findings as they now stand, and refuses only when there
+	// is no text model to ask.
+	case len(parts) == 2 && parts[1] == "modelpass" && r.Method == http.MethodPost:
+		if err := s.auth.AuthorizeMutation(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+		var request struct {
+			Model string `json:"model"`
+		}
+		if r.ContentLength != 0 {
+			if err := decodeBody(r, &request); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+		}
+		target, hold, ok := s.redactionModel(request.Model)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, errors.New(noTextModelServing))
+			return
+		}
+		// The hold keeps a model switch from starting underneath the pass
+		// before it has reached the runtime, the same reason proxyModel takes
+		// one. A pass is short next to the switch it would otherwise race.
+		defer hold.release()
+		client := &docredact.ModelClient{
+			BaseURL: fmt.Sprintf("http://127.0.0.1:%d", target.Service.DefaultHostPort),
+			Model:   target.Service.ServedModelID,
+			HTTP:    &http.Client{Timeout: docredactModelTimeout},
+		}
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		result, err := session.doc.ApplyModelPass(r.Context(), client)
+		if err != nil {
+			// The only error a pass returns is a cancelled context: the
+			// console hung up, so there is nobody left to answer.
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"findings": session.doc.Findings,
+			"model_pass": struct {
+				docredact.ModelPassResult
+				// Which model actually answered, so falling back from the
+				// redactor role to whatever is serving is visible rather
+				// than silent.
+				Model string `json:"model"`
+			}{result, target.DisplayName},
+		})
+
 	case len(parts) == 2 && parts[1] == "preview" && r.Method == http.MethodGet:
 		session.mu.Lock()
 		defer session.mu.Unlock()
@@ -220,6 +290,62 @@ func (s *Server) docredactSessionAction(w http.ResponseWriter, r *http.Request) 
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+// redactionModel picks the model a pass is sent to and holds it against a
+// switch, in the order the console promises: the redactor role, then a model
+// the request named, then whatever is serving. Every candidate has to be
+// serving right now -- a redaction pass never stops one model to start
+// another, unlike a /v1 request naming a role, because the document on screen
+// is not worth taking somebody's running model away for.
+//
+// Resolution happens inside tryAdmit, under the gate's lock, so the model
+// that is chosen is the model the hold is taken on and no switch can slip
+// between the two. That is also why the store reads here take a background
+// context rather than the request's, exactly as admitToServingModel does: a
+// client that has gone away is answered by the write failing later, never by
+// leaving the gate held on a dead context.
+func (s *Server) redactionModel(requested string) (recipe.Recipe, *serveHold, bool) {
+	return s.gate.tryAdmit(func() (recipe.Recipe, bool) {
+		ctx := context.Background()
+		if target, ok := s.servingRoleModel(ctx, docredactRoleName); ok {
+			return target, true
+		}
+		// A request may name a role of its own. A concrete model id is
+		// resolved the way /v1 resolves one: it is answered by the model that
+		// is serving, which is the fallback below.
+		if name, isRole := strings.CutPrefix(requested, roleModelPrefix); isRole {
+			if target, ok := s.servingRoleModel(ctx, name); ok {
+				return target, true
+			}
+		}
+		active, ok := s.activeReadyRecipe(ctx)
+		if !ok || !answersOnV1(active) {
+			return recipe.Recipe{}, false
+		}
+		return active, true
+	})
+}
+
+// servingRoleModel resolves a role the way an inference request does and
+// keeps the answer only when that model is the one serving text right now.
+func (s *Server) servingRoleModel(ctx context.Context, name string) (recipe.Recipe, bool) {
+	route, problem := s.roleRoute(ctx, name)
+	if problem != nil || route.follow {
+		return recipe.Recipe{}, false
+	}
+	if !answersOnV1(route.target) || !s.servingNow(ctx, route.target.ID) {
+		return recipe.Recipe{}, false
+	}
+	return route.target, true
+}
+
+// answersOnV1 reports whether a recipe speaks the OpenAI-compatible API a
+// pass needs. A media-generation runtime does not, and is reached through the
+// generation endpoints instead (ADR 0007).
+func answersOnV1(target recipe.Recipe) bool {
+	_, media := target.MediaGeneration()
+	return !media
 }
 
 // docredactAddStatus separates a request that was wrong from one the

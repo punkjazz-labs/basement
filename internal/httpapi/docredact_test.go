@@ -4,10 +4,19 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/punkjazz-labs/basement/internal/auth"
 	"github.com/punkjazz-labs/basement/internal/docredact"
+	"github.com/punkjazz-labs/basement/internal/engine"
+	"github.com/punkjazz-labs/basement/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/store"
 )
 
 const docredactSampleText = "Contact Jane at jane.doe@example.com about the contract, and again at jane.doe@example.com tomorrow."
@@ -409,5 +418,341 @@ func TestDocredactExportDownloads(t *testing.T) {
 	// never contain the mapping's warning line or any of its literals.
 	if strings.Contains(string(redactedBody), docredact.MappingWarning) {
 		t.Error("redacted download contains the mapping warning line")
+	}
+}
+
+// docredactFakeModel stands in for the serving runtime on its loopback port,
+// answering chat/completions with scripted content. The last scripted reply
+// is repeated once the script runs out, so a chunk's repair retry is
+// answered too without the test having to count calls.
+type docredactFakeModel struct {
+	mu       sync.Mutex
+	replies  []string
+	requests []string
+}
+
+func (m *docredactFakeModel) handler(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	m.mu.Lock()
+	m.requests = append(m.requests, string(body))
+	reply := m.replies[len(m.replies)-1]
+	if len(m.requests) <= len(m.replies) {
+		reply = m.replies[len(m.requests)-1]
+	}
+	m.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"content": reply}}},
+	})
+}
+
+func (m *docredactFakeModel) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.requests)
+}
+
+func (m *docredactFakeModel) lastRequest(t *testing.T) string {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.requests) == 0 {
+		t.Fatal("the runtime was never reached")
+	}
+	return m.requests[len(m.requests)-1]
+}
+
+// docredactModelFixture is a paired manager with one installed, active and
+// ready text model whose service port is the fake runtime's, which is how a
+// model pass runs end to end with no hardware. It follows the same shape as
+// newRoleFixtureWith in roles_test.go.
+type docredactModelFixture struct {
+	url     string
+	cookies []*http.Cookie
+	csrf    string
+	model   *docredactFakeModel
+	recipe  recipe.Recipe
+	store   *store.Store
+}
+
+func newDocredactModelFixture(t *testing.T, replies ...string) *docredactModelFixture {
+	t.Helper()
+	fake := &docredactFakeModel{replies: replies}
+	upstream := httptest.NewServer(http.HandlerFunc(fake.handler))
+	t.Cleanup(upstream.Close)
+	port, err := strconv.Atoi(upstream.URL[strings.LastIndex(upstream.URL, ":")+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := recipe.Recipe{
+		ID: "redactor-model", Version: 1, DisplayName: "Redactor Model",
+		Topology: recipe.Topology{SparkCount: 1},
+		Runtime:  recipe.Runtime{Kind: "vllm"},
+		Service:  recipe.Service{DefaultHostPort: port, ServedModelID: "publisher/redactor-model-nvfp4"},
+	}
+	// A second installed model that is not serving, so a test can point the
+	// redactor role at something the pass must not stop the serving model for.
+	idle := recipe.Recipe{
+		ID: "idle-model", Version: 1, DisplayName: "Idle Model",
+		Topology: recipe.Topology{SparkCount: 1},
+		Runtime:  recipe.Runtime{Kind: "vllm"},
+		Service:  recipe.Service{DefaultHostPort: port, ServedModelID: "publisher/idle-model-nvfp4"},
+	}
+	recipes := []recipe.Recipe{served, idle}
+
+	dataDir := t.TempDir()
+	database, err := store.Open(filepath.Join(dataDir, "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	authManager, err := auth.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &apiExecutor{done: map[string]bool{}, running: true}
+	runner := engine.New(database, executor, recipes)
+	manager := New("test-version", dataDir, authManager, database, readyInventory{}, executor, runner, recipes)
+	server := httptest.NewServer(manager.Handler())
+	t.Cleanup(server.Close)
+
+	ctx := t.Context()
+	for _, item := range recipes {
+		if err := database.SetInstalled(ctx, store.InstalledModel{RecipeID: item.ID, RecipeVersion: item.Version, Status: "stopped", ArtifactPath: "/managed/" + item.ID, ContainerID: "container-" + item.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.ActivateExclusively(ctx, store.InstalledModel{RecipeID: served.ID, RecipeVersion: served.Version, Status: "ready", ArtifactPath: "/managed/" + served.ID, ContainerID: "container-" + served.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	tokenBytes, err := os.ReadFile(authManager.PairingTokenPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	paired := doRequest(t, http.MethodPost, server.URL+"/api/v1/auth/pair",
+		`{"token":"`+strings.TrimSpace(string(tokenBytes))+`"}`, nil, map[string]string{"Origin": server.URL})
+	var result struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(paired.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	cookies := paired.Cookies()
+	paired.Body.Close()
+	if len(cookies) == 0 || result.CSRF == "" {
+		t.Fatal("pairing did not issue session and CSRF tokens")
+	}
+	return &docredactModelFixture{url: server.URL, cookies: cookies, csrf: result.CSRF, model: fake, recipe: served, store: database}
+}
+
+func (f *docredactModelFixture) assignRole(t *testing.T, role, recipeID string) {
+	t.Helper()
+	response := doRequest(t, http.MethodPost, f.url+"/api/v1/roles",
+		`{"role":"`+role+`","recipe_id":"`+recipeID+`"}`, f.cookies,
+		map[string]string{"Origin": f.url, "X-CSRF-Token": f.csrf, "Idempotency-Key": "docredact-test"})
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("assign %s status=%d body=%s", role, response.StatusCode, data)
+	}
+	response.Body.Close()
+}
+
+// docredactModelPassResponse mirrors the JSON the modelpass case writes: the
+// whole finding list as it now stands, and the pass's own tally with the name
+// of the model that answered it.
+type docredactModelPassResponse struct {
+	Findings  []*docredact.Finding `json:"findings"`
+	ModelPass struct {
+		docredact.ModelPassResult
+		Model string `json:"model"`
+	} `json:"model_pass"`
+}
+
+func docredactModelPass(t *testing.T, server, sessionID, csrf string, cookies []*http.Cookie, body string) *http.Response {
+	t.Helper()
+	return doRequest(t, http.MethodPost, server+"/api/v1/docredact/sessions/"+sessionID+"/modelpass",
+		body, cookies, map[string]string{"Origin": server, "X-CSRF-Token": csrf})
+}
+
+func TestDocredactModelPassAddsWhatThePatternsMissed(t *testing.T) {
+	fixture := newDocredactModelFixture(t, `[{"literal":"Jane","category":"person"}]`)
+	session := docredactAnalyze(t, fixture.url, fixture.csrf, fixture.cookies, docredactSampleText, "letter.txt")
+
+	response := docredactModelPass(t, fixture.url, session.SessionID, fixture.csrf, fixture.cookies, `{}`)
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("model pass status=%d body=%s", response.StatusCode, data)
+	}
+	var result docredactModelPassResponse
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	if result.ModelPass.Accepted != 1 || result.ModelPass.Degraded || result.ModelPass.ChunksFailed != 0 {
+		t.Fatalf("model pass = %+v, want one accepted literal and no degradation", result.ModelPass)
+	}
+	// The name of whichever model answered, so a fallback is never silent.
+	if result.ModelPass.Model != "Redactor Model" {
+		t.Errorf("model = %q, want the display name of the model that answered", result.ModelPass.Model)
+	}
+	byLiteral := map[string]*docredact.Finding{}
+	for _, finding := range result.Findings {
+		byLiteral[finding.Literal] = finding
+	}
+	person := byLiteral["Jane"]
+	if person == nil {
+		t.Fatalf("findings = %+v, want the literal the model named", result.Findings)
+	}
+	if person.Source != docredact.SourceModel {
+		t.Errorf("source = %q, want %q", person.Source, docredact.SourceModel)
+	}
+	if byLiteral["jane.doe@example.com"] == nil {
+		t.Errorf("findings = %+v, want the pattern finding kept alongside the model's", result.Findings)
+	}
+
+	// The runtime must be asked for the model id it actually serves.
+	if forwarded := fixture.model.lastRequest(t); !strings.Contains(forwarded, `"model":"publisher/redactor-model-nvfp4"`) {
+		t.Fatalf("forwarded body = %s, want the served model id", forwarded)
+	}
+}
+
+// The redactor role decides which model a pass is sent to when its model is
+// the one serving, and the answer names it.
+func TestDocredactModelPassFollowsTheRedactorRole(t *testing.T) {
+	fixture := newDocredactModelFixture(t, `[{"literal":"Jane","category":"person"}]`)
+	fixture.assignRole(t, docredactRoleName, "redactor-model")
+	session := docredactAnalyze(t, fixture.url, fixture.csrf, fixture.cookies, docredactSampleText, "letter.txt")
+
+	response := docredactModelPass(t, fixture.url, session.SessionID, fixture.csrf, fixture.cookies, `{}`)
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("model pass status=%d body=%s", response.StatusCode, data)
+	}
+	var result docredactModelPassResponse
+	json.NewDecoder(response.Body).Decode(&result)
+	response.Body.Close()
+	if result.ModelPass.Model != "Redactor Model" || result.ModelPass.Accepted != 1 {
+		t.Fatalf("model pass = %+v, want the role's model to have answered", result.ModelPass)
+	}
+}
+
+// A redactor role pointing at a model that is not serving does not stop the
+// one that is: the pass falls back to it, and says so by name.
+func TestDocredactModelPassFallsBackVisiblyToTheServingModel(t *testing.T) {
+	fixture := newDocredactModelFixture(t, `[{"literal":"Jane","category":"person"}]`)
+	fixture.assignRole(t, docredactRoleName, "idle-model")
+	session := docredactAnalyze(t, fixture.url, fixture.csrf, fixture.cookies, docredactSampleText, "letter.txt")
+
+	response := docredactModelPass(t, fixture.url, session.SessionID, fixture.csrf, fixture.cookies, `{}`)
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("model pass status=%d body=%s", response.StatusCode, data)
+	}
+	var result docredactModelPassResponse
+	json.NewDecoder(response.Body).Decode(&result)
+	response.Body.Close()
+	if result.ModelPass.Model != "Redactor Model" {
+		t.Fatalf("model = %q, want the model that was already serving", result.ModelPass.Model)
+	}
+	if forwarded := fixture.model.lastRequest(t); !strings.Contains(forwarded, `"model":"publisher/redactor-model-nvfp4"`) {
+		t.Fatalf("forwarded body = %s, want the serving model id", forwarded)
+	}
+	// Nothing was started for the pass: the idle model is still idle.
+	idle, err := fixture.store.Model(t.Context(), "idle-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idle.Active || idle.Status == "ready" {
+		t.Fatalf("the pass activated the model the role names: %+v", idle)
+	}
+}
+
+// A model that answers with nothing usable is data, not an error: the pass
+// says it is degraded and every pattern finding stands exactly as it was.
+func TestDocredactModelPassDegradedKeepsPatternFindings(t *testing.T) {
+	fixture := newDocredactModelFixture(t, "not json at all", "still not json")
+	session := docredactAnalyze(t, fixture.url, fixture.csrf, fixture.cookies, docredactSampleText, "letter.txt")
+
+	response := docredactModelPass(t, fixture.url, session.SessionID, fixture.csrf, fixture.cookies, `{}`)
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("model pass status=%d body=%s", response.StatusCode, data)
+	}
+	var result docredactModelPassResponse
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	if !result.ModelPass.Degraded {
+		t.Fatalf("model pass = %+v, want degraded", result.ModelPass)
+	}
+	if result.ModelPass.Accepted != 0 || result.ModelPass.ChunksFailed != result.ModelPass.ChunksTotal {
+		t.Errorf("model pass = %+v, want every chunk counted failed and nothing accepted", result.ModelPass)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Literal != "jane.doe@example.com" {
+		t.Fatalf("findings = %+v, want the pattern finding untouched", result.Findings)
+	}
+	if result.Findings[0].Source != docredact.Source {
+		t.Errorf("source = %q, want %q", result.Findings[0].Source, docredact.Source)
+	}
+	// The garbage reply was retried once for repair before the chunk was
+	// given up on, which is what the two scripted replies are for.
+	if fixture.model.count() < 2 {
+		t.Errorf("runtime calls = %d, want the repair retry too", fixture.model.count())
+	}
+}
+
+// Nothing serving means the pass cannot run, and the honest answer says so
+// without pretending the pattern findings changed.
+func TestDocredactModelPassNeedsATextModelServing(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	session := docredactAnalyze(t, server.URL, csrf, cookies, docredactSampleText, "letter.txt")
+
+	response := docredactModelPass(t, server.URL, session.SessionID, csrf, cookies, `{}`)
+	if response.StatusCode != http.StatusServiceUnavailable {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("model pass status=%d body=%s", response.StatusCode, data)
+	}
+	var problem struct {
+		Error string `json:"error"`
+	}
+	json.NewDecoder(response.Body).Decode(&problem)
+	response.Body.Close()
+	const want = "no text model is serving, so the model pass cannot run. The pattern findings are unchanged."
+	if problem.Error != want {
+		t.Fatalf("error = %q, want %q", problem.Error, want)
+	}
+
+	// The findings really are unchanged.
+	listed := doRequest(t, http.MethodGet, server.URL+"/api/v1/docredact/sessions/"+session.SessionID+"/findings", "", cookies, nil)
+	var body struct {
+		Findings []*docredact.Finding `json:"findings"`
+	}
+	json.NewDecoder(listed.Body).Decode(&body)
+	listed.Body.Close()
+	if len(body.Findings) != 1 || body.Findings[0].Literal != "jane.doe@example.com" {
+		t.Fatalf("findings = %+v, want the pattern finding untouched", body.Findings)
+	}
+}
+
+func TestDocredactModelPassRequiresSessionAndCSRF(t *testing.T) {
+	fixture := newDocredactModelFixture(t, `[]`)
+	session := docredactAnalyze(t, fixture.url, fixture.csrf, fixture.cookies, docredactSampleText, "letter.txt")
+	url := fixture.url + "/api/v1/docredact/sessions/" + session.SessionID + "/modelpass"
+
+	anonymous := doRequest(t, http.MethodPost, url, `{}`, nil, map[string]string{"Origin": fixture.url})
+	if anonymous.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated model pass status=%d", anonymous.StatusCode)
+	}
+	anonymous.Body.Close()
+	noCSRF := doRequest(t, http.MethodPost, url, `{}`, fixture.cookies, map[string]string{"Origin": fixture.url})
+	if noCSRF.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing CSRF status=%d", noCSRF.StatusCode)
+	}
+	noCSRF.Body.Close()
+	if fixture.model.count() != 0 {
+		t.Fatalf("the runtime was reached %d times by refused requests", fixture.model.count())
 	}
 }
