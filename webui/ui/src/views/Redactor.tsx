@@ -51,6 +51,9 @@ export default function Redactor() {
   const [restoring, setRestoring] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const previewPane = useRef<HTMLElement>(null)
+  // Bumped whenever the restore inputs change, so a response for an answer
+  // nobody is waiting for anymore can be told apart from the current one.
+  const restoreSeq = useRef(0)
 
   const sessionPath = (suffix: string) =>
     `/api/v1/docredact/sessions/${encodeURIComponent(doc?.sessionID ?? '')}${suffix}`
@@ -68,6 +71,7 @@ export default function Redactor() {
     setPassBefore(0)
     setPassProblem(null)
     setRestored(null)
+    restoreSeq.current++
     try {
       const text = await file.text()
       const session = await api<DocredactSession>('/api/v1/docredact/analyze', {
@@ -196,6 +200,9 @@ export default function Redactor() {
   // wrote them.
   const runRestore = async () => {
     if (restoring || reply.trim() === '') return
+    // A reply edited, a new document, or a new mapping makes an in-flight
+    // answer about the old inputs; it must be dropped, not shown.
+    const seq = restoreSeq.current
     setRestoring(true)
     try {
       const body = doc
@@ -205,7 +212,7 @@ export default function Redactor() {
         : await api<DocredactRestoreResponse>('/api/v1/docredact/restore', {
             method: 'POST', body: JSON.stringify({ text: reply, mapping: mappingFile?.raw ?? '' }),
           })
-      setRestored(body)
+      if (seq === restoreSeq.current) setRestored(body)
     } catch (problem) {
       noticeBox('Could not restore that reply', message(problem))
     } finally {
@@ -225,6 +232,7 @@ export default function Redactor() {
     setMappingProblem(false)
     setMappingFile({ name: file.name, raw, entries })
     setRestored(null)
+    restoreSeq.current++
   }
 
   // The restored text stays on screen; copy is the only way it leaves. The
@@ -328,7 +336,7 @@ export default function Redactor() {
               className="restore-in"
               value={reply}
               placeholder="Paste the reply that quotes [PERSON_1]-style pseudonyms."
-              onChange={event => { setReply(event.target.value); setRestored(null) }}
+              onChange={event => { setReply(event.target.value); setRestored(null); restoreSeq.current++ }}
             />
           </section>
           <section className="restore-col">
@@ -342,7 +350,7 @@ export default function Redactor() {
             {restored === null
               ? <div className="restore-out faint">Restored text appears here, on this screen only. It is never written to a file.</div>
               : colorable
-                ? <div className="restore-out">{segments!.map((segment, index) =>
+                ? <div className="restore-out">{segments.map((segment, index) =>
                     segment.kind === 'restored' ? <span key={index} className="back">{segment.text}</span>
                     : segment.kind === 'stray' ? <span key={index} className="stray">{segment.text}</span>
                     : <Fragment key={index}>{segment.text}</Fragment>)}</div>
