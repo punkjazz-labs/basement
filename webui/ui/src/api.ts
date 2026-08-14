@@ -327,6 +327,15 @@ export interface DocredactModelPassResponse {
   model_pass: DocredactModelPass
 }
 
+// One restore call: the restored text, how much came back, and which
+// pseudonym-shaped strings had no mapping entry.
+export interface DocredactRestoreResponse {
+  text: string
+  replaced: number
+  tokens: number
+  unknown: string[]
+}
+
 // ---- Finding and adopting a second Spark ------------------------------------
 // One machine the network sweep answered for. gb10_hint and basement are the
 // sweep's own findings, never a guess made here: they rank the list the

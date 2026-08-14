@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest'
 import type { DocredactFinding, DocredactModelPass } from './api'
 import {
   ACCEPT_ATTRIBUTE, ACCEPT_HINT, acceptedDocument, documentMeta, exportNames, findingByID,
-  groupFindings, passReceipt, pickDocument, previewParagraphs, previewSegments, selectionLiteral,
-  sourceClass, sourceLabel, toggledFindings, wordCount,
+  groupFindings, parseMappingFile, passReceipt, pickDocument, previewParagraphs, previewSegments,
+  restoreEntriesFromFindings, restoreSegments, restoredHint, segmentsText, selectionLiteral,
+  sourceClass, sourceLabel, strayLine, toggledFindings, wordCount,
 } from './docredact'
 
 const finding = (overrides: Partial<DocredactFinding> = {}): DocredactFinding => ({
@@ -251,5 +252,59 @@ describe('naming the downloads', () => {
   it('falls back to a name when there is nothing to derive one from', () => {
     expect(exportNames('')).toEqual({ redacted: 'document.redacted.txt', mapping: 'document.mapping.json' })
     expect(exportNames('   ')).toEqual({ redacted: 'document.redacted.txt', mapping: 'document.mapping.json' })
+  })
+})
+
+describe('restore helpers', () => {
+  const entries = [
+    { token: '[PERSON_1]', literal: 'Marta Ferretti' },
+    { token: '[ORG_1]', literal: 'Nordwind Logistik GmbH' },
+  ]
+
+  it('builds entries from enabled findings only', () => {
+    const findings = [
+      { id: 'a', token: '[PERSON_1]', literal: 'Marta Ferretti', category: 'person', source: 'model', occurrences: 1, enabled: true },
+      { id: 'b', token: '[DOB_1]', literal: '1998-06-02', category: 'dob', source: 'pattern', occurrences: 1, enabled: false },
+    ]
+    expect(restoreEntriesFromFindings(findings)).toEqual([{ token: '[PERSON_1]', literal: 'Marta Ferretti' }])
+  })
+
+  it('splits a reply into text, restored and stray segments', () => {
+    const segments = restoreSegments('Ask [PERSON_1] and [PERSON_9].', entries)
+    expect(segments).toEqual([
+      { kind: 'text', text: 'Ask ' },
+      { kind: 'restored', text: 'Marta Ferretti' },
+      { kind: 'text', text: ' and ' },
+      { kind: 'stray', text: '[PERSON_9]' },
+      { kind: 'text', text: '.' },
+    ])
+  })
+
+  it('joins segments back into the exact restored text', () => {
+    const segments = restoreSegments('Ask [PERSON_1] at [ORG_1].', entries)
+    expect(segmentsText(segments)).toBe('Ask Marta Ferretti at Nordwind Logistik GmbH.')
+  })
+
+  it('never rescans a restored literal that looks like a pseudonym', () => {
+    const tricky = [{ token: '[PHRASE_1]', literal: 'see [ORG_1] file' }, ...entries]
+    expect(segmentsText(restoreSegments('[PHRASE_1] and [ORG_1]', tricky)))
+      .toBe('see [ORG_1] file and Nordwind Logistik GmbH')
+  })
+
+  it('parses a mapping file and refuses garbage', () => {
+    const raw = 'WARNING: do not upload.\n{"entries":[{"token":"[X_1]","literal":"x","category":"phrase","source":"manual","occurrences":1}]}'
+    expect(parseMappingFile(raw)).toEqual([{ token: '[X_1]', literal: 'x' }])
+    expect(parseMappingFile('no newline')).toBeNull()
+    expect(parseMappingFile('warning\nnot json')).toBeNull()
+    expect(parseMappingFile('warning\n{"entries":[{"token":1}]}')).toBeNull()
+  })
+
+  it('words the tally and the stray line', () => {
+    expect(restoredHint(0)).toBe('nothing to put back')
+    expect(restoredHint(1)).toBe('1 name put back')
+    expect(restoredHint(3)).toBe('3 names put back')
+    expect(strayLine(0)).toBe('')
+    expect(strayLine(1)).toBe('1 pseudonym this document never used: it stays as the model wrote it')
+    expect(strayLine(2)).toBe('2 pseudonyms this document never used: they stay as the model wrote them')
   })
 })

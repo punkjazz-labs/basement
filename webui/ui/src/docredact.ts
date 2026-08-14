@@ -207,3 +207,79 @@ export function passReceipt(pass: DocredactModelPass, previousAccepted = 0): Pas
       `the model did not answer ${pass.chunks_failed} of ${pass.chunks_total} parts`,
   }
 }
+
+// ---- The reverse trip -------------------------------------------------------
+
+// The pairs a restore needs: the pseudonym and the real text. From an open
+// session these come from the enabled findings; from a saved mapping file
+// they come from parseMappingFile.
+export interface RestoreEntry {
+  token: string
+  literal: string
+}
+
+export const restoreEntriesFromFindings = (findings: DocredactFinding[]): RestoreEntry[] =>
+  findings.filter(finding => finding.enabled)
+    .map(finding => ({ token: finding.token, literal: finding.literal }))
+
+// A saved .mapping.json: one warning line, then JSON. The same shape
+// internal/docredact writes and parses. Anything that does not parse
+// cleanly is refused whole: a half-read mapping would restore half the
+// names and look done.
+export function parseMappingFile(raw: string): RestoreEntry[] | null {
+  const newline = raw.indexOf('\n')
+  if (newline < 0) return null
+  try {
+    const payload = JSON.parse(raw.slice(newline + 1)) as { entries?: Array<Record<string, unknown>> }
+    if (!payload || !Array.isArray(payload.entries)) return null
+    const entries: RestoreEntry[] = []
+    for (const entry of payload.entries) {
+      if (typeof entry.token !== 'string' || typeof entry.literal !== 'string') return null
+      entries.push({ token: entry.token, literal: entry.literal })
+    }
+    return entries
+  } catch {
+    return null
+  }
+}
+
+// The reply split for display: what the person typed, what came back, and
+// what the cloud model invented. One pass, so a restored literal is never
+// rescanned. The server is still the engine of record: the caller must
+// compare segmentsText against the server's text and drop the colors on
+// any mismatch.
+export type RestoreSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'restored'; text: string }
+  | { kind: 'stray'; text: string }
+
+export function restoreSegments(reply: string, entries: RestoreEntry[]): RestoreSegment[] {
+  const byToken = new Map(entries.map(entry => [entry.token, entry.literal]))
+  const segments: RestoreSegment[] = []
+  let last = 0
+  for (const match of reply.matchAll(new RegExp(TOKEN.source, 'g'))) {
+    const index = match.index ?? 0
+    if (index > last) segments.push({ kind: 'text', text: reply.slice(last, index) })
+    const literal = byToken.get(match[0])
+    if (literal === undefined) segments.push({ kind: 'stray', text: match[0] })
+    else segments.push({ kind: 'restored', text: literal })
+    last = index + match[0].length
+  }
+  if (last < reply.length) segments.push({ kind: 'text', text: reply.slice(last) })
+  return segments
+}
+
+export const segmentsText = (segments: RestoreSegment[]): string =>
+  segments.map(segment => segment.text).join('')
+
+// The right pane's tally, counting distinct pseudonyms put back.
+export const restoredHint = (tokens: number): string =>
+  tokens === 0 ? 'nothing to put back' : counted(tokens, 'name put back', 'names put back')
+
+// The amber line over the output when the reply quotes pseudonyms this
+// document never minted.
+export const strayLine = (unknown: number): string => {
+  if (unknown === 0) return ''
+  if (unknown === 1) return '1 pseudonym this document never used: it stays as the model wrote it'
+  return `${unknown} pseudonyms this document never used: they stay as the model wrote them`
+}
