@@ -183,6 +183,7 @@ export interface PassReceipt {
   model: string
   findings: string
   claims: string
+  parts: string
 }
 
 // The one line a finished pass leaves behind. Claims are the literals the
@@ -199,5 +200,10 @@ export function passReceipt(pass: DocredactModelPass, previousAccepted = 0): Pas
     model: pass.model,
     findings: gained === 0 ? 'no new findings' : counted(gained, 'new finding', 'new findings'),
     claims: pass.hallucinated === 0 ? '' : counted(pass.hallucinated, 'claim not in the document', 'claims not in the document'),
+    // A pass that got no answer for some chunks read less of the document
+    // than the receipt implies. The receipt must say so: on a redaction
+    // tool, a silent partial read looks like a full read.
+    parts: pass.chunks_failed === 0 ? '' :
+      `the model did not answer ${pass.chunks_failed} of ${pass.chunks_total} parts`,
   }
 }

@@ -252,7 +252,7 @@ export default function Redactor() {
             const receipt = passReceipt(pass, passBefore)
             return (
               <div className="passline">
-                <span>asked <span className="who">{receipt.model}</span>: {receipt.findings}{receipt.claims !== '' && <span className="claims">, {receipt.claims}</span>}</span>
+                <span>asked <span className="who">{receipt.model}</span>: {receipt.findings}{receipt.claims !== '' && <span className="claims">, {receipt.claims}</span>}{receipt.parts !== '' && <span className="claims">, {receipt.parts}</span>}</span>
               </div>
             )
           })()}

@@ -125,11 +125,11 @@ describe('groupFindings with model categories', () => {
 })
 
 describe('passReceipt', () => {
-  const pass = (accepted: number, hallucinated: number): DocredactModelPass =>
-    ({ accepted, duplicates: 0, hallucinated, chunks_total: 1, chunks_failed: 0, degraded: false, model: 'Qwen 3.6 27B' })
+  const pass = (accepted: number, hallucinated: number, chunksFailed = 0, chunksTotal = 1): DocredactModelPass =>
+    ({ accepted, duplicates: 0, hallucinated, chunks_total: chunksTotal, chunks_failed: chunksFailed, degraded: false, model: 'Qwen 3.6 27B' })
 
   it('counts new findings in words', () => {
-    expect(passReceipt(pass(4, 0))).toEqual({ model: 'Qwen 3.6 27B', findings: '4 new findings', claims: '' })
+    expect(passReceipt(pass(4, 0))).toEqual({ model: 'Qwen 3.6 27B', findings: '4 new findings', claims: '', parts: '' })
     expect(passReceipt(pass(1, 0)).findings).toBe('1 new finding')
     expect(passReceipt(pass(0, 0)).findings).toBe('no new findings')
   })
@@ -142,6 +142,12 @@ describe('passReceipt', () => {
   it('counts only the growth since the previous pass, since accepted is cumulative', () => {
     expect(passReceipt(pass(4, 0), 4).findings).toBe('no new findings')
     expect(passReceipt(pass(6, 0), 4).findings).toBe('2 new findings')
+  })
+
+  it('names parts only when some chunks went unanswered', () => {
+    expect(passReceipt(pass(4, 0)).parts).toBe('')
+    expect(passReceipt(pass(4, 0, 2, 5)).parts).toBe('the model did not answer 2 of 5 parts')
+    expect(passReceipt(pass(4, 0, 1, 3)).parts).toBe('the model did not answer 1 of 3 parts')
   })
 })
 
