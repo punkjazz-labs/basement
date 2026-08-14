@@ -214,8 +214,9 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
 	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
 	// Document redactor (docs/plans/12-doc-redactor.md), pattern pass only.
-	// Console session only, on both: a document's text and its findings are
-	// never something a bearer key should be able to submit or read.
+	// Console session only, across all three routes: a document's text, its
+	// findings, and its mapping are never something a bearer key should be
+	// able to submit or read.
 	mux.HandleFunc("/api/v1/docredact/analyze", server.withReadAuth(server.docredactAnalyze))
 	mux.HandleFunc("/api/v1/docredact/sessions/", server.withReadAuth(server.docredactSessionAction))
 	mux.HandleFunc("/api/v1/docredact/restore", server.withReadAuth(server.docredactRestore))

@@ -1,6 +1,7 @@
 package docredact
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -81,6 +82,35 @@ func TestRestoreEmptyCases(t *testing.T) {
 	}
 	if result := func() RestoreResult { _, r := Restore("plain", restoreEntries()); return r }(); result.Unknown == nil {
 		t.Fatalf("Unknown must be an empty slice, not nil, so the JSON reads [] rather than null")
+	}
+}
+
+// TestTokenShapeMatchesEveryCategoryPrefix pins tokenShape against every
+// Category this package declares, including the default/fallback prefix an
+// unrecognized category falls back to. tokenShape is hand-maintained rather
+// than derived from Category.Prefix(), so nothing stops a future category
+// from picking a prefix tokenShape does not match -- an underscore in the
+// prefix, say. Restore would then neither restore that token nor report it
+// as unknown: it would simply not look like a token at all, and vanish from
+// both counts while sitting untouched in the output. This test is the
+// tripwire for that silently wrong case.
+func TestTokenShapeMatchesEveryCategoryPrefix(t *testing.T) {
+	categories := []Category{
+		CategoryEmail, CategoryPhone, CategoryIBAN, CategoryCard, CategoryIPv4, CategoryIPv6,
+		CategoryDOB, CategoryITCF, CategoryUSSSN, CategoryFRNIR, CategoryESDNI, CategoryPTNIF,
+		CategoryDESteuerID, CategoryNLBSN, CategoryUKNINO, CategoryBRCPF, CategoryCNResidentID,
+		CategoryJPMyNumber, CategoryPhrase, CategoryPerson, CategoryOrg, CategoryAddress,
+		CategoryJobTitle, CategoryAmount,
+		// The fallback Category.Prefix() returns for a name none of the
+		// above match ("MATCH"), so the default case is pinned too, not
+		// just the named ones.
+		Category("unrecognized-category"),
+	}
+	for _, c := range categories {
+		token := fmt.Sprintf("[%s_1]", c.Prefix())
+		if !tokenShape.MatchString(token) {
+			t.Errorf("category %q: prefix %q does not fit tokenShape (token %q)", c, c.Prefix(), token)
+		}
 	}
 }
 

@@ -3,11 +3,14 @@ package docredact
 import "regexp"
 
 // tokenShape matches anything shaped like a pseudonym this package mints:
-// an uppercase prefix, an underscore, a number, in brackets. The console's
-// preview uses the same shape. A match is only restored when the mapping
-// actually names it; everything else is left exactly where it stood and
-// reported as unknown, because a pseudonym the mapping never minted is the
-// cloud model inventing one.
+// an uppercase prefix, an underscore, a number, in brackets. Its console
+// twin is the TOKEN regexp in webui/ui/src/docredact.ts, which the preview
+// uses for the same purpose; the two must stay in lockstep with every
+// Category.Prefix() this package declares, which
+// TestTokenShapeMatchesEveryCategoryPrefix pins. A match is only restored
+// when the mapping actually names it; everything else is left exactly where
+// it stood and reported as unknown, because a pseudonym the mapping never
+// minted is the cloud model inventing one.
 var tokenShape = regexp.MustCompile(`\[[A-Z][A-Z0-9]*_\d+\]`)
 
 // RestoreResult tallies what one Restore call did: how many pseudonym

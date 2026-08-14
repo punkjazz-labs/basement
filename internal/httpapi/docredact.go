@@ -389,15 +389,16 @@ func docredactAddStatus(err error) int {
 	}
 }
 
-// restoreResponse is the one wire shape both restore routes answer with,
-// so the console never has to care which route it called.
-func restoreResponse(text string, result docredact.RestoreResult) map[string]any {
-	return map[string]any{
-		"text":     text,
-		"replaced": result.Replaced,
-		"tokens":   result.Tokens,
-		"unknown":  result.Unknown,
-	}
+// restoreResponse is the one wire shape both restore routes answer with, so
+// the console never has to care which route it called. It embeds
+// docredact.RestoreResult rather than hand-spelling its fields, so the json
+// tags on RestoreResult (replaced/tokens/unknown) are the single source for
+// this shape and cannot drift from it.
+func restoreResponse(text string, result docredact.RestoreResult) any {
+	return struct {
+		docredact.RestoreResult
+		Text string `json:"text"`
+	}{result, text}
 }
 
 // docredactRestore is the stateless reverse trip, for a reply that comes

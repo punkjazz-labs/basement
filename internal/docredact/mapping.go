@@ -70,9 +70,14 @@ func (d *Document) MappingBytes() ([]byte, error) {
 }
 
 // ParseMapping parses bytes produced by MappingBytes back into the warning
-// line and entries. It exists for the round-trip test and for any future
-// "restore the reply" feature (spec's open question, not built here) that
-// needs to read a downloaded mapping file back in.
+// line and entries. It exists for the round-trip test and for the "restore
+// the reply" feature (spec's open question, now built): the restore
+// endpoints in internal/httpapi read a mapping file back in through this
+// exact function -- the stateless POST /api/v1/docredact/restore parses the
+// caller-supplied mapping bytes with it directly, and the session-scoped
+// restore route reads the same shape from the still-open session's own
+// Document.Mapping() instead of a saved file -- so a mapping is always
+// parsed by the code that wrote it.
 func ParseMapping(data []byte) (warning string, entries []MappingEntry, err error) {
 	idx := bytes.IndexByte(data, '\n')
 	if idx < 0 {

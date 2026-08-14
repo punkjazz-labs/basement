@@ -196,3 +196,34 @@ Locales expanded per owner directive 2026-08-13 with eight checksummed national-
 detectors, FR, ES, PT, DE, NL, BR, CN and JP (JP My Number matches the grouped form only),
 plus UK NINO, structure-only with no checksum; see
 `docs/superpowers/plans/2026-08-13-docredact-locale-expansion.md` for the detector list.
+
+## Amendment, 2026-08-14
+
+Records the reverse trip: the owner pastes a cloud model's reply back in and gets the real
+text back, closing the spec's open question that ADR 0021 and this ADR both left unbuilt.
+`internal/docredact/restore.go` adds `Restore(text, entries) (string, RestoreResult)`, a
+pure, single-pass swap of every pseudonym token back to its literal, with tokens the
+mapping does not name left untouched and reported in `RestoreResult.Unknown` rather than
+guessed at. `internal/httpapi/docredact.go` adds two more routes to the surface ADR 0021
+listed and this ADR extended, under the same console session auth and the same inline
+`AuthorizeMutation` on POST:
+
+- `POST /api/v1/docredact/sessions/{id}/restore` -- restore a pasted reply against the
+  session's current mapping (`Document.Mapping()`). A finding disabled before export was
+  never replaced in the redacted copy that left the machine, so its token was never minted
+  for a model to echo back; a reply quoting it anyway comes back as unknown rather than
+  restored, on purpose.
+- `POST /api/v1/docredact/restore` -- the same swap, stateless, for a reply that arrives
+  after the session that produced it is gone. The caller supplies the saved mapping file's
+  own bytes alongside the reply, parsed by the same `docredact.ParseMapping` that
+  `MappingBytes` round-trips through, so a saved file is read back by the code that wrote
+  it rather than a second mapping format. This is the first redactor endpoint that accepts
+  a sensitive literal inbound over HTTP: the posted mapping is exactly the file the owner
+  was warned not to upload anywhere. It gets the same treatment as everything else in this
+  feature even so: console-session-only auth, never a bearer key, and nothing from the
+  request is written to this machine's disk or to any log.
+
+Both routes answer the same shape, `{text, replaced, tokens, unknown}`, which is
+`docredact.RestoreResult`'s own json tags plus the restored text, so the wire shape has one
+source of truth in `internal/docredact/restore.go` rather than being hand-spelled a second
+time in the handler.

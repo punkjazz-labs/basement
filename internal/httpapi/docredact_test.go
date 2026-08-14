@@ -905,6 +905,44 @@ func TestDocredactRestoreRejectsBadInput(t *testing.T) {
 	}
 }
 
+func TestDocredactSessionRestoreRequiresSessionAndCSRF(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	result := docredactAnalyze(t, server.URL, csrf, cookies, docredactSampleText, "letter.txt")
+	url := server.URL + "/api/v1/docredact/sessions/" + result.SessionID + "/restore"
+	body := `{"text":"quote it back"}`
+
+	anonymous := doRequest(t, http.MethodPost, url, body, nil, map[string]string{"Origin": server.URL})
+	if anonymous.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated restore status=%d", anonymous.StatusCode)
+	}
+	anonymous.Body.Close()
+	noCSRF := doRequest(t, http.MethodPost, url, body, cookies, map[string]string{"Origin": server.URL})
+	if noCSRF.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing CSRF status=%d", noCSRF.StatusCode)
+	}
+	noCSRF.Body.Close()
+}
+
+// The stateless route needs no session, but it is still a console-only
+// mutation: a bearer key must never be able to submit a mapping or a reply
+// through it.
+func TestDocredactRestoreRequiresSessionAndCSRF(t *testing.T) {
+	server, cookies, _ := newPairedTestServer(t)
+	url := server.URL + "/api/v1/docredact/restore"
+	body := `{"text":"quote it back","mapping":"whatever"}`
+
+	anonymous := doRequest(t, http.MethodPost, url, body, nil, map[string]string{"Origin": server.URL})
+	if anonymous.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated restore status=%d", anonymous.StatusCode)
+	}
+	anonymous.Body.Close()
+	noCSRF := doRequest(t, http.MethodPost, url, body, cookies, map[string]string{"Origin": server.URL})
+	if noCSRF.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing CSRF status=%d", noCSRF.StatusCode)
+	}
+	noCSRF.Body.Close()
+}
+
 func TestDocredactModelPassRequiresSessionAndCSRF(t *testing.T) {
 	fixture := newDocredactModelFixture(t, `[]`)
 	session := docredactAnalyze(t, fixture.url, fixture.csrf, fixture.cookies, docredactSampleText, "letter.txt")

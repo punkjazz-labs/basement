@@ -112,7 +112,9 @@ export const findingByID = (findings: DocredactFinding[], id: string): Docredact
 
 // ---- The preview ------------------------------------------------------------
 
-// A pseudonym as it appears in the redacted text, e.g. [EMAIL_1].
+// A pseudonym as it appears in the redacted text, e.g. [EMAIL_1]. Its Go
+// twin is tokenShape in internal/docredact/restore.go; the two must stay
+// in lockstep.
 const TOKEN = /\[[A-Z][A-Z0-9]*_\d+\]/g
 
 export type PreviewSegment =
