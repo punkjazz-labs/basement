@@ -1,8 +1,11 @@
 import { Fragment, useRef, useState } from 'react'
-import { api, type DocredactFinding, type DocredactSession } from '../api'
+import {
+  api, ApiError, type DocredactFinding, type DocredactModelPass, type DocredactModelPassResponse,
+  type DocredactSession,
+} from '../api'
 import { noticeBox } from '../confirm'
 import {
-  ACCEPT_ATTRIBUTE, ACCEPT_HINT, documentMeta, exportNames, groupFindings, pickDocument,
+  ACCEPT_ATTRIBUTE, ACCEPT_HINT, documentMeta, exportNames, groupFindings, passReceipt, pickDocument,
   previewParagraphs, previewSegments, selectionLiteral, sourceClass, sourceLabel, toggledFindings,
   wordCount,
 } from '../docredact'
@@ -32,6 +35,9 @@ export default function Redactor() {
   const [preview, setPreview] = useState('')
   const [busy, setBusy] = useState(false)
   const [offer, setOffer] = useState<HideOffer | null>(null)
+  const [pass, setPass] = useState<DocredactModelPass | null>(null)
+  const [asking, setAsking] = useState(false)
+  const [passProblem, setPassProblem] = useState<string | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const previewPane = useRef<HTMLElement>(null)
 
@@ -47,6 +53,8 @@ export default function Redactor() {
   const open = async (file: File) => {
     setBusy(true)
     setOffer(null)
+    setPass(null)
+    setPassProblem(null)
     try {
       const text = await file.text()
       const session = await api<DocredactSession>('/api/v1/docredact/analyze', {
@@ -128,6 +136,27 @@ export default function Redactor() {
     }
   }
 
+  // The model pass is one POST: the manager picks the model (redactor role
+  // first), runs every chunk, and answers with the findings as they now
+  // stand. A degraded pass is an answer, not an error; only "no text model
+  // is serving" refuses, and that sentence is shown as the manager wrote it.
+  const askModel = async () => {
+    if (!doc || asking) return
+    setAsking(true)
+    setPassProblem(null)
+    try {
+      const body = await api<DocredactModelPassResponse>(sessionPath('/modelpass'), { method: 'POST' })
+      setPass(body.model_pass)
+      setFindings(body.findings ?? [])
+      await loadPreview(doc.sessionID)
+    } catch (problem) {
+      if (problem instanceof ApiError && problem.status === 503) setPassProblem(problem.message)
+      else noticeBox('Could not ask the model', message(problem))
+    } finally {
+      setAsking(false)
+    }
+  }
+
   // Both files, one press: the redacted copy is what leaves this machine, the
   // mapping is what turns it back, and neither is useful without the other.
   const exportSafeCopy = () => {
@@ -185,14 +214,42 @@ export default function Redactor() {
         <span className="name">{doc.name}</span>
         <span className="meta">{documentMeta(doc.words, findings.length)}</span>
         <div className="right">
-          <button className="open" disabled={busy} onClick={() => fileInput.current?.click()}>Open file</button>
-          <button className="export" onClick={exportSafeCopy}>Export safe copy</button>
+          <button className="ghost" disabled={busy || asking} onClick={() => fileInput.current?.click()}>Open file</button>
+          <button className="ghost" disabled={busy || asking} onClick={() => void askModel()}>
+            {asking ? 'Asking the model' : 'Ask the model'}
+          </button>
+          <button className="primary" onClick={exportSafeCopy}>Export safe copy</button>
         </div>
       </div>
+
+      {passProblem && (
+        <div className="error-note">
+          <strong>Could not ask the model</strong>
+          <p>{passProblem}</p>
+          <p className="faint">Start a text model on the Models tab, then ask again.</p>
+        </div>
+      )}
 
       <div className="cols">
         <section className="findings">
           <div className="findings-head"><h2>Findings</h2></div>
+          {asking && (
+            <div className="passline working"><span className="dot" />asking the model</div>
+          )}
+          {!asking && pass && pass.degraded && (
+            <div className="passline degraded">
+              <span className="dot" />the model&apos;s answers were unusable, so these findings are from patterns alone
+            </div>
+          )}
+          {!asking && pass && !pass.degraded && (() => {
+            const receipt = passReceipt(pass)
+            return (
+              <div className="passline">
+                <span>asked</span> <span className="who">{receipt.model}</span><span>: {receipt.findings}</span>
+                {receipt.claims !== '' && <span className="claims">, {receipt.claims}</span>}
+              </div>
+            )
+          })()}
           <div className="findings-body">
             {groupFindings(findings).map(group => (
               <Fragment key={group.heading}>
