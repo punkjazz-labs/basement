@@ -83,41 +83,41 @@ describe('grouping findings', () => {
 })
 
 describe('groupFindings with model categories', () => {
-  const finding = (category: string, source = 'pattern', literal = 'x'): DocredactFinding =>
+  const catFinding = (category: string, source = 'pattern', literal = 'x'): DocredactFinding =>
     ({ id: literal, token: '[X_1]', literal, category, source, occurrences: 1, enabled: true })
 
   it('files person, org and job_title under People and companies', () => {
-    const groups = groupFindings([finding('person'), finding('org'), finding('job_title')])
+    const groups = groupFindings([catFinding('person'), catFinding('org'), catFinding('job_title')])
     expect(groups).toHaveLength(1)
     expect(groups[0].heading).toBe('People and companies')
     expect(groups[0].findings).toHaveLength(3)
   })
 
   it('files address under Contact and amount under Money and accounts', () => {
-    const groups = groupFindings([finding('address'), finding('amount')])
+    const groups = groupFindings([catFinding('address'), catFinding('amount')])
     expect(groups.map(group => group.heading)).toEqual(['Contact', 'Money and accounts'])
   })
 
   it('files every national identifier under Dates and IDs', () => {
     const ids = ['fr_nir', 'es_dni', 'pt_nif', 'de_steuer_id', 'nl_bsn', 'uk_nino', 'br_cpf', 'cn_resident_id', 'jp_my_number']
-    const groups = groupFindings(ids.map(category => finding(category, 'pattern', category)))
+    const groups = groupFindings(ids.map(category => catFinding(category, 'pattern', category)))
     expect(groups).toHaveLength(1)
     expect(groups[0].heading).toBe('Dates and IDs')
     expect(groups[0].findings).toHaveLength(ids.length)
   })
 
   it('still files a category nobody named under the last heading', () => {
-    const groups = groupFindings([finding('never_heard_of_it')])
+    const groups = groupFindings([catFinding('never_heard_of_it')])
     expect(groups).toHaveLength(1)
     expect(groups[0].heading).toBe('Dates and IDs')
   })
 
   it('sorts model rows after pattern and manual rows inside a group, stably', () => {
     const groups = groupFindings([
-      finding('person', 'model', 'model-first'),
-      finding('person', 'pattern', 'rule-a'),
-      finding('person', 'model', 'model-second'),
-      finding('person', 'manual', 'by-hand'),
+      catFinding('person', 'model', 'model-first'),
+      catFinding('person', 'pattern', 'rule-a'),
+      catFinding('person', 'model', 'model-second'),
+      catFinding('person', 'manual', 'by-hand'),
     ])
     expect(groups[0].findings.map(item => item.literal))
       .toEqual(['rule-a', 'by-hand', 'model-first', 'model-second'])
@@ -137,6 +137,11 @@ describe('passReceipt', () => {
   it('names claims only when the model made one that was not in the document', () => {
     expect(passReceipt(pass(2, 1)).claims).toBe('1 claim not in the document')
     expect(passReceipt(pass(2, 3)).claims).toBe('3 claims not in the document')
+  })
+
+  it('counts only the growth since the previous pass, since accepted is cumulative', () => {
+    expect(passReceipt(pass(4, 0), 4).findings).toBe('no new findings')
+    expect(passReceipt(pass(6, 0), 4).findings).toBe('2 new findings')
   })
 })
 

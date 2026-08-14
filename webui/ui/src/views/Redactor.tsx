@@ -36,6 +36,10 @@ export default function Redactor() {
   const [busy, setBusy] = useState(false)
   const [offer, setOffer] = useState<HideOffer | null>(null)
   const [pass, setPass] = useState<DocredactModelPass | null>(null)
+  // The `accepted` count captured right before this pass was asked, so the
+  // receipt can report the growth since then rather than the server's
+  // cumulative total.
+  const [passBefore, setPassBefore] = useState(0)
   const [asking, setAsking] = useState(false)
   const [passProblem, setPassProblem] = useState<string | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -54,6 +58,7 @@ export default function Redactor() {
     setBusy(true)
     setOffer(null)
     setPass(null)
+    setPassBefore(0)
     setPassProblem(null)
     try {
       const text = await file.text()
@@ -142,11 +147,13 @@ export default function Redactor() {
   // is serving" refuses, and that sentence is shown as the manager wrote it.
   const askModel = async () => {
     if (!doc || asking) return
+    const before = pass?.accepted ?? 0
     setAsking(true)
     setPassProblem(null)
     try {
       const body = await api<DocredactModelPassResponse>(sessionPath('/modelpass'), { method: 'POST' })
       setPass(body.model_pass)
+      setPassBefore(before)
       setFindings(body.findings ?? [])
       await loadPreview(doc.sessionID)
     } catch (problem) {
@@ -223,7 +230,7 @@ export default function Redactor() {
       </div>
 
       {passProblem && (
-        <div className="error-note">
+        <div className="error-note" role="alert">
           <strong>Could not ask the model</strong>
           <p>{passProblem}</p>
           <p className="faint">Start a text model on the Models tab, then ask again.</p>
@@ -242,11 +249,10 @@ export default function Redactor() {
             </div>
           )}
           {!asking && pass && !pass.degraded && (() => {
-            const receipt = passReceipt(pass)
+            const receipt = passReceipt(pass, passBefore)
             return (
               <div className="passline">
-                <span>asked</span> <span className="who">{receipt.model}</span><span>: {receipt.findings}</span>
-                {receipt.claims !== '' && <span className="claims">, {receipt.claims}</span>}
+                <span>asked <span className="who">{receipt.model}</span>: {receipt.findings}{receipt.claims !== '' && <span className="claims">, {receipt.claims}</span>}</span>
               </div>
             )
           })()}

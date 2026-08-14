@@ -186,10 +186,16 @@ export interface PassReceipt {
 // The one line a finished pass leaves behind. Claims are the literals the
 // model named that were not in the document: the engine already dropped
 // them, so the receipt only has to say it happened, and only when it did.
-export function passReceipt(pass: DocredactModelPass): PassReceipt {
+//
+// The server's `accepted` is every model-source finding in the document,
+// cumulative across passes, not just this pass's contribution. What is new
+// this pass is the growth since the last one, so the receipt subtracts the
+// accepted count captured before this pass was asked.
+export function passReceipt(pass: DocredactModelPass, previousAccepted = 0): PassReceipt {
+  const gained = Math.max(0, pass.accepted - previousAccepted)
   return {
     model: pass.model,
-    findings: pass.accepted === 0 ? 'no new findings' : counted(pass.accepted, 'new finding', 'new findings'),
+    findings: gained === 0 ? 'no new findings' : counted(gained, 'new finding', 'new findings'),
     claims: pass.hallucinated === 0 ? '' : counted(pass.hallucinated, 'claim not in the document', 'claims not in the document'),
   }
 }

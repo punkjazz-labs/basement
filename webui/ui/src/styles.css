@@ -1141,6 +1141,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .passline .claims { color: var(--warn); }
 .passline.degraded { color: var(--warn); }
 .passline .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); flex: none; align-self: center; }
+.passline.working .dot { background: var(--muted); animation: breathe 1.2s ease-in-out infinite; }
 
 .cat { padding: 8px 14px 3px; color: var(--faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; }
 .frow { display: flex; align-items: center; gap: 10px; padding: 7px 14px; border-top: 1px solid var(--line); }
