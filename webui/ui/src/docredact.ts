@@ -1,4 +1,4 @@
-import type { DocredactFinding } from './api'
+import type { DocredactFinding, DocredactModelPass } from './api'
 
 // The console half of the document redactor. Everything here is pure: which
 // heading a finding is filed under, how the document is measured, what a
@@ -53,10 +53,17 @@ export const documentMeta = (words: number, findings: number): string =>
 // rather than dropped: a finding a person cannot see is a finding they cannot
 // switch off.
 const GROUPS: Array<{ heading: string; categories: string[] }> = [
-  { heading: 'People and companies', categories: ['phrase'] },
-  { heading: 'Contact', categories: ['email', 'phone'] },
-  { heading: 'Money and accounts', categories: ['iban', 'card'] },
-  { heading: 'Dates and IDs', categories: ['dob', 'it_codice_fiscale', 'us_ssn', 'ipv4', 'ipv6'] },
+  { heading: 'People and companies', categories: ['phrase', 'person', 'org', 'job_title'] },
+  { heading: 'Contact', categories: ['email', 'phone', 'address'] },
+  { heading: 'Money and accounts', categories: ['iban', 'card', 'amount'] },
+  {
+    heading: 'Dates and IDs',
+    categories: [
+      'dob', 'it_codice_fiscale', 'us_ssn', 'ipv4', 'ipv6',
+      'fr_nir', 'es_dni', 'pt_nif', 'de_steuer_id', 'nl_bsn',
+      'uk_nino', 'br_cpf', 'cn_resident_id', 'jp_my_number',
+    ],
+  },
 ]
 
 export interface FindingGroup {
@@ -64,14 +71,22 @@ export interface FindingGroup {
   findings: DocredactFinding[]
 }
 
+// Inside a group, whatever a rule or the owner found comes before what the
+// model claimed: a rule row is exact by construction, so it is the first
+// thing read. The sort is stable, so rows keep the document order they
+// arrived in otherwise.
+export const orderFindings = (findings: DocredactFinding[]): DocredactFinding[] =>
+  [...findings.filter(finding => finding.source !== 'model'),
+   ...findings.filter(finding => finding.source === 'model')]
+
 export function groupFindings(findings: DocredactFinding[]): FindingGroup[] {
   const known = new Set(GROUPS.flatMap(group => group.categories))
   const last = GROUPS.length - 1
   return GROUPS.map((group, index) => ({
     heading: group.heading,
-    findings: findings.filter(finding =>
+    findings: orderFindings(findings.filter(finding =>
       group.categories.includes(finding.category) ||
-      (index === last && !known.has(finding.category))),
+      (index === last && !known.has(finding.category)))),
   })).filter(group => group.findings.length > 0)
 }
 
@@ -157,5 +172,24 @@ export function exportNames(fileName: string): ExportNames {
   return {
     redacted: `${name}.redacted${extension === '.md' ? '.md' : '.txt'}`,
     mapping: `${name}.mapping.json`,
+  }
+}
+
+// ---- The pass receipt -------------------------------------------------------
+
+export interface PassReceipt {
+  model: string
+  findings: string
+  claims: string
+}
+
+// The one line a finished pass leaves behind. Claims are the literals the
+// model named that were not in the document: the engine already dropped
+// them, so the receipt only has to say it happened, and only when it did.
+export function passReceipt(pass: DocredactModelPass): PassReceipt {
+  return {
+    model: pass.model,
+    findings: pass.accepted === 0 ? 'no new findings' : counted(pass.accepted, 'new finding', 'new findings'),
+    claims: pass.hallucinated === 0 ? '' : counted(pass.hallucinated, 'claim not in the document', 'claims not in the document'),
   }
 }

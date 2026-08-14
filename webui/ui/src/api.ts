@@ -309,6 +309,24 @@ export interface DocredactSession {
   findings: DocredactFinding[]
 }
 
+// One model pass over an open session: the tally the engine kept while
+// applying the model's answers, plus the model that actually answered, so a
+// fall back from the redactor role to whatever is serving is visible.
+export interface DocredactModelPass {
+  accepted: number
+  duplicates: number
+  hallucinated: number
+  chunks_total: number
+  chunks_failed: number
+  degraded: boolean
+  model: string
+}
+
+export interface DocredactModelPassResponse {
+  findings: DocredactFinding[]
+  model_pass: DocredactModelPass
+}
+
 // ---- Finding and adopting a second Spark ------------------------------------
 // One machine the network sweep answered for. gb10_hint and basement are the
 // sweep's own findings, never a guess made here: they rank the list the
