@@ -1197,3 +1197,31 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   .cols { grid-template-columns: 1fr; }
   .findings { border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+/* The tab's two jobs. Redact is the existing flow; Restore is the reverse
+   trip. One switch, far left of the viewbar, in both modes. */
+.jobs { display: flex; gap: 2px; border: 1px solid var(--line); border-radius: 999px; padding: 2px; width: max-content; background: var(--surface); flex: none; }
+.jobs button { border: 0; background: none; color: var(--muted); border-radius: 999px; padding: 4px 14px; font-size: 12.5px; font-weight: 500; }
+.jobs button[aria-current='true'] { background: var(--surface-2); color: var(--ink); font-weight: 550; }
+
+/* Two panes: the reply on the left, what it really says on the right.
+   Restored literals wear a quiet green tint, the one place the console's
+   green appears off the serving light, so the eye can audit what came
+   back. A pseudonym the mapping never minted stays amber: the cloud model
+   invented it, nothing failed. */
+.restore-cols { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.restore-col { display: flex; flex-direction: column; min-height: 300px; }
+.restore-col + .restore-col { border-left: 1px solid var(--line); }
+.restore-col-head { display: flex; align-items: baseline; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.restore-col-head h2 { font-size: 13px; }
+.restore-col-head .hint { margin-left: auto; color: var(--faint); font-size: 11.5px; }
+.restore-in { flex: 1; border: 0; background: none; color: var(--ink); font: 13px/1.75 var(--sans); padding: 16px 20px; resize: none; outline: none; }
+.restore-in::placeholder { color: var(--faint); }
+.restore-out { flex: 1; padding: 16px 20px; font-size: 13px; line-height: 1.75; white-space: pre-wrap; overflow-y: auto; max-height: 560px; }
+.restore-out .back { background: color-mix(in srgb, var(--live) 12%, transparent); border-radius: 3px; padding: 0 2px; }
+.restore-out .stray { font-family: var(--mono); font-size: 11.5px; color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent); border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+
+@media (max-width: 980px) {
+  .restore-cols { grid-template-columns: 1fr; }
+  .restore-col + .restore-col { border-left: 0; border-top: 1px solid var(--line); }
+}

@@ -1,13 +1,14 @@
 import { Fragment, useRef, useState } from 'react'
 import {
   api, ApiError, type DocredactFinding, type DocredactModelPass, type DocredactModelPassResponse,
-  type DocredactSession,
+  type DocredactRestoreResponse, type DocredactSession,
 } from '../api'
 import { noticeBox } from '../confirm'
 import {
-  ACCEPT_ATTRIBUTE, ACCEPT_HINT, documentMeta, exportNames, groupFindings, passReceipt, pickDocument,
-  previewParagraphs, previewSegments, selectionLiteral, sourceClass, sourceLabel, toggledFindings,
-  wordCount,
+  ACCEPT_ATTRIBUTE, ACCEPT_HINT, documentMeta, exportNames, groupFindings, parseMappingFile, passReceipt,
+  pickDocument, previewParagraphs, previewSegments, restoreEntriesFromFindings, type RestoreEntry,
+  restoredHint, restoreSegments, segmentsText, selectionLiteral, sourceClass, sourceLabel, strayLine,
+  toggledFindings, wordCount,
 } from '../docredact'
 
 // The document never reaches this manager's disk and the redacted copy never
@@ -42,6 +43,12 @@ export default function Redactor() {
   const [passBefore, setPassBefore] = useState(0)
   const [asking, setAsking] = useState(false)
   const [passProblem, setPassProblem] = useState<string | null>(null)
+  const [mode, setMode] = useState<'redact' | 'restore'>('redact')
+  const [reply, setReply] = useState('')
+  const [mappingFile, setMappingFile] = useState<{ name: string; raw: string; entries: RestoreEntry[] } | null>(null)
+  const [mappingProblem, setMappingProblem] = useState(false)
+  const [restored, setRestored] = useState<DocredactRestoreResponse | null>(null)
+  const [restoring, setRestoring] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const previewPane = useRef<HTMLElement>(null)
 
@@ -60,6 +67,7 @@ export default function Redactor() {
     setPass(null)
     setPassBefore(0)
     setPassProblem(null)
+    setRestored(null)
     try {
       const text = await file.text()
       const session = await api<DocredactSession>('/api/v1/docredact/analyze', {
@@ -182,6 +190,69 @@ export default function Redactor() {
     window.setTimeout(() => save('/export/mapping', names.mapping), 150)
   }
 
+  // The server does the restoring; this screen only shows the answer. With a
+  // session open its live mapping is used. Without one, the saved mapping
+  // file's own bytes go along, parsed again server-side by the code that
+  // wrote them.
+  const runRestore = async () => {
+    if (restoring || reply.trim() === '') return
+    setRestoring(true)
+    try {
+      const body = doc
+        ? await api<DocredactRestoreResponse>(sessionPath('/restore'), {
+            method: 'POST', body: JSON.stringify({ text: reply }),
+          })
+        : await api<DocredactRestoreResponse>('/api/v1/docredact/restore', {
+            method: 'POST', body: JSON.stringify({ text: reply, mapping: mappingFile?.raw ?? '' }),
+          })
+      setRestored(body)
+    } catch (problem) {
+      noticeBox('Could not restore that reply', message(problem))
+    } finally {
+      setRestoring(false)
+    }
+  }
+
+  const openMapping = async (file: File | null) => {
+    if (!file) return
+    const raw = await file.text()
+    const entries = parseMappingFile(raw)
+    if (entries === null) {
+      setMappingFile(null)
+      setMappingProblem(true)
+      return
+    }
+    setMappingProblem(false)
+    setMappingFile({ name: file.name, raw, entries })
+    setRestored(null)
+  }
+
+  // The restored text stays on screen; copy is the only way it leaves. The
+  // clipboard API is absent when the console is reached over plain http on
+  // the LAN, so a hidden textarea is the fallback there.
+  const copyRestored = () => {
+    if (restored === null) return
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(restored.text)
+      return
+    }
+    const area = document.createElement('textarea')
+    area.value = restored.text
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    document.execCommand('copy')
+    area.remove()
+  }
+
+  const jobs = (
+    <div className="jobs">
+      <button aria-current={mode === 'redact'} onClick={() => setMode('redact')}>Redact</button>
+      <button aria-current={mode === 'restore'} onClick={() => setMode('restore')}>Restore</button>
+    </div>
+  )
+
   const picker = (
     <input
       ref={fileInput}
@@ -195,9 +266,100 @@ export default function Redactor() {
     />
   )
 
+  if (mode === 'restore') {
+    const entries = doc ? restoreEntriesFromFindings(findings) : (mappingFile?.entries ?? [])
+    const segments = restored === null ? null : restoreSegments(reply, entries)
+    // The server's text is the truth. Colors appear only when the client's
+    // segmentation reproduces it exactly.
+    const colorable = restored !== null && segments !== null && segmentsText(segments) === restored.text
+    const canRestore = !restoring && reply.trim() !== '' && (doc !== null || mappingFile !== null)
+
+    return (
+      <div className="stack">
+        <div className="viewbar">
+          {jobs}
+          <span className="meta">
+            {doc ? `using this session's mapping · ${doc.name}`
+              : mappingFile ? `using ${mappingFile.name}` : 'no document open'}
+          </span>
+          <div className="right">
+            <button className="ghost" disabled={restored === null} onClick={copyRestored}>Copy restored text</button>
+            <button className="primary" disabled={!canRestore} onClick={() => void runRestore()}>
+              {restoring ? 'Restoring' : 'Restore'}
+            </button>
+          </div>
+        </div>
+
+        {!doc && !mappingFile && (
+          <>
+            {mappingProblem && (
+              <div className="error-note" role="alert">
+                <strong>That file is not a mapping</strong>
+                <p>Use the .mapping.json file that the export saved. Nothing was read from this one.</p>
+              </div>
+            )}
+            <label
+              className="drop"
+              onDragOver={event => event.preventDefault()}
+              onDrop={event => {
+                event.preventDefault()
+                void openMapping(event.dataTransfer.files?.[0] ?? null)
+              }}
+            >
+              <b>Drop the mapping file here</b>
+              <span className="sub">the .mapping.json saved next to your redacted copy · it never leaves this machine</span>
+              <input
+                type="file"
+                accept=".json"
+                hidden
+                onChange={event => {
+                  void openMapping(event.target.files?.[0] ?? null)
+                  event.target.value = ''
+                }}
+              />
+            </label>
+          </>
+        )}
+
+        <div className="restore-cols">
+          <section className="restore-col">
+            <div className="restore-col-head"><h2>The cloud&apos;s reply</h2><span className="hint">Paste it here</span></div>
+            <textarea
+              className="restore-in"
+              value={reply}
+              placeholder="Paste the reply that quotes [PERSON_1]-style pseudonyms."
+              onChange={event => { setReply(event.target.value); setRestored(null) }}
+            />
+          </section>
+          <section className="restore-col">
+            <div className="restore-col-head">
+              <h2>What it really says</h2>
+              {restored !== null && <span className="hint">{restoredHint(restored.tokens)}</span>}
+            </div>
+            {restored !== null && restored.unknown.length > 0 && (
+              <div className="passline"><span className="claims">{strayLine(restored.unknown.length)}</span></div>
+            )}
+            {restored === null
+              ? <div className="restore-out faint">Restored text appears here, on this screen only. It is never written to a file.</div>
+              : colorable
+                ? <div className="restore-out">{segments!.map((segment, index) =>
+                    segment.kind === 'restored' ? <span key={index} className="back">{segment.text}</span>
+                    : segment.kind === 'stray' ? <span key={index} className="stray">{segment.text}</span>
+                    : <Fragment key={index}>{segment.text}</Fragment>)}</div>
+                : <div className="restore-out">{restored.text}</div>}
+          </section>
+        </div>
+      </div>
+    )
+  }
+
   if (!doc) {
     return (
       <div className="stack">
+        <div className="viewbar">
+          {jobs}
+          <span className="meta">no document open</span>
+        </div>
         <label
           className="drop"
           onDragOver={event => event.preventDefault()}
@@ -218,6 +380,7 @@ export default function Redactor() {
     <div className="stack">
       {picker}
       <div className="viewbar">
+        {jobs}
         <span className="name">{doc.name}</span>
         <span className="meta">{documentMeta(doc.words, findings.length)}</span>
         <div className="right">
