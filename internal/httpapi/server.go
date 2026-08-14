@@ -218,6 +218,7 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	// never something a bearer key should be able to submit or read.
 	mux.HandleFunc("/api/v1/docredact/analyze", server.withReadAuth(server.docredactAnalyze))
 	mux.HandleFunc("/api/v1/docredact/sessions/", server.withReadAuth(server.docredactSessionAction))
+	mux.HandleFunc("/api/v1/docredact/restore", server.withReadAuth(server.docredactRestore))
 	mux.HandleFunc("/api/v1/update/status", server.withReadAuth(server.updateStatus))
 	mux.HandleFunc("/api/v1/update/apply", server.withReadAuth(server.updateApplyAPI))
 	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateAPI))

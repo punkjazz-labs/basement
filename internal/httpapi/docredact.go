@@ -263,6 +263,33 @@ func (s *Server) docredactSessionAction(w http.ResponseWriter, r *http.Request) 
 			}{result, target.DisplayName},
 		})
 
+	// The reverse trip: the owner pastes a cloud model's reply and gets the
+	// real text back. The mapping used is the session's current one, so a
+	// finding switched off before export stays unknown here too: its token
+	// was never in the redacted copy, so a reply quoting it is the model
+	// inventing a pseudonym, not this session's own.
+	case len(parts) == 2 && parts[1] == "restore" && r.Method == http.MethodPost:
+		if err := s.auth.AuthorizeMutation(r); err != nil {
+			writeError(w, http.StatusForbidden, err)
+			return
+		}
+		var request struct {
+			Text string `json:"text"`
+		}
+		if err := decodeBody(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if strings.TrimSpace(request.Text) == "" {
+			writeError(w, http.StatusBadRequest, errors.New("text is required"))
+			return
+		}
+		session.mu.Lock()
+		entries := session.doc.Mapping()
+		session.mu.Unlock()
+		restored, result := docredact.Restore(request.Text, entries)
+		writeJSON(w, http.StatusOK, restoreResponse(restored, result))
+
 	case len(parts) == 2 && parts[1] == "preview" && r.Method == http.MethodGet:
 		session.mu.Lock()
 		defer session.mu.Unlock()
@@ -360,6 +387,52 @@ func docredactAddStatus(err error) int {
 	default:
 		return http.StatusBadRequest
 	}
+}
+
+// restoreResponse is the one wire shape both restore routes answer with,
+// so the console never has to care which route it called.
+func restoreResponse(text string, result docredact.RestoreResult) map[string]any {
+	return map[string]any{
+		"text":     text,
+		"replaced": result.Replaced,
+		"tokens":   result.Tokens,
+		"unknown":  result.Unknown,
+	}
+}
+
+// docredactRestore is the stateless reverse trip, for a reply that comes
+// back after the session is gone: the owner supplies the saved mapping
+// file's own bytes and the pasted reply, and nothing here touches a
+// session or this machine's disk. The mapping is parsed by the same code
+// that wrote it (docredact.ParseMapping), warning line and all.
+func (s *Server) docredactRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if err := s.auth.AuthorizeMutation(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	var request struct {
+		Text    string `json:"text"`
+		Mapping string `json:"mapping"`
+	}
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(request.Text) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("text is required"))
+		return
+	}
+	_, entries, err := docredact.ParseMapping([]byte(request.Mapping))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("mapping file not understood: %w", err))
+		return
+	}
+	restored, result := docredact.Restore(request.Text, entries)
+	writeJSON(w, http.StatusOK, restoreResponse(restored, result))
 }
 
 // writeDocredactDownload writes body as a browser download. Nothing here

@@ -737,6 +737,174 @@ func TestDocredactModelPassNeedsATextModelServing(t *testing.T) {
 	}
 }
 
+// docredactRestoreResponse mirrors the JSON shape restoreResponse writes,
+// the one both restore routes share.
+type docredactRestoreResponse struct {
+	Text     string   `json:"text"`
+	Replaced int      `json:"replaced"`
+	Tokens   int      `json:"tokens"`
+	Unknown  []string `json:"unknown"`
+}
+
+func TestDocredactSessionRestore(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf}
+	result := docredactAnalyze(t, server.URL, csrf, cookies, docredactSampleText, "letter.txt")
+	finding := result.Findings[0]
+
+	body := `{"text":"quote ` + finding.Token + ` back"}`
+	response := doRequest(t, http.MethodPost, server.URL+"/api/v1/docredact/sessions/"+result.SessionID+"/restore",
+		body, cookies, headers)
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("restore status=%d body=%s", response.StatusCode, data)
+	}
+	var restored docredactRestoreResponse
+	if err := json.NewDecoder(response.Body).Decode(&restored); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	want := "quote " + finding.Literal + " back"
+	if restored.Text != want {
+		t.Fatalf("text = %q, want %q", restored.Text, want)
+	}
+	if restored.Replaced != 1 || restored.Tokens != 1 {
+		t.Fatalf("restored = %+v, want Replaced 1 Tokens 1", restored)
+	}
+	if len(restored.Unknown) != 0 {
+		t.Fatalf("unknown = %v, want none", restored.Unknown)
+	}
+}
+
+// A finding switched off before export never made it into the redacted
+// copy that left the machine, so its token was never minted for a cloud
+// model to echo back. A reply quoting it anyway is restored as unknown,
+// not silently accepted.
+func TestDocredactSessionRestoreSkipsDisabledFindings(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf}
+	result := docredactAnalyze(t, server.URL, csrf, cookies, docredactSampleText, "letter.txt")
+	finding := result.Findings[0]
+
+	toggleURL := server.URL + "/api/v1/docredact/sessions/" + result.SessionID + "/findings/" + finding.ID + "/toggle"
+	toggleResponse := doRequest(t, http.MethodPost, toggleURL, `{"enabled":false}`, cookies, headers)
+	if toggleResponse.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(toggleResponse.Body)
+		t.Fatalf("toggle status=%d body=%s", toggleResponse.StatusCode, data)
+	}
+	toggleResponse.Body.Close()
+
+	body := `{"text":"quote ` + finding.Token + ` back"}`
+	response := doRequest(t, http.MethodPost, server.URL+"/api/v1/docredact/sessions/"+result.SessionID+"/restore",
+		body, cookies, headers)
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("restore status=%d body=%s", response.StatusCode, data)
+	}
+	var restored docredactRestoreResponse
+	if err := json.NewDecoder(response.Body).Decode(&restored); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	want := "quote " + finding.Token + " back"
+	if restored.Text != want {
+		t.Fatalf("text = %q, want the token left untouched: %q", restored.Text, want)
+	}
+	if restored.Replaced != 0 || restored.Tokens != 0 {
+		t.Fatalf("restored = %+v, want nothing replaced", restored)
+	}
+	if len(restored.Unknown) != 1 || restored.Unknown[0] != finding.Token {
+		t.Fatalf("unknown = %v, want [%s]", restored.Unknown, finding.Token)
+	}
+}
+
+// The stateless route never touches a session: the caller supplies the
+// mapping file bytes it downloaded earlier, exactly as docredact.ParseMapping
+// wrote them, alongside a reply pasted back after the session is long gone.
+func TestDocredactRestoreStateless(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf}
+
+	doc := docredact.Analyze(docredactSampleText)
+	mappingBytes, err := doc.MappingBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding := doc.Findings[0]
+
+	payload, err := json.Marshal(map[string]string{
+		"text":    "quote " + finding.Token + " back",
+		"mapping": string(mappingBytes),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := doRequest(t, http.MethodPost, server.URL+"/api/v1/docredact/restore", string(payload), cookies, headers)
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("restore status=%d body=%s", response.StatusCode, data)
+	}
+	var restored docredactRestoreResponse
+	if err := json.NewDecoder(response.Body).Decode(&restored); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	want := "quote " + finding.Literal + " back"
+	if restored.Text != want {
+		t.Fatalf("text = %q, want %q", restored.Text, want)
+	}
+	if restored.Replaced != 1 || restored.Tokens != 1 {
+		t.Fatalf("restored = %+v, want Replaced 1 Tokens 1", restored)
+	}
+	if len(restored.Unknown) != 0 {
+		t.Fatalf("unknown = %v, want none", restored.Unknown)
+	}
+}
+
+func TestDocredactRestoreRejectsBadInput(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf}
+	result := docredactAnalyze(t, server.URL, csrf, cookies, docredactSampleText, "letter.txt")
+
+	for _, testCase := range []struct {
+		name            string
+		url             string
+		body            string
+		want            int
+		wantErrContains string
+	}{
+		{"session restore empty text", server.URL + "/api/v1/docredact/sessions/" + result.SessionID + "/restore",
+			`{"text":"   "}`, http.StatusBadRequest, ""},
+		{"session restore unknown session", server.URL + "/api/v1/docredact/sessions/does-not-exist/restore",
+			`{"text":"hello"}`, http.StatusNotFound, ""},
+		{"stateless restore empty text", server.URL + "/api/v1/docredact/restore",
+			`{"text":"   ","mapping":"whatever"}`, http.StatusBadRequest, ""},
+		{"stateless restore garbage mapping", server.URL + "/api/v1/docredact/restore",
+			`{"text":"hello","mapping":"not a mapping file"}`, http.StatusBadRequest, "mapping"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := doRequest(t, http.MethodPost, testCase.url, testCase.body, cookies, headers)
+			if response.StatusCode != testCase.want {
+				data, _ := io.ReadAll(response.Body)
+				t.Fatalf("status=%d want=%d body=%s", response.StatusCode, testCase.want, data)
+			}
+			if testCase.wantErrContains != "" {
+				var problem struct {
+					Error string `json:"error"`
+				}
+				json.NewDecoder(response.Body).Decode(&problem)
+				if !strings.Contains(problem.Error, testCase.wantErrContains) {
+					t.Fatalf("error = %q, want it to mention %q", problem.Error, testCase.wantErrContains)
+				}
+			}
+			response.Body.Close()
+		})
+	}
+}
+
 func TestDocredactModelPassRequiresSessionAndCSRF(t *testing.T) {
 	fixture := newDocredactModelFixture(t, `[]`)
 	session := docredactAnalyze(t, fixture.url, fixture.csrf, fixture.cookies, docredactSampleText, "letter.txt")
