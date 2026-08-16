@@ -28,6 +28,15 @@ const ORIGINAL_TITLE = typeof document === 'undefined' ? '' : document.title
 const modelGlyph = (name: string): string =>
   name.split(/\s+/).filter(Boolean).slice(0, 2).map(word => word[0]).join('').toUpperCase()
 
+// The Generate button shows whichever chord this platform actually accepts.
+// Both the Mac and the non-Mac key combination are still handled below
+// regardless of what this reports, so a stale or unrecognized platform
+// string only ever costs a mislabeled glyph, never a broken shortcut.
+const shortcutGlyph = (): string => {
+  const platform = typeof navigator === 'undefined' ? '' : navigator.platform
+  return /Mac|iPhone|iPad|iPod/.test(platform) ? '⌘⏎' : 'Ctrl+⏎'
+}
+
 const generationFilePath = (generation: Generation): string =>
   generation.file_url ?? `/api/v1/generations/${encodeURIComponent(generation.id)}/file`
 
@@ -261,7 +270,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   const formRef = useRef<HTMLFormElement>(null)
   const audioCtxRef = useRef<AudioContext | null>(null)
   const statusRef = useRef<GenerationStatusMap>({})
-  const posterBusyRef = useRef(false)
+  const inFlightPosterRef = useRef<{ id: string; controller: AbortController } | null>(null)
   const posterFailedRef = useRef<Set<string>>(new Set())
 
   // The tier survives a change of shape, because turning a clip on its side is
@@ -354,22 +363,24 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     }
   }, [hasActive, loadGenerations, streamAvailable])
 
-  // Sound and the tab title only react to a run crossing into completed or
-  // failed, and only while this tab is not the one being looked at. The SSE
-  // handler and the poller both flow through setGenerations above, so this
-  // effect is the single place that notices a transition regardless of
-  // which path delivered it.
+  // Both react to a run crossing into completed or failed, but not on the
+  // same terms: the chime is the toggle's own promise ("sound when a run
+  // finishes"), so it plays whether this tab is the one being looked at or
+  // not; the title flash exists only to draw a look back to a tab nobody is
+  // watching, so it stays hidden-only. The SSE handler and the poller both
+  // flow through setGenerations above, so this effect is the single place
+  // that notices a transition regardless of which path delivered it.
   useEffect(() => {
     const current = generationStatusMap(generations)
     const transitioned = finishedTransitions(statusRef.current, current)
     statusRef.current = current
     if (transitioned.length === 0) return
-    if (typeof document === 'undefined' || !document.hidden) return
-    setUnseen(previous => markUnseen(previous, transitioned))
     if (soundOn && audioCtxRef.current) {
       const ctx = audioCtxRef.current
       transitioned.forEach((_id, index) => playChime(ctx, index * 0.2))
     }
+    if (typeof document === 'undefined' || !document.hidden) return
+    setUnseen(previous => markUnseen(previous, transitioned))
   }, [generations, soundOn])
 
   useEffect(() => {
@@ -414,27 +425,35 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   //
   // generations gets a new array identity on every SSE tick and every poll,
   // including ticks that have nothing to do with the run being captured, so
-  // this effect re-runs far more often than the capture itself changes.
-  // cancelled therefore only ever gates the final setPosterTick call, which
-  // exists purely to look for the next target; it does not gate storePoster,
-  // so a capture that finishes despite being superseded is still kept. The
-  // AbortController actually stops an abandoned network download, and the
-  // cleanup clears the busy guard synchronously (not from the aborted
-  // fetch's own, later, finally) so a React StrictMode double-invoke, which
-  // runs an effect, its cleanup, and the effect again before anything can
-  // resolve, cannot leave the guard permanently stuck open.
+  // this effect re-runs far more often than the capture itself changes. A
+  // capture in progress is tracked by id in inFlightPosterRef rather than by
+  // a plain busy flag: when the effect re-runs and that id is still present
+  // in the list, the running capture is left alone instead of being aborted
+  // and restarted, which is what used to make a large video's poster never
+  // finish under continuous polling. It is only actually stopped here if its
+  // target left the list (deleted); a true unmount is handled by the effect
+  // below, so this one only ever aborts a capture that is no longer wanted.
+  //
+  // cancelled still gates only the final setPosterTick call, which exists
+  // purely to look for the next target; it never gates storePoster, so a
+  // capture that finishes despite being superseded is still kept.
   useEffect(() => {
-    if (posterBusyRef.current) return
+    const inFlight = inFlightPosterRef.current
+    if (inFlight) {
+      if (generations.some(generation => generation.id === inFlight.id)) return
+      inFlight.controller.abort()
+      inFlightPosterRef.current = null
+    }
     const target = generations.find(generation => (
       generation.status === 'completed'
       && !posters.has(generation.id)
       && !posterFailedRef.current.has(generation.id)
     ))
     if (!target) return
-    posterBusyRef.current = true
     let cancelled = false
     let objectURL = ''
     const controller = new AbortController()
+    inFlightPosterRef.current = { id: target.id, controller }
     apiBlob(generationFilePath(target), { signal: controller.signal }).then(blob => {
       objectURL = URL.createObjectURL(playableVideoBlob(blob))
       return capturePoster(objectURL)
@@ -444,15 +463,18 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
       if ((problem as { name?: string })?.name !== 'AbortError') posterFailedRef.current.add(target.id)
     }).finally(() => {
       if (objectURL) URL.revokeObjectURL(objectURL)
-      posterBusyRef.current = false
+      if (inFlightPosterRef.current?.controller === controller) inFlightPosterRef.current = null
       if (!cancelled) setPosterTick(value => value + 1)
     })
-    return () => {
-      cancelled = true
-      controller.abort()
-      posterBusyRef.current = false
-    }
+    return () => { cancelled = true }
   }, [generations, posters])
+
+  // The one place an in-flight capture is actually torn down mid-flight: a
+  // real unmount. Empty deps means this cleanup runs only then, not on every
+  // re-run of the effect above.
+  useEffect(() => () => {
+    inFlightPosterRef.current?.controller.abort()
+  }, [])
 
   if (!config) return null
 
@@ -713,7 +735,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                     </label>
                   ))}
                 </div>
-                <span className="hint">{durationArithmetic(config, blocks)}</span>
+                {blocks > 0 && <span className="hint">{durationArithmetic(config, blocks)}</span>}
               </div>
               <label className="field">
                 <span>Seed (optional)</span>
@@ -733,7 +755,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
 
             <div className="gen-foot">
               <button className="primary" type="submit" disabled={!canSubmit}>
-                {submitting ? 'Starting' : <>Generate <span className="kbd" aria-hidden="true">&#8984;&#9166;</span></>}
+                {submitting ? 'Starting' : <>Generate <span className="kbd" aria-hidden="true">{shortcutGlyph()}</span></>}
               </button>
               <p className="faint">
                 {config.concurrent_generations === 1

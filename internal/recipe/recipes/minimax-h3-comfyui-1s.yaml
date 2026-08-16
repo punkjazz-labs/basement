@@ -14,8 +14,7 @@ id: minimax-h3-comfyui-1s
 # and the install and start proof runs 1. Version 1 proved itself with a
 # full-quality generation, which cost about eighteen minutes of waiting every
 # time the model was installed or started.
-# Version 3 adds the measured size wait factors for the console.
-version: 3
+version: 2
 display_name: MiniMax H3
 publisher: MiniMax + Comfy-Org
 model_by: MiniMax
@@ -111,16 +110,6 @@ service:
     sampler_steps: 20
     verification_sampler_steps: 1
     concurrent_generations: 1
-    # Wall times measured in docs/H3-MEASUREMENTS.md for a 5.17 s clip:
-    # 1061 s at 768, 3021 s at 1088, 7750 s at 1440. Factors are those
-    # times divided by the smallest one.
-    size_waits:
-      - short_edge: 768
-        factor: 1
-      - short_edge: 1088
-        factor: 2.85
-      - short_edge: 1440
-        factor: 7.3
 # 99.09 GB is the worst measured total across the four successful runs. The
 # overhead is that total minus the exact 42,470,585,471-byte weight set.
 memory_model:

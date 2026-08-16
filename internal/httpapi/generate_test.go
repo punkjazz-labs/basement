@@ -464,23 +464,21 @@ func TestRecipeCatalogReportsMediaGenerationConfigOnlyForMedia(t *testing.T) {
 // TestRecipeCatalogServesMeasuredSizeWaits proves size_waits reaches the
 // wire for a recipe that carries it, in the console's units, and that a
 // media recipe with none omits the key rather than serving an empty array.
+// Both recipes here are synthetic fixtures, not the shipped MiniMax H3
+// recipe: the console's canvas ladder and a recipe's size_waits edges are
+// two independently-declared things, and a fixture built to carry matching
+// edges proves the wire behavior without depending on H3 ever having a
+// measurement that happens to land on that ladder.
 func TestRecipeCatalogServesMeasuredSizeWaits(t *testing.T) {
-	builtin, err := recipe.Builtin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var h3 recipe.Recipe
-	var found bool
-	for _, r := range builtin {
-		if r.ID == "minimax-h3-comfyui-1s" {
-			h3, found = r, true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("minimax-h3-comfyui-1s is not in the builtin pack")
+	measured := recipetest.Media()
+	measured.ID = "media-test-measured-waits"
+	measured.Service.ComfyUI.SizeWaits = []recipe.SizeWait{
+		{ShortEdge: 768, Factor: 1},
+		{ShortEdge: 1088, Factor: 2.85},
+		{ShortEdge: 1440, Factor: 7.3},
 	}
 	unmeasured := recipetest.Media()
+	unmeasured.ID = "media-test-unmeasured-waits"
 
 	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
 	if err != nil {
@@ -488,7 +486,7 @@ func TestRecipeCatalogServesMeasuredSizeWaits(t *testing.T) {
 	}
 	t.Cleanup(func() { database.Close() })
 	server := &Server{store: database}
-	server.SetRecipes([]recipe.Recipe{h3, unmeasured}, []recipe.Recipe{h3, unmeasured})
+	server.SetRecipes([]recipe.Recipe{measured, unmeasured}, []recipe.Recipe{measured, unmeasured})
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/recipes", nil)
 	response := httptest.NewRecorder()
@@ -509,11 +507,11 @@ func TestRecipeCatalogServesMeasuredSizeWaits(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	var sawH3, sawUnmeasured bool
+	var sawMeasured, sawUnmeasured bool
 	for _, item := range body {
 		switch item.ID {
-		case h3.ID:
-			sawH3 = true
+		case measured.ID:
+			sawMeasured = true
 			var config mediaGeneration
 			if err := json.Unmarshal(item.MediaGeneration, &config); err != nil {
 				t.Fatal(err)
@@ -540,8 +538,8 @@ func TestRecipeCatalogServesMeasuredSizeWaits(t *testing.T) {
 			}
 		}
 	}
-	if !sawH3 || !sawUnmeasured {
-		t.Fatalf("catalog omitted fixture recipes: h3=%t unmeasured=%t", sawH3, sawUnmeasured)
+	if !sawMeasured || !sawUnmeasured {
+		t.Fatalf("catalog omitted fixture recipes: measured=%t unmeasured=%t", sawMeasured, sawUnmeasured)
 	}
 }
 

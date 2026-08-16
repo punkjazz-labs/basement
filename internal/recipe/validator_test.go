@@ -2,7 +2,6 @@ package recipe
 
 import (
 	"math"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -100,17 +99,11 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if config.ConcurrentGenerations != 1 || h3.Topology.SparkCount != 1 {
 		t.Fatalf("MiniMax H3 concurrency or topology is not single-device: config=%#v topology=%#v", config, h3.Topology)
 	}
-	// Wall times measured in docs/H3-MEASUREMENTS.md for a 5.17 s clip: 1061 s
-	// at 768, 3021 s at 1088, 7750 s at 1440. Factors are those times divided
-	// by the smallest one.
-	wantSizeWaits := []SizeWait{
-		{ShortEdge: 768, Factor: 1},
-		{ShortEdge: 1088, Factor: 2.85},
-		{ShortEdge: 1440, Factor: 7.3},
-	}
-	if !reflect.DeepEqual(config.SizeWaits, wantSizeWaits) {
-		t.Fatalf("MiniMax H3 size_waits=%#v, want %#v", config.SizeWaits, wantSizeWaits)
-	}
+	// size_waits is not asserted here: the shipped recipe carries none until a
+	// re-measurement lands with edges that match the console's 16:9 canvas
+	// ladder. TestSizeWaitsAreServedAndStayAbsentByDefault and
+	// TestRecipeCatalogServesMeasuredSizeWaits cover the field itself, on a
+	// synthetic fixture built for the purpose.
 	if h3.Runtime.StartTimeoutMinutes != 0 {
 		t.Fatalf("MiniMax H3 startup timeout=%d minutes, want the product's 20-minute health-wait default", h3.Runtime.StartTimeoutMinutes)
 	}
