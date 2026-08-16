@@ -607,19 +607,20 @@ func (s *Server) listRecipes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type mediaGenerationView struct {
-		Modes                 []string `json:"modes"`
-		DefaultShortEdge      int      `json:"default_short_edge"`
-		MaxShortEdge          int      `json:"max_short_edge"`
-		MaxLongEdge           int      `json:"max_long_edge"`
-		CanvasMultiple        int      `json:"canvas_multiple"`
-		FrameBlock            int      `json:"frame_block"`
-		FrameOffset           int      `json:"frame_offset"`
-		FramesPerSecond       int      `json:"frames_per_second"`
-		MinBlocks             int      `json:"min_blocks"`
-		MaxBlocks             int      `json:"max_blocks"`
-		DefaultBlocks         int      `json:"default_blocks"`
-		ConcurrentGenerations int      `json:"concurrent_generations"`
-		MaxPromptLength       int      `json:"max_prompt_length"`
+		Modes                 []string          `json:"modes"`
+		DefaultShortEdge      int               `json:"default_short_edge"`
+		MaxShortEdge          int               `json:"max_short_edge"`
+		MaxLongEdge           int               `json:"max_long_edge"`
+		CanvasMultiple        int               `json:"canvas_multiple"`
+		FrameBlock            int               `json:"frame_block"`
+		FrameOffset           int               `json:"frame_offset"`
+		FramesPerSecond       int               `json:"frames_per_second"`
+		MinBlocks             int               `json:"min_blocks"`
+		MaxBlocks             int               `json:"max_blocks"`
+		DefaultBlocks         int               `json:"default_blocks"`
+		ConcurrentGenerations int               `json:"concurrent_generations"`
+		MaxPromptLength       int               `json:"max_prompt_length"`
+		SizeWaits             []recipe.SizeWait `json:"size_waits,omitempty"`
 	}
 	type view struct {
 		recipe.Recipe
@@ -659,7 +660,7 @@ func (s *Server) listRecipes(w http.ResponseWriter, r *http.Request) {
 				FrameOffset: config.FrameOffset, FramesPerSecond: config.FramesPerSecond,
 				MinBlocks: config.MinBlocks, MaxBlocks: config.MaxBlocks,
 				DefaultBlocks: config.DefaultBlocks, ConcurrentGenerations: config.ConcurrentGenerations,
-				MaxPromptLength: MaxPromptLength,
+				MaxPromptLength: MaxPromptLength, SizeWaits: config.SizeWaits,
 			}
 		}
 		result = append(result, response)

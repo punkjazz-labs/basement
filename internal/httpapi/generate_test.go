@@ -461,6 +461,90 @@ func TestRecipeCatalogReportsMediaGenerationConfigOnlyForMedia(t *testing.T) {
 	}
 }
 
+// TestRecipeCatalogServesMeasuredSizeWaits proves size_waits reaches the
+// wire for a recipe that carries it, in the console's units, and that a
+// media recipe with none omits the key rather than serving an empty array.
+func TestRecipeCatalogServesMeasuredSizeWaits(t *testing.T) {
+	builtin, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h3 recipe.Recipe
+	var found bool
+	for _, r := range builtin {
+		if r.ID == "minimax-h3-comfyui-1s" {
+			h3, found = r, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("minimax-h3-comfyui-1s is not in the builtin pack")
+	}
+	unmeasured := recipetest.Media()
+
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	server := &Server{store: database}
+	server.SetRecipes([]recipe.Recipe{h3, unmeasured}, []recipe.Recipe{h3, unmeasured})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/recipes", nil)
+	response := httptest.NewRecorder()
+	server.listRecipes(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	type mediaGeneration struct {
+		SizeWaits []struct {
+			ShortEdge int     `json:"short_edge"`
+			Factor    float64 `json:"factor"`
+		} `json:"size_waits"`
+	}
+	var body []struct {
+		ID              string          `json:"id"`
+		MediaGeneration json.RawMessage `json:"media_generation"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	var sawH3, sawUnmeasured bool
+	for _, item := range body {
+		switch item.ID {
+		case h3.ID:
+			sawH3 = true
+			var config mediaGeneration
+			if err := json.Unmarshal(item.MediaGeneration, &config); err != nil {
+				t.Fatal(err)
+			}
+			want := []struct {
+				ShortEdge int
+				Factor    float64
+			}{{768, 1}, {1088, 2.85}, {1440, 7.3}}
+			if len(config.SizeWaits) != len(want) {
+				t.Fatalf("size_waits=%#v, want %#v", config.SizeWaits, want)
+			}
+			for i, entry := range want {
+				if config.SizeWaits[i].ShortEdge != entry.ShortEdge || config.SizeWaits[i].Factor != entry.Factor {
+					t.Fatalf("size_waits[%d]=%#v, want %#v", i, config.SizeWaits[i], entry)
+				}
+			}
+		case unmeasured.ID:
+			sawUnmeasured = true
+			if len(item.MediaGeneration) == 0 {
+				t.Fatal("media recipe has no media_generation block")
+			}
+			if strings.Contains(string(item.MediaGeneration), "size_waits") {
+				t.Fatalf("a recipe without measured waits must omit size_waits, got %s", item.MediaGeneration)
+			}
+		}
+	}
+	if !sawH3 || !sawUnmeasured {
+		t.Fatalf("catalog omitted fixture recipes: h3=%t unmeasured=%t", sawH3, sawUnmeasured)
+	}
+}
+
 // TestGenerateRefusesModelsThatCannotAnswer covers the three conflicts: a
 // model that is not the one running, a text model, and nothing running at all.
 func TestGenerateRefusesModelsThatCannotAnswer(t *testing.T) {
