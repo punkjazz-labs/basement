@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
   canvasSizes, canvasTiers, defaultCanvasTier, durationOptions, generationElapsedSeconds,
-  generationState, generationTerminal,
+  generationState, generationTerminal, playableVideoBlob,
 } from './generation'
 import type { Generation, MediaGenerationConfig } from './api'
 import { GenerationProgress } from './views/Generate'
@@ -165,5 +165,16 @@ describe('generation progress rendering', () => {
     expect(markup).toContain('Generating')
     expect(markup).toContain('Elapsed')
     expect(markup).not.toContain('%')
+  })
+})
+
+describe('playableVideoBlob', () => {
+  it('re-labels an octet-stream blob as video/mp4', () => {
+    const blob = new Blob(['x'], { type: 'application/octet-stream' })
+    expect(playableVideoBlob(blob).type).toBe('video/mp4')
+  })
+  it('keeps a blob that already carries a video type', () => {
+    const blob = new Blob(['x'], { type: 'video/mp4' })
+    expect(playableVideoBlob(blob)).toBe(blob)
   })
 })

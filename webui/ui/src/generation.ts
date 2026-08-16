@@ -142,3 +142,9 @@ export const generationMode = (mode: string): string => {
   if (mode === 'image_to_video') return 'Image to video'
   return mode
 }
+
+// The file endpoint deliberately serves application/octet-stream so nothing
+// from it can render in the page's origin. Safari refuses to play a blob
+// with that type, so the console re-labels its own copy before playback.
+export const playableVideoBlob = (blob: Blob): Blob =>
+  blob.type.startsWith('video/') ? blob : new Blob([blob], { type: 'video/mp4' })

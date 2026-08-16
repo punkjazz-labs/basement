@@ -6,6 +6,7 @@ import {
 import {
   canvasShapes, canvasSizes, defaultCanvasTier, durationOptions, formatElapsed,
   generationActive, generationElapsedSeconds, generationMode, generationState, generationTerminal,
+  playableVideoBlob,
   type CanvasShape,
 } from '../generation'
 import { readableWeights } from '../catalog'
@@ -92,7 +93,7 @@ function GenerationVideo({ generation }: { generation: Generation }) {
     apiBlob(generationFilePath(generation), {
       signal: controller.signal,
     }).then(blob => {
-      objectURL = URL.createObjectURL(blob)
+      objectURL = URL.createObjectURL(playableVideoBlob(blob))
       if (mounted) setURL(objectURL)
       else URL.revokeObjectURL(objectURL)
     }).catch(problem => {
