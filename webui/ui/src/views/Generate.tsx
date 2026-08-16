@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   api, apiBlob, idempotency,
-  type GenerateResponse, type Generation, type Recipe,
+  type GenerateResponse, type Generation, type MediaGenerationConfig, type Recipe,
 } from '../api'
 import {
-  canvasShapes, canvasSizes, defaultCanvasTier, durationOptions, formatElapsed,
-  generationActive, generationElapsedSeconds, generationMode, generationState, generationTerminal,
-  playableVideoBlob,
-  type CanvasShape,
+  canvasShapes, canvasSizes, defaultCanvasTier, durationArithmetic, durationOptions, finishedTransitions,
+  formatElapsed, generationActive, generationElapsedSeconds, generationState, generationStatusMap,
+  generationTerminal, markUnseen, playableVideoBlob, reuseValues, sizeWaitHint, sizeWaitLabel,
+  sortGenerationsNewestFirst, type CanvasShape, type GenerationStatusMap,
 } from '../generation'
+import { cachedPoster, capturePoster, forgetPoster, storePoster } from '../posters'
 import { readableWeights } from '../catalog'
 import { confirmBox, noticeBox } from '../confirm'
 
@@ -17,11 +18,49 @@ interface GenerateProps {
   recipes: Recipe[]
 }
 
+const SOUND_KEY = 'basement.generate.sound'
+const FLASH_TITLE = '● Done · basement'
+
+// Captured once, at import time, so a run of title flashes always has the
+// real title to return to even after several rounds of alternating it.
+const ORIGINAL_TITLE = typeof document === 'undefined' ? '' : document.title
+
 const modelGlyph = (name: string): string =>
   name.split(/\s+/).filter(Boolean).slice(0, 2).map(word => word[0]).join('').toUpperCase()
 
 const generationFilePath = (generation: Generation): string =>
   generation.file_url ?? `/api/v1/generations/${encodeURIComponent(generation.id)}/file`
+
+// The same arithmetic the old result card used: a generation's frame count
+// only still means a round number of seconds if it still lands on the
+// recipe's current frame grid. A recipe update can move that grid, so an
+// older generation just reports its frame count instead of a stale duration.
+function durationString(generation: Generation, config: MediaGenerationConfig): string {
+  const matchesCurrentFrameGrid = generation.frames === config.frame_block * generation.blocks + config.frame_offset
+  const seconds = matchesCurrentFrameGrid && config.frames_per_second > 0
+    ? generation.frames / config.frames_per_second
+    : null
+  return seconds === null
+    ? `${generation.frames} frames`
+    : `${Math.round(seconds * 10) / 10}s · ${generation.frames} frames`
+}
+
+// Two short tones built from oscillators rather than shipped as an audio
+// file, so the console has no binary asset to keep in sync with this code.
+function playChime(context: AudioContext): void {
+  const tone = (frequency: number, start: number, duration: number) => {
+    const oscillator = context.createOscillator()
+    const gain = context.createGain()
+    gain.gain.value = 0.08
+    oscillator.frequency.value = frequency
+    oscillator.connect(gain)
+    gain.connect(context.destination)
+    oscillator.start(context.currentTime + start)
+    oscillator.stop(context.currentTime + start + duration)
+  }
+  tone(880, 0, 0.09)
+  tone(1175, 0.09, 0.09)
+}
 
 function RunningElapsed({ generation }: { generation: Generation }) {
   const [, setTick] = useState(0)
@@ -140,76 +179,44 @@ function GenerationVideo({ generation }: { generation: Generation }) {
   )
 }
 
-function GenerationCard({ generation, recipe, busy, selected, onSelect, onCancel, onDelete }: {
+function Thumb({ generation, selected, onSelect }: {
   generation: Generation
-  recipe?: Recipe
-  busy: boolean
   selected: boolean
   onSelect: () => void
-  onCancel: () => void
-  onDelete: () => void
 }) {
-  const active = generationActive(generation.status)
-  const terminal = generationTerminal(generation.status)
-  const config = recipe?.media_generation
-  const matchesCurrentFrameGrid = config
-    && generation.frames === config.frame_block * generation.blocks + config.frame_offset
-  const seconds = matchesCurrentFrameGrid && config.frames_per_second > 0
-    ? generation.frames / config.frames_per_second
-    : null
-  const duration = seconds === null
-    ? `${generation.frames} frames`
-    : `${Math.round(seconds * 10) / 10}s · ${generation.frames} frames`
-  const finalElapsed = generation.finished_at
+  const poster = cachedPoster(generation.id)
+  const value = generation.progress_value
+  const max = generation.progress_max
+  const determinate = generation.status === 'running'
+    && typeof value === 'number' && typeof max === 'number' && max > 0 && value >= 0 && value <= max
+  const finishedElapsed = generation.status === 'completed'
     ? generationElapsedSeconds(generation, Date.now())
     : null
 
   return (
-    <article className={`gen-result ${generation.status}`}>
-      <div className="gen-result-head">
-        <span className={`gen-state ${generation.status}`}>{generationState(generation.status)}</span>
-        <span className="gen-result-model">{recipe?.display_name ?? generation.model_id}</span>
-      </div>
-      <p className="gen-result-prompt" title={generation.prompt}>{generation.prompt}</p>
-      <div className="gen-result-meta">
-        <span>{generationMode(generation.mode)}</span>
-        <span>{generation.width} × {generation.height}</span>
-        <span>{duration}</span>
-        <span>Seed {generation.seed}</span>
-      </div>
-
-      {generation.status === 'running' && (
-        <GenerationProgress generation={generation} />
-      )}
-      {generation.status === 'queued' && (
-        <div className="gen-working" role="status">
-          <span className="sdot wait" aria-hidden="true" />
-          <span>{generation.queue_position ? `Queue position ${generation.queue_position}` : 'Waiting in the queue'}</span>
+    <button type="button" className={`thumb${selected ? ' sel' : ''}`} onClick={onSelect}>
+      {poster
+        ? <img className="pic" src={poster} alt="" />
+        : (
+          <div className="thumb-blank">
+            <span className={`gen-state ${generation.status}`}>{generationState(generation.status)}</span>
+          </div>
+        )}
+      {determinate && (
+        <div className="prog">
+          <span style={{ width: `${(value / max) * 100}%` }} />
         </div>
       )}
-      {generation.status === 'completed' && selected && <GenerationVideo generation={generation} />}
-      {generation.status === 'completed' && finalElapsed !== null && (
-        <span className="gen-finished-time">Generated in {formatElapsed(finalElapsed)}</span>
-      )}
-      {generation.error && generation.status !== 'completed' && (
-        <p className="gen-result-error" role={generation.status === 'failed' ? 'alert' : undefined}>{generation.error}</p>
-      )}
-
-      <div className="gen-result-actions">
-        {generation.status === 'completed' && !selected && (
-          <button className="quiet" onClick={onSelect}>Play video</button>
-        )}
-        {generation.status === 'completed' && (
-          <a className="gen-download" href={generationFilePath(generation)}>Download</a>
-        )}
-        {active && <button className="quiet" disabled={busy} onClick={onCancel}>Cancel</button>}
-        {terminal && <button className="quiet" disabled={busy} onClick={onDelete}>Delete</button>}
+      <div className="cap">
+        <span className={`gen-state ${generation.status}`}>{generationState(generation.status)}</span>
+        <b>{generation.prompt}</b>
+        {finishedElapsed !== null && <span>{formatElapsed(finishedElapsed)}</span>}
       </div>
-    </article>
+    </button>
   )
 }
 
-export default function Generate({ recipe, recipes }: GenerateProps) {
+export default function Generate({ recipe }: GenerateProps) {
   const config = recipe.media_generation
   const [shape, setShape] = useState<CanvasShape>('horizontal')
   const sizes = useMemo(() => config ? canvasSizes(config, shape) : [], [config, shape])
@@ -218,14 +225,23 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   const [shortEdge, setShortEdge] = useState(0)
   const [blocks, setBlocks] = useState(0)
   const [seed, setSeed] = useState('')
+  const [filledNote, setFilledNote] = useState(false)
   const [generations, setGenerations] = useState<Generation[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [formError, setFormError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [busyID, setBusyID] = useState('')
-  const [selectedVideoID, setSelectedVideoID] = useState('')
+  const [stagedID, setStagedID] = useState('')
   const [streamAvailable, setStreamAvailable] = useState(true)
+  const [soundOn, setSoundOn] = useState(() => window.localStorage.getItem(SOUND_KEY) === 'on')
+  const [unseen, setUnseen] = useState<ReadonlySet<string>>(new Set())
+  const [posterTick, setPosterTick] = useState(0)
+  const formRef = useRef<HTMLFormElement>(null)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const statusRef = useRef<GenerationStatusMap>({})
+  const posterBusyRef = useRef(false)
+  const posterFailedRef = useRef<Set<string>>(new Set())
 
   // The tier survives a change of shape, because turning a clip on its side is
   // not a decision about how big it is.
@@ -244,7 +260,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     if (showLoading) setLoading(true)
     try {
       const next = await api<Generation[]>('/api/v1/generations')
-      setGenerations([...next].sort((left, right) => right.created_at.localeCompare(left.created_at)))
+      setGenerations(sortGenerationsNewestFirst(next))
       setLoadError('')
     } catch (problem) {
       setLoadError(problem instanceof Error ? problem.message : 'Could not read generations')
@@ -269,7 +285,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
       try {
         const payload = JSON.parse((event as MessageEvent).data) as { generations?: Generation[] }
         if (!Array.isArray(payload.generations)) return
-        setGenerations([...payload.generations].sort((left, right) => right.created_at.localeCompare(left.created_at)))
+        setGenerations(sortGenerationsNewestFirst(payload.generations))
         setLoadError('')
       } catch {
         // A later valid event or the polling fallback repairs the view.
@@ -282,12 +298,15 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     }
   }, [])
 
+  // stagedID can hold any run, not only a completed one, once the strip has
+  // been clicked. It is only re-picked here when the id it already holds no
+  // longer names a run at all (deleted, or nothing staged yet); the pick is
+  // still the newest completed run, matching what this screen always opened
+  // to before the strip existed.
   useEffect(() => {
-    setSelectedVideoID(current => {
-      if (generations.some(generation => generation.id === current && generation.status === 'completed')) {
-        return current
-      }
-      return generations.find(generation => generation.status === 'completed')?.id ?? ''
+    setStagedID(current => {
+      if (generations.some(generation => generation.id === current)) return current
+      return generations.find(generation => generation.status === 'completed')?.id ?? current
     })
   }, [generations])
 
@@ -306,13 +325,82 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     }
   }, [hasActive, loadGenerations, streamAvailable])
 
+  // Sound and the tab title only react to a run crossing into completed or
+  // failed, and only while this tab is not the one being looked at. The SSE
+  // handler and the poller both flow through setGenerations above, so this
+  // effect is the single place that notices a transition regardless of
+  // which path delivered it.
+  useEffect(() => {
+    const current = generationStatusMap(generations)
+    const transitioned = finishedTransitions(statusRef.current, current)
+    statusRef.current = current
+    if (transitioned.length === 0) return
+    if (typeof document === 'undefined' || !document.hidden) return
+    setUnseen(previous => markUnseen(previous, transitioned))
+    if (soundOn && audioCtxRef.current) {
+      const ctx = audioCtxRef.current
+      transitioned.forEach(() => playChime(ctx))
+    }
+  }, [generations, soundOn])
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    const onVisibility = () => {
+      if (document.hidden) return
+      setUnseen(new Set())
+      document.title = ORIGINAL_TITLE
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    if (unseen.size === 0 || !document.hidden) return
+    const timer = setInterval(() => {
+      document.title = document.title === ORIGINAL_TITLE ? FLASH_TITLE : ORIGINAL_TITLE
+    }, 1000)
+    return () => {
+      clearInterval(timer)
+      document.title = ORIGINAL_TITLE
+    }
+  }, [unseen])
+
+  // At most one poster capture runs at a time. Each attempt either stores a
+  // poster or marks the id as failed for this session, so a run that cannot
+  // be captured (a corrupt file, a browser that refuses the codec) is tried
+  // once and then left alone instead of retried on every render.
+  useEffect(() => {
+    if (posterBusyRef.current) return
+    const target = generations.find(generation => (
+      generation.status === 'completed'
+      && !cachedPoster(generation.id)
+      && !posterFailedRef.current.has(generation.id)
+    ))
+    if (!target) return
+    posterBusyRef.current = true
+    let cancelled = false
+    let objectURL = ''
+    apiBlob(generationFilePath(target)).then(blob => {
+      if (cancelled) return ''
+      objectURL = URL.createObjectURL(playableVideoBlob(blob))
+      return capturePoster(objectURL)
+    }).then(dataURI => {
+      if (cancelled || !dataURI) return
+      storePoster(target.id, dataURI)
+    }).catch(() => {
+      posterFailedRef.current.add(target.id)
+    }).finally(() => {
+      if (objectURL) URL.revokeObjectURL(objectURL)
+      posterBusyRef.current = false
+      if (!cancelled) setPosterTick(value => value + 1)
+    })
+    return () => { cancelled = true }
+  }, [generations, posterTick])
+
   if (!config) return null
 
   const selectedSize = sizes.find(option => option.shortEdge === shortEdge)
-  // Render time on this class of model tracks pixel count, and the largest
-  // canvas is hours rather than minutes, so each rung says what it costs
-  // against the smallest one on offer instead of leaving that to be found out.
-  const basePixels = sizes[0] ? sizes[0].width * sizes[0].height : 0
   const textMode = config.modes.includes('text_to_video')
   const imageMode = config.modes.includes('image_to_video')
   // Counted in code points so this agrees with the server, which counts
@@ -322,6 +410,34 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   const promptTooLong = promptLength > config.max_prompt_length
   const canSubmit = textMode && Boolean(prompt.trim()) && !promptTooLong && Boolean(selectedSize) && blocks > 0 && !submitting
   const quantization = recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant : undefined
+  const staged = generations.find(generation => generation.id === stagedID)
+
+  const editPrompt = (value: string) => { setPrompt(value); setFilledNote(false) }
+  const chooseShape = (value: CanvasShape) => { setShape(value); setFilledNote(false) }
+  const chooseSize = (value: number) => { setShortEdge(value); setFilledNote(false) }
+  const chooseDuration = (value: number) => { setBlocks(value); setFilledNote(false) }
+
+  const reuseThisPrompt = (source: Generation) => {
+    const values = reuseValues(source, config)
+    setPrompt(values.prompt)
+    setShape(values.shape)
+    setShortEdge(values.shortEdge)
+    setBlocks(values.blocks)
+    setSeed('')
+    setFilledNote(true)
+  }
+
+  const toggleSound = () => {
+    setSoundOn(current => {
+      const next = !current
+      window.localStorage.setItem(SOUND_KEY, next ? 'on' : 'off')
+      if (next && !audioCtxRef.current) {
+        const Ctor = window.AudioContext
+        if (Ctor) audioCtxRef.current = new Ctor()
+      }
+      return next
+    })
+  }
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -351,6 +467,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
         }),
       })
       setPrompt('')
+      setFilledNote(false)
       await loadGenerations()
     } catch (problem) {
       setFormError(problem instanceof Error ? problem.message : 'Could not start this generation')
@@ -384,6 +501,8 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     setBusyID(generation.id)
     try {
       await api(`/api/v1/generations/${encodeURIComponent(generation.id)}`, { method: 'DELETE', body: '{}' })
+      forgetPoster(generation.id)
+      posterFailedRef.current.delete(generation.id)
       await loadGenerations()
     } catch (problem) {
       noticeBox('Could not delete this generation', problem instanceof Error ? problem.message : undefined)
@@ -391,6 +510,10 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
       setBusyID('')
     }
   }
+
+  const finalElapsed = staged?.status === 'completed' && staged.finished_at
+    ? generationElapsedSeconds(staged, Date.now())
+    : null
 
   return (
     <div className="gen-layout">
@@ -408,7 +531,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
         </div>
 
         <section className="card">
-          <form className="gen-form" onSubmit={submit}>
+          <form ref={formRef} className="gen-form" onSubmit={submit}>
             <div>
               <div className="pill-group" role="radiogroup" aria-label="Mode">
                 <label className={!textMode ? 'disabled' : ''}>
@@ -439,7 +562,13 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                 aria-invalid={promptTooLong}
                 placeholder="Describe the clip"
                 value={prompt}
-                onChange={event => setPrompt(event.target.value)}
+                onChange={event => editPrompt(event.target.value)}
+                onKeyDown={event => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                    event.preventDefault()
+                    if (canSubmit) formRef.current?.requestSubmit()
+                  }
+                }}
               />
             </div>
             {/*
@@ -454,6 +583,11 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                   : `${promptLength.toLocaleString()} of ${config.max_prompt_length.toLocaleString()} characters`}
               </p>
             )}
+            {filledNote && (
+              <div className="filled-note" role="status">
+                <p>Filled from the staged result. The seed is empty: this run will be a new take.</p>
+              </div>
+            )}
 
             <div className="gen-controls">
               <div className="gen-canvas">
@@ -467,7 +601,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                           name="gen-shape"
                           value={option.shape}
                           checked={shape === option.shape}
-                          onChange={() => setShape(option.shape)}
+                          onChange={() => chooseShape(option.shape)}
                         />
                         <span className={`shape-glyph ${option.shape}`} aria-hidden="true" />
                         {option.label}
@@ -479,27 +613,24 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                 <div className="field">
                   <span>Size</span>
                   <div className="size-group" role="radiogroup" aria-label="Size">
-                    {sizes.map(option => (
-                      <label key={option.value} className="size-option">
-                        <input
-                          type="radio"
-                          name="gen-size"
-                          value={option.value}
-                          checked={shortEdge === option.shortEdge}
-                          onChange={() => setShortEdge(option.shortEdge)}
-                        />
-                        <span className="size-px">{option.label}</span>
-                        {basePixels > 0 && (
-                          <span className="size-cost">
-                            {(option.width * option.height / basePixels).toFixed(2).replace(/\.?0+$/, '')}× the pixels
-                          </span>
-                        )}
-                      </label>
-                    ))}
+                    {sizes.map(option => {
+                      const waitLabel = sizeWaitLabel(config, option.shortEdge)
+                      return (
+                        <label key={option.value} className="size-option">
+                          <input
+                            type="radio"
+                            name="gen-size"
+                            value={option.value}
+                            checked={shortEdge === option.shortEdge}
+                            onChange={() => chooseSize(option.shortEdge)}
+                          />
+                          <span className="size-px">{option.label}</span>
+                          {waitLabel && <span className="size-wait">{waitLabel}</span>}
+                        </label>
+                      )
+                    })}
                   </div>
-                  <span className="hint">
-                    Compared with {sizes[0]?.label ?? 'the smallest size'}. Render time grows faster than pixel count, so the largest canvas is hours rather than minutes.
-                  </span>
+                  <span className="hint">{sizeWaitHint(config)}</span>
                 </div>
               </div>
               <div className="field">
@@ -512,15 +643,13 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                         name="gen-duration"
                         value={option.blocks}
                         checked={blocks === option.blocks}
-                        onChange={() => setBlocks(option.blocks)}
+                        onChange={() => chooseDuration(option.blocks)}
                       />
                       {option.label}
                     </label>
                   ))}
                 </div>
-                <span className="hint">
-                  {config.frame_block} frames per block, plus {config.frame_offset}, at {config.frames_per_second} frames per second.
-                </span>
+                <span className="hint">{durationArithmetic(config, blocks)}</span>
               </div>
               <label className="field">
                 <span>Seed (optional)</span>
@@ -539,15 +668,15 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
             {formError && <div className="error-note" role="alert"><p>{formError}</p></div>}
 
             <div className="gen-foot">
+              <button className="primary" type="submit" disabled={!canSubmit}>
+                {submitting ? 'Starting' : <>Generate <span className="kbd" aria-hidden="true">&#8984;&#9166;</span></>}
+              </button>
               <p className="faint">
                 {config.concurrent_generations === 1
                   ? 'Generations run one at a time. New ones wait in the queue. '
                   : `Up to ${config.concurrent_generations} generations run at a time. New ones wait in the queue. `}
                 A generation keeps running if you leave this view.
               </p>
-              <button className="primary" type="submit" disabled={!canSubmit}>
-                {submitting ? 'Starting' : 'Generate'}
-              </button>
             </div>
           </form>
         </section>
@@ -556,29 +685,88 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
       <section className="card gen-right" aria-labelledby="generation-results-title">
         <div className="section-head">
           <h2 id="generation-results-title">Results</h2>
+          <button type="button" className="sound-toggle" aria-pressed={soundOn} onClick={toggleSound}>
+            <span className="box" aria-hidden="true">{soundOn ? '✓' : ''}</span>
+            Sound when a run finishes
+          </button>
           <span className="spacer" />
-          <span className="muted gen-results-note">Newest first · played from local disk only</span>
+          <span className="muted gen-results-note">Played from local disk only</span>
         </div>
-        {loading && <div className="gen-results-empty">Reading generations…</div>}
+
+        {loading && <div className="stage-empty">Reading generations…</div>}
         {!loading && loadError && <div className="error-note" role="alert"><p>{loadError}</p></div>}
-        {!loading && !loadError && generations.length === 0 && (
-          <div className="gen-results-empty">No generations yet. Describe a clip and generate it.</div>
-        )}
-        {!loading && generations.length > 0 && (
-          <div className="gen-results-list">
-            {generations.map(generation => (
-              <GenerationCard
-                key={generation.id}
-                generation={generation}
-                recipe={recipes.find(item => item.id === generation.model_id)}
-                busy={busyID === generation.id}
-                selected={selectedVideoID === generation.id}
-                onSelect={() => setSelectedVideoID(generation.id)}
-                onCancel={() => cancel(generation)}
-                onDelete={() => remove(generation)}
-              />
-            ))}
-          </div>
+
+        {!loading && !loadError && (
+          <>
+            <div className="stage">
+              {staged?.status === 'completed' ? (
+                <GenerationVideo generation={staged} />
+              ) : staged && generationActive(staged.status) ? (
+                <div className="stage-empty">
+                  {staged.status === 'running'
+                    ? <GenerationProgress generation={staged} />
+                    : (
+                      <div className="gen-working" role="status">
+                        <span className="sdot wait" aria-hidden="true" />
+                        <span>{staged.queue_position ? `Queue position ${staged.queue_position}` : 'Waiting in the queue'}</span>
+                      </div>
+                    )}
+                </div>
+              ) : staged ? (
+                <div className="stage-empty">
+                  <span className={`gen-state ${staged.status}`}>{generationState(staged.status)}</span>
+                </div>
+              ) : generations.length === 0 ? (
+                <div className="stage-empty">No generations yet. Describe a clip and generate it.</div>
+              ) : null}
+
+              {staged && (
+                <>
+                  <div className="stage-meta">
+                    <span className={`gen-state ${staged.status}`}>{generationState(staged.status)}</span>
+                    <span>{staged.width} × {staged.height}</span>
+                    <span>{durationString(staged, config)}</span>
+                    <span>Seed {staged.seed}</span>
+                    {finalElapsed !== null && <span>Generated in {formatElapsed(finalElapsed)}</span>}
+                  </div>
+                  <p className="stage-prompt">{staged.prompt}</p>
+                  {staged.error && staged.status !== 'completed' && (
+                    <p className="gen-result-error" role={staged.status === 'failed' ? 'alert' : undefined}>{staged.error}</p>
+                  )}
+                  <div className="actions">
+                    {staged.status === 'completed' && <a className="gen-download" href={generationFilePath(staged)}>Download</a>}
+                    {(staged.status === 'completed' || staged.status === 'failed') && (
+                      <button type="button" className="quiet reuse" onClick={() => reuseThisPrompt(staged)}>Use this prompt</button>
+                    )}
+                    {generationActive(staged.status) && (
+                      <button type="button" className="quiet" disabled={busyID === staged.id} onClick={() => cancel(staged)}>Cancel</button>
+                    )}
+                    {generationTerminal(staged.status) && (
+                      <button type="button" className="quiet" disabled={busyID === staged.id} onClick={() => remove(staged)}>Delete</button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {generations.length > 0 && (
+              <>
+                <div className="section-head strip-head">
+                  <span className="muted">All runs · newest first</span>
+                </div>
+                <div className="strip">
+                  {generations.map(generation => (
+                    <Thumb
+                      key={generation.id}
+                      generation={generation}
+                      selected={generation.id === stagedID}
+                      onSelect={() => setStagedID(generation.id)}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
+          </>
         )}
       </section>
     </div>

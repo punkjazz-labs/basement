@@ -735,7 +735,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 /* ---- Generate ------------------------------------------------------------ */
 
 .gen-layout {
-  display: grid; grid-template-columns: minmax(0, 1fr) 380px;
+  display: grid; grid-template-columns: 360px minmax(0, 1fr);
   gap: 20px; align-items: start;
 }
 /* Video prompts run long: a shot list with per-subject definitions, timings
@@ -743,6 +743,8 @@ dialog.confirm-box h2 { font-size: 15.5px; }
    three-line box is how a mistake stays hidden until the clip arrives. */
 .gen-composer textarea { max-height: 320px; }
 .prompt-count { margin: 6px 2px 0; text-align: right; font-size: 11.5px; }
+.filled-note { margin: 6px 2px 0; }
+.filled-note p { margin: 0; color: var(--accent-deep); font-size: 12px; }
 .gen-left { min-width: 0; }
 .gen-context { align-items: center; gap: 12px; }
 .gen-context .glyph {
@@ -771,17 +773,16 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .pill-group input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .gen-mode-note { margin: 7px 0 0; color: var(--faint); font-size: 11.5px; }
 
-.gen-controls {
-  display: grid; grid-template-columns: 1.6fr 1fr;
-  gap: 20px 24px; align-items: start;
-}
+/* The form column is narrow on purpose (the stage is the hero), so every
+   field stacks full width instead of sharing a row with another field. */
+.gen-controls { display: grid; gap: 16px; }
 .gen-controls .field > span:first-child { margin-bottom: 6px; }
 .gen-controls .hint { display: block; margin-top: 7px; color: var(--faint); font-size: 11px; line-height: 1.6; }
 .gen-duration-pills { max-height: 116px; overflow-y: auto; padding: 2px; margin: -2px; }
 
 /* Which way up the clip is, and how big it is, are two questions. They sit
    together on their own row because answering them is one act of framing. */
-.gen-canvas { grid-column: 1 / -1; display: grid; gap: 18px; }
+.gen-canvas { display: grid; gap: 18px; }
 .gen-shape-pills label { gap: 8px; padding-left: 11px; }
 /* The rectangle is the control's real label: nobody reads "16:9" and pictures
    a shape, and a proportional outline says it without a word. */
@@ -796,7 +797,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .size-option {
   display: grid; gap: 1px; position: relative; cursor: pointer; min-width: 112px;
   border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 13px 10px;
-  color: var(--muted);
+  color: var(--muted); text-align: center;
 }
 .size-option:hover { border-color: var(--line-strong); }
 .size-option:has(input:checked) { border-color: var(--ink); background: var(--surface-2); color: var(--ink); }
@@ -804,22 +805,37 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .size-option input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .size-px { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .size-option:has(input:checked) .size-px { font-weight: 600; }
-.size-cost { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
-.size-option:has(input:checked) .size-cost { color: var(--muted); }
-.gen-foot {
-  display: flex; justify-content: space-between; align-items: center; gap: 16px;
-  flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--line);
-}
+/* What a size costs in wait time, in the recipe's own measured words. */
+.size-wait { font-size: 10.5px; color: var(--faint); }
+.size-option:has(input:checked) .size-wait { color: var(--muted); }
+
+.gen-foot { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+.gen-foot .primary { width: 100%; }
 .gen-foot p { margin: 0; max-width: 60ch; }
+/* The shortcut glyph sits on the orange button, so its border is a share of
+   the button's own text color rather than a new color of its own. */
+.kbd {
+  font-family: var(--mono); font-size: 10.5px;
+  border: 1px solid color-mix(in srgb, var(--accent-ink) 45%, transparent);
+  border-radius: 5px; padding: 0 5px; opacity: 0.85; font-weight: 500;
+}
 
 .gen-right { min-width: 0; padding-bottom: 4px; }
 .gen-right .section-head { margin-bottom: 2px; }
 .gen-results-note { font-size: 12px; }
-.gen-results-list { display: grid; }
-.gen-results-empty { color: var(--faint); padding: 28px 6px; text-align: center; font-size: 12.5px; }
-.gen-result { display: grid; gap: 9px; padding: 14px 0; border-top: 1px solid var(--line); }
-.gen-result:first-child { border-top: 0; }
-.gen-result-head { display: flex; align-items: center; gap: 9px; min-width: 0; }
+
+.sound-toggle {
+  display: inline-flex; align-items: center; gap: 7px; background: none;
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px;
+  color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.sound-toggle:hover { border-color: var(--line-strong); }
+.sound-toggle .box {
+  width: 13px; height: 13px; border-radius: 4px; border: 1px solid var(--line-strong);
+  display: inline-grid; place-items: center; font-size: 10px; line-height: 1;
+  background: var(--surface-2); color: var(--ink);
+}
+
 .gen-state {
   flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--muted);
   border: 1px solid var(--line-strong); border-radius: 999px; padding: 2px 8px;
@@ -827,16 +843,9 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .gen-state.running, .gen-state.queued { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
 .gen-state.failed { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 45%, var(--line)); }
 .gen-state.cancelled, .gen-state.interrupted { color: var(--faint); }
-.gen-result-model { color: var(--faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gen-result-prompt {
-  margin: 0; font-size: 12.5px; color: var(--ink); overflow: hidden;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-}
-.gen-result-meta { display: flex; flex-wrap: wrap; gap: 3px 10px; color: var(--faint); font-size: 11.5px; }
-.gen-result-meta span { white-space: nowrap; }
 .gen-working { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .gen-working span:last-child { margin-left: auto; font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.gen-progress { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+.gen-progress { display: grid; gap: 5px; color: var(--muted); font-size: 12px; width: 100%; }
 .gen-progress-head, .gen-progress-count { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
 .gen-progress-head span:last-child, .gen-progress-count {
   font-family: var(--mono); font-variant-numeric: tabular-nums;
@@ -851,7 +860,6 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   .gen-progress-track > span { transition: none; }
 }
 .gen-result-error { margin: 0; color: var(--fail); font-size: 12px; overflow-wrap: anywhere; }
-.gen-result-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .gen-finished-time { color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 
 .gen-video-wrap { display: grid; gap: 9px; justify-items: start; }
@@ -871,17 +879,48 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   color: var(--faint); font-size: 12px; text-align: center; padding: 12px;
 }
 
+/* The stage: the selected run's video (or its placeholder), then a plain
+   meta line, the full prompt, and the actions that apply to that run. */
+.stage { display: grid; gap: 10px; margin-top: 8px; }
+.stage-empty {
+  aspect-ratio: 16 / 9; border-radius: 9px; border: 1px solid var(--line);
+  background: var(--panel); display: grid; place-items: center; padding: 16px;
+  color: var(--faint); font-size: 12.5px; text-align: center;
+}
+.stage-meta { display: flex; gap: 13px; color: var(--faint); font-size: 12px; flex-wrap: wrap; align-items: center; }
+.stage-meta span { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.stage-prompt { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+/* Orange marks this as the one action that starts something new, without
+   making it a second primary button next to Generate. */
+.quiet.reuse { border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line)); color: var(--accent-deep); }
+
+/* The strip: every run, newest first, as one small card each. */
+.strip-head { margin: 18px 0 8px; }
+/* align-items: flex-start keeps every card its own natural height: a
+   completed card's third caption line (the finished time) should not
+   stretch a shorter running or failed card to match it. */
+.strip { display: flex; align-items: flex-start; gap: 9px; overflow-x: auto; padding-bottom: 4px; }
+.thumb {
+  display: block; flex: none; width: 128px; padding: 0; text-align: left; font: inherit; color: inherit;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; cursor: pointer;
+}
+.thumb:hover { border-color: var(--line-strong); }
+.thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.thumb.sel { border-color: var(--line-strong); box-shadow: 0 0 0 1px var(--line-strong); }
+.thumb .pic { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.thumb-blank { aspect-ratio: 16 / 9; display: grid; place-items: center; background: var(--panel); }
+.thumb .prog { height: 3px; background: var(--surface-2); }
+.thumb .prog span { display: block; height: 100%; background: var(--warn); }
+.thumb .cap { padding: 4px 7px 6px; font-size: 10.5px; color: var(--faint); display: grid; gap: 1px; }
+.thumb .cap b { color: var(--muted); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 @media (prefers-reduced-motion: reduce) {
   .sdot.busy { animation: none; }
 }
 
-@media (max-width: 1100px) {
-  .gen-layout { grid-template-columns: 1fr; gap: 14px; }
-}
-
 @media (max-width: 900px) {
-  .gen-controls { grid-template-columns: 1fr; }
-  .gen-duration-pills { max-height: none; overflow: visible; }
+  .gen-layout { grid-template-columns: 1fr; gap: 14px; }
 }
 
 /* ---- Connect -------------------------------------------------------------- */
