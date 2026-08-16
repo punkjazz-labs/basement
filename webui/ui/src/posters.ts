@@ -55,7 +55,15 @@ export function storePoster(id: string, dataURI: string, store: Storage = window
     if (!evictOldest()) break
   }
 
-  while (!safeSet(store, entryKey(id), dataURI)) {
+  for (;;) {
+    const entryWritten = safeSet(store, entryKey(id), dataURI)
+    const indexWritten = entryWritten && safeSet(store, INDEX_KEY, JSON.stringify([...index, id]))
+    if (indexWritten) return
+
+    // Either write hit quota. An entry with no matching index membership is
+    // an orphan that no future eviction could ever reach (nothing else ever
+    // looks at raw keys), so undo it before making room for another try.
+    if (entryWritten) store.removeItem(entryKey(id))
     if (!evictOldest()) {
       // Nothing left to evict and the write still fails. Persist whatever
       // eviction already happened and give up on this poster silently.
@@ -63,9 +71,6 @@ export function storePoster(id: string, dataURI: string, store: Storage = window
       return
     }
   }
-
-  index.push(id)
-  safeSet(store, INDEX_KEY, JSON.stringify(index))
 }
 
 export function forgetPoster(id: string, store: Storage = window.localStorage): void {

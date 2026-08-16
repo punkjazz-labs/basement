@@ -26,6 +26,31 @@ function fakeStorage(capacity = Infinity, initial: Record<string, string> = {}):
   }
 }
 
+// A second stand-in, keyed off value size rather than key count: any value
+// longer than the budget throws. This models a store where a poster's short
+// dataURI fits but the index's JSON array (quoted, bracketed, comma joined)
+// does not, so the entry write can succeed while the index write fails.
+function fakeStorageByteBudget(budget: number, initial: Record<string, string> = {}): Storage {
+  const data = new Map(Object.entries(initial))
+  return {
+    getItem: (key: string) => (data.has(key) ? (data.get(key) as string) : null),
+    setItem: (key: string, value: string) => {
+      if (value.length > budget) {
+        throw new DOMException('storage quota exceeded', 'QuotaExceededError')
+      }
+      data.set(key, value)
+    },
+    removeItem: (key: string) => {
+      data.delete(key)
+    },
+    clear: () => data.clear(),
+    key: (index: number) => Array.from(data.keys())[index] ?? null,
+    get length() {
+      return data.size
+    },
+  }
+}
+
 // cachedPoster always reads window.localStorage, so tests that exercise it
 // stub window with a fake store rather than passing one as an argument.
 beforeEach(() => {
@@ -82,6 +107,34 @@ describe('storePoster eviction on a throwing store', () => {
     const store = fakeStorage(0)
     expect(() => storePoster('run-1', 'poster-1', store)).not.toThrow()
     expect(store.getItem('basement.generate.poster.run-1')).toBeNull()
+  })
+
+  it('never leaves an orphaned entry when only the index write hits quota', () => {
+    // A poster's dataURI is a couple of bytes; the index's JSON array is
+    // not, once it names an id. The entry write can succeed here on every
+    // attempt while the index write keeps failing, which is exactly the
+    // situation that used to leave a stored entry with no index membership.
+    const store = fakeStorageByteBudget(6, {
+      'basement.generate.poster.run-1': 'p1',
+      'basement.generate.posters': JSON.stringify(['run-1']),
+    })
+
+    storePoster('run-2', 'p2', store)
+
+    const indexed: string[] = JSON.parse(store.getItem('basement.generate.posters') ?? '[]')
+    const hasEntry = store.getItem('basement.generate.poster.run-2') !== null
+    const hasIndexMembership = indexed.includes('run-2')
+    expect(hasEntry).toBe(hasIndexMembership)
+  })
+
+  it('storing the same id twice does not duplicate it and moves it to newest', () => {
+    const store = fakeStorage()
+    storePoster('run-1', 'poster-1a', store)
+    storePoster('run-2', 'poster-2', store)
+    storePoster('run-1', 'poster-1b', store)
+
+    expect(JSON.parse(store.getItem('basement.generate.posters') as string)).toEqual(['run-2', 'run-1'])
+    expect(store.getItem('basement.generate.poster.run-1')).toBe('poster-1b')
   })
 })
 
