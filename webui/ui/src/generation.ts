@@ -212,3 +212,44 @@ export const generationMode = (mode: string): string => {
 // with that type, so the console re-labels its own copy before playback.
 export const playableVideoBlob = (blob: Blob): Blob =>
   blob.type.startsWith('video/') ? blob : new Blob([blob], { type: 'video/mp4' })
+
+export type GenerationStatusMap = Record<string, string>
+
+export function generationStatusMap(generations: Generation[]): GenerationStatusMap {
+  const map: GenerationStatusMap = {}
+  for (const generation of generations) map[generation.id] = generation.status
+  return map
+}
+
+// Ids that just crossed into a state worth telling someone about while they
+// are away from this tab: completed or failed. A status already carrying
+// that value on the previous map is not a transition, and neither is an id
+// seen here for the first time, because a run that finished before the
+// console ever looked at it should not chime the moment the console loads.
+export function finishedTransitions(previous: GenerationStatusMap, current: GenerationStatusMap): string[] {
+  const ids: string[] = []
+  for (const [id, status] of Object.entries(current)) {
+    if (status !== 'completed' && status !== 'failed') continue
+    const before = previous[id]
+    if (before === undefined || before === status) continue
+    ids.push(id)
+  }
+  return ids
+}
+
+// A run that finishes while the tab is hidden goes on this set so the tab
+// title keeps flashing until someone comes back to look. Always returns a
+// new Set, even when nothing was added, so callers never have to guess
+// whether the result aliases what they passed in.
+export function markUnseen(unseen: ReadonlySet<string>, ids: readonly string[]): Set<string> {
+  const next = new Set(unseen)
+  for (const id of ids) next.add(id)
+  return next
+}
+
+// The strip and the generations list both want every run newest first. The
+// server's created_at is RFC 3339 with a fixed-width fractional part, so
+// comparing it as a string already sorts it in time order.
+export function sortGenerationsNewestFirst(generations: Generation[]): Generation[] {
+  return [...generations].sort((left, right) => right.created_at.localeCompare(left.created_at))
+}

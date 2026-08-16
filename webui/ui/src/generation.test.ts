@@ -2,8 +2,9 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
-  canvasSizes, canvasTiers, defaultCanvasTier, durationArithmetic, durationOptions, generationElapsedSeconds,
-  generationState, generationTerminal, playableVideoBlob, reuseValues, sizeWaitHint, sizeWaitLabel,
+  canvasSizes, canvasTiers, defaultCanvasTier, durationArithmetic, durationOptions, finishedTransitions,
+  generationElapsedSeconds, generationState, generationStatusMap, generationTerminal, markUnseen,
+  playableVideoBlob, reuseValues, sizeWaitHint, sizeWaitLabel, sortGenerationsNewestFirst,
 } from './generation'
 import type { Generation, MediaGenerationConfig } from './api'
 import { GenerationProgress } from './views/Generate'
@@ -235,6 +236,80 @@ describe('generation progress rendering', () => {
     expect(markup).toContain('Generating')
     expect(markup).toContain('Elapsed')
     expect(markup).not.toContain('%')
+  })
+})
+
+describe('generationStatusMap and finishedTransitions', () => {
+  const run = (id: string, status: string): Generation => ({
+    id, model_id: 'media', mode: 'text_to_video', prompt: 'x', blocks: 1,
+    short_edge: 768, width: 1152, height: 768, frames: 22, seed: 1, status,
+    created_at: '2026-08-04T10:00:00Z',
+  })
+
+  it('maps each generation to its status by id', () => {
+    expect(generationStatusMap([run('a', 'running'), run('b', 'completed')])).toEqual({ a: 'running', b: 'completed' })
+  })
+
+  it('reports an id that just finished, completed or failed', () => {
+    const before = { a: 'running', b: 'queued' }
+    const after = { a: 'completed', b: 'failed' }
+    expect(finishedTransitions(before, after)).toEqual(['a', 'b'])
+  })
+
+  it('does not report a status that has not changed', () => {
+    expect(finishedTransitions({ a: 'completed' }, { a: 'completed' })).toEqual([])
+  })
+
+  it('does not report an id seen here for the first time, even if it is already finished', () => {
+    // A page load populates the previous map for the first time from
+    // whatever the server already reports; none of that is a transition,
+    // so a run that finished before the console ever looked does not chime.
+    expect(finishedTransitions({}, { a: 'completed' })).toEqual([])
+  })
+
+  it('ignores a transition into a state nobody is waiting to hear about', () => {
+    expect(finishedTransitions({ a: 'running' }, { a: 'cancelled' })).toEqual([])
+  })
+})
+
+describe('markUnseen', () => {
+  it('adds every new id to the set', () => {
+    const result = markUnseen(new Set(['a']), ['b', 'c'])
+    expect([...result].sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('returns an equivalent set, not the same reference, when nothing is added', () => {
+    const original = new Set(['a'])
+    const result = markUnseen(original, [])
+    expect(result).not.toBe(original)
+    expect([...result]).toEqual(['a'])
+  })
+
+  it('does not duplicate an id already marked unseen', () => {
+    expect([...markUnseen(new Set(['a']), ['a'])]).toEqual(['a'])
+  })
+})
+
+describe('sortGenerationsNewestFirst', () => {
+  const run = (id: string, createdAt: string): Generation => ({
+    id, model_id: 'media', mode: 'text_to_video', prompt: 'x', blocks: 1,
+    short_edge: 768, width: 1152, height: 768, frames: 22, seed: 1, status: 'completed',
+    created_at: createdAt,
+  })
+
+  it('puts the newest created_at first', () => {
+    const oldest = run('a', '2026-08-04T10:00:00Z')
+    const middle = run('b', '2026-08-04T11:00:00Z')
+    const newest = run('c', '2026-08-04T12:00:00Z')
+    expect(sortGenerationsNewestFirst([oldest, newest, middle]).map(item => item.id)).toEqual(['c', 'b', 'a'])
+  })
+
+  it('does not mutate the array it was given', () => {
+    const oldest = run('a', '2026-08-04T10:00:00Z')
+    const newest = run('c', '2026-08-04T12:00:00Z')
+    const input = [oldest, newest]
+    sortGenerationsNewestFirst(input)
+    expect(input).toEqual([oldest, newest])
   })
 })
 
