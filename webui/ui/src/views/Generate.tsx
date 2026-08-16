@@ -31,6 +31,13 @@ const modelGlyph = (name: string): string =>
 const generationFilePath = (generation: Generation): string =>
   generation.file_url ?? `/api/v1/generations/${encodeURIComponent(generation.id)}/file`
 
+// The generations list spans every model this Spark has ever run, not just
+// the recipe open right now, so a run's model name comes from its own
+// model_id rather than from the page's current context.
+function generationModelName(recipes: Recipe[], generation: Generation): string {
+  return recipes.find(item => item.id === generation.model_id)?.display_name ?? generation.model_id
+}
+
 // The same arithmetic the old result card used: a generation's frame count
 // only still means a round number of seconds if it still lands on the
 // recipe's current frame grid. A recipe update can move that grid, so an
@@ -179,8 +186,9 @@ function GenerationVideo({ generation }: { generation: Generation }) {
   )
 }
 
-function Thumb({ generation, selected, onSelect }: {
+function Thumb({ generation, modelName, selected, onSelect }: {
   generation: Generation
+  modelName: string
   selected: boolean
   onSelect: () => void
 }) {
@@ -194,7 +202,12 @@ function Thumb({ generation, selected, onSelect }: {
     : null
 
   return (
-    <button type="button" className={`thumb${selected ? ' sel' : ''}`} onClick={onSelect}>
+    <button
+      type="button"
+      className={`thumb${selected ? ' sel' : ''}`}
+      title={`${modelName}: ${generation.prompt}`}
+      onClick={onSelect}
+    >
       {poster
         ? <img className="pic" src={poster} alt="" />
         : (
@@ -216,7 +229,7 @@ function Thumb({ generation, selected, onSelect }: {
   )
 }
 
-export default function Generate({ recipe }: GenerateProps) {
+export default function Generate({ recipe, recipes }: GenerateProps) {
   const config = recipe.media_generation
   const [shape, setShape] = useState<CanvasShape>('horizontal')
   const sizes = useMemo(() => config ? canvasSizes(config, shape) : [], [config, shape])
@@ -724,6 +737,7 @@ export default function Generate({ recipe }: GenerateProps) {
                 <>
                   <div className="stage-meta">
                     <span className={`gen-state ${staged.status}`}>{generationState(staged.status)}</span>
+                    <span className="stage-model">{generationModelName(recipes, staged)}</span>
                     <span>{staged.width} × {staged.height}</span>
                     <span>{durationString(staged, config)}</span>
                     <span>Seed {staged.seed}</span>
@@ -759,6 +773,7 @@ export default function Generate({ recipe }: GenerateProps) {
                     <Thumb
                       key={generation.id}
                       generation={generation}
+                      modelName={generationModelName(recipes, generation)}
                       selected={generation.id === stagedID}
                       onSelect={() => setStagedID(generation.id)}
                     />

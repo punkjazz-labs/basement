@@ -889,6 +889,10 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 }
 .stage-meta { display: flex; gap: 13px; color: var(--faint); font-size: 12px; flex-wrap: wrap; align-items: center; }
 .stage-meta span { white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Every model this Spark has ever run can show up in the same list, so the
+   run's model name stays next to its state; same faint, small, ellipsized
+   treatment the old result card used for it. */
+.stage-model { max-width: 220px; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
 .stage-prompt { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 /* Orange marks this as the one action that starts something new, without
