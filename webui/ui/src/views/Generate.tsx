@@ -54,7 +54,10 @@ function durationString(generation: Generation, config: MediaGenerationConfig): 
 
 // Two short tones built from oscillators rather than shipped as an audio
 // file, so the console has no binary asset to keep in sync with this code.
-function playChime(context: AudioContext): void {
+// offset staggers one run's chime after another's, so two runs finishing in
+// the same tick play in sequence instead of both tones stacking into double
+// the gain.
+function playChime(context: AudioContext, offset = 0): void {
   const tone = (frequency: number, start: number, duration: number) => {
     const oscillator = context.createOscillator()
     const gain = context.createGain()
@@ -62,8 +65,8 @@ function playChime(context: AudioContext): void {
     oscillator.frequency.value = frequency
     oscillator.connect(gain)
     gain.connect(context.destination)
-    oscillator.start(context.currentTime + start)
-    oscillator.stop(context.currentTime + start + duration)
+    oscillator.start(context.currentTime + offset + start)
+    oscillator.stop(context.currentTime + offset + start + duration)
   }
   tone(880, 0, 0.09)
   tone(1175, 0.09, 0.09)
@@ -186,13 +189,13 @@ function GenerationVideo({ generation }: { generation: Generation }) {
   )
 }
 
-function Thumb({ generation, modelName, selected, onSelect }: {
+function Thumb({ generation, modelName, poster, selected, onSelect }: {
   generation: Generation
   modelName: string
+  poster: string | null
   selected: boolean
   onSelect: () => void
 }) {
-  const poster = cachedPoster(generation.id)
   const value = generation.progress_value
   const max = generation.progress_max
   const determinate = generation.status === 'running'
@@ -215,9 +218,11 @@ function Thumb({ generation, modelName, selected, onSelect }: {
             <span className={`gen-state ${generation.status}`}>{generationState(generation.status)}</span>
           </div>
         )}
-      {determinate && (
+      {generation.status === 'running' && (
         <div className="prog">
-          <span style={{ width: `${(value / max) * 100}%` }} />
+          {determinate
+            ? <span style={{ width: `${(value / max) * 100}%` }} />
+            : <span className="indeterminate" />}
         </div>
       )}
       <div className="cap">
@@ -249,6 +254,9 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   const [streamAvailable, setStreamAvailable] = useState(true)
   const [soundOn, setSoundOn] = useState(() => window.localStorage.getItem(SOUND_KEY) === 'on')
   const [unseen, setUnseen] = useState<ReadonlySet<string>>(new Set())
+  // Has no meaning of its own; incrementing it just forces the poster effect
+  // below to re-run and look for the next uncaptured poster once the
+  // current capture finishes, without generations itself having changed.
   const [posterTick, setPosterTick] = useState(0)
   const formRef = useRef<HTMLFormElement>(null)
   const audioCtxRef = useRef<AudioContext | null>(null)
@@ -313,13 +321,15 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
 
   // stagedID can hold any run, not only a completed one, once the strip has
   // been clicked. It is only re-picked here when the id it already holds no
-  // longer names a run at all (deleted, or nothing staged yet); the pick is
-  // still the newest completed run, matching what this screen always opened
-  // to before the strip existed.
+  // longer names a run at all (deleted, or nothing staged yet). The newest
+  // completed run is still the preference, matching what this screen always
+  // opened to before the strip existed; but when nothing has completed yet,
+  // the newest run of any status is staged instead, so the stage shows its
+  // progress or queue state rather than sitting empty.
   useEffect(() => {
     setStagedID(current => {
       if (generations.some(generation => generation.id === current)) return current
-      return generations.find(generation => generation.status === 'completed')?.id ?? current
+      return generations.find(generation => generation.status === 'completed')?.id ?? generations[0]?.id ?? current
     })
   }, [generations])
 
@@ -328,7 +338,13 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     if (!hasActive && streamAvailable) return
     let cancelled = false
     const poll = () => {
-      if (document.hidden || cancelled) return
+      if (cancelled) return
+      // A hidden tab with nothing active can wait for its next visit; a
+      // hidden tab with something running or queued cannot, because the
+      // completion sound and the title flash depend on this poll noticing
+      // the transition while nothing else is watching (SSE included, since
+      // this branch only runs at all when SSE is down or something is active).
+      if (document.hidden && !hasActive) return
       loadGenerations()
     }
     const timer = setInterval(poll, 2000)
@@ -352,7 +368,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     setUnseen(previous => markUnseen(previous, transitioned))
     if (soundOn && audioCtxRef.current) {
       const ctx = audioCtxRef.current
-      transitioned.forEach(() => playChime(ctx))
+      transitioned.forEach((_id, index) => playChime(ctx, index * 0.2))
     }
   }, [generations, soundOn])
 
@@ -379,37 +395,64 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     }
   }, [unseen])
 
+  // Posters are read from localStorage here, once per list change, rather
+  // than inside Thumb's render: cachedPoster is a synchronous storage read,
+  // and the strip can hold a lot of cards.
+  const posters = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const generation of generations) {
+      const poster = cachedPoster(generation.id)
+      if (poster) map.set(generation.id, poster)
+    }
+    return map
+  }, [generations, posterTick])
+
   // At most one poster capture runs at a time. Each attempt either stores a
   // poster or marks the id as failed for this session, so a run that cannot
   // be captured (a corrupt file, a browser that refuses the codec) is tried
   // once and then left alone instead of retried on every render.
+  //
+  // generations gets a new array identity on every SSE tick and every poll,
+  // including ticks that have nothing to do with the run being captured, so
+  // this effect re-runs far more often than the capture itself changes.
+  // cancelled therefore only ever gates the final setPosterTick call, which
+  // exists purely to look for the next target; it does not gate storePoster,
+  // so a capture that finishes despite being superseded is still kept. The
+  // AbortController actually stops an abandoned network download, and the
+  // cleanup clears the busy guard synchronously (not from the aborted
+  // fetch's own, later, finally) so a React StrictMode double-invoke, which
+  // runs an effect, its cleanup, and the effect again before anything can
+  // resolve, cannot leave the guard permanently stuck open.
   useEffect(() => {
     if (posterBusyRef.current) return
     const target = generations.find(generation => (
       generation.status === 'completed'
-      && !cachedPoster(generation.id)
+      && !posters.has(generation.id)
       && !posterFailedRef.current.has(generation.id)
     ))
     if (!target) return
     posterBusyRef.current = true
     let cancelled = false
     let objectURL = ''
-    apiBlob(generationFilePath(target)).then(blob => {
-      if (cancelled) return ''
+    const controller = new AbortController()
+    apiBlob(generationFilePath(target), { signal: controller.signal }).then(blob => {
       objectURL = URL.createObjectURL(playableVideoBlob(blob))
       return capturePoster(objectURL)
     }).then(dataURI => {
-      if (cancelled || !dataURI) return
       storePoster(target.id, dataURI)
-    }).catch(() => {
-      posterFailedRef.current.add(target.id)
+    }).catch(problem => {
+      if ((problem as { name?: string })?.name !== 'AbortError') posterFailedRef.current.add(target.id)
     }).finally(() => {
       if (objectURL) URL.revokeObjectURL(objectURL)
       posterBusyRef.current = false
       if (!cancelled) setPosterTick(value => value + 1)
     })
-    return () => { cancelled = true }
-  }, [generations, posterTick])
+    return () => {
+      cancelled = true
+      controller.abort()
+      posterBusyRef.current = false
+    }
+  }, [generations, posters])
 
   if (!config) return null
 
@@ -440,14 +483,21 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     setFilledNote(true)
   }
 
+  // AudioContext creation stays behind an actual user gesture (browsers
+  // refuse to let it make sound otherwise), but a reload with the toggle
+  // already on from a previous session never fires that toggle click, so
+  // Generate is the other gesture this screen can lean on to arm it.
+  const ensureAudioContext = () => {
+    if (audioCtxRef.current) return
+    const Ctor = window.AudioContext
+    if (Ctor) audioCtxRef.current = new Ctor()
+  }
+
   const toggleSound = () => {
     setSoundOn(current => {
       const next = !current
       window.localStorage.setItem(SOUND_KEY, next ? 'on' : 'off')
-      if (next && !audioCtxRef.current) {
-        const Ctor = window.AudioContext
-        if (Ctor) audioCtxRef.current = new Ctor()
-      }
+      if (next) ensureAudioContext()
       return next
     })
   }
@@ -464,6 +514,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
         return
       }
     }
+    if (soundOn) ensureAudioContext()
     setSubmitting(true)
     try {
       await api<GenerateResponse>('/api/v1/generate', {
@@ -774,6 +825,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                       key={generation.id}
                       generation={generation}
                       modelName={generationModelName(recipes, generation)}
+                      poster={posters.get(generation.id) ?? null}
                       selected={generation.id === stagedID}
                       onSelect={() => setStagedID(generation.id)}
                     />

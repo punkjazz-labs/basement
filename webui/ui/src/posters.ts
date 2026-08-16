@@ -90,12 +90,21 @@ export function capturePoster(videoURL: string): Promise<string> {
     let frameHandle: number | null = null
 
     const cleanup = () => {
+      window.clearTimeout(timeoutHandle)
       video.removeEventListener('loadeddata', onFrame)
       video.removeEventListener('error', onError)
       if (frameHandle !== null) video.cancelVideoFrameCallback(frameHandle)
       video.removeAttribute('src')
       video.load()
     }
+
+    // A video that never fires loadeddata or error (a stalled connection, a
+    // codec the browser silently refuses) would otherwise hold the caller's
+    // one-capture-at-a-time guard open for the rest of the session.
+    const timeoutHandle = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('timed out waiting for a video frame to capture'))
+    }, 30000)
 
     const onFrame = () => {
       const width = 128

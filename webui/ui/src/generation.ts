@@ -201,12 +201,6 @@ export function formatElapsed(seconds: number): string {
   return `${minutes}:${String(remainder).padStart(2, '0')}`
 }
 
-export const generationMode = (mode: string): string => {
-  if (mode === 'text_to_video') return 'Text to video'
-  if (mode === 'image_to_video') return 'Image to video'
-  return mode
-}
-
 // The file endpoint deliberately serves application/octet-stream so nothing
 // from it can render in the page's origin. Safari refuses to play a blob
 // with that type, so the console re-labels its own copy before playback.

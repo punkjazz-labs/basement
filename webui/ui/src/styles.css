@@ -860,7 +860,6 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   .gen-progress-track > span { transition: none; }
 }
 .gen-result-error { margin: 0; color: var(--fail); font-size: 12px; overflow-wrap: anywhere; }
-.gen-finished-time { color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 
 .gen-video-wrap { display: grid; gap: 9px; justify-items: start; }
 .gen-video-wrap video {
@@ -900,7 +899,10 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .quiet.reuse { border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line)); color: var(--accent-deep); }
 
 /* The strip: every run, newest first, as one small card each. */
-.strip-head { margin: 18px 0 8px; }
+/* .gen-right .section-head already sets margin-bottom at the same
+   specificity as a bare .strip-head would; scoped the same way so this one
+   wins instead of losing the cascade to it. */
+.gen-right .strip-head { margin: 18px 0 8px; }
 /* align-items: flex-start keeps every card its own natural height: a
    completed card's third caption line (the finished time) should not
    stretch a shorter running or failed card to match it. */
@@ -915,7 +917,10 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .thumb .pic { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
 .thumb-blank { aspect-ratio: 16 / 9; display: grid; place-items: center; background: var(--panel); }
 .thumb .prog { height: 3px; background: var(--surface-2); }
-.thumb .prog span { display: block; height: 100%; background: var(--warn); }
+.thumb .prog span { display: block; height: 100%; width: 100%; background: var(--warn); }
+/* No progress numbers yet, but a running card still needs its bar so every
+   card in the strip keeps the same height. */
+.thumb .prog span.indeterminate { opacity: 0.45; }
 .thumb .cap { padding: 4px 7px 6px; font-size: 10.5px; color: var(--faint); display: grid; gap: 1px; }
 .thumb .cap b { color: var(--muted); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -925,6 +930,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 
 @media (max-width: 900px) {
   .gen-layout { grid-template-columns: 1fr; gap: 14px; }
+  .gen-duration-pills { max-height: none; overflow: visible; }
 }
 
 /* ---- Connect -------------------------------------------------------------- */
