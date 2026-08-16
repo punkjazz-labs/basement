@@ -440,9 +440,17 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   useEffect(() => {
     const inFlight = inFlightPosterRef.current
     if (inFlight) {
-      if (generations.some(generation => generation.id === inFlight.id)) return
-      inFlight.controller.abort()
-      inFlightPosterRef.current = null
+      // An aborted controller means the unmount cleanup below already ran.
+      // Under StrictMode that happens on a synthetic unmount too, so the
+      // entry no longer represents live work and must not block a restart.
+      if (inFlight.controller.signal.aborted) {
+        inFlightPosterRef.current = null
+      } else if (generations.some(generation => generation.id === inFlight.id)) {
+        return
+      } else {
+        inFlight.controller.abort()
+        inFlightPosterRef.current = null
+      }
     }
     const target = generations.find(generation => (
       generation.status === 'completed'
