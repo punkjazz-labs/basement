@@ -2,8 +2,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
-  canvasSizes, canvasTiers, defaultCanvasTier, durationOptions, generationElapsedSeconds,
-  generationState, generationTerminal, playableVideoBlob,
+  canvasSizes, canvasTiers, defaultCanvasTier, durationArithmetic, durationOptions, generationElapsedSeconds,
+  generationState, generationTerminal, playableVideoBlob, reuseValues, sizeWaitHint, sizeWaitLabel,
 } from './generation'
 import type { Generation, MediaGenerationConfig } from './api'
 import { GenerationProgress } from './views/Generate'
@@ -101,6 +101,76 @@ describe('durationOptions', () => {
       { blocks: 3, frames: 25, seconds: 2.5, label: '2.5s' },
       { blocks: 4, frames: 33, seconds: 3.3, label: '3.3s' },
     ])
+  })
+})
+
+const h3WithWaits = config({
+  default_short_edge: 768, max_short_edge: 1440, max_long_edge: 2560,
+  size_waits: [{ short_edge: 768, factor: 1 }, { short_edge: 1088, factor: 2.85 }, { short_edge: 1440, factor: 7.3 }],
+})
+
+describe('sizeWaitLabel', () => {
+  it('names the fastest size plainly instead of claiming it takes one times as long', () => {
+    expect(sizeWaitLabel(h3WithWaits, 768)).toBe('shortest wait')
+  })
+
+  it('rounds the factor to a whole number of times', () => {
+    expect(sizeWaitLabel(h3WithWaits, 1088)).toBe('about 3× the wait')
+    expect(sizeWaitLabel(h3WithWaits, 1440)).toBe('about 7× the wait')
+  })
+
+  it('gives no label when the recipe measured no waits, or not for this edge', () => {
+    expect(sizeWaitLabel(h3, 768)).toBe('')
+    expect(sizeWaitLabel(h3WithWaits, 864)).toBe('')
+  })
+})
+
+describe('sizeWaitHint', () => {
+  it('points to the measured waits when the recipe declares them', () => {
+    expect(sizeWaitHint(h3WithWaits)).toBe(
+      'Waits measured on this model for a 5 second clip. A longer clip waits more.',
+    )
+  })
+
+  it('falls back to a plain warning when the recipe measured nothing', () => {
+    expect(sizeWaitHint(h3)).toBe('A bigger size waits much longer. The largest size can take hours.')
+  })
+})
+
+describe('durationArithmetic', () => {
+  it('shows the frame count the block picker actually produces', () => {
+    expect(durationArithmetic(h3, 7)).toBe('= 124 frames at 24 fps')
+  })
+})
+
+describe('reuseValues', () => {
+  const generation = (overrides: Partial<Generation> = {}): Generation => ({
+    id: 'gen-1', model_id: 'media', mode: 'text_to_video', prompt: 'fog over the bay', blocks: 7,
+    short_edge: 864, width: 1536, height: 864, frames: 124, seed: 42, status: 'completed',
+    created_at: '2026-08-04T10:00:00Z',
+    ...overrides,
+  })
+
+  it('refills an exact horizontal match, but never the seed', () => {
+    const result = reuseValues(generation(), h3)
+    expect(result).toEqual({ prompt: 'fog over the bay', shape: 'horizontal', shortEdge: 864, blocks: 7 })
+    expect(result).not.toHaveProperty('seed')
+  })
+
+  it('refills an exact vertical match', () => {
+    const result = reuseValues(generation({ width: 864, height: 1536, frames: 56, blocks: 3 }), h3)
+    expect(result).toEqual({ prompt: 'fog over the bay', shape: 'vertical', shortEdge: 864, blocks: 3 })
+  })
+
+  it('falls back to the default tier when the exact size is no longer offered', () => {
+    const result = reuseValues(generation({ width: 999, height: 999 }), h3)
+    expect(result.shape).toBe('square')
+    expect(result.shortEdge).toBe(defaultCanvasTier(h3))
+  })
+
+  it('falls back to default_blocks when the frame count is off the current grid', () => {
+    const result = reuseValues(generation({ frames: 999 }), h3)
+    expect(result.blocks).toBe(h3.default_blocks)
   })
 })
 

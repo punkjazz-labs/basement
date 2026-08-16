@@ -102,6 +102,70 @@ export function durationOptions(config: MediaGenerationConfig): DurationOption[]
   return options
 }
 
+// The word a size's wait carries next to it, in the fewest words that stay
+// honest. The shortest measured wait is not "1× the wait": that phrasing
+// asks the reader to do arithmetic on a number that means nothing to them,
+// so it gets its own plain words instead. Every other entry rounds to a
+// whole multiple, because a fractional multiple of a wait is not a number
+// anyone plans around.
+export function sizeWaitLabel(config: MediaGenerationConfig, shortEdge: number): string {
+  const waits = config.size_waits
+  if (!waits || waits.length === 0) return ''
+  const entry = waits.find(wait => wait.short_edge === shortEdge)
+  if (!entry) return ''
+  const shortest = Math.min(...waits.map(wait => wait.factor))
+  if (entry.factor === shortest) return 'shortest wait'
+  return `about ${Math.round(entry.factor)}× the wait`
+}
+
+// The one line of context above the size picker. A recipe that measured its
+// own waits gets to say so plainly; one that did not still owes the reader a
+// warning, just a vaguer one.
+export function sizeWaitHint(config: MediaGenerationConfig): string {
+  if (config.size_waits && config.size_waits.length > 0) {
+    return 'Waits measured on this model for a 5 second clip. A longer clip waits more.'
+  }
+  return 'A bigger size waits much longer. The largest size can take hours.'
+}
+
+// The same sum durationOptions runs per block, spelled out once more so the
+// duration picker can show its own arithmetic next to the slider rather than
+// asking the reader to trust a hidden formula.
+export function durationArithmetic(config: MediaGenerationConfig, blocks: number): string {
+  const frames = config.frame_block * blocks + config.frame_offset
+  return `= ${frames} frames at ${config.frames_per_second} fps`
+}
+
+export interface ReuseValues {
+  prompt: string
+  shape: CanvasShape
+  shortEdge: number
+  blocks: number
+}
+
+// What "generate another one like this" carries forward from a finished
+// generation. The size and duration are read back off the current grid
+// rather than off the generation's own numbers, because a recipe update can
+// have retired the exact size or block count the original run used; when
+// that happens the closest current offering stands in rather than silently
+// failing to fill the form. The seed never comes back: a reuse is a new
+// take, not a repeat of the same one.
+export function reuseValues(generation: Generation, config: MediaGenerationConfig): ReuseValues {
+  const shape: CanvasShape = generation.width > generation.height
+    ? 'horizontal'
+    : generation.width < generation.height ? 'vertical' : 'square'
+  const match = canvasSizes(config, shape).find(
+    option => option.width === generation.width && option.height === generation.height,
+  )
+  const duration = durationOptions(config).find(option => option.frames === generation.frames)
+  return {
+    prompt: generation.prompt,
+    shape,
+    shortEdge: match ? match.shortEdge : defaultCanvasTier(config),
+    blocks: duration ? duration.blocks : config.default_blocks,
+  }
+}
+
 export const generationTerminal = (status: string): boolean =>
   ['completed', 'failed', 'cancelled', 'interrupted'].includes(status)
 

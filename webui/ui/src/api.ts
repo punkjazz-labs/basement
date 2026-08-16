@@ -38,6 +38,10 @@ export interface MediaGenerationConfig {
   default_blocks: number
   concurrent_generations: number
   max_prompt_length: number
+  // How long each offered size waits, relative to the shortest one. Absent
+  // when the recipe declares no measurement; present entries name only the
+  // short edges the recipe measured, not every size the console offers.
+  size_waits?: { short_edge: number; factor: number }[]
 }
 
 export interface Recipe {
