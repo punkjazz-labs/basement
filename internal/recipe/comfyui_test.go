@@ -1,6 +1,8 @@
 package recipe_test
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,6 +98,15 @@ func TestMediaRecipeRejections(t *testing.T) {
 			r.Service.ComfyUI.VerificationSamplerSteps = r.Service.ComfyUI.SamplerSteps + 1
 		}, "verification_sampler_steps must not exceed sampler_steps"},
 		{"more than one generation at a time", func(r *recipe.Recipe) { r.Service.ComfyUI.ConcurrentGenerations = 2 }, "concurrent_generations must be 1"},
+		{"size_waits factor below 1", func(r *recipe.Recipe) {
+			r.Service.ComfyUI.SizeWaits = []recipe.SizeWait{{ShortEdge: 768, Factor: 0.5}}
+		}, "factor for short_edge 768 must be at least 1"},
+		{"size_waits non-positive short edge", func(r *recipe.Recipe) {
+			r.Service.ComfyUI.SizeWaits = []recipe.SizeWait{{ShortEdge: 0, Factor: 1}}
+		}, "short_edge 0 must be positive"},
+		{"size_waits duplicate short edge", func(r *recipe.Recipe) {
+			r.Service.ComfyUI.SizeWaits = []recipe.SizeWait{{ShortEdge: 768, Factor: 1}, {ShortEdge: 768, Factor: 2}}
+		}, "declares short_edge 768 more than once"},
 		{"whole snapshot download", func(r *recipe.Recipe) { r.Artifacts[0].Files = nil }, "pin its weights file by file"},
 		{"weights outside a model folder", func(r *recipe.Recipe) {
 			r.Artifacts[0].Files = []recipe.ArtifactFile{{Name: "model.safetensors", ExpectedBytes: 30_000_000_000}}
@@ -227,6 +238,11 @@ service:
     sampler_steps: 20
     verification_sampler_steps: 1
     concurrent_generations: 1
+    size_waits:
+      - short_edge: 768
+        factor: 1
+      - short_edge: 1088
+        factor: 2.85
 memory_model:
   weights_bytes: 30000000000
   kv_bytes_per_token: 0
@@ -261,7 +277,59 @@ uninstall:
 	if !media || config.Graphs[recipe.ModeTextToVideo] != "t2v.json" || config.MaxLongEdge != 1344 {
 		t.Fatalf("decoded media block=%#v", config)
 	}
+	wantWaits := []recipe.SizeWait{{ShortEdge: 768, Factor: 1}, {ShortEdge: 1088, Factor: 2.85}}
+	if !reflect.DeepEqual(config.SizeWaits, wantWaits) {
+		t.Fatalf("decoded size_waits=%#v, want %#v", config.SizeWaits, wantWaits)
+	}
 	if !decoded.RequiresTerritoryConfirmation() {
 		t.Fatal("a territory-gated media recipe must still require its confirmation")
+	}
+}
+
+// TestSizeWaitsAreServedAndStayAbsentByDefault proves size_waits reaches the
+// JSON a recipe is served as, in the exact shape the console reads, and that
+// a recipe carrying none omits the field entirely rather than serving an
+// empty array.
+func TestSizeWaitsAreServedAndStayAbsentByDefault(t *testing.T) {
+	recipetest.WithTextToVideoGraph(t)
+
+	r := recipetest.Media()
+	r.Service.ComfyUI.SizeWaits = []recipe.SizeWait{
+		{ShortEdge: 768, Factor: 1},
+		{ShortEdge: 1088, Factor: 2.85},
+	}
+	if err := recipe.Validate(r); err != nil {
+		t.Fatalf("a recipe with measured size_waits must validate: %v", err)
+	}
+	config, media := r.MediaGeneration()
+	if !media {
+		t.Fatal("a comfyui recipe must report itself as a media model")
+	}
+	body, err := json.Marshal(config)
+	if err != nil {
+		t.Fatalf("json.Marshal()=%v", err)
+	}
+	var decoded struct {
+		SizeWaits []struct {
+			ShortEdge int     `json:"short_edge"`
+			Factor    float64 `json:"factor"`
+		} `json:"size_waits"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal()=%v", err)
+	}
+	if len(decoded.SizeWaits) != 2 || decoded.SizeWaits[0].ShortEdge != 768 || decoded.SizeWaits[0].Factor != 1 ||
+		decoded.SizeWaits[1].ShortEdge != 1088 || decoded.SizeWaits[1].Factor != 2.85 {
+		t.Fatalf("served size_waits=%#v", decoded.SizeWaits)
+	}
+
+	absent := recipetest.Media()
+	config, _ = absent.MediaGeneration()
+	body, err = json.Marshal(config)
+	if err != nil {
+		t.Fatalf("json.Marshal()=%v", err)
+	}
+	if strings.Contains(string(body), "size_waits") {
+		t.Fatalf("a recipe without size_waits must omit the field entirely, got %s", body)
 	}
 }

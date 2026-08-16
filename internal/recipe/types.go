@@ -265,6 +265,24 @@ type ComfyUIConfig struct {
 	// one running beside it. Requests beyond that are queued in order, never
 	// refused.
 	ConcurrentGenerations int `yaml:"concurrent_generations" json:"concurrent_generations"`
+	// SizeWaits carries measured wait factors per canvas short edge, so the
+	// console can scale a shown wait estimate by how much longer a larger
+	// canvas actually took on real hardware, rather than showing the same
+	// estimate at every size. It is optional: a recipe with no measurements
+	// yet simply omits it, and the console falls back to whatever it does
+	// today for that case.
+	SizeWaits []SizeWait `yaml:"size_waits,omitempty" json:"size_waits,omitempty"`
+}
+
+// SizeWait is one measured canvas size and the multiple of the fastest
+// measured wait it cost. ShortEdge matches the console's own canvas control,
+// which is expressed by short edge everywhere else in this struct. Factor is
+// that size's wall time divided by the fastest measured size's wall time, so
+// a factor of 1 marks the fastest size and every other factor says how many
+// times as long the rest took.
+type SizeWait struct {
+	ShortEdge int     `yaml:"short_edge" json:"short_edge"`
+	Factor    float64 `yaml:"factor" json:"factor"`
 }
 
 // CanvasMultiple is the grid every generated dimension sits on. It is the

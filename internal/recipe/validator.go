@@ -809,6 +809,7 @@ func comfyUIProblems(r Recipe, sparkCount int) []string {
 	problems = append(problems, comfyUIDirectoryProblems(r, c)...)
 	problems = append(problems, comfyUICanvasProblems(c)...)
 	problems = append(problems, comfyUIDurationProblems(c)...)
+	problems = append(problems, comfyUISizeWaitProblems(c)...)
 	if c.ConcurrentGenerations != 1 {
 		// Stated as a schema rule rather than left to the API: a second
 		// generation beside the first has never been measured on this
@@ -925,6 +926,30 @@ func comfyUICanvasProblems(c ComfyUIConfig) []string {
 	}
 	if c.MaxShortEdge > c.MaxLongEdge {
 		problems = append(problems, "comfyui max_short_edge must not exceed max_long_edge")
+	}
+	return problems
+}
+
+// comfyUISizeWaitProblems validates the optional measured wait table.
+// SizeWaits is allowed to be absent or empty; every entry it does carry must
+// name a real short edge and a real multiple of the fastest measured size,
+// because the console divides a shown estimate by nothing else.
+func comfyUISizeWaitProblems(c ComfyUIConfig) []string {
+	var problems []string
+	seen := make(map[int]bool, len(c.SizeWaits))
+	for _, wait := range c.SizeWaits {
+		if wait.ShortEdge <= 0 {
+			problems = append(problems, fmt.Sprintf("comfyui size_waits short_edge %d must be positive", wait.ShortEdge))
+			continue
+		}
+		if seen[wait.ShortEdge] {
+			problems = append(problems, fmt.Sprintf("comfyui size_waits declares short_edge %d more than once", wait.ShortEdge))
+			continue
+		}
+		seen[wait.ShortEdge] = true
+		if wait.Factor < 1 {
+			problems = append(problems, fmt.Sprintf("comfyui size_waits factor for short_edge %d must be at least 1", wait.ShortEdge))
+		}
 	}
 	return problems
 }
