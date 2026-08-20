@@ -185,13 +185,6 @@ if [ "$(readlink /usr/lib/basement/current)" != "versions/$manager_version" ] ||
   exit 1
 fi
 
-token_file=/var/lib/basement/pairing-token
-tries=0
-while [ ! -s "$token_file" ] && [ "$tries" -lt 20 ]; do
-  tries=$((tries + 1))
-  sleep 0.5
-done
-
 port=7070
 case "$listen" in *:*) port=${listen##*:} ;; esac
 host_short=$(hostname -s 2>/dev/null || hostname)
@@ -199,6 +192,26 @@ case "$listen" in
   "" | 127.0.0.1:*) console_url="http://127.0.0.1:${port}" ;;
   *) console_url="http://${listen}" ;;
 esac
+
+# An active systemd unit is not yet a usable installation. Require the exact
+# configured HTTP endpoint and the pairing token before printing success.
+token_file=/var/lib/basement/pairing-token
+tries=0
+while [ "$tries" -lt 90 ]; do
+  if [ -s "$token_file" ] && curl -fsS --max-time 2 -o /dev/null "$console_url/healthz" 2>/dev/null; then
+    break
+  fi
+  tries=$((tries + 1))
+  sleep 1
+done
+if ! curl -fsS --max-time 2 -o /dev/null "$console_url/healthz"; then
+  echo "basement.service started, but $console_url/healthz did not answer" >&2
+  exit 1
+fi
+if [ ! -s "$token_file" ]; then
+  echo "basement.service started, but no pairing token appeared at $token_file" >&2
+  exit 1
+fi
 
 echo
 echo "=================================================================="
@@ -213,13 +226,8 @@ else
     "$lan_ip":*) echo "  Also try:          http://${host_short}.local:${port}" ;;
   esac
 fi
-if [ -s "$token_file" ]; then
-  echo
-  echo "  Pairing token:     $(cat "$token_file")"
-else
-  echo
-  echo "  Pairing token appears shortly at: $token_file"
-fi
+echo
+echo "  Pairing token:     $(cat "$token_file")"
 echo
 echo "  Re-print this card anytime with:"
 echo "    /usr/lib/basement/basement pairing-url"

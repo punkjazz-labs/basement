@@ -268,9 +268,17 @@ func hostKeyCallback(prompter Prompter) (ssh.HostKeyCallback, error) {
 			return nil
 		}
 		var keyErr *knownhosts.KeyError
-		if !errors.As(err, &keyErr) || len(keyErr.Want) > 0 {
-			// A mismatched recorded key is never auto-accepted.
+		if !errors.As(err, &keyErr) {
 			return err
+		}
+		if len(keyErr.Want) > 0 {
+			// A mismatched recorded key is never auto-accepted. Give the
+			// operator enough information to verify and remove only this stale
+			// entry, instead of leaking the knownhosts package's opaque error.
+			target := knownhosts.Normalize(hostname)
+			return fmt.Errorf(
+				"SSH host key for %s changed. This can mean the Spark was reinstalled, or that another machine is using that name. The new %s fingerprint is %s. Verify that fingerprint directly on the Spark or with its owner. If it is correct, remove only the stale entry with:\n  ssh-keygen -R %s\nThen run setup again",
+				target, key.Type(), ssh.FingerprintSHA256(key), shellQuote(target))
 		}
 		accept, promptErr := prompter.Confirm(fmt.Sprintf(
 			"The authenticity of %s can't be established.\n%s key fingerprint is %s.\nTrust this machine and continue?",

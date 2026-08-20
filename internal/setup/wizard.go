@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/punkjazz-labs/basement/internal/discovery"
 )
@@ -190,8 +193,59 @@ func FinishInstall(ctx context.Context, ui WizardUI, runner Runner, source Binar
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("install failed: %w", err)
 	}
+	if !result.Loopback {
+		ui.Progress("  · checking the console from this computer")
+		if err := verifyOperatorConsole(ctx, result.ConsoleURL); err != nil {
+			return result, fmt.Errorf("basement is installed and running on the target, but this computer cannot reach %s: %w. Check that both devices can reach the selected network and that TCP port 7070 is allowed, then run setup again", result.ConsoleURL, err)
+		}
+	}
 	ui.Summary(result)
 	return result, nil
+}
+
+func operatorConsoleHealth(ctx context.Context, baseURL string) error {
+	deadline := time.Now().Add(10 * time.Second)
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	var last error
+	for {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(baseURL, "/")+"/healthz", nil)
+		if err != nil {
+			return err
+		}
+		response, err := client.Do(request)
+		if err == nil {
+			payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<10))
+			response.Body.Close()
+			var health struct {
+				Status string `json:"status"`
+			}
+			switch {
+			case readErr != nil:
+				last = readErr
+			case response.StatusCode != http.StatusOK:
+				last = fmt.Errorf("health check returned HTTP %d", response.StatusCode)
+			case json.Unmarshal(payload, &health) != nil || health.Status != "ok":
+				last = errors.New("health check did not identify a running basement manager")
+			default:
+				return nil
+			}
+		} else {
+			last = err
+		}
+		if time.Now().After(deadline) {
+			return last
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // Machine is one machine a run installed on: the address setup connected to
@@ -215,6 +269,12 @@ var connectTarget = func(ctx context.Context, ui WizardUI, target, sshUser strin
 // the real console exchange. Tests return a fixed outcome without contacting
 // the addresses carried by their fake install results.
 var enrolInstalledFleet = EnrollInstalledFleet
+
+// verifyOperatorConsole is a network seam for setup tests. Production checks
+// the exact non-loopback URL it is about to hand to the operator. The target
+// has already passed its own health check in Install; this second direction is
+// what catches a firewall, wrong interface, or unreachable LAN address.
+var verifyOperatorConsole = operatorConsoleHealth
 
 // InstallMore continues a run that already installed on first: it offers the
 // other GB10-class machines discovery found, one at a time, and installs on
@@ -243,7 +303,11 @@ func InstallMore(ctx context.Context, ui WizardUI, first Machine, offer []string
 		result, err := installOne(ctx, ui, target, sshUser, source)
 		if err != nil {
 			ui.Progress("✗ " + target + ": " + err.Error())
-			ui.Progress("  Nothing changed on " + target + "; the machines already set up are unaffected.")
+			if result.ConsoleURL == "" {
+				ui.Progress("  Nothing changed on " + target + "; the machines already set up are unaffected.")
+			} else {
+				ui.Progress("  basement is installed on " + target + ", but its console still needs the reported network issue corrected.")
+			}
 			pending = append(pending, target)
 			continue
 		}

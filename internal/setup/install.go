@@ -51,6 +51,7 @@ const (
 	legacyUnitName    = "runonspark-manager.service"
 	legacyUnitPath    = "/etc/systemd/system/" + legacyUnitName
 	legacyServiceUser = "runonspark"
+	serviceReadyWait  = 90 * time.Second
 )
 
 // ListenMode selects which interface the console binds after install.
@@ -349,7 +350,14 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 		}
 	}
 
-	token := waitForToken(ctx, runner)
+	healthAddress := listen
+	if healthAddress == "" {
+		healthAddress = "127.0.0.1:7070"
+	}
+	token, err := waitForService(ctx, runner, "http://"+healthAddress+"/healthz")
+	if err != nil {
+		return InstallResult{}, err
+	}
 	result := InstallResult{Token: token, Loopback: listen == ""}
 	port := "7070"
 	if index := strings.LastIndex(listen, ":"); index >= 0 {
@@ -497,18 +505,42 @@ func resolveListen(ctx context.Context, runner Runner, mode ListenMode) (string,
 	}
 }
 
-// waitForToken polls for the pairing token the freshly started service mints.
-func waitForToken(ctx context.Context, runner Runner) string {
-	for attempt := 0; attempt < 20; attempt++ {
-		out, err := runner.RunPrivileged(ctx, "cat "+dataDir+"/pairing-token 2>/dev/null", nil)
-		if err == nil && strings.TrimSpace(out) != "" {
-			return strings.TrimSpace(out)
+// waitForService proves both halves of a usable first launch: the HTTP server
+// answers on the interface setup configured, and the pairing token exists.
+// systemd's active state proves neither one, so it is never sufficient for the
+// success card.
+func waitForService(ctx context.Context, runner Runner, healthURL string) (string, error) {
+	deadline := time.Now().Add(serviceReadyWait)
+	var token string
+	var healthReady bool
+	for {
+		if token == "" {
+			out, err := runner.RunPrivileged(ctx, "cat "+dataDir+"/pairing-token 2>/dev/null", nil)
+			if err == nil {
+				token = strings.TrimSpace(out)
+			}
+		}
+		if !healthReady {
+			_, err := runner.Run(ctx, "curl -fsS --max-time 2 -o /dev/null "+shellQuote(healthURL), nil)
+			healthReady = err == nil
+		}
+		if token != "" && healthReady {
+			return token, nil
+		}
+		if time.Now().After(deadline) {
+			switch {
+			case !healthReady && token == "":
+				return "", fmt.Errorf("basement.service started, but %s did not answer and no pairing token appeared", healthURL)
+			case !healthReady:
+				return "", fmt.Errorf("basement.service started, but %s did not answer", healthURL)
+			default:
+				return "", fmt.Errorf("basement.service started, but no pairing token appeared at %s/pairing-token", dataDir)
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return ""
-		case <-time.After(500 * time.Millisecond):
+			return "", fmt.Errorf("wait for basement.service readiness: %w", ctx.Err())
+		case <-time.After(time.Second):
 		}
 	}
-	return ""
 }

@@ -34,17 +34,14 @@
 	<string>public.app-category.utilities</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<!-- Hides the app from the Dock and Cmd-Tab. The wizard is a browser tab,
-	     so this process never opens a window of its own and never runs a Cocoa
-	     event loop. Given a Dock presence, macOS looks for that event loop,
-	     does not find one, and marks the icon as not responding within seconds
-	     of launch: an installer that looks hung while it is working perfectly.
-	     Without one, attention goes where the work actually is, which is the
-	     browser tab that just opened. The cost is that there is no Dock icon to
-	     quit from; the server covers that itself by exiting once the run has
-	     finished and had time to be read (setupweb.idleAfterFinish).
-	     This is an Info.plist visibility key, not a code signing entitlement. -->
-	<key>LSUIElement</key>
+	<!-- This is a faceless launcher, not an agent app: it opens the browser and
+	     never owns a window or a Cocoa event loop. Launch Services starts this
+	     process only long enough for it to detach the wizard worker, so Finder
+	     never waits for application events the Go binary cannot service. The
+	     worker exits after the completed page has had time to be read
+	     (setupweb.idleAfterFinish). This is an Info.plist visibility key, not a
+	     code signing entitlement. -->
+	<key>LSBackgroundOnly</key>
 	<true/>
 </dict>
 </plist>

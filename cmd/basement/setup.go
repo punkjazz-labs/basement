@@ -199,8 +199,10 @@ func (u *terminalUI) AskUsername(target, suggested string) (string, error) {
 
 // ChooseListen asks which network the console should be reachable from.
 // Installing from another machine defaults to the local network (that is
-// where the operator is); installing on the machine itself defaults to
-// loopback, the conservative choice. A --listen flag bypasses the prompt.
+// where the operator is). Running locally through SSH has the same default:
+// loopback would strand the operator on the computer they connected from.
+// A genuinely local session keeps loopback as the conservative default. A
+// --listen flag bypasses the prompt.
 func (u *terminalUI) ChooseListen(remote bool) (setup.ListenMode, error) {
 	switch u.listenFlag {
 	case "loopback":
@@ -214,7 +216,7 @@ func (u *terminalUI) ChooseListen(remote bool) (setup.ListenMode, error) {
 		return "", fmt.Errorf("unknown --listen value %q", u.listenFlag)
 	}
 	defaultChoice, defaultMode := "1", setup.ListenLoopback
-	if remote {
+	if remote || runningOverSSH() {
 		defaultChoice, defaultMode = "3", setup.ListenLAN
 	}
 	recommended := func(choice string) string {
@@ -317,9 +319,17 @@ func (u *terminalUI) finishInstall(ctx context.Context, runner setup.Runner, sou
 		return setup.InstallResult{}, err
 	}
 	if !result.Loopback {
-		openBrowser(result.ConsoleURL, u.paint)
+		if runningOverSSH() {
+			fmt.Println(u.paint.dim("  (open " + result.ConsoleURL + " in a browser on the computer you connected from)"))
+		} else {
+			openBrowser(result.ConsoleURL, u.paint)
+		}
 	}
 	return result, nil
+}
+
+func runningOverSSH() bool {
+	return os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != ""
 }
 
 func openBrowser(url string, paint style) {

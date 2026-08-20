@@ -3,6 +3,8 @@ package setup
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -133,6 +135,8 @@ func installableRunner(lanIP, hostname string) *fakeRunner {
 func fakeMachines(t *testing.T, machines map[string]*fakeRunner, refuse map[string]string) {
 	t.Helper()
 	original := connectTarget
+	originalConsoleCheck := verifyOperatorConsole
+	verifyOperatorConsole = func(context.Context, string) error { return nil }
 	connectTarget = func(_ context.Context, _ WizardUI, target, _ string) (Runner, func(), error) {
 		if message, bad := refuse[target]; bad {
 			return nil, func() {}, errors.New(message)
@@ -143,7 +147,58 @@ func fakeMachines(t *testing.T, machines map[string]*fakeRunner, refuse map[stri
 		}
 		return runner, func() {}, nil
 	}
-	t.Cleanup(func() { connectTarget = original })
+	t.Cleanup(func() {
+		connectTarget = original
+		verifyOperatorConsole = originalConsoleCheck
+	})
+}
+
+func TestFinishInstallChecksANonLoopbackConsoleFromTheOperator(t *testing.T) {
+	console := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","version":"test"}`))
+	}))
+	defer console.Close()
+
+	original := verifyOperatorConsole
+	checked := ""
+	verifyOperatorConsole = func(ctx context.Context, baseURL string) error {
+		checked = baseURL
+		return operatorConsoleHealth(ctx, console.URL)
+	}
+	t.Cleanup(func() { verifyOperatorConsole = original })
+
+	runner := installableRunner("192.168.99.134", "spark-head")
+	ui := &stubUI{listenMode: ListenLAN}
+	if _, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if checked != "http://192.168.99.134:7070" {
+		t.Errorf("operator health check used %q", checked)
+	}
+}
+
+func TestFinishInstallDoesNotShowSuccessForAnUnreachableConsole(t *testing.T) {
+	original := verifyOperatorConsole
+	verifyOperatorConsole = func(context.Context, string) error { return errors.New("no route to host") }
+	t.Cleanup(func() { verifyOperatorConsole = original })
+
+	runner := installableRunner("192.168.99.134", "spark-head")
+	ui := &stubUI{listenMode: ListenLAN}
+	result, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, nil, true)
+	if err == nil || !strings.Contains(err.Error(), "installed and running") || !strings.Contains(err.Error(), "TCP port 7070") {
+		t.Fatalf("unreachable console error = %v", err)
+	}
+	if result.ConsoleURL != "http://192.168.99.134:7070" {
+		t.Errorf("unreachable install lost its result: %+v", result)
+	}
+	if len(ui.summaries) != 0 {
+		t.Error("an unreachable console was shown as a successful setup")
+	}
 }
 
 func firstMachine() Machine {
@@ -217,6 +272,28 @@ func TestInstallMoreKeepsEarlierMachinesWhenOneFails(t *testing.T) {
 	}
 	if len(ui.nextSteps) != 1 || !strings.Contains(strings.Join(ui.nextSteps[0], " "), "spark-worker") {
 		t.Errorf("next steps = %v, want the machine that failed named for later", ui.nextSteps)
+	}
+}
+
+func TestInstallMoreDoesNotClaimNothingChangedAfterAReachabilityFailure(t *testing.T) {
+	fakeMachines(t, map[string]*fakeRunner{
+		"spark-worker": installableRunner("192.168.99.137", "spark-worker"),
+	}, nil)
+	verifyOperatorConsole = func(context.Context, string) error { return errors.New("no route to host") }
+	ui := &stubUI{listenMode: ListenLAN, confirmAlways: []bool{true}}
+
+	installed := InstallMore(context.Background(), ui, firstMachine(),
+		[]string{"spark-worker"}, LocalFileSource{Path: "/tmp/binary"}, "nvidia")
+
+	if len(installed) != 1 {
+		t.Fatalf("installed = %+v, want only the first machine with a reachable console", installed)
+	}
+	reported := strings.Join(ui.progressLines, "\n")
+	if strings.Contains(reported, "Nothing changed") {
+		t.Errorf("setup denied an install it had already completed: %q", reported)
+	}
+	if !strings.Contains(reported, "basement is installed on spark-worker") || !strings.Contains(reported, "network issue") {
+		t.Errorf("setup did not distinguish install success from console reachability: %q", reported)
 	}
 }
 

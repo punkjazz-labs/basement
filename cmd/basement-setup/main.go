@@ -28,7 +28,44 @@ import (
 // CFBundleVersion, which Finder shows without running anything.
 var version = "dev"
 
+const wizardWorkerArg = "--wizard-worker"
+
 func main() {
+	// Launch Services expects the process it starts from an app bundle to
+	// service application events for as long as it remains alive. This binary
+	// has no Cocoa event loop: its UI is the browser. Leave the Launch Services
+	// process immediately and run the long-lived wizard as an ordinary child,
+	// so opening the app again never targets an unresponsive application.
+	if shouldLaunchWizardWorker(runtime.GOOS, os.Args[1:]) {
+		if err := launchWizardWorker(); err != nil {
+			fmt.Fprintln(os.Stderr, "basement-setup:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	runWizard()
+}
+
+func shouldLaunchWizardWorker(goos string, args []string) bool {
+	return goos == "darwin" && (len(args) == 0 || args[0] != wizardWorkerArg)
+}
+
+func launchWizardWorker() error {
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate wizard: %w", err)
+	}
+	command := exec.Command(executable, wizardWorkerArg)
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start wizard: %w", err)
+	}
+	if err := command.Process.Release(); err != nil {
+		return fmt.Errorf("release wizard process: %w", err)
+	}
+	return nil
+}
+
+func runWizard() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

@@ -70,8 +70,22 @@ signing them is ADR 0008's follow-up.
   username); `--user` skips the prompt.
 - Host keys verify against `~/.ssh/known_hosts` with trust-on-first-use:
   unknown hosts show the SHA256 fingerprint and require explicit consent; a
-  **changed** key is a hard failure, never re-promptable.
+  **changed** key is a hard failure, never re-promptable. The failure names the
+  newly presented fingerprint and gives a command that removes only the stale
+  entry after the operator verifies that fingerprint directly on the Spark.
 - sudo: passwordless probed first; otherwise prompted once per session.
+
+When setup itself is running on a GB10 through an SSH session, the listen
+choice treats the operator as remote and recommends the LAN rather than
+loopback. It cannot open a browser back on the SSH client, so the completed
+card says to open the URL there. A local desktop session keeps the conservative
+loopback recommendation.
+
+Setup does not equate an active systemd unit with a usable console. Before it
+prints success, the target must answer `/healthz` on the configured interface
+and produce a pairing token. For a non-loopback install, a laptop-hosted wizard
+also reaches that health endpoint from the laptop, catching a wrong interface
+or firewall before it hands over a dead link.
 
 ### More than one machine per run
 

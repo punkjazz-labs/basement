@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"strings"
 	"testing"
+
+	"github.com/punkjazz-labs/basement/internal/setup"
 )
 
 func scriptedUI(answers string) *terminalUI {
@@ -40,5 +42,31 @@ func TestConfirmAlwaysTakesTheTypedAnswer(t *testing.T) {
 	// No terminal to ask on: the read fails and the flow reads that as no.
 	if proceed, err := scriptedUI("").ConfirmAlways("Set up spark-worker as well?"); err == nil || proceed {
 		t.Errorf("ConfirmAlways with closed input = %v, %v; want an error and no", proceed, err)
+	}
+}
+
+func TestListenChoiceTreatsAnSSHSessionAsRemote(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "192.0.2.20 50123 192.0.2.30 22")
+	ui := scriptedUI("")
+	mode, err := ui.ChooseListen(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != setup.ListenLAN {
+		t.Errorf("ChooseListen in an SSH session = %q, want lan", mode)
+	}
+}
+
+func TestListenChoiceKeepsLoopbackForAGenuinelyLocalSession(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_CLIENT", "")
+	t.Setenv("SSH_TTY", "")
+	ui := scriptedUI("")
+	mode, err := ui.ChooseListen(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != setup.ListenLoopback {
+		t.Errorf("ChooseListen in a local session = %q, want loopback", mode)
 	}
 }

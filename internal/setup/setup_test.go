@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeRunner records commands and answers them from canned outputs.
@@ -140,6 +141,9 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 			t.Errorf("privileged plan is missing %q", required)
 		}
 	}
+	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "curl -fsS --max-time 2 -o /dev/null 'http://192.168.99.134:7070/healthz'") {
+		t.Errorf("install did not check the configured console health endpoint:\n%s", commands)
+	}
 
 	var dropIn string
 	for command, payload := range runner.writes {
@@ -158,6 +162,28 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 	}
 	if !strings.Contains(fleet, "gx10-office.local") {
 		t.Errorf("fleet.json is missing the discovered peer: %q", fleet)
+	}
+}
+
+func TestInstallDoesNotSucceedWithoutAHealthyConsole(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	runner.outputs["pairing-token"] = "tok\n"
+	runner.failures["/healthz"] = "connection refused"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := Install(ctx, runner, LocalFileSource{Path: "/tmp/binary"}, Options{}, nil); err == nil {
+		t.Fatal("install reported success without a healthy console")
+	}
+}
+
+func TestInstallDoesNotSucceedWithoutAPairingToken(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := Install(ctx, runner, LocalFileSource{Path: "/tmp/binary"}, Options{}, nil); err == nil {
+		t.Fatal("install reported success without a pairing token")
 	}
 }
 
