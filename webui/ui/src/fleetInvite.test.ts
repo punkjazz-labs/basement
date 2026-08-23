@@ -76,7 +76,7 @@ describe('what the add dialog says', () => {
     expect(inviteName(progress(), 'loft.local')).toBe('loft')
     expect(inviteName(null, 'loft.local')).toBe('loft.local')
     expect(inviteTitle('waiting', 'loft')).toBe('Approve on loft')
-    expect(inviteBody('loft')).toBe("Press Approve on loft's console. We opened it in a new tab.")
+    expect(inviteBody('loft')).toBe("Press Approve on loft's console. Opened in a new tab.")
   })
 
   it('says which half of the exchange is running', () => {
@@ -87,7 +87,7 @@ describe('what the add dialog says', () => {
   it('reports a denial and an expiry as answers, not as errors', () => {
     expect(inviteOutcome(progress({ state: 'denied' }), 'loft')).toBe('Denied on loft.')
     expect(inviteOutcome(progress({ state: 'expired' }), 'loft'))
-      .toBe('The request expired. Add again when you are ready.')
+      .toBe('Request expired. Try adding again.')
   })
 
   it('shows a failure in the words the manager used, and says something when it has none', () => {
@@ -118,7 +118,7 @@ describe('what the machine being added is asked', () => {
     const invitation = { id: 'inv-1', controller_name: 'attic', controller_console_url: 'http://attic.local:7070', expires_at: '' }
     expect(invitationTitle(invitation)).toBe("Join attic's fleet?")
     expect(invitationBody(invitation))
-      .toBe("attic will manage this Spark's models and updates. Everything it serves keeps running.")
+      .toBe("attic will manage this Spark's models and updates. It keeps serving.")
   })
 
   it('keeps only the invitations it can name', () => {

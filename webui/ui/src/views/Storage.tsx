@@ -42,13 +42,13 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
     const { ok, checked } = await confirmBox({
       title: `Uninstall ${selected.display_name}?`,
       body: serving
-        ? 'It is currently serving and will be stopped first. The runtime and configuration are removed.'
+        ? 'It will stop first. The runtime and config are removed.'
         : 'The runtime and configuration are removed.',
       confirmLabel: 'Uninstall',
       danger: true,
       checkbox: {
         label: `Also delete ${formatBytes(selected.artifact_bytes)} of downloaded model files`,
-        note: 'Keeping them makes a future reinstall much faster.',
+        note: 'Faster reinstall later.',
       },
     })
     if (!ok) return
@@ -120,7 +120,6 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
       <section className="card">
         <div className="section-head" style={{ marginBottom: 4 }}>
           <h2 style={{ fontSize: 16 }}>Downloaded models</h2>
-          <span className="muted">Uninstall a model or delete leftover downloads to reclaim space</span>
         </div>
         {(() => {
           // One row per model: people think in models, not weight repositories.
@@ -194,7 +193,7 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
         <section className="card">
           <div className="section-head" style={{ marginBottom: 4 }}>
             <h2 style={{ fontSize: 16 }}>Runtime images</h2>
-            <span className="muted">Pulled by installs; removed with their last model</span>
+            <span className="muted">Removed with their last model.</span>
           </div>
           {info.images.map(image => {
             const shortRef = image.reference.split('@')[0]
@@ -212,7 +211,7 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
                   <strong>{title}</strong>
                   <div className="faint" style={{ fontSize: 12 }}>
                     {usedBy
-                      ? `The exact version pinned for ${usedBy}`
+                      ? `Pinned for ${usedBy}`
                       : 'Not used by any current model'}
                   </div>
                 </div>

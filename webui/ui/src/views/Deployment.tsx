@@ -22,7 +22,7 @@ interface Phase {
 }
 
 function firstStartNote(recipe?: Recipe): string {
-  return `Loading the model into memory. The first start can take up to ${startTimeoutMinutes(recipe)} minutes, with live progress the whole way. Later starts are much faster.`
+  return `Loading into memory. The first start can take up to ${startTimeoutMinutes(recipe)} minutes.`
 }
 
 function phasePlan(job: Job, recipe?: Recipe): Phase[] {
@@ -57,8 +57,8 @@ function phasePlan(job: Job, recipe?: Recipe): Phase[] {
       {
         ...mediaVerification,
         activeNote: recipe?.media_generation
-          ? 'Waiting for the model to load and complete its verification generation.'
-          : 'Waiting for the model to load and answer. This takes a few minutes when memory is cold.',
+          ? 'Waiting for the model to load and verify.'
+          : 'Waiting for the model to load and answer.',
       },
     ]
   }
@@ -185,7 +185,7 @@ function LiveProgress({ step }: { step: Step }) {
     return (
       <div className="sub-progress">
         {node && <span className="file">{node}</span>}
-        <span className="mono nums">Health check #{attempt}. The model is still loading, this is normal.</span>
+        <span className="mono nums">Health check #{attempt}. Still loading.</span>
       </div>
     )
   }
@@ -302,7 +302,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
     const { ok } = await confirmBox({
       title: `Cancel this ${noun}?`,
       body: job.kind === 'install'
-        ? 'Downloads are resumable. Installing again later picks up where this left off.'
+        ? 'Downloads are resumable and resume later.'
         : undefined,
       confirmLabel: `Cancel ${noun}`,
       cancelLabel: 'Keep going',
@@ -359,7 +359,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
         {job.state === 'cancelled' ? (
           <p className="muted" role="status">
             {job.kind === 'install'
-              ? 'Cancelled. Everything downloaded so far is kept, and installing again resumes where this left off.'
+              ? 'Cancelled. Downloads are kept; installing again resumes.'
               : `The ${noun} was cancelled.`}
           </p>
         ) : (
@@ -397,7 +397,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
                 <pre>{step.receipt && Object.keys(step.receipt).length ? JSON.stringify(step.receipt, null, 2) : 'No receipt yet'}</pre>
               </li>
             ))}
-            {job.steps.length === 0 && <li className="faint">The first persisted step will appear here.</li>}
+            {job.steps.length === 0 && <li className="faint">No steps yet.</li>}
           </ul>
         </details>
         <div className="dialog-foot">
@@ -406,9 +406,9 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
               ? `Closing this window does not stop the ${noun}.`
               : succeeded
                 ? {
-                    install: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
-                    start: `${recipe?.display_name ?? job.recipe_id} is live and serving on this Spark.`,
-                    benchmark: 'Measured with a real request on this Spark.',
+                    install: `${recipe?.display_name ?? job.recipe_id} is live and serving.`,
+                    start: `${recipe?.display_name ?? job.recipe_id} is live and serving.`,
+                    benchmark: 'Measured with a real request.',
                     'smoke-test': isMedia
                       ? 'The model completed a real generation.'
                       : 'The model answered a real inference request.',

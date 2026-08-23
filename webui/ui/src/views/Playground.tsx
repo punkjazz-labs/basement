@@ -283,7 +283,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
         <img src={logoFor(recipeID ? [recipeID] : [])} alt="" width="30" height="30" />
         <div>
           <strong>{targetName}</strong>
-          <div className="faint">Serving on this Spark, through your own endpoint</div>
+          <div className="faint">Serving on this Spark</div>
         </div>
         {/* The picker exists only where there is something to pick: two or
             more text models serving is what puts the council on offer. */}
@@ -314,7 +314,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       </div>
       <div className="chat card" ref={chatRef} aria-live="polite">
         {messages.length === 0 && (
-          <p className="chat-hint">Send a message. The reply streams from your Spark, token by token.</p>
+          <p className="chat-hint">Send a message.</p>
         )}
         {messages.map((message, index) => {
           const last = index === messages.length - 1

@@ -55,14 +55,14 @@ describe('the line under the models table', () => {
 
   it('warns about an old index whatever the last attempt did', () => {
     const expected = {
-      text: 'Recipe feed · 40 days old. Newer recipes and revocations may be missing.',
+      text: 'Recipe feed · 40 days old; may be missing updates.',
       warn: true,
     }
     expect(feedNote(health({ stale: true, accepted_generated_at: ago(40 * DAY) }), NOW)).toEqual(expected)
     expect(feedNote(health({ state: 'unreachable', stale: true, accepted_generated_at: ago(40 * DAY) }), NOW))
       .toEqual(expected)
     expect(feedNote(health({ stale: true, accepted_generated_at: ago(DAY) }), NOW)?.text)
-      .toBe('Recipe feed · 1 day old. Newer recipes and revocations may be missing.')
+      .toBe('Recipe feed · 1 day old; may be missing updates.')
   })
 
   it('says nothing about a feed that has never been fetched', () => {

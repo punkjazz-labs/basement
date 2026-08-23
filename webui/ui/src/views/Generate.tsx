@@ -586,7 +586,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     const { ok } = await confirmBox({
       title: 'Delete this generation?',
       body: generation.status === 'completed'
-        ? 'Deletes the result file and its generation record from this Spark.'
+        ? 'Deletes the result file and generation record.'
         : 'Deletes this generation record from this Spark.',
       confirmLabel: 'Delete generation',
       danger: true,
@@ -639,7 +639,6 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                   </label>
                 )}
               </div>
-              {imageMode && <p className="gen-mode-note">Image to video is not available yet.</p>}
             </div>
 
             <div className="composer gen-composer">
@@ -679,7 +678,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
             )}
             {filledNote && (
               <div className="filled-note" role="status">
-                <p>Filled from the staged result. The seed is empty: this run will be a new take.</p>
+                <p>Filled from the staged result. Seed cleared for a new take.</p>
               </div>
             )}
 
@@ -757,7 +756,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
               </label>
             </div>
 
-            {sizes.length === 0 && <p className="error-text">This recipe declares no canvas that fits a 16:9 shape on its own pixel grid.</p>}
+            {sizes.length === 0 && <p className="error-text">No canvas size fits this model&apos;s grid.</p>}
             {!textMode && <p className="error-text">Text to video is not available for this model.</p>}
             {formError && <div className="error-note" role="alert"><p>{formError}</p></div>}
 
@@ -766,10 +765,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                 {submitting ? 'Starting' : <>Generate <span className="kbd" aria-hidden="true">{shortcutGlyph()}</span></>}
               </button>
               <p className="faint">
-                {config.concurrent_generations === 1
-                  ? 'Generations run one at a time. New ones wait in the queue. '
-                  : `Up to ${config.concurrent_generations} generations run at a time. New ones wait in the queue. `}
-                A generation keeps running if you leave this view.
+                Up to {config.concurrent_generations} run at a time; extra runs queue. Keeps generating if you leave.
               </p>
             </div>
           </form>

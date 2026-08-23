@@ -8,7 +8,7 @@ import { BUILTIN_ROLES, DEFAULT_ROLE, combinedFit, distinctModelsAfter, isValidR
 // The swap warning, in the words the design settled on. This Spark serves one
 // model at a time, so it is shown whenever a choice would leave roles pointing
 // at more than one model, which is exactly when models swap in and out.
-const SWAP_NOTE = 'These will swap in and out. First request after a switch is slower.'
+const SWAP_NOTE = 'These will swap. The first request after is slower.'
 
 export default function Roles({ system, recipes, models }: AppState) {
   const [roles, setRoles] = useState<Role[]>([])
@@ -167,13 +167,13 @@ export default function Roles({ system, recipes, models }: AppState) {
           <div className="budget-line">
             <strong>{formatBytes(memoryTotal)}</strong> unified memory on this Spark
             {currentFit.bytes !== null && roles.length > 0 && (
-              <> · the models behind your roles are estimated at <strong>{formatBytes(currentFit.bytes)}</strong> together</>
+              <> · roles need an estimated <strong>{formatBytes(currentFit.bytes)}</strong> together</>
             )}
           </div>
         )}
         {choices.length === 0 ? (
           <p className="muted" style={{ fontSize: 12.5 }}>
-            No models are installed on this Spark yet. Install one from the Models page and it appears here.
+            No models installed. Install one from the Models page.
           </p>
         ) : (
           <div className="install-choice" role="radiogroup" aria-label={`Choose a model for ${label}`}>
@@ -190,7 +190,7 @@ export default function Roles({ system, recipes, models }: AppState) {
               // role uses is what makes models start swapping.
               const swaps = distinctModelsAfter(roles, roleName, recipe.id) > 1
               if (fitWith(roleName, recipe.id).overBudget) {
-                notes.push("these models do not fit in this Spark's memory together, by estimate")
+                notes.push('may not fit together in memory')
               }
               return (
                 <label className={`confirm-check ${swaps ? 'over' : ''}`} key={recipe.id}>
@@ -317,8 +317,8 @@ export default function Roles({ system, recipes, models }: AppState) {
                     ? `${recipeID}, ${state.word.toLowerCase()}`
                     : name === DEFAULT_ROLE
                       ? servingRecipe
-                        ? `${servingRecipe.display_name}, because nothing is assigned to this role yet`
-                        : 'Nothing is serving right now, so this role has nothing to follow.'
+                        ? `${servingRecipe.display_name}, until you assign one`
+                        : 'Nothing is serving yet.'
                       : 'Nothing yet. Pick a model below.'}
               </dd>
             </dl>
@@ -348,39 +348,33 @@ export default function Roles({ system, recipes, models }: AppState) {
             <div className="hero-name">
               <p className="kicker">Before you assign your first role</p>
               <h2>What roles are, in plain terms</h2>
-              <p className="pub">Three quick things worth knowing before you point an app at basement.</p>
+              <p className="pub">Three things to know first.</p>
             </div>
           </div>
           <div className="explain-grid">
             <div className="cell">
-              <h3>A role is a fixed job, not a model</h3>
+              <h3>A role is a job, not a model</h3>
               <p>
-                Standard, Fast, Reasoning and Vision are jobs your apps rely on. You decide which installed
-                model does each job today, and change that decision whenever you want.
+                Pick which model does each job. Change it anytime.
               </p>
             </div>
             <div className="cell">
               <h3>The endpoint never changes</h3>
               <p>
-                Each role keeps the same URL and the same model name for as long as it exists. Point an app at
-                Reasoning once. Swap the model behind it as often as you like; the app never needs to be
-                reconfigured.
+                The URL and model name stay the same. Swap the model without reconfiguring your app.
               </p>
             </div>
             <div className="cell">
               <h3>A switch costs a load</h3>
               <p>
-                This Spark serves one model at a time. When a request names a role whose model is not the one
-                running, basement starts that model first and the request waits for it. Later requests for the
-                same model are answered straight away.
+                One model runs at a time. The first request after a switch waits for it to load.
               </p>
             </div>
           </div>
           <div className="hero-note">
             <p>
-              <strong>Recommended:</strong> point your apps at{' '}
-              <code>role/{DEFAULT_ROLE}</code> to begin with. It answers from the model that is serving, so it
-              works before you assign anything, and you can give it a model of its own later.
+              <strong>Recommended:</strong> point apps at{' '}
+              <code>role/{DEFAULT_ROLE}</code>. It answers from whatever is serving until you assign it.
             </p>
             <span className="spacer" />
             <button type="button" className="brand" onClick={() => openPicker(BUILTIN_ROLES[0].name)}>
@@ -397,7 +391,7 @@ export default function Roles({ system, recipes, models }: AppState) {
           <span className="faint" style={{ fontSize: 12 }}>
             {formatBytes(memoryTotal)} unified memory on this Spark
             {currentFit.bytes !== null && roles.length > 0 &&
-              ` · the models behind your roles are estimated at ${formatBytes(currentFit.bytes)} together`}
+              ` · roles need an estimated ${formatBytes(currentFit.bytes)} together`}
           </span>
         )}
       </div>
@@ -411,7 +405,7 @@ export default function Roles({ system, recipes, models }: AppState) {
           <div className="add-role">
             <div className="txt">
               <strong>Add a custom role</strong>
-              <span>Give it a name, pick a model, and it gets its own endpoint that never changes.</span>
+              <span>Name it, pick a model, get a fixed endpoint.</span>
             </div>
             <button type="button" className="ghost" onClick={toggleAddRole}>+ Add custom role</button>
           </div>
@@ -441,9 +435,8 @@ export default function Roles({ system, recipes, models }: AppState) {
       </div>
 
       <p className="table-note">
-        Every role answers on the one endpoint above. A role with no model assigned yet answers with an error
-        that points back to this page, except for <code>role/{DEFAULT_ROLE}</code>, which follows whatever is
-        serving until you assign it. Click a role to see its endpoint details and change what backs it.
+        An unassigned role errors, except <code>role/{DEFAULT_ROLE}</code>, which follows whatever is
+        serving. Click a role to change its model.
       </p>
     </div>
   )

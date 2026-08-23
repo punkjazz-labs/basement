@@ -303,7 +303,7 @@ export default function Redactor() {
             {mappingProblem && (
               <div className="error-note" role="alert">
                 <strong>That file is not a mapping</strong>
-                <p>Use the .mapping.json file that the export saved. Nothing was read from this one.</p>
+                <p>Use the .mapping.json file the export saved.</p>
               </div>
             )}
             <label
@@ -315,7 +315,7 @@ export default function Redactor() {
               }}
             >
               <b>Drop the mapping file here</b>
-              <span className="sub">the .mapping.json saved next to your redacted copy · it never leaves this machine</span>
+              <span className="sub">the .mapping.json next to your redacted copy · never leaves this machine</span>
               <input
                 type="file"
                 accept=".json"
@@ -348,7 +348,7 @@ export default function Redactor() {
               <div className="passline"><span className="claims">{strayLine(restored.unknown.length)}</span></div>
             )}
             {restored === null
-              ? <div className="restore-out faint">Restored text appears here, on this screen only. It is never written to a file.</div>
+              ? <div className="restore-out faint">Restored text stays on this screen. It is never saved to a file.</div>
               : colorable
                 ? <div className="restore-out">{segments.map((segment, index) =>
                     segment.kind === 'restored' ? <span key={index} className="back">{segment.text}</span>
@@ -404,7 +404,7 @@ export default function Redactor() {
         <div className="error-note" role="alert">
           <strong>Could not ask the model</strong>
           <p>{passProblem}</p>
-          <p className="faint">Start a text model on the Models tab, then ask again.</p>
+          <p className="faint">Start a text model on the Models tab.</p>
         </div>
       )}
 
@@ -416,7 +416,7 @@ export default function Redactor() {
           )}
           {!asking && pass && pass.degraded && (
             <div className="passline degraded">
-              <span className="dot" />the model&apos;s answers were unusable, so these findings are from patterns alone
+              <span className="dot" />the model&apos;s answers were unusable; findings are from patterns only
             </div>
           )}
           {!asking && pass && !pass.degraded && (() => {

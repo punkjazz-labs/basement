@@ -272,7 +272,7 @@ export default function Models({
         setDelegated(previous => new Set(previous).add(recipe.id))
         noticeBox(
           `${peer.name} is installing ${recipe.display_name}`,
-          `The job runs on that Spark, so its progress and logs live on its own console. This row shows the model as soon as ${peer.name} reports it.`,
+          `Progress shows on ${peer.name}'s own console.`,
         )
         return
       }
@@ -302,7 +302,7 @@ export default function Models({
       const from = recipes.find(item => item.id === active.recipe_id)?.display_name ?? active.recipe_id
       const { ok } = await confirmBox({
         title: `Switch to ${recipe.display_name}?`,
-        body: `${from} will stop. If the new model fails verification, basement restores the previous one.`,
+        body: `${from} will stop. Basement restores it if the new model fails.`,
         confirmLabel: 'Switch model',
       })
       if (!ok) return
@@ -315,13 +315,13 @@ export default function Models({
     const { ok, checked } = await confirmBox({
       title: `Uninstall ${recipe.display_name}?`,
       body: serving
-        ? 'It is currently serving and will be stopped first. The runtime and configuration are removed.'
+        ? 'It will stop first. The runtime and config are removed.'
         : 'The runtime and configuration are removed.',
       confirmLabel: 'Uninstall',
       danger: true,
       checkbox: {
         label: `Also delete ${formatBytes(recipe.artifact_bytes)} of downloaded model files`,
-        note: 'Keeping them makes a future reinstall much faster.',
+        note: 'Faster reinstall later.',
       },
     })
     if (!ok) return
@@ -721,8 +721,7 @@ export default function Models({
         </div>
       )}
       <p className="table-note">
-        Speeds marked “typical” are community-reported for a DGX Spark; basement measures the real number after install.
-        Click a row for weights, revisions and licences.
+        “Typical” speeds are community-reported. Basement measures the real number after install.
       </p>
 
       <dialog ref={dialogRef} onClose={() => setConfirm(null)} aria-label="Confirm installation">
@@ -841,22 +840,22 @@ export default function Models({
                               {plan.weightsPresent === null
                                 ? 'Reading what is already on this Spark.'
                                 : plan.weightsPresent
-                                  ? 'This version pins the same weights that are already on this Spark. They are reused, so there is no large download.'
-                                  : `This version pins weights this Spark does not have yet. ${formatBytes(plan.bytesToFetch)} is downloaded.`}
+                                  ? 'Same weights already on this Spark are reused. No large download.'
+                                  : `New weights needed. ${formatBytes(plan.bytesToFetch)} downloads.`}
                             </dd>
                             <dt>Runtime</dt>
                             <dd>
                               {plan.imagePresent === null
                                 ? `Pinned ${runtimeWord} image, by digest.`
                                 : plan.imagePresent
-                                  ? `The ${runtimeWord} image this version pins is already on this Spark.`
-                                  : `The ${runtimeWord} image this version pins is not on this Spark yet, so it is pulled.`}
+                                  ? `${runtimeWord} image already on this Spark.`
+                                  : `${runtimeWord} image not on this Spark yet; it is pulled.`}
                             </dd>
                           </>
                         ) : (
                           <>
                             <dt>Files</dt>
-                            <dd>{machine} works out for itself which weights and which runtime image it already has.</dd>
+                            <dd>{machine} works out what it already has.</dd>
                           </>
                         )}
                         {plan?.contextLength ? (
@@ -874,11 +873,6 @@ export default function Models({
                           </>
                         ) : null}
                       </dl>
-                      <p className="faint">
-                        Basement does not keep the recipe of the version already installed, so it cannot list
-                        setting by setting what differs. These recipes carry no release notes, so there is no
-                        changelog to show.
-                      </p>
                     </div>
                   ) : (
                     <dl className="model-facts">
@@ -904,20 +898,15 @@ export default function Models({
                   )}
                   {onPeer ? (
                     <p className="muted" style={{ fontSize: 12.5 }}>
-                      {machine} runs this install itself, so the live progress is on that Spark's own console.
-                      The first start loads the model into memory and can take up to {startTimeoutMinutes(recipe)} minutes.
+                      Progress shows on {machine}'s own console. First start can take up to {startTimeoutMinutes(recipe)} minutes.
                     </p>
                   ) : nothingToFetch ? (
                     <p className="muted" style={{ fontSize: 12.5 }}>
-                      Nothing is downloaded, so this goes straight to starting the model. Loading it into
-                      memory can take up to {startTimeoutMinutes(recipe)} minutes, with live progress the
-                      whole way, and later starts are much faster.
+                      Nothing to download; starting the model can take up to {startTimeoutMinutes(recipe)} minutes.
                     </p>
                   ) : (
                     <p className="muted" style={{ fontSize: 12.5 }}>
-                      After the download, the first start loads the model into memory. This can take up to{' '}
-                      {startTimeoutMinutes(recipe)} minutes, with live progress the whole way, and later
-                      starts are much faster. Cancelling is always safe: downloads resume where they left off.
+                      After downloading, the first start can take up to {startTimeoutMinutes(recipe)} minutes. Cancelling is safe; downloads resume later.
                     </p>
                   )}
                   {!onPeer && anotherInstallRunning && (
@@ -937,7 +926,7 @@ export default function Models({
                           {switchFrom === recipe.id ? 'Update and switch now' : 'Download and switch now'}
                           <small>
                             {switchFrom === recipe.id
-                              ? `This restarts ${recipe.display_name} on the new version. If it fails, basement restores the version that was running.`
+                              ? `Restarts ${recipe.display_name} on the new version. Basement restores it if this fails.`
                               : `This stops ${nameOf(switchFrom)} while ${recipe.display_name} starts.`}
                           </small>
                         </span>
@@ -954,7 +943,7 @@ export default function Models({
                           {switchFrom === recipe.id ? 'Update only' : 'Download only'}
                           <small>
                             {switchFrom === recipe.id
-                              ? `${recipe.display_name} keeps serving the current version. Switch to the update later from the Models tab.`
+                              ? `${recipe.display_name} keeps serving. Switch later from the Models tab.`
                               : `${nameOf(switchFrom)} keeps serving. Start ${recipe.display_name} later from the Models tab.`}
                           </small>
                         </span>
@@ -965,8 +954,8 @@ export default function Models({
                   {onPeer && (
                     <p className="muted" style={{ fontSize: 12.5 }}>
                       {switchFrom
-                        ? `Switching happens on ${machine}: it changes the model that Spark serves, not the one serving here.`
-                        : `${machine} downloads and serves this model. What this Spark is serving does not change.`}
+                        ? `Switching happens on ${machine}, not here.`
+                        : `${machine} downloads and serves this. This Spark is unaffected.`}
                     </p>
                   )}
                   {licences.length > 0 && (

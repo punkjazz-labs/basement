@@ -32,7 +32,7 @@ export default function Pairing({ onPaired }: { onPaired: () => void }) {
         <h1>Pair this Spark</h1>
       </div>
       <p className="muted">
-        Enter the pairing token shown when the manager was installed.
+        Enter the token shown when basement was installed.
       </p>
       {/* The token is masked because it is on screen next to nothing else,
           but it is a one-time bootstrap credential: after pairing, the

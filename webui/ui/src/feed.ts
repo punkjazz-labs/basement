@@ -61,7 +61,7 @@ export function feedNote(health: RecipeFeedHealth | null | undefined, nowMs: num
     const days = ageInDays(health.accepted_generated_at, nowMs)
     if (days !== null) {
       return {
-        text: `Recipe feed · ${days} ${days === 1 ? 'day' : 'days'} old. Newer recipes and revocations may be missing.`,
+        text: `Recipe feed · ${days} ${days === 1 ? 'day' : 'days'} old; may be missing updates.`,
         warn: true,
       }
     }

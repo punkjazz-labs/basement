@@ -23,7 +23,7 @@ describe('api', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
     await expect(api('/api/v1/jobs/1/cancel', { method: 'POST' })).rejects.toThrow(OfflineError)
     await expect(api('/api/v1/jobs/1/cancel', { method: 'POST' })).rejects.toThrow(
-      'Cannot reach this Spark. It may be offline, or its manager may be restarting. Try again once it answers.',
+      'Cannot reach this Spark. It may be offline or restarting. Try again soon.',
     )
   })
 

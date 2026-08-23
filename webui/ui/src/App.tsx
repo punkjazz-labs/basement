@@ -26,15 +26,9 @@ type Tab = (typeof TABS)[number]
 // Redactor has no line here on purpose: its own bar names the open document,
 // and nothing above it needs to repeat what the screen already shows.
 const DESC: Partial<Record<Tab, string>> = {
-  Models: 'The best open models, tuned for your Spark. Pick one and click Install.',
-  Roles: 'Persistent endpoints that stay stable while you change the model behind them.',
-  Playground: 'Talk to the model that is serving right now.',
-  Generate: 'Create a video from a prompt on the model that is running.',
-  Connect: 'Endpoint, API keys and client snippets for this Spark.',
+  Roles: 'Endpoints that stay the same while you change the model.',
+  Connect: 'Endpoint, keys and snippets.',
   Monitor: 'Live GPU health and serving metrics.',
-  Fleet: 'Every Spark you have added, and what each one is serving right now.',
-  Storage: 'What is on disk and how to reclaim it.',
-  Activity: 'Every job, persisted. Open one for phases and receipts.',
 }
 
 export interface AppState {

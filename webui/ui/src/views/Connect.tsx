@@ -120,29 +120,26 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
             {copied === 'endpoint' ? 'Copied' : 'Copy'}
           </button>
         </div>
-        <p className="muted" style={{ marginBottom: 0 }}>
-          One address, always. Switching models never changes it, so clients keep working.
-          {activeModelID && (
-            <>
-              {' '}Current model ID:{' '}
-              <code>{activeModelID}</code>{' '}
-              <button className="quiet" onClick={() => copy('model', activeModelID)}>
-                {copied === 'model' ? 'Copied' : 'Copy'}
-              </button>
-            </>
-          )}
-        </p>
+        {activeModelID && (
+          <p className="muted" style={{ marginBottom: 0 }}>
+            Current model ID:{' '}
+            <code>{activeModelID}</code>{' '}
+            <button className="quiet" onClick={() => copy('model', activeModelID)}>
+              {copied === 'model' ? 'Copied' : 'Copy'}
+            </button>
+          </p>
+        )}
       </section>
 
       <section className="card">
         <div className="section-head" style={{ marginBottom: 6 }}>
           <h2 style={{ fontSize: 16 }}>API keys</h2>
-          <span className="muted">Required for any client that is not this console</span>
+          <span className="muted">Needed by every client except this console.</span>
         </div>
         {freshSecret && (
           <div className="secret-reveal" role="alert">
             <strong>“{freshSecret.name}” created. Copy the key now.</strong>
-            <span className="muted">For security it is never shown again.</span>
+            <span className="muted">It will not be shown again.</span>
             <code>{freshSecret.secret}</code>
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="primary" onClick={() => copy('secret', freshSecret.secret)}>
@@ -165,7 +162,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
           </div>
         ))}
         {keys.length === 0 && !freshSecret && (
-          <p className="muted">No keys yet. Create one to connect Cursor, scripts, or anything OpenAI-compatible.</p>
+          <p className="muted">No keys yet.</p>
         )}
         {/* A lone text field sitting next to a freshly revealed secret is
             close enough to a login form for a manager to guess at. It names
@@ -205,11 +202,10 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
           <pre><code>{snippetFor(snippet, base, model)}</code></pre>
         </div>
         <p className="muted" style={{ fontSize: 12.5 }}>
-          <code>{model}</code> follows whatever model is serving until you assign one to it on the Roles page,
-          where you can also point it, and the other roles, at a model of your choosing.
+          Follows whatever model is serving. Change this on the Roles page.
         </p>
         <p className="faint" style={{ fontSize: 12.5, marginBottom: 0 }}>
-          Set <code>BASEMENT_API_KEY</code> to a key from above. Works with the OpenAI SDKs, Cursor, Continue, LiteLLM, Open WebUI, and anything else OpenAI-compatible.
+          Set <code>BASEMENT_API_KEY</code> to a key from above.
         </p>
       </section>
     </div>

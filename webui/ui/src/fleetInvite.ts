@@ -295,7 +295,7 @@ export const inviteTitle = (state: string, name: string): string => {
 }
 
 export const inviteBody = (name: string): string =>
-  `Press Approve on ${name}'s console. We opened it in a new tab.`
+  `Press Approve on ${name}'s console. Opened in a new tab.`
 
 export const inviteWaitLine = (state: string): string => (state === 'adopting' ? 'Adding…' : 'Waiting…')
 
@@ -308,7 +308,7 @@ export function inviteOutcome(progress: FleetInviteProgress, name: string): stri
     case 'denied':
       return `Denied on ${name}.`
     case 'expired':
-      return 'The request expired. Add again when you are ready.'
+      return 'Request expired. Try adding again.'
     default:
       return progress.reason || `Adding ${name} stopped before it finished.`
   }
@@ -337,4 +337,4 @@ export const invitationTitle = (invitation: FleetInvitation): string =>
   `Join ${invitation.controller_name}'s fleet?`
 
 export const invitationBody = (invitation: FleetInvitation): string =>
-  `${invitation.controller_name} will manage this Spark's models and updates. Everything it serves keeps running.`
+  `${invitation.controller_name} will manage this Spark's models and updates. It keeps serving.`

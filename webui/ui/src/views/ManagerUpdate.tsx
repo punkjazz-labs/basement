@@ -166,7 +166,7 @@ function ManagerUpdateBody({
       } else if (outcome.kind === 'timeout') {
         setReconnectTimedOut(true)
       } else if (outcome.kind === 'inactive') {
-        setError(ambiguousFailure || 'The manager did not start an update. Check for updates, then try again.')
+        setError(ambiguousFailure || 'The manager did not start an update. Try again.')
       }
     })
   }, [onManagerReady, setReconnectState])
@@ -262,7 +262,7 @@ function ManagerUpdateBody({
         })
         startFollowing(payload.attempt_id)
       } else {
-        startFollowing(undefined, 'The update response was incomplete. Check for updates, then try again.')
+        startFollowing(undefined, 'The update response was incomplete. Try again.')
       }
     } catch (problem) {
       const message = problem instanceof Error ? problem.message : 'Could not start the update'
@@ -287,7 +287,7 @@ function ManagerUpdateBody({
         method: 'POST',
         body: JSON.stringify({ confirmed: true }),
       })
-      if (!isFleetUpgradeRun(payload)) throw new Error('The fleet update response was incomplete. Check for updates, then try again.')
+      if (!isFleetUpgradeRun(payload)) throw new Error('The fleet update response was incomplete. Try again.')
       setFleetRun(payload)
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : 'Could not start the fleet update')
@@ -349,7 +349,7 @@ function ManagerUpdateBody({
           </StateHead>
           <div className="update-notice fail">
             <strong>Check the manager service before trying again</strong>
-            The console stopped waiting so it would not hide an unreachable manager.
+            The console stopped waiting for a response.
           </div>
           <div className="update-actions">
             <button className="primary" type="button" onClick={() => startFollowing(attempt?.attempt_id)}>Try reconnecting</button>
@@ -373,7 +373,6 @@ function ManagerUpdateBody({
         </section>
         <div className="update-notice">
           <strong>Your model stays on</strong>
-          The updater does not stop the model container.
         </div>
       </div>
     )
@@ -466,7 +465,7 @@ function ManagerUpdateBody({
     return (
       <div className="update-view">
         <section className="card update-card">
-          <p className="update-member-copy">This Spark updates as part of the fleet. Start the update from the Spark running the fleet console.</p>
+          <p className="update-member-copy">Updates with the fleet. Start it from the fleet console.</p>
         </section>
       </div>
     )
@@ -510,8 +509,7 @@ function ManagerUpdateBody({
             </div>
             <div className="update-notice fail">
               <strong>The fleet stays locked until this is resolved</strong>
-              Resolving releases the update lock on every Spark, including the ones that
-              already updated, so the fleet can work and try again.
+              Resolving unlocks every Spark so the fleet can update again.
             </div>
             {error && <div className="error-note"><p>{error}</p></div>}
             <div className="update-actions">
@@ -530,7 +528,7 @@ function ManagerUpdateBody({
         <div className="update-view">
           <section className="card update-card">
             <StateHead mark="!" tone="warn" title="Resolve did not reach every Spark">
-              <p>The fleet is unlocked, but {holdouts.length === 1 ? 'one Spark still holds' : `${holdouts.length} Sparks still hold`} a local update lock.</p>
+              <p>The fleet is unlocked. {holdouts.length === 1 ? 'One Spark still holds' : `${holdouts.length} Sparks still hold`} a local lock.</p>
             </StateHead>
             <div className="update-progress-list" aria-label="Sparks that still need attention">
               {holdouts.map(node => (
@@ -558,7 +556,7 @@ function ManagerUpdateBody({
         <div className="update-view">
           <section className="card update-card">
             <StateHead mark="OK" tone="complete" title="Fleet update resolved">
-              <p>Every Spark released its update lock. The fleet is ready for a new update.</p>
+              <p>Every Spark released its lock. Ready for a new update.</p>
             </StateHead>
             {error && <div className="error-note"><p>{error}</p></div>}
             <div className="update-actions">
@@ -622,7 +620,7 @@ function ManagerUpdateBody({
         <div className="update-view">
           <section className="card update-card">
             <StateHead mark="UP" tone="complete" title={<>Update basement to <span className="mono">{target}</span></>} signed>
-              <p>All {count} Sparks update one at a time. Each Spark&apos;s console reconnects as it restarts. Models keep serving.</p>
+              <p>All {count} Sparks update one at a time. Models keep serving.</p>
             </StateHead>
             {error && <div className="error-note"><p>{error}</p></div>}
             <div className="update-actions">

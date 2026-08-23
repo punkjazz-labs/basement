@@ -651,7 +651,7 @@ export class ApiError extends Error {
 // from here those two look identical.
 export class OfflineError extends Error {
   constructor() {
-    super('Cannot reach this Spark. It may be offline, or its manager may be restarting. Try again once it answers.')
+    super('Cannot reach this Spark. It may be offline or restarting. Try again soon.')
     this.name = 'OfflineError'
   }
 }
@@ -768,7 +768,7 @@ export function trustLine(recipe: Recipe): string {
   if (recipe.verification === 'verified') {
     return 'Verified on our own Spark and pinned for a single Spark.'
   }
-  return 'Pinned for a single Spark. Still a candidate: it has not finished its full lifecycle on our own hardware.'
+  return 'Pinned for a single Spark. Still a candidate on our hardware.'
 }
 
 export function installConfirmationsComplete(
@@ -852,7 +852,7 @@ export async function copyText(value: string): Promise<void> {
   holder.focus({ preventScroll: true })
   holder.setSelectionRange(0, holder.value.length)
   try {
-    if (!document.execCommand('copy')) throw new Error('Copy is unavailable in this browser context.')
+    if (!document.execCommand('copy')) throw new Error('Copy is not available here.')
   } finally {
     holder.remove()
     if (previous && selection) {

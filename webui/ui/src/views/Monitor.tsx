@@ -168,7 +168,7 @@ export default function Monitor({ telemetry, activeName }: { telemetry: Telemetr
         <Tile label="Disk free" value={formatBytes(telemetry.storage_available)} />
       </div>
       {!serving && (
-        <p className="faint">Start a model to see live generation speed, request queue, and KV-cache pressure here.</p>
+        <p className="faint">Start a model to see live metrics.</p>
       )}
     </div>
   )

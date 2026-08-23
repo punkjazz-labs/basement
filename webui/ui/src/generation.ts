@@ -123,9 +123,9 @@ export function sizeWaitLabel(config: MediaGenerationConfig, shortEdge: number):
 // warning, just a vaguer one.
 export function sizeWaitHint(config: MediaGenerationConfig): string {
   if (config.size_waits && config.size_waits.length > 0) {
-    return 'Waits measured on this model for a 5 second clip. A longer clip waits more.'
+    return 'Waits measured for a 5 second clip; longer clips wait more.'
   }
-  return 'A bigger size waits much longer. The largest size can take hours.'
+  return 'A bigger size waits much longer, up to hours.'
 }
 
 // The same sum durationOptions runs per block, spelled out once more so the

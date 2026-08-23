@@ -129,12 +129,12 @@ describe('sizeWaitLabel', () => {
 describe('sizeWaitHint', () => {
   it('points to the measured waits when the recipe declares them', () => {
     expect(sizeWaitHint(h3WithWaits)).toBe(
-      'Waits measured on this model for a 5 second clip. A longer clip waits more.',
+      'Waits measured for a 5 second clip; longer clips wait more.',
     )
   })
 
   it('falls back to a plain warning when the recipe measured nothing', () => {
-    expect(sizeWaitHint(h3)).toBe('A bigger size waits much longer. The largest size can take hours.')
+    expect(sizeWaitHint(h3)).toBe('A bigger size waits much longer, up to hours.')
   })
 })
 
