@@ -62,7 +62,7 @@ id: deepseek-v4-flash-0731-ud-iq3-xxs-1s
 #   reduce most layers' cache and are not modelled here. runtime_overhead_bytes
 #   is a conservative allowance for the CUDA context and compute buffers, not a
 #   measurement; both figures are replaced by what qualification measures.
-version: 1
+version: 2
 display_name: DeepSeek V4 Flash 0731 3-bit
 publisher: DeepSeek + unsloth
 model_by: DeepSeek
@@ -96,7 +96,7 @@ runtime:
 artifacts:
   - role: primary
     repository: unsloth/DeepSeek-V4-Flash-0731-GGUF
-    revision: 57326b941c4603e24d1a5e71c22520c66e086eb8
+    revision: fbbb5b93fb787c21338159b0af3318bb3f4d9768
     expected_bytes: 104207848032
     files:
       - name: UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf
@@ -108,7 +108,7 @@ artifacts:
       - name: UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf
         expected_bytes: 5034198464
     licence: MIT
-    licence_url: https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF/tree/57326b941c4603e24d1a5e71c22520c66e086eb8
+    licence_url: https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF/tree/fbbb5b93fb787c21338159b0af3318bb3f4d9768
 requirements:
   architecture: aarch64
   dgx_spark: true

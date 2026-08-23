@@ -14,7 +14,7 @@ id: minimax-h3-comfyui-1s
 # and the install and start proof runs 1. Version 1 proved itself with a
 # full-quality generation, which cost about eighteen minutes of waiting every
 # time the model was installed or started.
-version: 3
+version: 4
 display_name: MiniMax H3
 publisher: MiniMax + Comfy-Org
 model_by: MiniMax
@@ -47,7 +47,7 @@ runtime:
 artifacts:
   - role: primary
     repository: Comfy-Org/MiniMax-H3
-    revision: 0543966fbdce5ba05709a8f2031c94bdba629b4a
+    revision: 6701b0a14feefd7141bd9cfe8386961c27007622
     expected_bytes: 42470585471
     files:
       # LFS sha256 e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a.

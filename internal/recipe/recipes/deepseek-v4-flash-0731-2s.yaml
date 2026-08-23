@@ -81,7 +81,7 @@ id: deepseek-v4-flash-0731-2s
 #
 # memory_model is omitted: TP=2 shards weights across nodes and the flat
 # single-node formula would be wrong by construction.
-version: 3
+version: 4
 display_name: DeepSeek V4 Flash 0731
 publisher: DeepSeek
 model_by: DeepSeek
@@ -159,10 +159,10 @@ artifacts:
     # revision this recipe pinned before, dspark fields and FP4 experts
     # included, so this is not a different model: it is the exact point in the
     # repository's history that deployment measured.
-    revision: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
-    expected_bytes: 166898660330
+    revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+    expected_bytes: 166898661074
     licence: MIT
-    licence_url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/9e165c30e2704aec5d9d593cce3eebd58bbef1cb/LICENSE
+    licence_url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/7872f01b1d1fe23eabc4c98b48bffcef5a386062/LICENSE
 requirements:
   architecture: aarch64
   dgx_spark: true
