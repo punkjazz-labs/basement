@@ -319,7 +319,8 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--ac
     var options = [
       { value: "loopback", title: "Only this machine itself", sub: "Other devices would need an SSH tunnel." },
       { value: "tailscale", title: "Your Tailscale devices", sub: "Reachable from anywhere via your tailnet." },
-      { value: "lan", title: "Any device on your local network", sub: "Phones, laptops — and it opens in your browser when done." }
+      { value: "lan", title: "Any device on your local network", sub: "Phones and laptops. Opens in your browser when done." },
+      { value: "lan+tailscale", title: "Local network and Tailscale", sub: "Both addresses at once." }
     ];
     var recommended = state.remote ? "lan" : "loopback";
     var chosen = recommended;
