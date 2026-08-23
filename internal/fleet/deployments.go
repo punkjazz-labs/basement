@@ -128,8 +128,12 @@ type independentDeploymentResponse struct {
 
 // Adoption carries no grant and no reservation, because it claims nothing on
 // the target node. It only names the exact recipe the controller believes is
-// already installed there, and the deployment record it belongs to.
+// already installed there, and the deployment record it belongs to. The
+// recipe version is the controller's reading of the node's own heartbeat, so
+// it is a hint: the node's installed_models row stays the authority and
+// refuses the request when the two disagree.
 type adoptDeploymentRequest struct {
+	NodeID         string `json:"node_id"`
 	RecipeID       string `json:"recipe_id"`
 	RecipeVersion  int    `json:"recipe_version"`
 	DeploymentID   string `json:"deployment_id"`
@@ -150,6 +154,15 @@ type remoteJobActionRequest struct {
 func stablePlacementID(prefix, authority, key string) string {
 	digest := sha256.Sum256([]byte(authority + "\x00" + key))
 	return prefix + hex.EncodeToString(digest[:16])
+}
+
+// adoptPlacementKey builds the key half of an adopted deployment id. The
+// lengths keep a colon inside a node id or a recipe id from building the same
+// key as some other pair, and the "adopt:" word keeps this id space apart
+// from the create path's "key:" space, so one deployment id can never mean
+// two different placements.
+func adoptPlacementKey(nodeID, recipeID string) string {
+	return fmt.Sprintf("adopt:%d:%s:%d:%s", len(nodeID), nodeID, len(recipeID), recipeID)
 }
 
 func (m *Manager) CreateIndependentDeployment(ctx context.Context, request CreateDeploymentRequest) (Deployment, bool, error) {
@@ -186,7 +199,12 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 	if authority == "" {
 		authority = m.identity.NodeID
 	}
-	deploymentID := stablePlacementID("deployment_", authority, request.IdempotencyKey)
+	// The "key:" word keeps this id space apart from the adopt path's
+	// "adopt:" space. Changing how a deployment id is derived is safe exactly
+	// once, and this is that moment: no console release has ever called this
+	// API, so no deployment record exists in the field to be orphaned. After
+	// the first shipped console writes one, this derivation is frozen.
+	deploymentID := stablePlacementID("deployment_", authority, "key:"+request.IdempotencyKey)
 	reservationID := stablePlacementID("reservation_", request.NodeID, deploymentID)
 	lock := m.placementLock(deploymentID)
 	lock.Lock()
@@ -269,16 +287,16 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	if idempotencyKey == "" || len(idempotencyKey) > 128 {
 		return Deployment{}, false, errors.New("a valid idempotency key is required")
 	}
-	selected, ok := recipe.Find(m.effectiveRecipes(), recipeID)
+	// The effective catalogue answers "is this a model this controller knows,
+	// and is it a one-Spark model" with the clearest words. It cannot answer
+	// "which version runs there", so the exact recipe is resolved below from
+	// the node's own report against the catalogue that retains history.
+	known, ok := recipe.Find(m.effectiveRecipes(), recipeID)
 	if !ok {
 		return Deployment{}, false, errors.New("the model is not in this controller's current catalogue")
 	}
-	if selected.Topology.SparkCount != 1 {
-		return Deployment{}, false, fmt.Errorf("%s requires %d nodes and cannot use independent placement", selected.DisplayName, selected.Topology.SparkCount)
-	}
-	fingerprint, err := RecipeFingerprint(selected)
-	if err != nil {
-		return Deployment{}, false, err
+	if known.Topology.SparkCount != 1 {
+		return Deployment{}, false, fmt.Errorf("%s requires %d nodes and cannot use independent placement", known.DisplayName, known.Topology.SparkCount)
 	}
 	config, err := m.database.FleetConfig(ctx)
 	if err != nil {
@@ -287,6 +305,21 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	if config.Role == "member" {
 		return Deployment{}, false, errors.New("a fleet member cannot adopt a deployment")
 	}
+	running, err := m.runningModelVersion(ctx, nodeID, recipeID)
+	if err != nil {
+		return Deployment{}, false, err
+	}
+	selected, ok := recipe.FindVersion(m.recipes(), recipeID, running)
+	if !ok {
+		return Deployment{}, false, fmt.Errorf("node %s runs version %d of that model, which is not in this controller's catalogue history", nodeID, running)
+	}
+	if selected.Topology.SparkCount != 1 {
+		return Deployment{}, false, fmt.Errorf("%s requires %d nodes and cannot use independent placement", selected.DisplayName, selected.Topology.SparkCount)
+	}
+	fingerprint, err := RecipeFingerprint(selected)
+	if err != nil {
+		return Deployment{}, false, err
+	}
 	authority := config.FleetID
 	if authority == "" {
 		authority = m.identity.NodeID
@@ -294,21 +327,25 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	// The deployment id comes from the fleet, the node, and the recipe. It
 	// never comes from the caller's idempotency key, so two consoles that
 	// adopt the same model on the same node reach the same single record.
-	deploymentID := stablePlacementID("deployment_", authority, "adopt:"+nodeID+":"+recipeID)
+	// The version is deliberately absent: one model on one node is one
+	// deployment, and updating it must not fork the record.
+	deploymentID := stablePlacementID("deployment_", authority, adoptPlacementKey(nodeID, recipeID))
 	lock := m.placementLock(deploymentID)
 	lock.Lock()
 	defer lock.Unlock()
 	if existing, err := m.database.FleetDeployment(ctx, deploymentID); err == nil {
-		// An adopted record with an owner job is already what the caller
-		// wants, even if the catalogue moved on since. Hand it back.
+		// A record that already owns a job is what the caller wants, even if
+		// the catalogue moved on since. Hand it back. A record without one is
+		// a half-written earlier attempt: fall through and finish it, because
+		// refusing here would wedge this model on this node for good.
 		if existing.OwnerJobID != "" {
 			view, viewErr := m.Deployment(ctx, deploymentID)
 			return view, false, viewErr
 		}
-		if existing.RecipeVersion != selected.Version || existing.RecipeFingerprint != fingerprint {
-			return Deployment{}, false, errors.New("an earlier adoption record for this model names a different version")
-		}
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Deployment{}, false, err
+	}
+	if err := m.refuseDuplicateDeployment(ctx, deploymentID, nodeID, recipeID); err != nil {
 		return Deployment{}, false, err
 	}
 	target, local, err := m.placementNode(ctx, nodeID)
@@ -316,7 +353,7 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 		return Deployment{}, false, fmt.Errorf("node %s: %w", nodeID, err)
 	}
 	job, jobCreated, err := m.adoptOnNode(ctx, target, local, adoptDeploymentRequest{
-		RecipeID: selected.ID, RecipeVersion: selected.Version,
+		NodeID: nodeID, RecipeID: selected.ID, RecipeVersion: selected.Version,
 		DeploymentID: deploymentID, IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
@@ -335,6 +372,55 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	}
 	adopted.OwnerJobID, adopted.State, adopted.LastObservedAt = job.ID, job.State, observedAt
 	return Deployment{FleetDeployment: adopted, Job: &job}, created && jobCreated, nil
+}
+
+// runningModelVersion reads the version a node actually serves out of the
+// membership overview, which carries that node's own signed heartbeat. The
+// effective catalogue holds only the newest version of each model. That is
+// the right answer for a fresh install or an update, and the wrong one for a
+// model that already runs: its container name, port, and config were built
+// from the recipe as it was at install time, not from whatever the catalogue
+// has moved on to since (see recipe.FindVersion). Adoption therefore records
+// what runs. The reading is still only a hint, because the node's own
+// installed_models row is the authority and refuses a version it disagrees
+// with.
+func (m *Manager) runningModelVersion(ctx context.Context, nodeID, recipeID string) (int, error) {
+	summary, err := m.Summary(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, node := range summary.Nodes {
+		if node.NodeID != nodeID {
+			continue
+		}
+		for _, model := range node.InstalledModels {
+			if model.RecipeID == recipeID {
+				return model.RecipeVersion, nil
+			}
+		}
+		return 0, fmt.Errorf("node %s does not report that model as installed", nodeID)
+	}
+	return 0, fmt.Errorf("node %s is not in this fleet", nodeID)
+}
+
+// refuseDuplicateDeployment keeps one model on one node to one record. The
+// create path may already own this pair under an id derived from an
+// idempotency key, and a second record would give the console two rows and
+// two owner jobs for one serving model.
+func (m *Manager) refuseDuplicateDeployment(ctx context.Context, deploymentID, nodeID, recipeID string) error {
+	stored, err := m.database.FleetDeployments(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range stored {
+		if item.DeploymentID == deploymentID || item.State == "removed" {
+			continue
+		}
+		if item.OwnerNodeID == nodeID && item.RecipeID == recipeID {
+			return fmt.Errorf("node %s already has a deployment record for that model", nodeID)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) placementLock(deploymentID string) *sync.Mutex {
@@ -421,6 +507,12 @@ func (m *Manager) adoptOnNode(ctx context.Context, target store.FleetNode, local
 func (m *Manager) adoptIndependent(ctx context.Context, request adoptDeploymentRequest) (store.Job, bool, error) {
 	if request.DeploymentID == "" || request.RecipeID == "" || request.RecipeVersion <= 0 {
 		return store.Job{}, false, errors.New("the adoption request is incomplete")
+	}
+	// The request must name this node, exactly as a reservation prepare must
+	// (see validateIndependentPrepare). A record aimed at another node must
+	// never be answered here.
+	if request.NodeID != m.identity.NodeID {
+		return store.Job{}, false, errors.New("the adoption request names another node")
 	}
 	selected, ok := recipe.FindVersion(m.recipes(), request.RecipeID, request.RecipeVersion)
 	if !ok || selected.Topology.SparkCount != 1 {

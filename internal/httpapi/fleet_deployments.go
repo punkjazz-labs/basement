@@ -96,7 +96,11 @@ func (s *Server) AdoptIndependentJob(ctx context.Context, selected recipe.Recipe
 	if err != nil {
 		return store.Job{}, false, err
 	}
-	if created {
+	// A retry must repair a carrier job that an earlier attempt left short of
+	// terminal, the way the sibling install path restarts a failed or
+	// interrupted job. This job has no work to redo, so it only needs its
+	// state put right.
+	if created || job.State != "ready" {
 		if err := s.store.UpdateJobState(ctx, job.ID, "ready", ""); err != nil {
 			return store.Job{}, false, err
 		}
@@ -291,9 +295,11 @@ func (s *Server) fleetDeploymentAdopt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
+	// 201, not 202: the record exists in full by the time this replies, and
+	// no work was handed to anything. A repeat adoption returns 200.
 	status := http.StatusOK
 	if created {
-		status = http.StatusAccepted
+		status = http.StatusCreated
 	}
 	writeJSON(w, status, map[string]any{"deployment": deployment, "created": created})
 }

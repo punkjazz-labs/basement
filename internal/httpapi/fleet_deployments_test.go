@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/punkjazz-labs/basement/internal/auth"
 	"github.com/punkjazz-labs/basement/internal/engine"
@@ -14,6 +15,165 @@ import (
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/store"
 )
+
+// The carrier job exists only to hold a deployment id where
+// independentDeploymentID can read it. It must be terminal at once and it
+// must never reach the engine, so adopting a model can never disturb the
+// container that model already serves from.
+func TestAdoptIndependentJobIsTerminalAndRunsNoOperation(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	database, err := store.Open(filepath.Join(directory, "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authManager, err := auth.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected recipe.Recipe
+	for _, item := range recipes {
+		if item.Topology.SparkCount == 1 {
+			selected = item
+			break
+		}
+	}
+	if selected.ID == "" {
+		t.Fatal("an independent recipe is required")
+	}
+	executor := &apiExecutor{done: map[string]bool{}}
+	runner := engine.New(database, executor, recipes)
+	server := New("test", directory, authManager, database, readyInventory{}, executor, runner, recipes)
+	if err := database.SetInstalled(ctx, store.InstalledModel{RecipeID: selected.ID, RecipeVersion: selected.Version, Status: "ready", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	job, created, err := server.AdoptIndependentJob(ctx, selected, "deployment_under_test", "adopt-key")
+	if err != nil || !created {
+		t.Fatalf("adoption created=%v err=%v", created, err)
+	}
+	if job.Kind != "adopt" || job.State != "ready" {
+		t.Fatalf("the carrier job is not a terminal adopt job: %+v", job)
+	}
+	// A job handed to the engine runs in its own goroutine, so give one time
+	// to appear before calling the executor untouched.
+	time.Sleep(100 * time.Millisecond)
+	executor.mu.Lock()
+	operations, running := len(executor.done), executor.running
+	executor.mu.Unlock()
+	if operations != 0 || running {
+		t.Fatalf("adoption executed %d operations and left running=%v", operations, running)
+	}
+	stored, err := database.GetJob(ctx, job.ID)
+	if err != nil || stored.State != "ready" {
+		t.Fatalf("the carrier job did not stay terminal: job=%+v err=%v", stored, err)
+	}
+
+	// An earlier attempt that died before the job reached terminal must be
+	// repaired by the next one, not left behind as queued work.
+	if err := database.UpdateJobState(ctx, job.ID, "queued", ""); err != nil {
+		t.Fatal(err)
+	}
+	repaired, created, err := server.AdoptIndependentJob(ctx, selected, "deployment_under_test", "adopt-key")
+	if err != nil || created || repaired.State != "ready" {
+		t.Fatalf("retry created=%v job=%+v err=%v", created, repaired, err)
+	}
+
+	// The installed row is the authority: a version it does not hold is
+	// refused, whatever the controller believed.
+	moved := selected
+	moved.Version = selected.Version + 1
+	if _, _, err := server.AdoptIndependentJob(ctx, moved, "deployment_under_test", "adopt-moved"); err == nil {
+		t.Fatal("adoption accepted a version this node does not run")
+	}
+	if _, err := database.Model(ctx, selected.ID); err != nil {
+		t.Fatalf("adoption disturbed the installed model: %v", err)
+	}
+}
+
+// The public route must reach adoption past the /api/v1/fleet/deployments/
+// prefix that sits beside it, and must report a record it created apart from
+// one it found. This also drives the local branch, where the controller
+// adopts a model on itself.
+func TestFleetDeploymentAdoptRouteCreatesOnceAndRepeats(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	database, err := store.Open(filepath.Join(directory, "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authManager, err := auth.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected recipe.Recipe
+	for _, item := range recipes {
+		if item.Topology.SparkCount == 1 {
+			selected = item
+			break
+		}
+	}
+	executor := &apiExecutor{done: map[string]bool{}}
+	runner := engine.New(database, executor, recipes)
+	server := New("test", directory, authManager, database, readyInventory{}, executor, runner, recipes)
+	manager, err := fleet.NewManager(ctx, fleet.Options{
+		DataDir: directory, Database: database, Inventory: readyInventory{}, Version: "test", BuildIdentity: "test-build",
+		DisplayName: "node-local", ConsoleURL: "http://192.168.99.10:7070", NodeURL: "https://192.168.99.10:7071",
+		Recipes: recipes, EffectiveRecipes: recipes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetFleetManager(manager)
+	if err := database.SetInstalled(ctx, store.InstalledModel{RecipeID: selected.ID, RecipeVersion: selected.Version, Status: "ready", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := manager.Summary(ctx)
+	if err != nil || len(summary.Nodes) != 1 {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+	cookie, csrf := pairMembershipConsole(t, server, authManager)
+	adopt := func(key string) *httptest.ResponseRecorder {
+		body := `{"node_id":"` + summary.Nodes[0].NodeID + `","recipe_id":"` + selected.ID + `"}`
+		request := httptest.NewRequest(http.MethodPost, "http://console.test/api/v1/fleet/deployments/adopt", bytes.NewBufferString(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", "http://console.test")
+		request.Header.Set("X-CSRF-Token", csrf)
+		request.Header.Set("Idempotency-Key", key)
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+	created := adopt("adopt-one")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("first adoption status=%d body=%s", created.Code, created.Body.String())
+	}
+	repeated := adopt("adopt-two")
+	if repeated.Code != http.StatusOK {
+		t.Fatalf("repeat adoption status=%d body=%s", repeated.Code, repeated.Body.String())
+	}
+	deployments, err := manager.Deployments(ctx)
+	if err != nil || len(deployments) != 1 || deployments[0].OwnerJobID == "" {
+		t.Fatalf("adoption did not leave one owned record: %+v err=%v", deployments, err)
+	}
+	executor.mu.Lock()
+	operations := len(executor.done)
+	executor.mu.Unlock()
+	if operations != 0 {
+		t.Fatalf("adoption over the route executed %d operations", operations)
+	}
+}
 
 func TestPublicAPIKeyCannotPlanOrCreateFleetDeployment(t *testing.T) {
 	ctx := context.Background()

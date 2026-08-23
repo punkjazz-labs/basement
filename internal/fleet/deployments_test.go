@@ -240,8 +240,9 @@ func TestAdoptIndependentDeploymentRecordsAnInstalledModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	independent := independentRecipes(t, recipes, 3)
+	independent := independentRecipes(t, recipes, 5)
 	serving, stale, absent := independent[0], independent[1], independent[2]
+	duplicated, repairable := independent[3], independent[4]
 	grouped := groupedRecipe(t, recipes)
 	controller, controllerStore := newPlacementManager(t, "controller", "192.168.99.30", recipes)
 	member, memberStore := newPlacementManager(t, "node-a", "192.168.99.31", recipes)
@@ -254,14 +255,25 @@ func TestAdoptIndependentDeploymentRecordsAnInstalledModel(t *testing.T) {
 	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
 		t.Fatal(err)
 	}
+	// These models were installed before fleet placement existed, so none has
+	// a deployment record and none owns a job anywhere. The heartbeat below
+	// is how the controller learns which version each one runs.
+	for _, model := range []store.InstalledModel{
+		{RecipeID: serving.ID, RecipeVersion: serving.Version, Status: "ready", Active: true},
+		{RecipeID: stale.ID, RecipeVersion: stale.Version, Status: "ready"},
+		{RecipeID: duplicated.ID, RecipeVersion: duplicated.Version, Status: "ready"},
+		{RecipeID: repairable.ID, RecipeVersion: repairable.Version, Status: "ready"},
+	} {
+		if err := memberStore.SetInstalled(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := controller.PollOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Both models were installed before fleet placement existed, so neither
-	// has a deployment record and neither owns a job anywhere.
-	if err := memberStore.SetInstalled(ctx, store.InstalledModel{RecipeID: serving.ID, RecipeVersion: serving.Version, Status: "ready", Active: true}); err != nil {
-		t.Fatal(err)
-	}
+	// The node moves one model to another version after that heartbeat. The
+	// controller's reading is now out of date, and the node's own row must
+	// still be the authority that refuses it.
 	if err := memberStore.SetInstalled(ctx, store.InstalledModel{RecipeID: stale.ID, RecipeVersion: stale.Version + 1, Status: "ready"}); err != nil {
 		t.Fatal(err)
 	}
@@ -308,6 +320,15 @@ func TestAdoptIndependentDeploymentRecordsAnInstalledModel(t *testing.T) {
 	// as it did before the record appeared.
 	assertServingRecipe(t, memberStore, serving.ID)
 
+	// The create path already owns this pair under an id of its own. One
+	// model on one node must stay one record, whatever id it carries.
+	if _, _, err := controllerStore.CreateFleetDeployment(ctx, store.FleetDeployment{
+		DeploymentID: "deployment_from_the_create_path", RecipeID: duplicated.ID, RecipeVersion: duplicated.Version,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: member.identity.NodeID, State: "committing",
+	}, store.FleetDeploymentNode{NodeID: member.identity.NodeID, ReservationID: "reservation_from_the_create_path"}); err != nil {
+		t.Fatal(err)
+	}
+
 	for _, test := range []struct {
 		name     string
 		nodeID   string
@@ -316,11 +337,12 @@ func TestAdoptIndependentDeploymentRecordsAnInstalledModel(t *testing.T) {
 		want     string
 	}{
 		{name: "a two node recipe", nodeID: member.identity.NodeID, recipeID: grouped.ID, key: "adopt-grouped", want: "cannot use independent placement"},
-		{name: "a model that is not installed", nodeID: member.identity.NodeID, recipeID: absent.ID, key: "adopt-absent", want: "the model is not installed on that node"},
-		{name: "a model at another version", nodeID: member.identity.NodeID, recipeID: stale.ID, key: "adopt-stale", want: "the installed model is a different version"},
-		{name: "a node outside the fleet", nodeID: "node_missing", recipeID: serving.ID, key: "adopt-missing", want: "not an active fleet member"},
+		{name: "a model the node does not report", nodeID: member.identity.NodeID, recipeID: absent.ID, key: "adopt-absent", want: "does not report that model as installed"},
+		{name: "a model the node moved to another version", nodeID: member.identity.NodeID, recipeID: stale.ID, key: "adopt-stale", want: "the installed model is a different version"},
+		{name: "a node outside the fleet", nodeID: "node_missing", recipeID: serving.ID, key: "adopt-missing", want: "is not in this fleet"},
 		{name: "a model outside the catalogue", nodeID: member.identity.NodeID, recipeID: "no-such-model", key: "adopt-unknown", want: "not in this controller's current catalogue"},
 		{name: "no idempotency key", nodeID: member.identity.NodeID, recipeID: serving.ID, key: "", want: "a valid idempotency key is required"},
+		{name: "a pair another record already owns", nodeID: member.identity.NodeID, recipeID: duplicated.ID, key: "adopt-duplicated", want: "already has a deployment record for that model"},
 	} {
 		_, created, err := controller.AdoptIndependentDeployment(ctx, test.nodeID, test.recipeID, test.key)
 		if err == nil || created {
@@ -334,26 +356,119 @@ func TestAdoptIndependentDeploymentRecordsAnInstalledModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deployments) != 1 || deployments[0].DeploymentID != adopted.DeploymentID {
+	if len(deployments) != 2 {
 		t.Fatalf("a refused adoption left a record behind: %+v", deployments)
 	}
 
-	// Only this node's pinned controller may adopt on it. A stranger that
-	// completes mutual TLS is still not the fleet authority here.
-	stranger, _ := newPlacementManager(t, "stranger", "192.168.99.32", recipes)
-	body, err := json.Marshal(adoptDeploymentRequest{
-		RecipeID: serving.ID, RecipeVersion: serving.Version,
-		DeploymentID: adopted.DeploymentID, IdempotencyKey: "adopt-stranger",
-	})
+	// An earlier attempt that wrote the record and then died before it could
+	// name an owner job must not wedge this model on this node. The next
+	// adoption finishes it.
+	config, err := controllerStore.FleetConfig(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "https://member.test/internal/fleet/v1/deployments/adopt", bytes.NewReader(body))
-	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{stranger.identity.Certificate}}
-	response := httptest.NewRecorder()
-	member.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden {
+	halfWritten := stablePlacementID("deployment_", config.FleetID, adoptPlacementKey(member.identity.NodeID, repairable.ID))
+	fingerprint, err := RecipeFingerprint(repairable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := controllerStore.CreateFleetDeployment(ctx, store.FleetDeployment{
+		DeploymentID: halfWritten, RecipeID: repairable.ID, RecipeVersion: repairable.Version,
+		RecipeFingerprint: fingerprint, TopologyCount: 1, OwnerNodeID: member.identity.NodeID, State: "adopting",
+	}, store.FleetDeploymentNode{NodeID: member.identity.NodeID}); err != nil {
+		t.Fatal(err)
+	}
+	repaired, _, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, repairable.ID, "adopt-repairable")
+	if err != nil {
+		t.Fatalf("a half-written record wedged its model: %v", err)
+	}
+	if repaired.DeploymentID != halfWritten || repaired.OwnerJobID == "" || repaired.Job == nil {
+		t.Fatalf("the half-written record did not gain an owner job: %+v", repaired)
+	}
+
+	// Only this node's pinned controller may adopt on it, and only for this
+	// node. The controller certificate is the control: it reaches the
+	// handler, so the refusals below are attributable to what they name.
+	stranger, _ := newPlacementManager(t, "stranger", "192.168.99.32", recipes)
+	callAdopt := func(caller *Manager, request adoptDeploymentRequest) *httptest.ResponseRecorder {
+		body, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		httpRequest := httptest.NewRequest(http.MethodPost, "https://member.test/internal/fleet/v1/deployments/adopt", bytes.NewReader(body))
+		httpRequest.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{caller.identity.Certificate}}
+		response := httptest.NewRecorder()
+		member.Handler().ServeHTTP(response, httpRequest)
+		return response
+	}
+	valid := adoptDeploymentRequest{
+		NodeID: member.identity.NodeID, RecipeID: serving.ID, RecipeVersion: serving.Version,
+		DeploymentID: adopted.DeploymentID, IdempotencyKey: "adopt-serving",
+	}
+	if control := callAdopt(controller, valid); control.Code != http.StatusOK {
+		t.Fatalf("control adoption refused: status=%d body=%s", control.Code, control.Body.String())
+	}
+	if response := callAdopt(stranger, valid); response.Code != http.StatusForbidden {
 		t.Fatalf("a node that is not the controller adopted: status=%d body=%s", response.Code, response.Body.String())
+	}
+	elsewhere := valid
+	elsewhere.NodeID = controller.identity.NodeID
+	if response := callAdopt(controller, elsewhere); response.Code != http.StatusConflict {
+		t.Fatalf("a request aimed at another node was answered here: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdoptIndependentDeploymentRecordsTheVersionTheNodeRuns(t *testing.T) {
+	ctx := context.Background()
+	builtin, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := independentRecipes(t, builtin, 1)[0]
+	// The catalogue moved on while this model kept serving. History holds
+	// both versions; the effective catalogue holds only the newer one.
+	newer := installed
+	newer.Version = installed.Version + 1
+	history := []recipe.Recipe{installed, newer}
+	effective := []recipe.Recipe{newer}
+	controller, _ := newCatalogueManager(t, "controller", "192.168.99.40", history, effective)
+	member, memberStore := newCatalogueManager(t, "node-a", "192.168.99.41", history, effective)
+	member.SetIndependentRuntime(&placementRuntime{database: memberStore, allocator: member.Allocator()})
+	controller.newClient = inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memberStore.SetInstalled(ctx, store.InstalledModel{RecipeID: installed.ID, RecipeVersion: installed.Version, Status: "ready", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	adopted, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, installed.ID, "adopt-running-version")
+	if err != nil || !created {
+		t.Fatalf("adoption of a model behind the catalogue created=%v err=%v", created, err)
+	}
+	if adopted.RecipeVersion != installed.Version {
+		t.Fatalf("adoption recorded version %d, but the node runs %d", adopted.RecipeVersion, installed.Version)
+	}
+	if adopted.RecipeVersion == newer.Version {
+		t.Fatalf("adoption recorded the newest catalogue version %d instead of what runs", newer.Version)
+	}
+	fingerprint, err := RecipeFingerprint(installed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.RecipeFingerprint != fingerprint {
+		t.Fatalf("the record does not fingerprint the recipe the node actually runs: %+v", adopted)
+	}
+	model, err := memberStore.Model(ctx, installed.ID)
+	if err != nil || model.RecipeVersion != installed.Version || !model.Active {
+		t.Fatalf("adoption disturbed the running model: model=%+v err=%v", model, err)
 	}
 }
 
@@ -396,6 +511,14 @@ func groupedRecipe(t *testing.T, recipes []recipe.Recipe) recipe.Recipe {
 
 func newPlacementManager(t *testing.T, name, address string, recipes []recipe.Recipe) (*Manager, *store.Store) {
 	t.Helper()
+	return newCatalogueManager(t, name, address, recipes, recipes)
+}
+
+// newCatalogueManager separates the catalogue that retains history from the
+// effective catalogue, which holds only the newest version of each model.
+// Adoption must read the first and not the second.
+func newCatalogueManager(t *testing.T, name, address string, all, effective []recipe.Recipe) (*Manager, *store.Store) {
+	t.Helper()
 	directory := t.TempDir()
 	database, err := store.Open(filepath.Join(directory, "manager.db"))
 	if err != nil {
@@ -404,8 +527,8 @@ func newPlacementManager(t *testing.T, name, address string, recipes []recipe.Re
 	t.Cleanup(func() { database.Close() })
 	options := testManagerOptions(directory, database, address)
 	options.DisplayName = name
-	options.Recipes = recipes
-	options.EffectiveRecipes = recipes
+	options.Recipes = all
+	options.EffectiveRecipes = effective
 	manager, err := NewManager(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
