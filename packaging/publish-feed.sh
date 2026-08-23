@@ -80,7 +80,9 @@ revoked_args=()
 if [ -n "${REVOKED:-}" ]; then
   revoked_args=(-revoked "$REVOKED")
 fi
-build_summary="$(go run ./cmd/build-index -out "$index_path" "${revoked_args[@]}")"
+# The +-expansion keeps macOS's bash 3.2 happy: expanding an empty array
+# under set -u is an unbound-variable error there.
+build_summary="$(go run ./cmd/build-index -out "$index_path" ${revoked_args[@]+"${revoked_args[@]}"})"
 echo "$build_summary"
 recipe_count="$(printf '%s\n' "$build_summary" | grep -oE '[0-9]+ recipe' | grep -oE '[0-9]+')"
 revocation_count="$(printf '%s\n' "$build_summary" | grep -oE '[0-9]+ revocation' | grep -oE '[0-9]+')"
