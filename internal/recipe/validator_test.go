@@ -191,7 +191,7 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if obliterated.Runtime.Reference() != flash3bit.Runtime.Reference() {
 		t.Fatalf("Obliterated must share the DeepSeek 3-bit llama.cpp image pin: %#v", obliterated.Runtime)
 	}
-	if len(obliterated.Artifacts) != 1 || obliterated.TotalArtifactBytes() != 29047084728 || !isPinnedRevision(obliterated.Artifacts[0].Revision) {
+	if len(obliterated.Artifacts) != 1 || obliterated.TotalArtifactBytes() != 29047084826 || !isPinnedRevision(obliterated.Artifacts[0].Revision) {
 		t.Fatalf("Obliterated weights are not pinned: %#v", obliterated.Artifacts)
 	}
 	if len(obliterated.Artifacts[0].Files) != 2 || obliterated.Service.LlamaCpp.ModelFile != obliterated.Artifacts[0].Files[0].Name ||

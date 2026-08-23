@@ -51,11 +51,13 @@ id: qwen38-27b-obliterated-q8-0-1s
 # - flash_attention is left unpinned. This hybrid architecture under
 #   llama.cpp has not been measured here, so llama.cpp's own default
 #   applies rather than a value this recipe invented.
-# - jinja is on and chat_template_file pins the card's bundled 408-byte
+# - jinja is on and chat_template_file pins the card's bundled 506-byte
 #   template rather than the fuller Qwen template embedded in the GGUF.
 #   This is the card's own serving instruction: the bundled template
 #   prefills an empty think block so the model answers directly, which is
-#   the configuration the publisher's quality claims describe.
+#   the configuration the publisher's quality claims describe. Since the
+#   publisher's V3 pass the template also honors an opt-in enable_thinking
+#   request flag; with the flag absent the rendered prompt is unchanged.
 # - The card calls repetition_penalty 1.15 "essential" with the greedy
 #   decoding it recommends, and warns that system prompts can reintroduce
 #   refusals. The llamacpp service block has no generation-defaults field
@@ -70,7 +72,12 @@ id: qwen38-27b-obliterated-q8-0-1s
 #   compute buffers are all covered by runtime_overhead_bytes, a
 #   conservative allowance rather than a measurement. Qualification
 #   replaces both figures with what it measures.
-version: 1
+# Version 2 follows the publisher's V3 repository pass: the Q8_0 weights
+# are byte-identical, and only chat_template.jinja changed, growing an
+# opt-in enable_thinking branch whose absence renders the exact prompt
+# version 1 rendered. Reviewed by hand; feed-watch refused it because a
+# pinned file changed size.
+version: 2
 display_name: Qwen 3.8 27B Obliterated
 publisher: OBLITERATUS
 model_by: Qwen team, Alibaba; abliteration by OBLITERATUS
@@ -80,7 +87,7 @@ trust: basement-candidate
 verification: candidate
 source:
   url: https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED
-  revision: 2648a6231b82328c601ba27b9ffd5029057d0e33
+  revision: d8ab3e2dfee510566123b2b079cd0df2fd458837
 topology:
   spark_count: 1
 runtime:
@@ -107,15 +114,15 @@ runtime:
 artifacts:
   - role: primary
     repository: OBLITERATUS/Qwen3.8-27B-OBLITERATED
-    revision: 2648a6231b82328c601ba27b9ffd5029057d0e33
-    expected_bytes: 29047084728
+    revision: d8ab3e2dfee510566123b2b079cd0df2fd458837
+    expected_bytes: 29047084826
     files:
       - name: Qwen3.8-27B-OBLITERATED-Q8_0.gguf
         expected_bytes: 29047084320
       - name: chat_template.jinja
-        expected_bytes: 408
+        expected_bytes: 506
     licence: Apache-2.0
-    licence_url: https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/tree/2648a6231b82328c601ba27b9ffd5029057d0e33
+    licence_url: https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/tree/d8ab3e2dfee510566123b2b079cd0df2fd458837
 requirements:
   architecture: aarch64
   dgx_spark: true
@@ -142,7 +149,7 @@ service:
     jinja: true
     chat_template_file: chat_template.jinja
 memory_model:
-  weights_bytes: 29047084728
+  weights_bytes: 29047084826
   kv_bytes_per_token: 65536
   runtime_overhead_bytes: 4000000000
 operations:
