@@ -44,9 +44,9 @@ type WizardUI interface {
 	// as the default; implementations resolve an empty answer to suggested
 	// themselves.
 	AskUsername(target, suggested string) (string, error)
-	// ChooseListen asks which interface the console should bind. remote
-	// reports whether the install target is a different machine than the
-	// one running the wizard (it changes the recommended default).
+	// ChooseListen asks which interface, or interfaces, the console should
+	// bind. remote reports whether the install target is a different machine
+	// than the one running the wizard (it changes the recommended default).
 	ChooseListen(remote bool) (ListenMode, error)
 	// Progress announces one line of status text. Implementations decide
 	// how to render it; the flow never assumes a particular presentation.

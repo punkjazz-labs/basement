@@ -29,7 +29,7 @@ func runSetup(args []string) int {
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
 	host := flags.String("host", "", "skip discovery and install on this host (IP or hostname)")
 	sshUser := flags.String("user", setup.DefaultSSHUser(), "SSH user on the target machine")
-	listen := flags.String("listen", "", "console interface: loopback, tailscale or lan (prompted when empty)")
+	listen := flags.String("listen", "", "console interface: loopback, tailscale, lan or lan+tailscale (prompted when empty)")
 	binary := flags.String("binary", "", "path to a linux/arm64 manager binary to install (defaults to this binary when compatible, else the latest release)")
 	assumeYes := flags.Bool("yes", false, "skip confirmation prompts (still asks for passwords)")
 	if err := flags.Parse(args); err != nil {
@@ -211,6 +211,8 @@ func (u *terminalUI) ChooseListen(remote bool) (setup.ListenMode, error) {
 		return setup.ListenTailscale, nil
 	case "lan":
 		return setup.ListenLAN, nil
+	case "lan+tailscale":
+		return setup.ListenLANTailscale, nil
 	case "":
 	default:
 		return "", fmt.Errorf("unknown --listen value %q", u.listenFlag)
@@ -233,7 +235,8 @@ func (u *terminalUI) ChooseListen(remote bool) (setup.ListenMode, error) {
 	fmt.Println("  1  Only this machine itself" + recommended("1") + "\n     " + u.paint.dim("Other devices would need an SSH tunnel."))
 	fmt.Println("  2  Your Tailscale devices" + recommended("2") + "\n     " + u.paint.dim("Reachable from anywhere via your tailnet."))
 	fmt.Println("  3  Any device on your local network" + recommended("3") + "\n     " + u.paint.dim("Phones, laptops — and it opens in your browser when done."))
-	answer, err := u.ask(fmt.Sprintf("Type 1, 2 or 3 — or press Enter for %s: ", defaultChoice))
+	fmt.Println("  4  Your local network and Tailscale" + recommended("4"))
+	answer, err := u.ask(fmt.Sprintf("Type 1, 2, 3 or 4, or press Enter for %s: ", defaultChoice))
 	if err != nil {
 		return "", err
 	}
@@ -244,6 +247,8 @@ func (u *terminalUI) ChooseListen(remote bool) (setup.ListenMode, error) {
 		return setup.ListenTailscale, nil
 	case "3":
 		return setup.ListenLAN, nil
+	case "4":
+		return setup.ListenLANTailscale, nil
 	case "":
 		return defaultMode, nil
 	default:
@@ -268,7 +273,13 @@ func (u *terminalUI) Summary(result setup.InstallResult) {
 	fmt.Println(rule)
 	fmt.Printf("  %s %s\n", u.paint.green("✓"), u.paint.bold("basement is running"))
 	fmt.Println()
+	// One line per bound address, primary first, under a single label: a
+	// console that binds the local network and Tailscale is reachable at
+	// both, and the card must say so.
 	fmt.Printf("    %-14s %s\n", "Console", u.paint.bold(result.ConsoleURL))
+	for _, extra := range result.ExtraConsoleURLs() {
+		fmt.Printf("    %-14s %s\n", "", u.paint.bold(extra))
+	}
 	if result.AltURL != "" {
 		fmt.Printf("    %-14s %s\n", "Also try", result.AltURL)
 	}

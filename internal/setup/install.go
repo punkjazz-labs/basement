@@ -61,6 +61,10 @@ const (
 	ListenLoopback  ListenMode = "loopback"
 	ListenTailscale ListenMode = "tailscale"
 	ListenLAN       ListenMode = "lan"
+	// ListenLANTailscale binds both addresses at once: the console answers
+	// on the local network and on the tailnet. The LAN address is the
+	// primary one.
+	ListenLANTailscale ListenMode = "lan+tailscale"
 )
 
 // Options configures one installation.
@@ -82,15 +86,28 @@ type Options struct {
 
 // InstallResult is what the operator needs after a successful install.
 //
-// ConsoleURL is the address to use. AltURL is another address the same
-// console can be reached at, for display: when ConsoleHost was set, that is
-// an address the target reported for itself, and it is not to be used for
-// anything the caller's trust depends on.
+// ConsoleURL is the address to use. ConsoleURLs are every address the new
+// console now answers on, primary first, and its first entry is always
+// ConsoleURL: an install that binds one address has one entry. AltURL is
+// another address the same console can be reached at, for display: when
+// ConsoleHost was set, that is an address the target reported for itself,
+// and it is not to be used for anything the caller's trust depends on.
 type InstallResult struct {
-	ConsoleURL string
-	AltURL     string
-	Token      string
-	Loopback   bool
+	ConsoleURL  string
+	ConsoleURLs []string
+	AltURL      string
+	Token       string
+	Loopback    bool
+}
+
+// ExtraConsoleURLs are the addresses the new console answers on besides
+// ConsoleURL, in bound order. An install that binds one address, which is
+// most of them, has none.
+func (r InstallResult) ExtraConsoleURLs() []string {
+	if len(r.ConsoleURLs) < 2 {
+		return nil
+	}
+	return r.ConsoleURLs[1:]
 }
 
 // BinarySource stages the linux/arm64 manager binary onto the target and
@@ -324,7 +341,7 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 			return InstallResult{}, err
 		}
 	} else {
-		logf("console will listen on %s", listen)
+		logf("console will listen on %s", strings.Join(listenAddresses(listen), " and "))
 		dropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=%s --data-dir %s --listen %s\n", binaryPath, dataDir, listen)
 		if _, err := runner.RunPrivileged(ctx, "install -d -m 0755 "+dropInDir+" && tee "+dropInPath+" >/dev/null", strings.NewReader(dropIn)); err != nil {
 			return InstallResult{}, fmt.Errorf("write listen configuration: %w", err)
@@ -350,7 +367,14 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 		}
 	}
 
-	healthAddress := listen
+	// The health check, the port and every reported URL follow the primary
+	// address. A console that binds several addresses still has one identity.
+	addresses := listenAddresses(listen)
+	primary := ""
+	if len(addresses) > 0 {
+		primary = addresses[0]
+	}
+	healthAddress := primary
 	if healthAddress == "" {
 		healthAddress = "127.0.0.1:7070"
 	}
@@ -358,26 +382,31 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	if err != nil {
 		return InstallResult{}, err
 	}
-	result := InstallResult{Token: token, Loopback: listen == ""}
+	result := InstallResult{Token: token, Loopback: primary == ""}
 	port := "7070"
-	if index := strings.LastIndex(listen, ":"); index >= 0 {
-		port = listen[index+1:]
+	if _, listenPort, err := net.SplitHostPort(primary); err == nil && listenPort != "" {
+		port = listenPort
 	}
 	// Both of these are built out of what the target said about itself: the
 	// address it bound, and the name it calls itself. Useful to show a
 	// person, and never more than that.
 	reportedURL, localURL := "", ""
-	if listen != "" {
-		reportedURL = "http://" + listen
+	if primary != "" {
+		reportedURL = "http://" + primary
 		if short, err := runner.Run(ctx, "hostname -s 2>/dev/null || hostname", nil); err == nil && strings.TrimSpace(short) != "" {
 			localURL = fmt.Sprintf("http://%s.local:%s", strings.TrimSpace(short), port)
 		}
 	}
 	switch {
-	case listen == "":
+	case primary == "":
 		result.ConsoleURL = "http://127.0.0.1:" + port
+		result.ConsoleURLs = []string{result.ConsoleURL}
 	case opts.ConsoleHost != "":
 		result.ConsoleURL = "http://" + net.JoinHostPort(opts.ConsoleHost, port)
+		// Only the address the caller verified is a console URL here. Every
+		// other address the target bound is the target's own answer, so it
+		// stays in AltURL, for display and nothing more.
+		result.ConsoleURLs = []string{result.ConsoleURL}
 		for _, alternate := range []string{reportedURL, localURL} {
 			if alternate != "" && alternate != result.ConsoleURL {
 				result.AltURL = alternate
@@ -387,6 +416,9 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	default:
 		result.ConsoleURL = reportedURL
 		result.AltURL = localURL
+		for _, address := range addresses {
+			result.ConsoleURLs = append(result.ConsoleURLs, "http://"+address)
+		}
 	}
 	return result, nil
 }
@@ -462,47 +494,85 @@ func targetExists(ctx context.Context, runner Runner, check string) (bool, error
 	return strings.TrimSpace(out) == "present", nil
 }
 
-// resolveListen turns a listen mode into a concrete address using the
-// target's own interfaces, exactly like install.sh does.
+// resolveListen turns a listen mode into the concrete addresses the console
+// binds, using the target's own interfaces, exactly like install.sh does.
+// One mode can resolve to more than one address: the result is then the
+// comma separated list the manager's --listen flag takes, primary first.
 func resolveListen(ctx context.Context, runner Runner, mode ListenMode) (string, error) {
 	switch mode {
 	case ListenLoopback, "":
 		return "", nil
 	case ListenTailscale:
-		out, err := runner.Run(ctx, "tailscale ip -4 2>/dev/null | head -n1", nil)
-		address := strings.TrimSpace(out)
-		if err != nil || address == "" {
-			return "", fmt.Errorf("the target has no Tailscale address; pick loopback or lan instead")
-		}
-		return address + ":7070", nil
+		return resolveTailscaleListen(ctx, runner, "pick loopback or lan instead")
 	case ListenLAN:
-		// hostname -I lists addresses in interface enumeration order, and a
-		// cluster port with link but no DHCP puts its self-assigned 169.254
-		// address first (two cabled Sparks do exactly this). The default
-		// route's source address is the one the LAN actually reaches; a
-		// machine without a default route falls back to the first address
-		// that is not link-local.
-		out, _ := runner.Run(ctx, "ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \\([0-9.]*\\).*/\\1/p' | head -n1", nil)
-		address := strings.TrimSpace(out)
-		if address == "" {
-			out, err := runner.Run(ctx, "hostname -I 2>/dev/null", nil)
-			if err != nil {
-				return "", fmt.Errorf("could not determine the target's LAN address")
-			}
-			for _, field := range strings.Fields(out) {
-				if ip := net.ParseIP(field); ip != nil && ip.To4() != nil && !ip.IsLinkLocalUnicast() {
-					address = field
-					break
-				}
-			}
+		return resolveLANListen(ctx, runner)
+	case ListenLANTailscale:
+		// The LAN address comes first. It is the primary one: the fleet
+		// listener and every URL the machine reports for itself follow it.
+		lan, err := resolveLANListen(ctx, runner)
+		if err != nil {
+			return "", err
 		}
-		if address == "" {
+		tailscale, err := resolveTailscaleListen(ctx, runner, "pick lan instead")
+		if err != nil {
+			return "", err
+		}
+		return lan + "," + tailscale, nil
+	default:
+		return "", fmt.Errorf("unknown listen mode %q (loopback, tailscale, lan, lan+tailscale)", mode)
+	}
+}
+
+// resolveTailscaleListen reads the target's tailnet address. advice names the
+// mode to use instead when the target has none.
+func resolveTailscaleListen(ctx context.Context, runner Runner, advice string) (string, error) {
+	out, err := runner.Run(ctx, "tailscale ip -4 2>/dev/null | head -n1", nil)
+	address := strings.TrimSpace(out)
+	if err != nil || address == "" {
+		return "", fmt.Errorf("the target has no Tailscale address; %s", advice)
+	}
+	return address + ":7070", nil
+}
+
+// resolveLANListen reads the target's local network address.
+//
+// hostname -I lists addresses in interface enumeration order, and a cluster
+// port with link but no DHCP puts its self-assigned 169.254 address first
+// (two cabled Sparks do exactly this). The default route's source address is
+// the one the LAN actually reaches; a machine without a default route falls
+// back to the first address that is not link-local.
+func resolveLANListen(ctx context.Context, runner Runner) (string, error) {
+	out, _ := runner.Run(ctx, "ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \\([0-9.]*\\).*/\\1/p' | head -n1", nil)
+	address := strings.TrimSpace(out)
+	if address == "" {
+		out, err := runner.Run(ctx, "hostname -I 2>/dev/null", nil)
+		if err != nil {
 			return "", fmt.Errorf("could not determine the target's LAN address")
 		}
-		return address + ":7070", nil
-	default:
-		return "", fmt.Errorf("unknown listen mode %q (loopback, tailscale, lan)", mode)
+		for _, field := range strings.Fields(out) {
+			if ip := net.ParseIP(field); ip != nil && ip.To4() != nil && !ip.IsLinkLocalUnicast() {
+				address = field
+				break
+			}
+		}
 	}
+	if address == "" {
+		return "", fmt.Errorf("could not determine the target's LAN address")
+	}
+	return address + ":7070", nil
+}
+
+// listenAddresses splits a resolved listen value into its addresses. An
+// install that binds the local network and Tailscale carries both here,
+// comma separated, exactly as the manager's --listen flag takes them.
+func listenAddresses(listen string) []string {
+	var addresses []string
+	for _, field := range strings.Split(listen, ",") {
+		if address := strings.TrimSpace(field); address != "" {
+			addresses = append(addresses, address)
+		}
+	}
+	return addresses
 }
 
 // waitForService proves both halves of a usable first launch: the HTTP server

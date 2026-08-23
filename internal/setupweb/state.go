@@ -34,9 +34,13 @@ type candidateView struct {
 }
 
 // summaryView renders a completed install's setup.InstallResult.
+// ConsoleURLs holds every address the new console answers on, primary first,
+// so a machine that binds the local network and Tailscale shows both.
+// ConsoleURL stays the primary one.
 type summaryView struct {
-	ConsoleURL string `json:"consoleUrl"`
-	AltURL     string `json:"altUrl,omitempty"`
-	Token      string `json:"token,omitempty"`
-	Loopback   bool   `json:"loopback"`
+	ConsoleURL  string   `json:"consoleUrl"`
+	ConsoleURLs []string `json:"consoleUrls,omitempty"`
+	AltURL      string   `json:"altUrl,omitempty"`
+	Token       string   `json:"token,omitempty"`
+	Loopback    bool     `json:"loopback"`
 }

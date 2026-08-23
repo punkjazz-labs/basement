@@ -57,6 +57,55 @@ func TestListenChoiceTreatsAnSSHSessionAsRemote(t *testing.T) {
 	}
 }
 
+// Four choices, and the typed number decides. Choice 4 is the new one: the
+// console binds the local network and Tailscale at the same time.
+func TestListenChoiceMapsEveryTypedNumber(t *testing.T) {
+	for answer, want := range map[string]setup.ListenMode{
+		"1": setup.ListenLoopback,
+		"2": setup.ListenTailscale,
+		"3": setup.ListenLAN,
+		"4": setup.ListenLANTailscale,
+	} {
+		ui := scriptedUI(answer + "\n")
+		ui.assumeYes = false
+		mode, err := ui.ChooseListen(false)
+		if err != nil {
+			t.Errorf("ChooseListen(%q) failed: %v", answer, err)
+			continue
+		}
+		if mode != want {
+			t.Errorf("ChooseListen(%q) = %q, want %q", answer, mode, want)
+		}
+	}
+	ui := scriptedUI("5\n")
+	ui.assumeYes = false
+	if mode, err := ui.ChooseListen(false); err == nil {
+		t.Errorf("ChooseListen(\"5\") = %q, want an error", mode)
+	}
+}
+
+// --listen names the same four modes without a prompt.
+func TestListenFlagMapsEveryMode(t *testing.T) {
+	for flag, want := range map[string]setup.ListenMode{
+		"loopback":      setup.ListenLoopback,
+		"tailscale":     setup.ListenTailscale,
+		"lan":           setup.ListenLAN,
+		"lan+tailscale": setup.ListenLANTailscale,
+	} {
+		ui := scriptedUI("")
+		ui.listenFlag = flag
+		mode, err := ui.ChooseListen(false)
+		if err != nil || mode != want {
+			t.Errorf("--listen %s = %q, %v; want %q", flag, mode, err, want)
+		}
+	}
+	ui := scriptedUI("")
+	ui.listenFlag = "lan+carrier-pigeon"
+	if mode, err := ui.ChooseListen(false); err == nil {
+		t.Errorf("--listen lan+carrier-pigeon = %q, want an error", mode)
+	}
+}
+
 func TestListenChoiceKeepsLoopbackForAGenuinelyLocalSession(t *testing.T) {
 	t.Setenv("SSH_CONNECTION", "")
 	t.Setenv("SSH_CLIENT", "")

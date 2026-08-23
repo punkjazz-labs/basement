@@ -75,6 +75,15 @@ signing them is ADR 0008's follow-up.
   entry after the operator verifies that fingerprint directly on the Spark.
 - sudo: passwordless probed first; otherwise prompted once per session.
 
+The listen choice has four answers: this machine only (`loopback`), Tailscale
+(`tailscale`), the local network (`lan`), and the local network and Tailscale
+together (`lan+tailscale`). The combined answer resolves both addresses on the
+target and writes them into one `--listen` list, LAN first. The manager then
+binds every address in that list with one HTTP server, so the same console
+answers on each of them, and the first address stays the machine's own
+identity: the fleet listener and every URL it reports follow it. A target with
+no Tailscale address fails the combined choice and is told to pick `lan`.
+
 When setup itself is running on a GB10 through an SSH session, the listen
 choice treats the operator as remote and recommends the LAN rather than
 loopback. It cannot open a browser back on the SSH client, so the completed

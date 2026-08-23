@@ -90,7 +90,7 @@ func main() {
 	fleetManager, err := fleet.NewManager(context.Background(), fleet.Options{
 		DataDir: cfg.DataDir, Database: db, Inventory: provider, Version: cfg.Version,
 		BuildIdentity: buildIdentity, DisplayName: hostname,
-		ConsoleURL: "http://" + cfg.Listen, NodeURL: "https://" + cfg.FleetListen, Recipes: cachedAll, EffectiveRecipes: cachedEffective,
+		ConsoleURL: "http://" + cfg.PrimaryListen(), NodeURL: "https://" + cfg.FleetListen, Recipes: cachedAll, EffectiveRecipes: cachedEffective,
 	})
 	if err != nil {
 		logger.Error("initialize fleet identity", "error", err)
@@ -129,7 +129,7 @@ func main() {
 	api.SetRecipes(cachedAll, cachedEffective)
 	// A Spark adopted from this console is installed to listen the same way
 	// this one does (ADR 0014), so the API needs to know how that is.
-	api.SetListenAddress(cfg.Listen)
+	api.SetListenAddress(cfg.PrimaryListen())
 	// The console reports feed health from the fetcher's own state, so an
 	// index that has not been refreshed in a month can say so rather than
 	// look like a healthy feed with nothing new in it.
@@ -159,7 +159,16 @@ func main() {
 		logger.Error("reconcile active model", "error", err)
 		exit(1)
 	}
-	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
+	// One server, one handler, one listener per configured address: the
+	// console answers the same way on every address it binds. Binding
+	// happens here, before anything starts serving, so an address that
+	// cannot be bound stops the manager instead of disappearing quietly.
+	consoleListeners, err := listenConsole(cfg.Listen)
+	if err != nil {
+		logger.Error("bind console address", "error", err)
+		exit(1)
+	}
+	server := &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
 	fleetServer := &http.Server{Addr: cfg.FleetListen, Handler: fleetManager.Handler(), TLSConfig: fleetManager.TLSConfig(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
 	// Progress streams stay open indefinitely by design; without this hook a
 	// restart waits out the whole drain timeout whenever a console is open.
@@ -194,13 +203,18 @@ func main() {
 		api.CountTokens(countCtx)
 	}()
 
-	go func() {
-		logger.Info("manager listening", "address", cfg.Listen, "pairing_token_path", authManager.PairingTokenPath(), "version", cfg.Version)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("HTTP server failed", "error", err)
-			exit(1)
-		}
-	}()
+	for _, listener := range consoleListeners {
+		go func(listener net.Listener) {
+			address := listener.Addr().String()
+			logger.Info("manager listening", "address", address, "pairing_token_path", authManager.PairingTokenPath(), "version", cfg.Version)
+			// Shutdown below closes every listener this server was given,
+			// so a normal stop arrives here as ErrServerClosed.
+			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("HTTP server failed", "error", err, "address", address)
+				exit(1)
+			}
+		}(listener)
+	}
 	go func() {
 		logger.Info("fleet manager listening", "address", cfg.FleetListen, "version", cfg.Version)
 		if err := fleetServer.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -234,31 +248,56 @@ func main() {
 	pauseBeforeExit()
 }
 
+// listenConsole binds every console address before the manager serves on any
+// of them, and hands back the listeners in the configured order.
+//
+// A bind failure is fatal for the whole start. An address the owner named and
+// the manager quietly skipped is an address they believe in and cannot reach,
+// which is worse than a manager that refuses to start and says why. Listeners
+// already open are closed again, so a refused start holds no port.
+func listenConsole(addresses []string) ([]net.Listener, error) {
+	listeners := make([]net.Listener, 0, len(addresses))
+	for _, address := range addresses {
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			for _, open := range listeners {
+				open.Close()
+			}
+			return nil, fmt.Errorf("listen on %s: %w", address, err)
+		}
+		listeners = append(listeners, listener)
+	}
+	return listeners, nil
+}
+
 // printPairingInfo re-prints the pairing card so nobody ever has to hunt for
 // the token file by hand after installation.
+//
+// The console addresses come from the configuration, which is what the
+// service actually binds. The machine's own name is offered after them as an
+// alternative, and only when at least one bound address leaves this machine:
+// a loopback-only console cannot be opened by that name from anywhere else.
 func printPairingInfo(cfg config.Config) {
 	port := "7070"
-	if _, listenPort, err := net.SplitHostPort(cfg.Listen); err == nil && listenPort != "" {
+	if _, listenPort, err := net.SplitHostPort(cfg.PrimaryListen()); err == nil && listenPort != "" {
 		port = listenPort
 	}
 	fmt.Println("basement — pairing")
 	fmt.Println()
-	if hostname, err := os.Hostname(); err == nil {
-		short, _, _ := strings.Cut(hostname, ".")
-		fmt.Printf("  Console:  http://%s.local:%s\n", short, port)
-	}
-	if addrs, err := net.InterfaceAddrs(); err == nil {
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok || ipNet.IP.To4() == nil || ipNet.IP.IsLoopback() {
-				continue
+	label := "Console:"
+	reachable := false
+	for _, address := range cfg.Listen {
+		fmt.Printf("  %-9s http://%s\n", label, address)
+		label = ""
+		if host, _, err := net.SplitHostPort(address); err == nil {
+			if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+				reachable = true
 			}
-			label := "LAN"
-			if tailscaleRange.Contains(ipNet.IP) {
-				label = "Tailscale"
-			}
-			fmt.Printf("  %-9s http://%s:%s\n", label+":", ipNet.IP, port)
 		}
+	}
+	if hostname, err := os.Hostname(); err == nil && reachable {
+		short, _, _ := strings.Cut(hostname, ".")
+		fmt.Printf("  %-9s http://%s.local:%s\n", "Also try:", short, port)
 	}
 	fmt.Println()
 	tokenPath := filepath.Join(cfg.DataDir, "pairing-token")
@@ -268,11 +307,5 @@ func printPairingInfo(cfg config.Config) {
 		fmt.Printf("  Pairing token: not created yet — start the service first (%s)\n", tokenPath)
 	}
 	fmt.Println()
-	fmt.Println("  The console is reachable only on the interface the service listens on.")
+	fmt.Println("  The console answers only on the addresses above.")
 }
-
-// tailscaleRange is the CGNAT block Tailscale assigns addresses from.
-var tailscaleRange = func() *net.IPNet {
-	_, block, _ := net.ParseCIDR("100.64.0.0/10")
-	return block
-}()

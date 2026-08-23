@@ -211,7 +211,10 @@ stable while the model behind them changes), Playground, Generate, Connect,
 Monitor, Fleet, Storage and Activity.
 
 The manager defaults to loopback until an operator deliberately chooses a LAN
-or Tailscale bind address (the installer asks). Model containers always bind
+or Tailscale bind address, or both at once (the installer asks). `--listen`
+takes one address or several separated by commas; one console then answers on
+every address it binds, and the first one is the address the machine reports
+for itself. Model containers always bind
 loopback: the manager's authenticated `/v1` endpoint, with console-managed
 API keys, is the only network path to inference, so the base URL never
 changes when models switch (see

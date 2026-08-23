@@ -391,6 +391,24 @@ func TestChooseListenMapsModeString(t *testing.T) {
 	}
 }
 
+// The browser wizard takes the combined mode too: one console on the local
+// network and on Tailscale.
+func TestChooseListenAcceptsTheCombinedMode(t *testing.T) {
+	s, _ := newTestServer(t)
+	resultCh := make(chan setup.ListenMode, 1)
+	go func() {
+		mode, _ := s.ChooseListen(true)
+		resultCh <- mode
+	}()
+	waitForPending(t, s, "listen")
+
+	resp := postAnswer(t, s, `{"kind":"listen","mode":"lan+tailscale"}`)
+	resp.Body.Close()
+	if got := <-resultCh; got != setup.ListenLANTailscale {
+		t.Errorf("ChooseListen = %q, want lan+tailscale", got)
+	}
+}
+
 func TestProgressAccumulatesAndSummaryReachesThePolledState(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.Progress("uploading manager binary")

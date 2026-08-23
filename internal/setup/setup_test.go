@@ -276,6 +276,96 @@ func TestInstallRefusesWithoutDocker(t *testing.T) {
 	}
 }
 
+// lan+tailscale binds both addresses at once. The LAN address is the primary
+// one: the drop-in lists it first, the health check and the reported console
+// URL follow it, and the tailnet address is served as well.
+func TestInstallLANTailscaleBindsBothAddresses(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	runner.outputs["route get"] = "192.168.99.134\n"
+	runner.outputs["tailscale ip -4"] = "100.64.30.7\n"
+	runner.outputs["pairing-token"] = "tok\n"
+	runner.outputs["hostname -s"] = "spark-head\n"
+
+	result, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"},
+		Options{Listen: ListenLANTailscale}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConsoleURL != "http://192.168.99.134:7070" {
+		t.Errorf("ConsoleURL = %q, want the LAN address as the primary one", result.ConsoleURL)
+	}
+	want := []string{"http://192.168.99.134:7070", "http://100.64.30.7:7070"}
+	if strings.Join(result.ConsoleURLs, " ") != strings.Join(want, " ") {
+		t.Errorf("ConsoleURLs = %v, want %v", result.ConsoleURLs, want)
+	}
+	if extras := result.ExtraConsoleURLs(); len(extras) != 1 || extras[0] != want[1] {
+		t.Errorf("ExtraConsoleURLs() = %v, want just the tailnet address", extras)
+	}
+	if result.AltURL != "http://spark-head.local:7070" {
+		t.Errorf("AltURL = %q", result.AltURL)
+	}
+	if result.Loopback {
+		t.Error("a two-address install reported loopback")
+	}
+
+	var dropIn string
+	for command, payload := range runner.writes {
+		if strings.Contains(command, dropInPath) {
+			dropIn = payload
+		}
+	}
+	if !strings.Contains(dropIn, "--listen 192.168.99.134:7070,100.64.30.7:7070") {
+		t.Errorf("listen drop-in = %q, want both addresses, LAN first", dropIn)
+	}
+	if commands := strings.Join(runner.commands, "\n"); !strings.Contains(commands, "curl -fsS --max-time 2 -o /dev/null 'http://192.168.99.134:7070/healthz'") {
+		t.Errorf("install did not check the primary address for health:\n%s", commands)
+	}
+}
+
+// A machine with no tailnet address cannot serve half of lan+tailscale, so
+// the install stops and names the mode to use instead. It must never fall
+// back to the LAN address alone: the owner asked for both.
+func TestInstallLANTailscaleNeedsTailscaleAddress(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	runner.outputs["route get"] = "192.168.99.134\n"
+	runner.outputs["tailscale ip -4"] = "\n"
+	runner.outputs["pairing-token"] = "tok\n"
+	_, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"},
+		Options{Listen: ListenLANTailscale}, nil)
+	if err == nil {
+		t.Fatal("lan+tailscale succeeded without a tailscale address")
+	}
+	if !strings.Contains(err.Error(), "no Tailscale address") || !strings.Contains(err.Error(), "pick lan instead") {
+		t.Errorf("unhelpful error: %v", err)
+	}
+	for command := range runner.writes {
+		if strings.Contains(command, dropInPath) {
+			t.Error("a failed lan+tailscale install still wrote a listen drop-in")
+		}
+	}
+}
+
+// A single-address install keeps exactly one console URL, so nothing that
+// reads the result has to special-case the common machine.
+func TestInstallSingleAddressReportsOneConsoleURL(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	runner.outputs["hostname -I"] = "192.168.99.134 \n"
+	runner.outputs["pairing-token"] = "tok\n"
+	result, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"}, Options{Listen: ListenLAN}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ConsoleURLs) != 1 || result.ConsoleURLs[0] != result.ConsoleURL {
+		t.Errorf("ConsoleURLs = %v, want only %q", result.ConsoleURLs, result.ConsoleURL)
+	}
+	if extras := result.ExtraConsoleURLs(); len(extras) != 0 {
+		t.Errorf("ExtraConsoleURLs() = %v, want none", extras)
+	}
+}
+
 func TestInstallTailscaleModeNeedsTailscaleAddress(t *testing.T) {
 	runner := newFakeRunner()
 	runner.outputs["docker info"] = "nvidia runc \n"

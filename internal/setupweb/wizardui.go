@@ -148,6 +148,8 @@ func (s *Server) ChooseListen(remote bool) (setup.ListenMode, error) {
 		return setup.ListenTailscale, nil
 	case "lan":
 		return setup.ListenLAN, nil
+	case "lan+tailscale":
+		return setup.ListenLANTailscale, nil
 	default:
 		return "", fmt.Errorf("unknown listen mode %q", body.Mode)
 	}
@@ -167,10 +169,11 @@ func (s *Server) Summary(result setup.InstallResult) {
 	s.mu.Lock()
 	s.state.Phase = "summary"
 	s.state.Summaries = append(s.state.Summaries, summaryView{
-		ConsoleURL: result.ConsoleURL,
-		AltURL:     result.AltURL,
-		Token:      result.Token,
-		Loopback:   result.Loopback,
+		ConsoleURL:  result.ConsoleURL,
+		ConsoleURLs: result.ConsoleURLs,
+		AltURL:      result.AltURL,
+		Token:       result.Token,
+		Loopback:    result.Loopback,
 	})
 	s.state.Seq++
 	s.mu.Unlock()

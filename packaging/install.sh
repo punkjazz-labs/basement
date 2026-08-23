@@ -133,11 +133,15 @@ if [ -z "$listen" ] && [ -t 0 ]; then
   echo "  1) This machine only (127.0.0.1) [default]"
   [ -n "$tailscale_ip" ] && echo "  2) Your Tailscale network ($tailscale_ip)"
   [ -n "$lan_ip" ] && echo "  3) Your local network ($lan_ip)"
+  [ -n "$lan_ip" ] && [ -n "$tailscale_ip" ] && echo "  4) Your local network and Tailscale"
   printf "Choice [1]: "
   read -r choice || choice=1
   case "$choice" in
     2) [ -n "$tailscale_ip" ] && listen="$tailscale_ip:7070" ;;
     3) [ -n "$lan_ip" ] && listen="$lan_ip:7070" ;;
+    # Both at once. The console binds every address in the list, local
+    # network first: that one is the primary address.
+    4) [ -n "$lan_ip" ] && [ -n "$tailscale_ip" ] && listen="$lan_ip:7070,$tailscale_ip:7070" ;;
   esac
 fi
 if [ -n "$listen" ]; then
@@ -185,12 +189,17 @@ if [ "$(readlink /usr/lib/basement/current)" != "versions/$manager_version" ] ||
   exit 1
 fi
 
+# --listen takes one address or a comma separated list, and a rerun reads
+# whatever the drop-in already holds. The card, the health check and the QR
+# code all follow the first address: every address serves the same console,
+# and the first one is the primary.
+primary_listen=${listen%%,*}
 port=7070
-case "$listen" in *:*) port=${listen##*:} ;; esac
+case "$primary_listen" in *:*) port=${primary_listen##*:} ;; esac
 host_short=$(hostname -s 2>/dev/null || hostname)
-case "$listen" in
+case "$primary_listen" in
   "" | 127.0.0.1:*) console_url="http://127.0.0.1:${port}" ;;
-  *) console_url="http://${listen}" ;;
+  *) console_url="http://${primary_listen}" ;;
 esac
 
 # An active systemd unit is not yet a usable installation. Require the exact
@@ -218,11 +227,22 @@ echo "=================================================================="
 echo "  basement is running."
 echo
 echo "  Open the console:  $console_url"
+# Every other bound address, one per line, under the same heading.
+extra_listen=${listen#"$primary_listen"}
+extra_listen=${extra_listen#,}
+while [ -n "$extra_listen" ]; do
+  next=${extra_listen%%,*}
+  echo "                     http://${next}"
+  case "$extra_listen" in
+    *,*) extra_listen=${extra_listen#*,} ;;
+    *) extra_listen="" ;;
+  esac
+done
 if [ -z "$listen" ]; then
   echo "  (loopback only. From another device use an SSH tunnel, or rerun"
   echo "   install.sh and pick a network interface)"
 else
-  case "$listen" in
+  case "$primary_listen" in
     "$lan_ip":*) echo "  Also try:          http://${host_short}.local:${port}" ;;
   esac
 fi

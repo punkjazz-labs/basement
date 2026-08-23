@@ -207,17 +207,26 @@ func (checker *SystemHealthChecker) client() *http.Client {
 	return NewSystemHealthChecker(checker.Service).Client
 }
 
+// listenArgument reads the manager's own --listen flag from its command line.
+// The flag takes one address or a comma separated list, and every address
+// serves the same console, so the first one is what the probe uses.
 func listenArgument(commandLine []byte) (string, error) {
 	arguments := strings.Split(strings.TrimRight(string(commandLine), "\x00"), "\x00")
 	for index, argument := range arguments {
 		if strings.HasPrefix(argument, "--listen=") {
-			return strings.TrimPrefix(argument, "--listen="), nil
+			return primaryListenAddress(strings.TrimPrefix(argument, "--listen=")), nil
 		}
 		if argument == "--listen" && index+1 < len(arguments) {
-			return arguments[index+1], nil
+			return primaryListenAddress(arguments[index+1]), nil
 		}
 	}
 	return "", errors.New("basement.service main process has no listen argument")
+}
+
+// primaryListenAddress is the first address of a --listen value.
+func primaryListenAddress(value string) string {
+	first, _, _ := strings.Cut(value, ",")
+	return strings.TrimSpace(first)
 }
 
 func interfaceIPs() ([]net.IP, error) {

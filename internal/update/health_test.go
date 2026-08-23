@@ -41,6 +41,29 @@ func TestExeVerificationSkippableOnlyForPermissionDenied(t *testing.T) {
 // the probe must proceed without the is-it-local confirmation rather than
 // fail an update whose manager is already answering healthily, which is
 // what happened on hardware (2026-08-12).
+// A manager that binds several addresses answers the same console on each of
+// them, so the probe follows the first one. Reading the whole list as one
+// address would fail every update on such a machine.
+func TestListenArgumentTakesThePrimaryAddress(t *testing.T) {
+	for _, test := range []struct {
+		cmdline string
+		want    string
+	}{
+		{"basement\x00--listen\x00127.0.0.1:7070\x00", "127.0.0.1:7070"},
+		{"basement\x00--listen=127.0.0.1:7070\x00", "127.0.0.1:7070"},
+		{"basement\x00--listen\x00192.168.99.20:7070,100.64.30.7:7070\x00", "192.168.99.20:7070"},
+		{"basement\x00--listen=192.168.99.20:7070,100.64.30.7:7070\x00", "192.168.99.20:7070"},
+	} {
+		got, err := listenArgument([]byte(test.cmdline))
+		if err != nil || got != test.want {
+			t.Errorf("listenArgument(%q) = %q, %v; want %q", test.cmdline, got, err, test.want)
+		}
+	}
+	if _, err := listenArgument([]byte("basement\x00--data-dir\x00/var/lib/basement\x00")); err == nil {
+		t.Error("a command line without --listen was accepted")
+	}
+}
+
 func TestHealthCheckProceedsWhenInterfaceEnumerationIsUnavailable(t *testing.T) {
 	root := t.TempDir()
 	procRoot := filepath.Join(root, "proc")

@@ -46,7 +46,7 @@ you are touching.
 | `cmd/basement/` | the manager: runs on the Spark, serves the console and `/v1` |
 | `cmd/basement-setup/` | the installer: runs on the operator's laptop, installs a Spark over SSH |
 | `cmd/sign-index/` | signs a recipe index (ADR 0009); key path passed in, never key material |
-| `internal/config/` | flag parsing: `--listen`, `--data-dir`, subcommands |
+| `internal/config/` | flag parsing: `--listen` (one address or a comma separated list), `--data-dir`, subcommands |
 | `internal/httpapi/` | REST API under `/api/v1/`, SSE job events, the `/v1` inference proxy, and the embedded console handler |
 | `internal/engine/` | job engine: planning, execution, rollback, per-recipe locks, one-slot runtime semaphore |
 | `internal/operations/` | step executors (`verify_*`, `pull_image`, `download_artifact`, container lifecycle, fabric checks) |
