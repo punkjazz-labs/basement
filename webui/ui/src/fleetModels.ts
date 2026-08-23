@@ -1,6 +1,7 @@
-import type {
-  FleetDeploymentView, FleetModelSnapshot, FleetNodeSummary, FleetSummary, NodeInventory, Peer,
-  PlacementCandidate, PlacementPlan,
+import {
+  terminal,
+  type FleetDeploymentView, type FleetModelSnapshot, type FleetNodeSummary, type FleetSummary,
+  type NodeInventory, type Peer, type PlacementCandidate, type PlacementPlan,
 } from './api'
 import { consoleKey, isLocalNode, nodeName, nodeServing, nodeStatus, type NodeStatus } from './fleetInvite'
 
@@ -145,6 +146,32 @@ export type ActionRoute =
 // placement. The controller keeps the last state it saw, and this says plainly
 // that it is only the last one.
 export const NOT_ANSWERING = 'Not answering'
+
+// Why a row action could not be sent. A row only offers a button its route
+// allows, so these are what the owner reads when the fleet moved between the
+// render and the click.
+export const ACTION_REFUSAL: Record<'no-placement' | 'not-answering' | 'unsupported', string> = {
+  'no-placement': 'The fleet holds no placement for this model on that Spark.',
+  'not-answering': 'That Spark is not answering for this model.',
+  unsupported: 'The deployment action is not supported.',
+}
+
+// Whether a placement is already mid-change, so its row must not send it a
+// second action. A local row learns this from the job list it polls every few
+// seconds; a placement is two polls away from saying the same thing, so the
+// job this console just started counts until the controller's own read has
+// caught up with it and reported it finished. A placement that has answered
+// with no job at all, or with an older job than the one just started, is
+// treated as still working rather than as free.
+export function placementBusy(
+  placement: FleetDeploymentView | undefined,
+  startedJobID: string | undefined,
+): boolean {
+  if (placement === undefined) return false
+  if (placement.job && !terminal(placement.job.state)) return true
+  if (startedJobID === undefined) return false
+  return !(placement.job?.id === startedJobID && terminal(placement.job.state))
+}
 
 // The placement that owns this model on this Spark. The Spark this console
 // runs on never has one here: its own API is the authority for it.

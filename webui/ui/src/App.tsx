@@ -237,10 +237,16 @@ export default function App() {
       setRemoteJob(previous =>
         previous?.deploymentID === watchedDeploymentID ? { deploymentID: watchedDeploymentID, job } : previous,
       )
-      if (terminal(job.state)) stream.close()
+      if (terminal(job.state)) {
+        stream.close()
+        // The same catch-up the local stream does. A remote job can change
+        // what this Spark itself serves, and the fleet reads behind it should
+        // not wait for their own next tick.
+        refreshModelsAndJobs()
+      }
     })
     return () => stream.close()
-  }, [authed, watchedDeploymentID])
+  }, [authed, watchedDeploymentID, refreshModelsAndJobs])
 
   // A job on another Spark is cancelled through the placement that owns it;
   // this console's own /api/v1/jobs knows nothing about it.

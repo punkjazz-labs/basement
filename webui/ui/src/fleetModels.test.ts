@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type {
-  FleetDeploymentView, FleetModelSnapshot, FleetNodeSummary, FleetSummary, NodeInventory, Peer, PlacementPlan,
+  FleetDeploymentView, FleetModelSnapshot, FleetNodeSummary, FleetSummary, Job, NodeInventory, Peer, PlacementPlan,
 } from './api'
 import {
-  deploymentIndex, deploymentKey, fleetRows, joinCandidatesWithInventory, modelChips, rowActionRoute, rowPlacement,
-  FLEET_DEPLOYMENT_ACTIONS, type ActionTarget, type FleetRow,
+  deploymentIndex, deploymentKey, fleetRows, joinCandidatesWithInventory, modelChips, placementBusy,
+  rowActionRoute, rowPlacement, ACTION_REFUSAL, FLEET_DEPLOYMENT_ACTIONS, type ActionTarget, type FleetRow,
 } from './fleetModels'
 
 const inventory = (overrides: Partial<NodeInventory> = {}): NodeInventory => ({
@@ -216,6 +216,54 @@ describe('where one row action goes', () => {
       { nodeID: 'node-loft', recipeID: 'qwen36-35b-a3b-nvfp4-1s', isSelf: true },
       placements,
     )).toBeUndefined()
+  })
+})
+
+describe('whether a placement is already working', () => {
+  const job = (id: string, state: string): Job => ({
+    id, kind: 'stop', recipe_id: 'qwen36-35b-a3b-nvfp4-1s', state, created_at: '', updated_at: '', steps: [],
+  })
+
+  it('leaves a Spark this console holds no placement for alone', () => {
+    expect(placementBusy(undefined, undefined)).toBe(false)
+    expect(placementBusy(undefined, 'job-one')).toBe(false)
+  })
+
+  it('is free when the controller last read a finished job', () => {
+    expect(placementBusy(deployment({ job: job('job-one', 'ready') }), undefined)).toBe(false)
+  })
+
+  it('is busy while the controller reads a job that is still running', () => {
+    expect(placementBusy(deployment({ job: job('job-one', 'starting') }), undefined)).toBe(true)
+  })
+
+  it('is busy from the moment an action is accepted, before any new read', () => {
+    // The placement still carries the job it had before the click.
+    expect(placementBusy(deployment({ job: job('job-one', 'ready') }), 'job-two')).toBe(true)
+  })
+
+  it('is free again once the controller reports the started job finished', () => {
+    expect(placementBusy(deployment({ job: job('job-two', 'ready') }), 'job-two')).toBe(false)
+  })
+
+  it('is busy while the started job is still running', () => {
+    expect(placementBusy(deployment({ job: job('job-two', 'stopping') }), 'job-two')).toBe(true)
+  })
+
+  it('is busy when a started action left the placement with no job to read', () => {
+    expect(placementBusy(deployment({ job: undefined }), 'job-two')).toBe(true)
+  })
+})
+
+describe('why a row action was refused', () => {
+  it('has a line for every reason a route can give', () => {
+    for (const reason of ['no-placement', 'not-answering', 'unsupported'] as const) {
+      expect(ACTION_REFUSAL[reason].length).toBeGreaterThan(0)
+    }
+  })
+
+  it('says a Spark is not answering in the words the row uses', () => {
+    expect(ACTION_REFUSAL['not-answering']).toContain('not answering')
   })
 })
 

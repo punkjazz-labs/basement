@@ -12,7 +12,8 @@ import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS } from '../fleetInvite'
 import {
-  deploymentIndex, fleetRows, modelChips, rowActionRoute, rowPlacement, NOT_ANSWERING,
+  deploymentIndex, fleetRows, modelChips, placementBusy, rowActionRoute, rowPlacement,
+  ACTION_REFUSAL, NOT_ANSWERING,
   type ActionTarget, type FleetDeploymentAction, type FleetRow,
 } from '../fleetModels'
 
@@ -102,6 +103,11 @@ export default function Models({
   // answers, so it is polled beside the summary rather than fetched at the
   // moment of a click.
   const [placements, setPlacements] = useState<Map<string, FleetDeploymentView>>(new Map())
+  // The last job this console started on each placement. The placement poll
+  // and the other Spark's heartbeat are both seconds behind a click, so
+  // without this a row would unlock while its own action was still starting
+  // and a second click would create a second job.
+  const [startedOnPlacement, setStartedOnPlacement] = useState<Map<string, string>>(new Map())
 
   // Storage tells us which recipes already have model files on disk, so a
   // partially downloaded model can offer to resume instead of start over.
@@ -418,10 +424,12 @@ export default function Models({
       acceptJob(await local())
       return
     }
-    // A row only offers a button the route allows, so anything else here is a
-    // placement that went away between the render and the click.
-    if (route.where !== 'fleet') return
+    // A row only offers a button the route allows, so anything else here is
+    // the fleet moving between the render and the click. run() turns this into
+    // the same notice every other refused action gets.
+    if (route.where !== 'fleet') throw new Error(ACTION_REFUSAL[route.reason])
     const result = await api<{ job: Job }>(route.path, { method: 'POST', headers: idempotency(), body })
+    setStartedOnPlacement(previous => new Map(previous).set(route.deploymentID, result.job.id))
     openFleetDeployment(route.deploymentID, result.job)
   }
 
@@ -554,8 +562,11 @@ export default function Models({
       : Boolean(peerModel?.active && peerModel.status === 'ready')
     const otherBusy = otherWord === 'Installing' || otherWord === 'Starting' || otherWord === 'Switching'
     // No button on another Spark's row while that Spark is already changing
-    // this model, and none at all while it is not answering for it.
-    const hostLocked = busy || otherBusy || notAnswering
+    // this model, and none at all while it is not answering for it. The
+    // placement locks the row from the moment the action is accepted; the
+    // heartbeat word only follows a few seconds later.
+    const hostLocked = busy || otherBusy || notAnswering ||
+      placementBusy(placement, placement && startedOnPlacement.get(placement.deployment_id))
     const localStatus = busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
     // Nothing of this recipe runs anywhere in the fleet and its version has
     // been withdrawn, so the row's whole state is the revocation. A Spark
@@ -669,7 +680,7 @@ export default function Models({
                 {/* The playground and the generate tab only reach the model
                     this Spark serves, so a live model on another Spark is
                     opened on that Spark's own console. */}
-                {hostServing && otherURL && (
+                {otherServing && otherURL && (
                   <button
                     className="primary"
                     onClick={act(() => window.open(otherURL, '_blank', 'noopener,noreferrer'))}
@@ -823,19 +834,25 @@ export default function Models({
             {/* The same tools, on the machine that holds the model. A
                 placement on another Spark carries them there; without one
                 there is nothing here to run them against. */}
-            {(model || hostPlaced) && (
-              <div className="row-tools">
-                {(host ? hostServing : isActive) && (
-                  <>
-                    {!isMedia && (
-                      <button className="ghost" disabled={hostLocked} onClick={() => simpleAction(recipe, host, 'benchmark')}>Measure speed</button>
-                    )}
-                    <button className="ghost" disabled={hostLocked} onClick={() => simpleAction(recipe, host, 'smoke-test')}>Check health</button>
-                  </>
-                )}
-                <button className="danger" disabled={hostLocked} onClick={() => remove(recipe, host)}>Uninstall</button>
-              </div>
-            )}
+            {(model || hostPlaced) && (() => {
+              // A tool on this Spark's own row answers to this Spark alone.
+              // What another Spark is doing with the same recipe has never
+              // stopped a local button and must not start now.
+              const toolsLocked = host ? hostLocked : busy
+              return (
+                <div className="row-tools">
+                  {(host ? hostServing : isActive) && (
+                    <>
+                      {!isMedia && (
+                        <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(recipe, host, 'benchmark')}>Measure speed</button>
+                      )}
+                      <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(recipe, host, 'smoke-test')}>Check health</button>
+                    </>
+                  )}
+                  <button className="danger" disabled={toolsLocked} onClick={() => remove(recipe, host)}>Uninstall</button>
+                </div>
+              )
+            })()}
           </div>
         )}
       </Fragment>
