@@ -3,15 +3,18 @@ import {
   api, fetchFleetDeployments, idempotency, terminal, formatBytes, formatTokens, runtimeLabel, startTimeoutMinutes,
   modelStateWord, peerModelList,
   updatePlan, installRequest, installConfirmationsComplete, licenceArtifacts, territoryEligibilityLabel, trustLine,
-  type FleetSummary, type InstalledModel, type Job, type Peer, type Preflight, type Recipe, type StorageInfo,
-  type PeerSummary, type TokenUsage,
+  type FleetDeploymentView, type FleetSummary, type InstalledModel, type Job, type Peer, type Preflight,
+  type Recipe, type StorageInfo, type PeerSummary, type TokenUsage,
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS } from '../fleetInvite'
-import { deploymentIndex, fleetRows, type FleetRow } from '../fleetModels'
+import {
+  deploymentIndex, fleetRows, modelChips, rowActionRoute, rowPlacement, NOT_ANSWERING,
+  type ActionTarget, type FleetDeploymentAction, type FleetRow,
+} from '../fleetModels'
 
 const USE: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
@@ -36,14 +39,6 @@ interface ConfirmState {
   recipe: Recipe
   preflight: Preflight
   switchFrom?: string
-}
-
-// The name of one Spark on a model's row. live means that Spark serves this
-// model right now.
-interface NodeChip {
-  nodeID: string
-  name: string
-  live: boolean
 }
 
 // The fleet in one line above the table: every Spark, whether it serves
@@ -73,7 +68,8 @@ function FleetStrip({ sparks }: { sparks: FleetRow[] }) {
 type Placement = 'local' | 'peer'
 
 export default function Models({
-  system, recipes, models, jobs, peers, refreshModelsAndJobs, openDeployment, openPlayground, openGenerate, openFleet,
+  system, recipes, models, jobs, peers, refreshModelsAndJobs, openDeployment, openFleetDeployment,
+  openPlayground, openGenerate, openFleet,
 }: AppState) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [licence, setLicence] = useState(false)
@@ -101,10 +97,11 @@ export default function Models({
   // means this console has no fleet to show: a standalone Spark, a member, or
   // a summary this console could not read.
   const [fleet, setFleet] = useState<FleetSummary | null>(null)
-  // Which placement owns which model on which Spark. Nothing on this screen
-  // reads it yet; row actions do, and they need it fresh, so it is polled
-  // beside the summary rather than fetched at the moment of a click.
-  const placements = useRef<Map<string, string>>(new Map())
+  // Which placement owns which model on which Spark. Row actions on another
+  // Spark are sent through it, and its rows also say whether that Spark still
+  // answers, so it is polled beside the summary rather than fetched at the
+  // moment of a click.
+  const [placements, setPlacements] = useState<Map<string, FleetDeploymentView>>(new Map())
 
   // Storage tells us which recipes already have model files on disk, so a
   // partially downloaded model can offer to resume instead of start over.
@@ -202,7 +199,7 @@ export default function Models({
       if (!first && document.hidden) return
       try {
         const deployments = await fetchFleetDeployments()
-        if (!cancelled) placements.current = deploymentIndex(deployments)
+        if (!cancelled) setPlacements(deploymentIndex(deployments))
       } catch {
         /* the next read tries again */
       }
@@ -237,18 +234,26 @@ export default function Models({
   const showFleet = leadsFleet && sparks.length > 1
   // Which Sparks hold this model, and which one serves it now. The Spark this
   // console runs on is named only while another Spark is on screen beside it.
-  const nodeChips = (recipeID: string): NodeChip[] => {
-    if (!showFleet) return []
-    return sparks
-      .filter(spark => spark.installedModels.some(model => model.recipe_id === recipeID))
-      .map(spark => ({
-        nodeID: spark.nodeID,
-        name: spark.displayName,
-        live: spark.serving?.recipe_id === recipeID,
-      }))
-  }
+  const nodeChips = (recipe: Recipe) =>
+    showFleet ? modelChips(sparks, recipe.id, recipe.topology.spark_count) : []
 
   const installed = useMemo(() => new Map(models.map(model => [model.recipe_id, model])), [models])
+  // The Spark that holds this model, when the Spark this console runs on does
+  // not. A model on both machines keeps this Spark in front, exactly as the
+  // status line already reads it. A Spark added by address only is never one
+  // of these: the fleet holds no placement for it, so nothing here can act on
+  // it. A model that needs more than one Spark is not one of these either: it
+  // runs across the fleet rather than on a machine that could be named.
+  const hostOf = (recipe: Recipe): FleetRow | undefined => {
+    if (!showFleet || installed.has(recipe.id) || recipe.topology.spark_count !== 1) return undefined
+    return sparks.find(spark =>
+      !spark.isSelf && !spark.legacyPeerOnly &&
+      spark.installedModels.some(model => model.recipe_id === recipe.id))
+  }
+  // The model and the machine one row acts on. Without a host the row acts on
+  // this Spark, which is what it has always done.
+  const targetOf = (recipe: Recipe, host?: FleetRow): ActionTarget =>
+    ({ nodeID: host?.nodeID ?? '', recipeID: recipe.id, isSelf: host === undefined })
   const usage = useMemo(() => new Map((tokens?.models ?? []).map(item => [item.recipe_id, item])), [tokens])
   const sorted = useMemo(() => sortCatalog(recipes), [recipes])
   const detected = system?.hardware_scope.detected_spark_count ?? 0
@@ -397,20 +402,45 @@ export default function Models({
       acceptJob(result)
     })
 
-  const simpleAction = (id: string, action: string) =>
-    run(id, async () => {
-      const result = await api<{ job: Job }>(`/api/v1/models/${id}/${action}`, {
-        method: 'POST',
-        headers: idempotency(),
-        body: '{}',
-      })
-      acceptJob(result)
-    })
+  // One action on one model, sent to the Spark that holds it. This Spark keeps
+  // the call it has always used. Another Spark is reached through the
+  // placement that owns the model on it, and answers with its own job, which
+  // the placement's own stream then follows.
+  const sendAction = async (
+    recipe: Recipe,
+    host: FleetRow | undefined,
+    action: FleetDeploymentAction,
+    body: string,
+    local: () => Promise<{ job: Job }>,
+  ) => {
+    const route = rowActionRoute(targetOf(recipe, host), placements, action)
+    if (route.where === 'local') {
+      acceptJob(await local())
+      return
+    }
+    // A row only offers a button the route allows, so anything else here is a
+    // placement that went away between the render and the click.
+    if (route.where !== 'fleet') return
+    const result = await api<{ job: Job }>(route.path, { method: 'POST', headers: idempotency(), body })
+    openFleetDeployment(route.deploymentID, result.job)
+  }
 
-  const startOrSwitch = async (recipe: Recipe) => {
-    const active = activeOther(recipe.id)
+  const simpleAction = (recipe: Recipe, host: FleetRow | undefined, action: FleetDeploymentAction) =>
+    run(recipe.id, () =>
+      sendAction(recipe, host, action, '{}', () =>
+        api<{ job: Job }>(`/api/v1/models/${recipe.id}/${action}`, {
+          method: 'POST',
+          headers: idempotency(),
+          body: '{}',
+        })))
+
+  const startOrSwitch = async (recipe: Recipe, host?: FleetRow) => {
+    // Which model has to give way, on the machine this start runs on.
+    const active = host
+      ? (host.serving && host.serving.recipe_id !== recipe.id ? host.serving.recipe_id : '')
+      : activeOther(recipe.id)?.recipe_id ?? ''
     if (active) {
-      const from = recipes.find(item => item.id === active.recipe_id)?.display_name ?? active.recipe_id
+      const from = recipes.find(item => item.id === active)?.display_name ?? active
       const { ok } = await confirmBox({
         title: `Switch to ${recipe.display_name}?`,
         body: `${from} will stop. Basement restores it if the new model fails.`,
@@ -418,11 +448,11 @@ export default function Models({
       })
       if (!ok) return
     }
-    simpleAction(recipe.id, 'start')
+    simpleAction(recipe, host, 'start')
   }
 
-  const remove = async (recipe: Recipe) => {
-    const serving = installed.get(recipe.id)?.active
+  const remove = async (recipe: Recipe, host?: FleetRow) => {
+    const serving = host ? host.serving?.recipe_id === recipe.id : installed.get(recipe.id)?.active
     const { ok, checked } = await confirmBox({
       title: `Uninstall ${recipe.display_name}?`,
       body: serving
@@ -436,17 +466,19 @@ export default function Models({
       },
     })
     if (!ok) return
-    run(recipe.id, async () => {
-      const result = await api<{ job: Job }>(`/api/v1/models/${recipe.id}`, {
-        method: 'DELETE',
-        headers: idempotency(),
-        body: JSON.stringify({
-          remove_artifacts: checked,
-          expected_reclaim_bytes: checked ? recipe.artifact_bytes : 0,
-        }),
-      })
-      acceptJob(result)
-    })
+    run(recipe.id, () =>
+      // The fleet API takes the same choice about the downloaded files. It
+      // takes no reclaim figure, because only the machine holding those files
+      // can count them.
+      sendAction(recipe, host, 'remove', JSON.stringify({ remove_artifacts: checked }), () =>
+        api<{ job: Job }>(`/api/v1/models/${recipe.id}`, {
+          method: 'DELETE',
+          headers: idempotency(),
+          body: JSON.stringify({
+            remove_artifacts: checked,
+            expected_reclaim_bytes: checked ? recipe.artifact_bytes : 0,
+          }),
+        })))
   }
 
   const preflightBlockers = (preflight: Preflight): string[] => {
@@ -491,26 +523,52 @@ export default function Models({
     const isActive = Boolean(model?.active && model.status === 'ready')
     const fits = fitsOn(recipe)
     const canPair = pairable(recipe)
+    // The Spark in the fleet that holds this model when this one does not, the
+    // placement this console acts on it through, and what that Spark last
+    // reported about it.
+    const host = hostOf(recipe)
+    const hostModel = host?.installedModels.find(item => item.recipe_id === recipe.id)
+    const placement = host ? rowPlacement(targetOf(recipe, host), placements) : undefined
+    // The owner of this placement has stopped answering the controller for it,
+    // so every state below is only the last one this console was told.
+    const notAnswering = placement?.stale === true
+    const hostServing = Boolean(hostModel?.active && hostModel.status === 'ready')
+    const hostWord = notAnswering ? NOT_ANSWERING : hostModel ? modelStateWord(hostModel) : ''
+    // A row can only act on a placement, so a Spark holding a model the fleet
+    // has no placement for keeps the fallback this console has always offered.
+    const hostPlaced = host !== undefined && placement !== undefined
     // What the paired Spark says about this same model. Its own word for its
     // own state, plus the one thing this console knows that it cannot see
     // yet: an install this session asked it to run.
     const peerModel: InstalledModel | undefined = peerInstalled.get(recipe.id)
-    const peerServing = Boolean(peerModel?.active && peerModel.status === 'ready')
     const peerWord = peerModel ? modelStateWord(peerModel) : delegated.has(recipe.id) ? 'Installing' : ''
-    const peerBusy = peerWord === 'Installing' || peerWord === 'Starting' || peerWord === 'Switching'
+    // What another Spark says about this same model, and how to reach it. The
+    // fleet speaks for one of its own members, because it also knows whether
+    // that member still answers; a Spark added by address only still speaks
+    // for itself.
+    const otherName = host ? host.displayName : peer?.name ?? ''
+    const otherURL = host ? host.consoleURL : peer?.base_url ?? ''
+    const otherWord = host ? hostWord : peerWord
+    const otherServing = host
+      ? hostServing && !notAnswering
+      : Boolean(peerModel?.active && peerModel.status === 'ready')
+    const otherBusy = otherWord === 'Installing' || otherWord === 'Starting' || otherWord === 'Switching'
+    // No button on another Spark's row while that Spark is already changing
+    // this model, and none at all while it is not answering for it.
+    const hostLocked = busy || otherBusy || notAnswering
     const localStatus = busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
     // Nothing of this recipe runs anywhere in the fleet and its version has
     // been withdrawn, so the row's whole state is the revocation. A Spark
     // that is running it keeps its own word instead: what a machine is doing
     // outranks what a publisher has decided.
-    const readsRevoked = revocation.revoked && !peerWord
+    const readsRevoked = revocation.revoked && !otherWord
     // A model that lives only on the other Spark reads as that Spark's
     // status; one that lives on both keeps this Spark's status in front.
-    const statusText = readsRevoked ? 'Revoked' : !model && peerWord ? peerWord : localStatus
-    const peerNote = peer && peerWord ? (!model ? `on ${peer.name}` : `${peerWord} on ${peer.name}`) : ''
+    const statusText = readsRevoked ? 'Revoked' : !model && otherWord ? otherWord : localStatus
+    const otherNote = otherName && otherWord ? (!model ? `on ${otherName}` : `${otherWord} on ${otherName}`) : ''
     // Serving is serving, whichever Spark is doing it; the annotation says
     // which one.
-    const dotClass = readsRevoked ? 'fail' : isActive || peerServing ? 'on' : busy || peerBusy ? 'busy' : ''
+    const dotClass = readsRevoked ? 'fail' : isActive || otherServing ? 'on' : busy || otherBusy ? 'busy' : ''
     const measured = model?.tokens_per_second
     const reference = REFERENCE_TPS[recipe.id]
     // Counting happens only while basement serves the model on this Spark,
@@ -518,7 +576,7 @@ export default function Models({
     const served = usage.get(recipe.id)
     const servedTotal = served ? served.prompt_tokens + served.generation_tokens : 0
     const updateAvailable = Boolean(model && model.recipe_version < recipe.version)
-    const chips = nodeChips(recipe.id)
+    const chips = nodeChips(recipe)
     const open = expanded === recipe.id
     const toggle = () => setExpanded(open ? '' : recipe.id)
     // Buttons act without toggling the row; empty space anywhere else in the
@@ -552,7 +610,7 @@ export default function Models({
                 {/* Which Sparks in the fleet hold this model. The lit chip is
                     the one serving it now. */}
                 {chips.map(chip => (
-                  <span key={chip.nodeID} className={`node-chip ${chip.live ? 'live' : ''}`}>
+                  <span key={chip.key} className={`node-chip ${chip.live ? 'live' : ''}`}>
                     <i aria-hidden="true" />
                     {chip.name}
                   </span>
@@ -577,70 +635,110 @@ export default function Models({
             <span className={`sdot ${dotClass}`} aria-hidden="true" />
             <span>
               {statusText}
-              {peerNote && <small className="peer-note">{peerNote}</small>}
+              {otherNote && <small className="peer-note">{otherNote}</small>}
               {/* The status above is true and stays true: this only adds what
                   the publisher has since said about the version it runs. */}
               {revocation.installedRevoked && <small className="peer-note warn">Recipe revoked</small>}
             </span>
           </div>
           <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
-            {peer && peerWord && (
-              <button
-                className="ghost"
-                onClick={act(() => window.open(peer.base_url, '_blank', 'noopener,noreferrer'))}
-              >
-                Open on {peer.name}
-              </button>
-            )}
-            {/* A withdrawn version is refused by the manager, so the button
-                that would only fail is offered dead rather than hidden: the
-                row still says what this model is and why it cannot start. */}
-            {!model && (fits || !canPair || revocation.installBlocked) && (
-              <button
-                className="primary"
-                disabled={busy || !fits || revocation.installBlocked}
-                onClick={act(() => startInstall(recipe))}
-              >
-                {busy ? 'Working' : fits || revocation.installBlocked ? installVerb(recipe) : 'Needs a Spark'}
-              </button>
-            )}
-            {!model && !fits && canPair && !revocation.installBlocked && (
-              <button className="primary" onClick={act(openFleet)}>Pair a second Spark</button>
-            )}
-            {model && isActive && (
+            {/* This model lives on another Spark in the fleet and the fleet
+                holds the placement that owns it there, so the row acts on that
+                Spark. While it is not answering, its buttons stay in place and
+                stay dead: the row says what it last knew, and promises
+                nothing. */}
+            {hostPlaced && host ? (
               <>
-                <button className="ghost" disabled={busy} onClick={act(() => simpleAction(recipe.id, 'stop'))}>Stop</button>
-                {updateAvailable && (
+                {hostServing ? (
                   <button
                     className="ghost"
-                    disabled={busy || revocation.installBlocked}
-                    onClick={act(() => startInstall(recipe))}
+                    disabled={hostLocked}
+                    onClick={act(() => simpleAction(recipe, host, 'stop'))}
                   >
-                    Update
+                    Stop
+                  </button>
+                ) : (
+                  <button
+                    className="primary"
+                    disabled={hostLocked}
+                    onClick={act(() => startOrSwitch(recipe, host))}
+                  >
+                    {host.serving && host.serving.recipe_id !== recipe.id ? 'Switch to' : 'Start'}
                   </button>
                 )}
-                <button className="primary" disabled={busy} onClick={act(isMedia ? openGenerate : openPlayground)}>
-                  {isMedia ? 'Generate' : 'Open'}
-                </button>
+                {/* The playground and the generate tab only reach the model
+                    this Spark serves, so a live model on another Spark is
+                    opened on that Spark's own console. */}
+                {hostServing && otherURL && (
+                  <button
+                    className="primary"
+                    onClick={act(() => window.open(otherURL, '_blank', 'noopener,noreferrer'))}
+                  >
+                    Open on {otherName}
+                  </button>
+                )}
               </>
-            )}
-            {model && !isActive && model.status !== 'recovering' && (
+            ) : (
               <>
-                {updateAvailable && (
+                {otherURL && otherWord && (
                   <button
                     className="ghost"
-                    disabled={busy || revocation.installBlocked}
-                    onClick={act(() => startInstall(recipe))}
+                    onClick={act(() => window.open(otherURL, '_blank', 'noopener,noreferrer'))}
                   >
-                    Update
+                    Open on {otherName}
                   </button>
                 )}
-                <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
-                  {activeOther(recipe.id) ? 'Switch to' : 'Start'}
-                </button>
+                {/* A withdrawn version is refused by the manager, so the button
+                    that would only fail is offered dead rather than hidden: the
+                    row still says what this model is and why it cannot start. */}
+                {!model && (fits || !canPair || revocation.installBlocked) && (
+                  <button
+                    className="primary"
+                    disabled={busy || !fits || revocation.installBlocked}
+                    onClick={act(() => startInstall(recipe))}
+                  >
+                    {busy ? 'Working' : fits || revocation.installBlocked ? installVerb(recipe) : 'Needs a Spark'}
+                  </button>
+                )}
+                {!model && !fits && canPair && !revocation.installBlocked && (
+                  <button className="primary" onClick={act(openFleet)}>Pair a second Spark</button>
+                )}
+                {model && isActive && (
+                  <>
+                    <button className="ghost" disabled={busy} onClick={act(() => simpleAction(recipe, undefined, 'stop'))}>Stop</button>
+                    {updateAvailable && (
+                      <button
+                        className="ghost"
+                        disabled={busy || revocation.installBlocked}
+                        onClick={act(() => startInstall(recipe))}
+                      >
+                        Update
+                      </button>
+                    )}
+                    <button className="primary" disabled={busy} onClick={act(isMedia ? openGenerate : openPlayground)}>
+                      {isMedia ? 'Generate' : 'Open'}
+                    </button>
+                  </>
+                )}
+                {model && !isActive && model.status !== 'recovering' && (
+                  <>
+                    {updateAvailable && (
+                      <button
+                        className="ghost"
+                        disabled={busy || revocation.installBlocked}
+                        onClick={act(() => startInstall(recipe))}
+                      >
+                        Update
+                      </button>
+                    )}
+                    <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
+                      {activeOther(recipe.id) ? 'Switch to' : 'Start'}
+                    </button>
+                  </>
+                )}
+                {model?.status === 'recovering' && <button className="ghost" disabled onClick={act(() => {})}>Recovering</button>}
               </>
             )}
-            {model?.status === 'recovering' && <button className="ghost" disabled onClick={act(() => {})}>Recovering</button>}
           </div>
           <span className={`m-caret ${open ? 'open' : ''}`} aria-hidden="true">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
@@ -722,17 +820,20 @@ export default function Models({
                 </Fragment>
               ))}
             </dl>
-            {model && (
+            {/* The same tools, on the machine that holds the model. A
+                placement on another Spark carries them there; without one
+                there is nothing here to run them against. */}
+            {(model || hostPlaced) && (
               <div className="row-tools">
-                {isActive && (
+                {(host ? hostServing : isActive) && (
                   <>
                     {!isMedia && (
-                      <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'benchmark')}>Measure speed</button>
+                      <button className="ghost" disabled={hostLocked} onClick={() => simpleAction(recipe, host, 'benchmark')}>Measure speed</button>
                     )}
-                    <button className="ghost" disabled={busy} onClick={() => simpleAction(recipe.id, 'smoke-test')}>Check health</button>
+                    <button className="ghost" disabled={hostLocked} onClick={() => simpleAction(recipe, host, 'smoke-test')}>Check health</button>
                   </>
                 )}
-                <button className="danger" disabled={busy} onClick={() => remove(recipe)}>Uninstall</button>
+                <button className="danger" disabled={hostLocked} onClick={() => remove(recipe, host)}>Uninstall</button>
               </div>
             )}
           </div>

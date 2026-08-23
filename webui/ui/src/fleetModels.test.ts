@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type {
-  FleetDeploymentView, FleetNodeSummary, FleetSummary, NodeInventory, Peer, PlacementPlan,
+  FleetDeploymentView, FleetModelSnapshot, FleetNodeSummary, FleetSummary, NodeInventory, Peer, PlacementPlan,
 } from './api'
-import { deploymentIndex, deploymentKey, fleetRows, joinCandidatesWithInventory } from './fleetModels'
+import {
+  deploymentIndex, deploymentKey, fleetRows, joinCandidatesWithInventory, modelChips, rowActionRoute, rowPlacement,
+  FLEET_DEPLOYMENT_ACTIONS, type ActionTarget, type FleetRow,
+} from './fleetModels'
 
 const inventory = (overrides: Partial<NodeInventory> = {}): NodeInventory => ({
   hostname: 'attic',
@@ -134,7 +137,7 @@ describe('one row per Spark', () => {
 describe('which placement owns a model on a Spark', () => {
   it('keys every placement node by its Spark and model', () => {
     const index = deploymentIndex([deployment()])
-    expect(index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))).toBe('deployment_one')
+    expect(index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))?.deployment_id).toBe('deployment_one')
     expect(index.size).toBe(1)
   })
 
@@ -143,11 +146,133 @@ describe('which placement owns a model on a Spark', () => {
       deployment({ deployment_id: 'deployment_new', created_at: '2026-08-23T11:00:00Z' }),
       deployment({ deployment_id: 'deployment_old', created_at: '2026-08-23T08:00:00Z' }),
     ])
-    expect(index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))).toBe('deployment_new')
+    expect(index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))?.deployment_id).toBe('deployment_new')
+  })
+
+  it('keeps what the controller last saw of the placement, not only its id', () => {
+    const index = deploymentIndex([deployment({ stale: true })])
+    expect(index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))?.stale).toBe(true)
   })
 
   it('answers with an empty index when the fleet holds no placement', () => {
     expect(deploymentIndex([]).size).toBe(0)
+  })
+})
+
+describe('where one row action goes', () => {
+  const index = (...views: FleetDeploymentView[]) => deploymentIndex(views)
+  const loft = (recipeID: string): ActionTarget =>
+    ({ nodeID: 'node-loft', recipeID, isSelf: false })
+
+  it('leaves the Spark this console runs on with its own calls', () => {
+    const route = rowActionRoute({ nodeID: 'node-lead', recipeID: 'anything', isSelf: true }, new Map(), 'stop')
+    expect(route).toEqual({ where: 'local' })
+  })
+
+  it('sends another Spark through the placement that owns the model', () => {
+    const route = rowActionRoute(loft('qwen36-35b-a3b-nvfp4-1s'), index(deployment()), 'stop')
+    expect(route).toEqual({
+      where: 'fleet',
+      deploymentID: 'deployment_one',
+      path: '/api/v1/fleet/deployments/deployment_one/stop',
+    })
+  })
+
+  it('names every action the fleet API accepts', () => {
+    for (const action of FLEET_DEPLOYMENT_ACTIONS) {
+      const route = rowActionRoute(loft('qwen36-35b-a3b-nvfp4-1s'), index(deployment()), action)
+      expect(route).toMatchObject({ where: 'fleet', path: `/api/v1/fleet/deployments/deployment_one/${action}` })
+    }
+  })
+
+  it('refuses an action the fleet API does not take', () => {
+    const route = rowActionRoute(loft('qwen36-35b-a3b-nvfp4-1s'), index(deployment()), 'install')
+    expect(route).toEqual({ where: 'none', reason: 'unsupported' })
+  })
+
+  it('refuses a model on another Spark that no placement owns', () => {
+    const route = rowActionRoute(loft('qwen36-27b-nvfp4-1s'), index(deployment()), 'stop')
+    expect(route).toEqual({ where: 'none', reason: 'no-placement' })
+  })
+
+  it('refuses a placement whose Spark has stopped answering', () => {
+    const route = rowActionRoute(loft('qwen36-35b-a3b-nvfp4-1s'), index(deployment({ stale: true })), 'stop')
+    expect(route).toEqual({ where: 'none', reason: 'not-answering' })
+  })
+
+  it('escapes a placement id before it reaches a path', () => {
+    const route = rowActionRoute(
+      loft('qwen36-35b-a3b-nvfp4-1s'),
+      index(deployment({ deployment_id: 'deployment one/two' })),
+      'stop',
+    )
+    expect(route).toMatchObject({ path: '/api/v1/fleet/deployments/deployment%20one%2Ftwo/stop' })
+  })
+
+  it('reads the placement itself only for another Spark', () => {
+    const placements = index(deployment())
+    expect(rowPlacement(loft('qwen36-35b-a3b-nvfp4-1s'), placements)?.deployment_id).toBe('deployment_one')
+    expect(rowPlacement(
+      { nodeID: 'node-loft', recipeID: 'qwen36-35b-a3b-nvfp4-1s', isSelf: true },
+      placements,
+    )).toBeUndefined()
+  })
+})
+
+describe('the Sparks named on a model row', () => {
+  const snapshot = (recipeID: string, active = false): FleetModelSnapshot =>
+    ({ recipe_id: recipeID, recipe_version: 1, status: active ? 'ready' : 'stopped', active })
+
+  const spark = (name: string, held: FleetModelSnapshot[]): FleetRow => ({
+    nodeID: `node-${name}`,
+    displayName: name,
+    isSelf: false,
+    consoleURL: `http://${name}.local:7070`,
+    installedModels: held,
+    serving: held.find(model => model.active),
+    status: { word: 'Idle', dot: '' },
+  })
+
+  it('names each Spark that holds a one-Spark model', () => {
+    const sparks = [
+      spark('attic', [snapshot('qwen36-27b-nvfp4-1s')]),
+      spark('loft', [snapshot('qwen36-27b-nvfp4-1s', true)]),
+    ]
+    expect(modelChips(sparks, 'qwen36-27b-nvfp4-1s', 1)).toEqual([
+      { key: 'node-attic', name: 'attic', live: false },
+      { key: 'node-loft', name: 'loft', live: true },
+    ])
+  })
+
+  it('counts the machines for a model that needs more than one Spark', () => {
+    const sparks = [
+      spark('attic', [snapshot('deepseek-v4-flash-0731-2s')]),
+      spark('loft', [snapshot('deepseek-v4-flash-0731-2s')]),
+    ]
+    expect(modelChips(sparks, 'deepseek-v4-flash-0731-2s', 2)).toEqual([
+      { key: 'topology', name: '2 Sparks', live: false },
+    ])
+  })
+
+  it('lights the counted chip while the model serves', () => {
+    const sparks = [spark('attic', [snapshot('deepseek-v4-flash-0731-2s', true)])]
+    expect(modelChips(sparks, 'deepseek-v4-flash-0731-2s', 2)).toEqual([
+      { key: 'topology', name: '2 Sparks', live: true },
+    ])
+  })
+
+  it('names nothing for a model no Spark holds', () => {
+    expect(modelChips([spark('attic', [snapshot('qwen36-27b-nvfp4-1s')])], 'deepseek-v4-flash-0731-2s', 2)).toEqual([])
+  })
+
+  it('leaves a Spark that only holds another model out', () => {
+    const sparks = [
+      spark('attic', [snapshot('qwen36-27b-nvfp4-1s')]),
+      spark('loft', [snapshot('qwen36-35b-a3b-nvfp4-1s')]),
+    ]
+    expect(modelChips(sparks, 'qwen36-27b-nvfp4-1s', 1)).toEqual([
+      { key: 'node-attic', name: 'attic', live: false },
+    ])
   })
 })
 

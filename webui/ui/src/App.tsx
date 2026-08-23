@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
-  api, setCSRF, terminal, formatBytes, OfflineError,
-  type SystemInfo, type Recipe, type InstalledModel, type Job, type Peer, type Telemetry, type UpdateInfo,
+  api, idempotency, setCSRF, terminal, formatBytes, OfflineError,
+  type FleetDeploymentView, type SystemInfo, type Recipe, type InstalledModel, type Job, type Peer,
+  type Telemetry, type UpdateInfo,
 } from './api'
 import Pairing from './views/Pairing'
 import Models from './views/Models'
@@ -44,6 +45,10 @@ export interface AppState {
   refreshModelsAndJobs: () => Promise<void>
   refreshPeers: () => Promise<void>
   openDeployment: (jobID: string) => void
+  // Progress for work this console asked another Spark to do. The job row
+  // lives on that Spark, so it is handed over whole with the placement that
+  // owns it, and the placement is what the progress window then follows.
+  openFleetDeployment: (deploymentID: string, job: Job) => void
   openPlayground: () => void
   openGenerate: () => void
   openFleet: () => void
@@ -65,6 +70,10 @@ export default function App() {
     initialManagerUpdateDialogState,
   )
   const [selectedJobID, setSelectedJobID] = useState('')
+  // The one job on another Spark this console is watching, and the placement
+  // it was started through. Only one at a time, because only one progress
+  // window is ever open.
+  const [remoteJob, setRemoteJob] = useState<{ deploymentID: string; job: Job } | null>(null)
   const streams = useRef(new Map<string, EventSource>())
   const tokenRate = useRef<{ at: number; total: number } | null>(null)
   const [liveTPS, setLiveTPS] = useState<number | null>(null)
@@ -212,6 +221,38 @@ export default function App() {
     for (const stream of streams.current.values()) stream.close()
   }, [])
 
+  // The same wiring for a job on another Spark, over the placement stream
+  // instead of the local job stream. That stream carries the whole placement,
+  // so the job inside it is what the progress window reads, and the stream
+  // closes on the same terminal states the local one does.
+  const watchedDeploymentID = remoteJob?.deploymentID
+  useEffect(() => {
+    if (!authed || !watchedDeploymentID) return
+    const path = `/api/v1/fleet/deployments/${encodeURIComponent(watchedDeploymentID)}/events`
+    const stream = new EventSource(path)
+    stream.addEventListener('deployment', event => {
+      const view = JSON.parse((event as MessageEvent).data) as FleetDeploymentView
+      const job = view.job
+      if (!job) return
+      setRemoteJob(previous =>
+        previous?.deploymentID === watchedDeploymentID ? { deploymentID: watchedDeploymentID, job } : previous,
+      )
+      if (terminal(job.state)) stream.close()
+    })
+    return () => stream.close()
+  }, [authed, watchedDeploymentID])
+
+  // A job on another Spark is cancelled through the placement that owns it;
+  // this console's own /api/v1/jobs knows nothing about it.
+  const cancelRemoteJob = useCallback(async () => {
+    if (!remoteJob) return
+    await api(`/api/v1/fleet/deployments/${encodeURIComponent(remoteJob.deploymentID)}/cancel`, {
+      method: 'POST',
+      headers: idempotency(),
+      body: '{}',
+    })
+  }, [remoteJob])
+
   // The rail's live pulse: light telemetry poll while the tab is visible.
   useEffect(() => {
     if (!authed) return
@@ -292,12 +333,23 @@ export default function App() {
 
   const state: AppState = {
     system, recipes, models, jobs, peers, refresh, refreshModelsAndJobs, refreshPeers,
-    openDeployment: id => setSelectedJobID(id),
+    openDeployment: id => {
+      setRemoteJob(null)
+      setSelectedJobID(id)
+    },
+    openFleetDeployment: (deploymentID, job) => {
+      setSelectedJobID('')
+      setRemoteJob({ deploymentID, job })
+    },
     openPlayground: () => setTab('Playground'),
     openGenerate: () => setTab('Generate'),
     openFleet: () => setTab('Fleet'),
   }
-  const selectedJob = jobs.find(job => job.id === selectedJobID) ?? null
+  // One progress window, whichever Spark is doing the work. A job on another
+  // Spark serves that Spark's endpoint, so this console's own playground and
+  // generate tabs are not where it finishes.
+  const selectedJob = jobs.find(job => job.id === selectedJobID) ?? remoteJob?.job ?? null
+  const showingRemoteJob = remoteJob !== null && selectedJob === remoteJob.job
 
   return (
     <div className="shell">
@@ -390,12 +442,16 @@ export default function App() {
       <DeploymentDialog
         job={selectedJob}
         recipes={recipes}
-        onClose={() => setSelectedJobID('')}
-        onOpenPlayground={() => {
+        onCancel={showingRemoteJob ? cancelRemoteJob : undefined}
+        onClose={() => {
+          setSelectedJobID('')
+          setRemoteJob(null)
+        }}
+        onOpenPlayground={showingRemoteJob ? undefined : () => {
           setSelectedJobID('')
           setTab('Playground')
         }}
-        onOpenGenerate={() => {
+        onOpenGenerate={showingRemoteJob ? undefined : () => {
           setSelectedJobID('')
           refreshModelsAndJobs().then(() => setTab('Generate'))
         }}

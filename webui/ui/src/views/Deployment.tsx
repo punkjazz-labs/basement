@@ -263,12 +263,17 @@ function activePhaseIndex(job: Job, phases: Phase[]): number {
   return index >= 0 ? index : 0
 }
 
-export default function DeploymentDialog({ job, recipes, onClose, onOpenPlayground, onOpenGenerate }: {
+export default function DeploymentDialog({ job, recipes, onClose, onCancel, onOpenPlayground, onOpenGenerate }: {
   job: Job | null
   recipes: Recipe[]
   onClose: () => void
-  onOpenPlayground: () => void
-  onOpenGenerate: () => void
+  // How to stop this job, when it does not belong to this Spark. Without one,
+  // the job is this Spark's own and this Spark's own endpoint stops it.
+  onCancel?: () => Promise<void>
+  // Absent when the model this job serves does not answer on this Spark, so
+  // there is no local tab to send anyone to.
+  onOpenPlayground?: () => void
+  onOpenGenerate?: () => void
 }) {
   const ref = useRef<HTMLDialogElement>(null)
 
@@ -310,7 +315,8 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
     })
     if (!ok) return
     try {
-      await api(`/api/v1/jobs/${encodeURIComponent(job.id)}/cancel`, { method: 'POST', body: '{}' })
+      if (onCancel) await onCancel()
+      else await api(`/api/v1/jobs/${encodeURIComponent(job.id)}/cancel`, { method: 'POST', body: '{}' })
     } catch (problem) {
       noticeBox('Could not cancel', problem instanceof Error ? problem.message : undefined)
     }
@@ -418,7 +424,8 @@ export default function DeploymentDialog({ job, recipes, onClose, onOpenPlaygrou
                 : ''}
           </span>
           {!terminal(job.state) && <button className="danger" onClick={cancel}>Cancel {noun}</button>}
-          {succeeded && mediaReady && (job.kind === 'install' || job.kind === 'start') && (
+          {succeeded && mediaReady && (job.kind === 'install' || job.kind === 'start') &&
+            (isMedia ? onOpenGenerate : onOpenPlayground) && (
             <button className="brand" onClick={isMedia ? onOpenGenerate : onOpenPlayground}>
               {isMedia ? 'Generate video' : 'Try it in the playground'}
             </button>

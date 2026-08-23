@@ -458,8 +458,10 @@ export const peerModelList = (summary?: PeerSummary | null): InstalledModel[] =>
 
 // The word a model's row shows for its own state, on this Spark or another.
 // Only statuses the manager actually stores are named; anything else is
-// shown as it arrived rather than guessed at.
-export function modelStateWord(model: InstalledModel): string {
+// shown as it arrived rather than guessed at. The state and the active flag
+// are all this reads, so a heartbeat snapshot answers it as well as a full
+// model record does.
+export function modelStateWord(model: { status: string; active: boolean }): string {
   if (model.active && model.status === 'ready') return 'Serving'
   switch (model.status) {
     case 'ready':
