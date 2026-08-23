@@ -1,0 +1,174 @@
+schema_version: 1
+id: qwen38-27b-nvfp4-1s
+# Qwen3.8-27B on one Spark, served by SGLang. The model is Alibaba's August
+# 2026 release: 27.8B parameters, dense, and the pack's first hybrid
+# attention architecture, 48 linear-attention (Gated DeltaNet) layers and 16
+# full-attention layers plus an in-checkpoint multi-token-prediction head.
+# Thinking is on by default in its chat template. The checkpoint is
+# RadixArk's mixed quantization: NVFP4 (group 16) for the MLP weights, FP8
+# for the attention-path projections, FP8 KV cache. All of that is read from
+# the checkpoint's own config and quantization manifests at the pinned
+# revision, verified live on 2026-08-23.
+#
+# The serving configuration comes from MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark
+# (the same publisher as the Qwen 3.6 recipes), pinned at source.revision.
+# The image is lmsysorg/sglang:qwen38-27b, a model-specific SGLang build:
+# its own OCI labels name the sgl-project/sglang commit and CI run it was
+# built from (nightly-dev-20260814-c4271c3f, CUDA 13.0.3). It is not a
+# numbered SGLang release. The recipe pins it by index digest, and that
+# digest equals the one the launcher repository itself documents, checked
+# against the live registry on 2026-08-23.
+#
+# Speculative decoding: this recipe runs the launcher's default mode, EAGLE
+# over the checkpoint's own MTP head (steps 3, top-k 1, draft 4). No second
+# artifact, nothing extra to download. The launcher offers two faster modes
+# that are deliberately not this recipe: DSPARK (a separate trained drafter
+# checkpoint; the launcher measures 51.5 tok/s on code against 34.5 for
+# this mode) would need schema values no basement qualification has seen
+# yet, and DFlash2 (66.6 tok/s on chat) requires an image the user builds
+# locally, which a pack that pins image bytes cannot ship (ADR 0012). If
+# qualification wants DSPARK later, it arrives as a version bump with a
+# drafter artifact, not as a default this recipe guesses at today.
+#
+# Speed, honestly: the launcher repository's own measurements on one GB10
+# are 34.5 tok/s on code, about 24 tok/s on chat and essays, for exactly
+# this mode. Community reports, not a basement measurement; the console
+# shows measured speed only after a benchmark runs here.
+#
+# Deliberate differences from the observed launcher command, each with its
+# reason:
+# - mem_fraction_static is 0.90, not the launcher's 0.95. basement requires
+#   the fraction to leave the per-node reserve outside the runtime's claim,
+#   which 0.95 does not. 0.90 is also the value the launcher's own DSpark
+#   mode uses on the same hardware.
+# - Containers run with isolated IPC and an explicit 32 GiB /dev/shm
+#   (ADR 0006). The launcher runs --privileged with host IPC; basement does
+#   not, and qualification decides whether that costs anything here.
+# - trust_remote_code stays on: this hybrid architecture loads model code
+#   shipped inside the checkpoint snapshot. The revision pin fixes those
+#   bytes, so what runs is what was reviewed, not whatever the repository
+#   moves to next.
+# - max_mamba_cache_size 40 is the launcher's own derivation, four hybrid
+#   cache slots per running request at max_running_requests 10. The mamba
+#   settings exist because the 48 linear-attention layers keep a recurrent
+#   state pool instead of a growing KV cache, and the launcher tunes that
+#   pool explicitly.
+# - sampling_defaults model serves the checkpoint's own generation defaults
+#   rather than OpenAI-style constants, the launcher's choice, kept.
+# - The launcher's CPU pinning (--cpuset-cpus) and --enable-cache-report
+#   are not carried: host-specific tuning and a diagnostic, respectively.
+# - context_length 262144 is the model's native window. The launcher can
+#   stretch to 1M with YaRN by overriding the model config; this recipe
+#   pins the native window and leaves YaRN to a qualification that measures
+#   it.
+version: 1
+display_name: Qwen 3.8 27B
+publisher: MiaAI Lab + RadixArk
+model_by: Qwen team, Alibaba
+recipe_by: MiaAI Lab
+model_released: August 2026
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://github.com/MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark
+  revision: c90d8c34cf795185ee8de736b7ded9bca3fe0de1
+topology:
+  spark_count: 1
+runtime:
+  kind: sglang
+  # lmsysorg/sglang:qwen38-27b, multi-arch index digest. The linux/arm64
+  # manifest inside it is
+  # sha256:3c0abdf41ef22de9d7a859dc16ed71eae69452e36c91f071a25e60c85a6d1fc6,
+  # built 2026-08-14 from sgl-project/sglang commit c4271c3f (its own OCI
+  # labels), CUDA 13.0.3. image_bytes is the arm64 layers' compressed sum
+  # from the registry manifest; image_disk_bytes is measured, not modelled:
+  # docker pull plus image inspect on a GB10 on 2026-08-23.
+  image: lmsysorg/sglang
+  digest: sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1
+  image_bytes: 17793228389
+  image_disk_bytes: 38619182431
+  environment: {}
+  shm_bytes: 34359738368
+  memory_lock: false
+  ipc_lock: false
+artifacts:
+  - role: primary
+    repository: RadixArk/Qwen3.8-27B-NVFP4
+    revision: 319f741cce68d7914884900c138a1fbb70a42f30
+    expected_bytes: 21945295265
+    licence: Apache-2.0
+    # The repository carries a verbatim Apache-2.0 LICENSE file at this
+    # revision, and the base model (Qwen/Qwen3.8-27B) declares Apache-2.0
+    # as well. The link points at the pinned tree so the user sees exactly
+    # the revision they are accepting (the ADR 0006 pattern).
+    licence_url: https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4/tree/319f741cce68d7914884900c138a1fbb70a42f30
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  # 11.9 GB rather than the 12 GB the vLLM recipes reserve. The validator
+  # computes the runtime's leftover as floor(minimum x (1 - fraction)) in
+  # floating point, and 0.90 of 120 GB lands one byte under 12 GB there.
+  # Stating the reserve keeps the memory fraction at the launcher's own
+  # 0.90 instead of bending the runtime configuration to a rounding
+  # artifact.
+  per_node_memory_reserve_bytes: 11900000000
+  safety_margin_bytes: 20000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: RadixArk/Qwen3.8-27B-NVFP4
+  sglang:
+    tensor_parallel_size: 1
+    mem_fraction_static: "0.90"
+    context_length: 262144
+    max_running_requests: 10
+    # No --quantization flag: the launcher passes none either. The
+    # checkpoint's own config carries the mixed NVFP4/FP8 scheme and the
+    # runtime reads it from there.
+    quantization: ""
+    kv_cache_dtype: fp8_e4m3
+    speculative_algorithm: EAGLE
+    speculative_num_draft_tokens: 4
+    speculative_model_role: ""
+    # No chat template override: the pinned snapshot ships its own
+    # chat_template.jinja and trust_remote_code loads it.
+    chat_template_file: ""
+    tool_call_parser: qwen3_coder
+    reasoning_parser: qwen3
+    attention_backend: flashinfer
+    trust_remote_code: true
+    chunked_prefill_size: 8192
+    disable_prefill_cuda_graph: true
+    mamba_ssm_dtype: bfloat16
+    mamba_full_memory_ratio: "4.21"
+    mamba_radix_cache_strategy: extra_buffer_lazy
+    max_mamba_cache_size: 40
+    speculative_num_steps: 3
+    speculative_eagle_topk: 1
+    sampling_defaults: model
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_memory_capacity
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: verify_memory
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared

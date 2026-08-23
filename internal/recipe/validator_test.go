@@ -11,8 +11,8 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recipes) != 9 {
-		t.Fatalf("got %d recipes, want 9", len(recipes))
+	if len(recipes) != 11 {
+		t.Fatalf("got %d recipes, want 11", len(recipes))
 	}
 	for _, r := range recipes {
 		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
@@ -135,6 +135,52 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	planned, ok = flash3bit.PlannedMemoryBytes()
 	if !ok || planned+flash3bit.Requirements.MemoryReserveBytes > flash3bit.Requirements.MinimumMemoryBytes {
 		t.Fatalf("DeepSeek 3-bit plans %d bytes, which does not leave its own reserve", planned)
+	}
+	// The pack's first hybrid-attention model: Qwen3.8 mixes Gated DeltaNet
+	// linear-attention with full-attention layers, runs on a model-specific
+	// SGLang build, and speculates through the checkpoint's own MTP head, so
+	// EAGLE here needs no second artifact.
+	qwen38, ok := Find(recipes, "qwen38-27b-nvfp4-1s")
+	if !ok || qwen38.Runtime.Kind != "sglang" || qwen38.Distributed() {
+		t.Fatalf("unexpected Qwen 3.8 recipe: %#v", qwen38)
+	}
+	if qwen38.Runtime.Reference() != "lmsysorg/sglang@sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1" {
+		t.Fatalf("Qwen 3.8 runtime is not pinned: %#v", qwen38.Runtime)
+	}
+	if len(qwen38.Artifacts) != 1 || qwen38.TotalArtifactBytes() != 21945295265 || qwen38.Artifacts[0].Revision != "319f741cce68d7914884900c138a1fbb70a42f30" {
+		t.Fatalf("Qwen 3.8 weights are not pinned: %#v", qwen38.Artifacts)
+	}
+	if s := qwen38.Service.SGLang; s.SpeculativeAlgorithm != "EAGLE" || s.SpeculativeModelRole != "" ||
+		!s.TrustRemoteCode || s.MambaRadixCacheStrategy != "extra_buffer_lazy" || s.MaxMambaCacheSize != s.MaxRunningRequests*4 {
+		t.Fatalf("unexpected Qwen 3.8 serve configuration: %#v", s)
+	}
+	// The pack's first behaviour-modified derivative: Qwen3.8-27B with its
+	// refusal behaviour removed by weight ablation, shipped under the
+	// publisher's own OBLITERATED name. It pins two files out of a repository
+	// that also carries five other quantizations, a vision projector and two
+	// overlapping bf16 shard sets, and it must serve the card's own bundled
+	// chat template, because that template is what the publisher's quality
+	// claims describe.
+	obliterated, ok := Find(recipes, "qwen38-27b-obliterated-q8-0-1s")
+	if !ok || obliterated.Runtime.Kind != "llamacpp" || obliterated.Distributed() {
+		t.Fatalf("unexpected Obliterated recipe: %#v", obliterated)
+	}
+	if obliterated.Runtime.Reference() != flash3bit.Runtime.Reference() {
+		t.Fatalf("Obliterated must share the DeepSeek 3-bit llama.cpp image pin: %#v", obliterated.Runtime)
+	}
+	if len(obliterated.Artifacts) != 1 || obliterated.TotalArtifactBytes() != 29047084728 || obliterated.Artifacts[0].Revision != "2648a6231b82328c601ba27b9ffd5029057d0e33" {
+		t.Fatalf("Obliterated weights are not pinned: %#v", obliterated.Artifacts)
+	}
+	if len(obliterated.Artifacts[0].Files) != 2 || obliterated.Service.LlamaCpp.ModelFile != obliterated.Artifacts[0].Files[0].Name ||
+		obliterated.Service.LlamaCpp.ChatTemplateFile != obliterated.Artifacts[0].Files[1].Name {
+		t.Fatalf("Obliterated must pin and serve its GGUF and the card's chat template: %#v", obliterated.Artifacts[0].Files)
+	}
+	if !obliterated.Service.LlamaCpp.Jinja || obliterated.MemoryModel == nil || obliterated.MemoryModel.KVBytesPerToken != 65536 {
+		t.Fatalf("unexpected Obliterated serve configuration: %#v %#v", obliterated.Service.LlamaCpp, obliterated.MemoryModel)
+	}
+	planned, ok = obliterated.PlannedMemoryBytes()
+	if !ok || planned+obliterated.Requirements.MemoryReserveBytes > obliterated.Requirements.MinimumMemoryBytes {
+		t.Fatalf("Obliterated plans %d bytes, which does not leave its own reserve", planned)
 	}
 }
 

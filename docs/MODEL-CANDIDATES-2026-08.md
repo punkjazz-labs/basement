@@ -171,3 +171,92 @@ territory, Qwen family is vLLM. No single runtime covers the frontier.
 - Decision: do NOT add a recipe (neither 1s nor 2s). Ride the moment
   editorially instead. If video-on-Spark becomes a product goal, start from a
   model whose licence permits US/EU use, and design the video surface first.
+
+## Round 4 — 2026-08-23, owner links (Qwen3.8, single-Spark DS4F, Obliterated)
+
+Trigger: the owner sent three links to add. Every fact verified live on
+2026-08-23 (HF API, GitHub API, registry manifests); research method as in
+Round 2.
+
+### 1. Qwen3.8-27B on SGLang — ADDED as `qwen38-27b-nvfp4-1s`
+- Base: `Qwen/Qwen3.8-27B` (Aug 2026, Apache-2.0), 27.8B dense, the pack's
+  first hybrid attention model: 48 linear-attention (Gated DeltaNet) plus 16
+  full-attention layers, in-checkpoint MTP head, native VLM, thinking on by
+  default, native context 262144.
+- Checkpoint: `RadixArk/Qwen3.8-27B-NVFP4` rev `319f741c`, 21,945,295,265
+  bytes, NVFP4 (MLP, group 16) + FP8 (attention path) + FP8 KV, Apache-2.0
+  with LICENSE in tree.
+- Launcher: `MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark` @ `c90d8c34` (same
+  publisher as the Qwen 3.6 recipes). Image `lmsysorg/sglang:qwen38-27b`
+  (nightly-dev-20260814-c4271c3f, model-specific build), pinned by index
+  digest `febfb971`; the live registry digest equals the launcher's own
+  documented pin.
+- Schema widened for the hybrid architecture (sglang fields: trust remote
+  code, chunked prefill, prefill CUDA graph toggle, four mamba cache knobs,
+  EAGLE steps/top-k, sampling defaults). Allowlist policy unchanged: values
+  a maintainer has seen a runtime accept.
+- Modes: the recipe carries the launcher's default EAGLE/MTP mode (34.5
+  tok/s code, ~24 chat/essays, launcher's own measurements). DSPARK (51.5
+  tok/s code, separate trained drafter `RadixArk/Qwen3.8-27B-DSpark`) is a
+  possible later version bump; it needs a DSPARK enum, a drafter artifact
+  role, block-size and draft-quantization fields, none qualified here yet.
+  DFlash2 (66.6 tok/s chat) is excluded outright: its image is built
+  locally by the user, and a pack that pins image bytes cannot ship it
+  (ADR 0012).
+
+### 2. DeepSeek V4 Flash on ONE Spark (MiaAI-Lab One-DGX-Spark) — TRACKED, NOT ADDABLE YET
+- What it is: `0xSero/deepseek-v4-flash-0731-spark` (EXL3 3.0bpw on a
+  REAP-pruned K216 checkpoint, 216 of 256 experts, 106,862,968,575 bytes =
+  99.5 GiB, fits one Spark), served by an NGC vLLM 26.02-based sparkinfer
+  image (`ghcr.io/0xsero/deepseek-v4-flash-0731-spark-sparkinfer`, single
+  tag, digest matches the launcher's pin). Launcher-measured: 44 to 47
+  tok/s decode, 384k context, 439,622-token KV pool, exact needle recall at
+  370k tokens. Roughly 3x our 3-bit GGUF single-Spark recipe.
+- Why there is no recipe today, each blocker named:
+  1. The working deployment bind-mounts six patch files over the pinned
+     image: NaN-prefill fixes for the native 432-byte NVFP4 KV records, a
+     DSpark draft KV-write fix, two b12x kernel backports. basement has no
+     extra-mount primitive, deliberately (pinned image bytes only). Without
+     the patches the default KV layout NaNs on any prompt of 7 or more
+     tokens; the padded fallback layout avoids that but shrinks the KV pool
+     to ~181k tokens and still hits blocker 2.
+  2. The image's first-boot entrypoint coalesces the TP4 rank-sliced EXL3
+     shards into a TP1 layout and builds the DSpark draft. basement
+     replaces the entrypoint and launches vllm directly, so neither step
+     ever runs. Serving the raw rank-sliced shards is not a configuration,
+     it is a broken install.
+  3. The image self-declares no provenance labels (no source, revision, or
+     licence label; only inherited NVIDIA base labels). The Anemll image
+     behind the two-Spark recipe self-declares all three. ADR 0012's
+     primary-source bar is thinner here.
+  4. The checkpoint's own card says end-to-end generation "has not yet
+     passed" the publisher's validation; the launcher repo's stress tests
+     are the only end-to-end evidence.
+- Unblock paths: upstream publishes an image with the patches baked in plus
+  a pre-coalesced TP1 checkpoint (their README says a newer kernel build is
+  not published "yet"), or basement grows a verified extra-mount /
+  first-boot-operation primitive. The second is an ADR-sized engine
+  decision, owner's call, not a recipe detail.
+- Meanwhile the pack keeps both existing DS4F recipes (two-Spark official
+  weights, one-Spark 3-bit GGUF).
+
+### 3. OBLITERATUS/Qwen3.8-27B-OBLITERATED — ADDED as `qwen38-27b-obliterated-q8-0-1s`
+- Abliterated derivative of Qwen3.8-27B (weight-space ablation, refusal
+  behaviour removed), by the OBLITERATUS org, card credits "Pliny the
+  Prompter". Apache-2.0 with a verbatim LICENSE file at the pinned
+  revision. Card's own quality claim: MMLU 82.33% vs 84.46% stock, its
+  measurement, not ours.
+- Path: Q8_0 GGUF (29,047,084,320 bytes) on the llama.cpp image the pack
+  already pins. Architecture support verified by commit ancestry: qwen35
+  merged in llama.cpp b7990 (2026-02-10), the pinned b10257 image builds
+  2267 commits after the merge.
+- Repo anomaly worth knowing: two overlapping bf16 safetensors shard sets
+  (an orphaned 18-way split beside the live 29-file split); a
+  whole-snapshot download would pull ~215 GB for a 29 GB serve. The recipe
+  pins two files by name and size.
+- No NVFP4 of the abliterated weights exists on HF (searched 2026-08-23).
+- Curation note: the Ornith skip above ruled an abliterated community quant
+  "not shippable as a default" where it would silently stand in for a clean
+  model. This entry is different in kind: the owner asked for this model
+  itself, it ships under its own name, and the recipe states what it is in
+  plain words. Explicit, labeled, candidate.

@@ -1,0 +1,168 @@
+schema_version: 1
+id: qwen38-27b-obliterated-q8-0-1s
+# A community derivative, and the pack's first recipe whose defining change
+# is behavioural rather than a quantization: OBLITERATUS/Qwen3.8-27B-OBLITERATED
+# is Alibaba's Qwen3.8-27B with the refusal behaviour removed by weight-space
+# ablation ("abliteration"). The publisher's card states this plainly and so
+# does this recipe: the model "has had safety guardrails surgically removed"
+# and "will comply with requests that stock Qwen3.8-27B would refuse". The
+# person who installs it accepts the licence and owns what they generate.
+# Nothing here softens or hides that; the display name carries the
+# publisher's own OBLITERATED label for the same reason.
+#
+# What is verified, and what is the card's own claim:
+# - Artifact: verified live against the Hugging Face API on 2026-08-23.
+#   Revision as pinned below, Apache-2.0 with a verbatim LICENSE file at
+#   that revision. The recipe pins two files by name and size (the Q8_0
+#   GGUF and the card's bundled chat template) because the repository also
+#   holds five other GGUF quantizations, a vision projector, and two
+#   overlapping bf16 safetensors shard sets, one of which is orphaned; a
+#   whole-snapshot download would fetch about 215 GB to serve 29 GB of it.
+# - Method and quality: the card's own figures, not a basement measurement.
+#   It reports MMLU 82.33% for this release against 84.46% for stock
+#   Qwen3.8-27B (a 2.12 point cost), from iterative SVD/LEACE weight
+#   surgery it calls "complementary abliteration blending". Nobody here has
+#   reproduced those numbers; qualification measures serving, not MMLU.
+# - Attribution: the card credits "Pliny the Prompter" as the builder and
+#   the OBLITERATUS ablation suite as the tool. Base model by the Qwen
+#   team, Alibaba, Apache-2.0.
+#
+# Why Q8_0 GGUF on llama.cpp: it is the highest-precision quantization the
+# repository ships that one 128 GB Spark serves with headroom (29.0 GB
+# weights), and it runs on the exact llama.cpp image this pack already pins
+# for the DeepSeek 3-bit recipe. The architecture is qwen35, a hybrid of 48
+# linear-attention (Gated DeltaNet) and 16 full-attention layers plus one
+# multi-token-prediction block, read from the GGUF header itself. llama.cpp
+# merged qwen35 support in b7990 (2026-02-10); the pinned image builds from
+# a commit 2267 commits after that merge, confirmed by commit ancestry
+# against ggml-org/llama.cpp on 2026-08-23. The bf16 safetensors path
+# (55.6 GB via a model-specific SGLang build) and an NVFP4 quantization
+# were considered: the first is unmeasured here, the second does not exist
+# for these weights (searched 2026-08-23).
+#
+# Configuration notes:
+# - context_size 262144 is the model's own native maximum, read from the
+#   GGUF header. The memory model's arithmetic leaves it far inside the
+#   pool: only the 16 full-attention layers grow a KV cache with context,
+#   so even the full window costs about 17 GB next to 29 GB of weights.
+# - parallel 1: given an explicit slot count llama-server divides
+#   --ctx-size among the slots, so a second slot would halve the window a
+#   single request can use.
+# - flash_attention is left unpinned. This hybrid architecture under
+#   llama.cpp has not been measured here, so llama.cpp's own default
+#   applies rather than a value this recipe invented.
+# - jinja is on and chat_template_file pins the card's bundled 408-byte
+#   template rather than the fuller Qwen template embedded in the GGUF.
+#   This is the card's own serving instruction: the bundled template
+#   prefills an empty think block so the model answers directly, which is
+#   the configuration the publisher's quality claims describe.
+# - The card calls repetition_penalty 1.15 "essential" with the greedy
+#   decoding it recommends, and warns that system prompts can reintroduce
+#   refusals. The llamacpp service block has no generation-defaults field
+#   to carry that, so it is recorded here for the qualification pass and
+#   for clients: without a repetition penalty the card says greedy decoding
+#   loops on imports and boilerplate.
+# - memory_model: kv_bytes_per_token is computed from the GGUF's own
+#   header as the growing-cache bound: 16 full-attention layers x 2 (K+V)
+#   x 4 KV heads x 256 head dim x 2 bytes at f16 = 65536. The 48
+#   linear-attention layers hold a small constant recurrent state instead
+#   of a growing cache; that state, the MTP block, the CUDA context and
+#   compute buffers are all covered by runtime_overhead_bytes, a
+#   conservative allowance rather than a measurement. Qualification
+#   replaces both figures with what it measures.
+version: 1
+display_name: Qwen 3.8 27B Obliterated
+publisher: OBLITERATUS
+model_by: Qwen team, Alibaba; abliteration by OBLITERATUS
+recipe_by: basement
+model_released: August 2026
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED
+  revision: 2648a6231b82328c601ba27b9ffd5029057d0e33
+topology:
+  spark_count: 1
+runtime:
+  kind: llamacpp
+  # ghcr.io/ggml-org/llama.cpp:server-cuda13-b10257, multi-arch index digest,
+  # the same pin the DeepSeek 3-bit recipe carries. The linux/arm64 manifest
+  # inside it is
+  # sha256:a8e4e3da97c80c6a2ff89dd1962ad39678c476f9d967316932a97500d82e1512,
+  # NVARCH=sbsa, CUDA_VERSION=13.3.0, entrypoint /app/llama-server, and its
+  # config plus layers total the image_bytes below. image_disk_bytes allows
+  # the usual threefold expansion on disk. Re-verified live against ghcr.io
+  # on 2026-08-23: the digest still resolves and its arm64 manifest is
+  # unchanged.
+  image: ghcr.io/ggml-org/llama.cpp
+  digest: sha256:866ad568474de9e835e487ae841ad6ace1a494b5eab4f292cbd45adb6180f711
+  image_bytes: 2181978652
+  image_disk_bytes: 6545935956
+  environment: {}
+  # llama-server is a single process and uses no shared-memory transport, so
+  # it needs none of the /dev/shm the Python engines are given.
+  shm_bytes: 0
+  memory_lock: false
+  ipc_lock: false
+artifacts:
+  - role: primary
+    repository: OBLITERATUS/Qwen3.8-27B-OBLITERATED
+    revision: 2648a6231b82328c601ba27b9ffd5029057d0e33
+    expected_bytes: 29047084728
+    files:
+      - name: Qwen3.8-27B-OBLITERATED-Q8_0.gguf
+        expected_bytes: 29047084320
+      - name: chat_template.jinja
+        expected_bytes: 408
+    licence: Apache-2.0
+    licence_url: https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/tree/2648a6231b82328c601ba27b9ffd5029057d0e33
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 12000000000
+  safety_margin_bytes: 20000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: OBLITERATUS/Qwen3.8-27B-OBLITERATED
+  llamacpp:
+    model_file: Qwen3.8-27B-OBLITERATED-Q8_0.gguf
+    context_size: 262144
+    # Above the model's 65 blocks, so every layer stays on the device.
+    # Current llama.cpp also accepts the keyword "all" for this, but an
+    # explicit count means the same thing on every build that ever shipped.
+    gpu_layers: 999
+    parallel: 1
+    flash_attention: ""
+    jinja: true
+    chat_template_file: chat_template.jinja
+memory_model:
+  weights_bytes: 29047084728
+  kv_bytes_per_token: 65536
+  runtime_overhead_bytes: 4000000000
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_memory_capacity
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: verify_memory
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared
