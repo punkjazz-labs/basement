@@ -37,10 +37,14 @@ id: qwen38-27b-nvfp4-1s
 #
 # Deliberate differences from the observed launcher command, each with its
 # reason:
-# - mem_fraction_static is 0.90, not the launcher's 0.95. basement requires
-#   the fraction to leave the per-node reserve outside the runtime's claim,
-#   which 0.95 does not. 0.90 is also the value the launcher's own DSpark
-#   mode uses on the same hardware.
+# - mem_fraction_static is 0.85, not the launcher's 0.95. Real hardware
+#   decided this number: the fraction applies to the device's true 130.7 GB,
+#   and a GB10 idles near 126 GB available, so 0.90 plus the 12 GB reserve
+#   asked for 129.5 GB and the preflight correctly refused to start it
+#   (measured on edgexpert-2051, 2026-08-23, recipe version 1). 0.85 is the
+#   value the pack's other SGLang recipe serves with, and it leaves about
+#   3 GB of real slack on an idle box. The runtime still gets 111 GB for a
+#   22 GB weight set and its caches.
 # - Containers run with isolated IPC and an explicit 32 GiB /dev/shm
 #   (ADR 0006). The launcher runs --privileged with host IPC; basement does
 #   not, and qualification decides whether that costs anything here.
@@ -61,7 +65,7 @@ id: qwen38-27b-nvfp4-1s
 #   stretch to 1M with YaRN by overriding the model config; this recipe
 #   pins the native window and leaves YaRN to a qualification that measures
 #   it.
-version: 1
+version: 2
 display_name: Qwen 3.8 27B
 publisher: MiaAI Lab + RadixArk
 model_by: Qwen team, Alibaba
@@ -108,13 +112,7 @@ requirements:
   docker: true
   nvidia_container_runtime: true
   per_node_minimum_memory_bytes: 120000000000
-  # 11.9 GB rather than the 12 GB the vLLM recipes reserve. The validator
-  # computes the runtime's leftover as floor(minimum x (1 - fraction)) in
-  # floating point, and 0.90 of 120 GB lands one byte under 12 GB there.
-  # Stating the reserve keeps the memory fraction at the launcher's own
-  # 0.90 instead of bending the runtime configuration to a rounding
-  # artifact.
-  per_node_memory_reserve_bytes: 11900000000
+  per_node_memory_reserve_bytes: 12000000000
   safety_margin_bytes: 20000000000
   secrets: []
   required_licence_acceptance: true
@@ -124,7 +122,7 @@ service:
   served_model_id: RadixArk/Qwen3.8-27B-NVFP4
   sglang:
     tensor_parallel_size: 1
-    mem_fraction_static: "0.90"
+    mem_fraction_static: "0.85"
     context_length: 262144
     max_running_requests: 10
     # No --quantization flag: the launcher passes none either. The
