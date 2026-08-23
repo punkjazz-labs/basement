@@ -6,6 +6,22 @@ import (
 	"testing"
 )
 
+// isPinnedRevision reports whether s is a full git commit hash. The pack test
+// asserts this shape rather than exact hashes because feed-watch moves pins
+// to new revisions on safe upstream bumps; what must never change is that
+// every artifact is pinned to one.
+func isPinnedRevision(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	recipes, err := Builtin()
 	if err != nil {
@@ -44,7 +60,7 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if inkling.Runtime.Reference() != "lmsysorg/sglang@sha256:7d3617a95c2d09b233dc6eb654ed746eaa1f69903b1012c2bedc13732d2e3590" {
 		t.Fatalf("Inkling runtime is not pinned: %#v", inkling.Runtime)
 	}
-	if len(inkling.Artifacts) != 1 || inkling.TotalArtifactBytes() != 170764923366 || inkling.Artifacts[0].Revision != "b6a99534467840620d411e4cd4ad5819b2610d9c" {
+	if len(inkling.Artifacts) != 1 || inkling.TotalArtifactBytes() == 0 || !isPinnedRevision(inkling.Artifacts[0].Revision) {
 		t.Fatalf("Inkling weights are not pinned: %#v", inkling.Artifacts)
 	}
 	if inkling.Service.SGLang.TensorParallelSize != 2 || inkling.Service.SGLang.SpeculativeAlgorithm != "" || inkling.Service.SGLang.SpeculativeModelRole != "" {
@@ -86,8 +102,10 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if h3.Service.InternalPort != 8188 || h3.Service.DefaultHostPort != 8188 {
 		t.Fatalf("MiniMax H3 does not use ComfyUI's port: %#v", h3.Service)
 	}
-	if h3.Version != 3 {
-		t.Fatalf("MiniMax H3 version=%d, want 3 now that image_to_video ships", h3.Version)
+	// A floor, not an exact pin: version 3 is where image_to_video shipped,
+	// and feed-watch moves versions upward on safe upstream pin bumps.
+	if h3.Version < 3 {
+		t.Fatalf("MiniMax H3 version=%d, want at least 3 now that image_to_video ships", h3.Version)
 	}
 	config, media := h3.MediaGeneration()
 	if !media || len(config.Graphs) != 2 || config.Graphs[ModeTextToVideo] != "minimax-h3-t2v.json" || config.Graphs[ModeImageToVideo] != "minimax-h3-i2v.json" {
@@ -124,7 +142,9 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if flash3bit.Runtime.Reference() != "ghcr.io/ggml-org/llama.cpp@sha256:866ad568474de9e835e487ae841ad6ace1a494b5eab4f292cbd45adb6180f711" {
 		t.Fatalf("DeepSeek 3-bit runtime is not pinned: %#v", flash3bit.Runtime)
 	}
-	if len(flash3bit.Artifacts) != 1 || flash3bit.TotalArtifactBytes() != 104207848032 || flash3bit.Artifacts[0].Revision != "57326b941c4603e24d1a5e71c22520c66e086eb8" {
+	// Bytes stay exact here: per-file pins only auto-bump when every file is
+	// byte-identical, so a byte change can only come from a human edit.
+	if len(flash3bit.Artifacts) != 1 || flash3bit.TotalArtifactBytes() != 104207848032 || !isPinnedRevision(flash3bit.Artifacts[0].Revision) {
 		t.Fatalf("DeepSeek 3-bit weights are not pinned: %#v", flash3bit.Artifacts)
 	}
 	if len(flash3bit.Artifacts[0].Files) != 4 {
@@ -150,7 +170,7 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if qwen38.Runtime.Reference() != "lmsysorg/sglang@sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1" {
 		t.Fatalf("Qwen 3.8 runtime is not pinned: %#v", qwen38.Runtime)
 	}
-	if len(qwen38.Artifacts) != 1 || qwen38.TotalArtifactBytes() != 21945295265 || qwen38.Artifacts[0].Revision != "319f741cce68d7914884900c138a1fbb70a42f30" {
+	if len(qwen38.Artifacts) != 1 || qwen38.TotalArtifactBytes() == 0 || !isPinnedRevision(qwen38.Artifacts[0].Revision) {
 		t.Fatalf("Qwen 3.8 weights are not pinned: %#v", qwen38.Artifacts)
 	}
 	if s := qwen38.Service.SGLang; s.SpeculativeAlgorithm != "EAGLE" || s.SpeculativeModelRole != "" ||
@@ -171,7 +191,7 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if obliterated.Runtime.Reference() != flash3bit.Runtime.Reference() {
 		t.Fatalf("Obliterated must share the DeepSeek 3-bit llama.cpp image pin: %#v", obliterated.Runtime)
 	}
-	if len(obliterated.Artifacts) != 1 || obliterated.TotalArtifactBytes() != 29047084728 || obliterated.Artifacts[0].Revision != "2648a6231b82328c601ba27b9ffd5029057d0e33" {
+	if len(obliterated.Artifacts) != 1 || obliterated.TotalArtifactBytes() != 29047084728 || !isPinnedRevision(obliterated.Artifacts[0].Revision) {
 		t.Fatalf("Obliterated weights are not pinned: %#v", obliterated.Artifacts)
 	}
 	if len(obliterated.Artifacts[0].Files) != 2 || obliterated.Service.LlamaCpp.ModelFile != obliterated.Artifacts[0].Files[0].Name ||
