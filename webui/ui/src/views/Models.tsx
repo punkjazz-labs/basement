@@ -4,7 +4,7 @@ import {
   modelStateWord, peerModelList,
   updatePlan, installRequest, installConfirmationsComplete, licenceArtifacts, territoryEligibilityLabel, trustLine,
   type FleetDeploymentView, type FleetSummary, type InstalledModel, type Job, type Peer, type Preflight,
-  type Recipe, type StorageInfo, type PeerSummary, type TokenUsage,
+  type PlacementPlan, type Recipe, type StorageInfo, type PeerSummary, type TokenUsage,
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
@@ -12,9 +12,11 @@ import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS } from '../fleetInvite'
 import {
-  deploymentActionPath, deploymentIndex, deploymentKey, fleetRows, mergePlacements, modelChips,
-  placementBusy, rowActionRoute, rowPlacement,
-  ACTION_REFUSAL, ADOPT_PATH, NOT_ANSWERING, NO_PLACEMENT_BACK,
+  deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetInstallVerb,
+  fleetRows, fleetSwitchFrom, initialPlacement, installRoute, joinCandidatesWithInventory,
+  mergePlacements, modelChips, placedNodeID, placementBusy, placementOptions, rowActionRoute, rowPlacement,
+  ACTION_REFUSAL, ADOPT_PATH, FLEET_DEPLOYMENTS_PATH, NOT_ANSWERING, NO_PLACEMENT_BACK,
+  NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
   type ActionTarget, type FleetDeploymentAction, type FleetRow,
 } from '../fleetModels'
 
@@ -65,8 +67,10 @@ function FleetStrip({ sparks }: { sparks: FleetRow[] }) {
   )
 }
 
-// Where an install is about to run. A recipe that needs two Sparks always
-// runs across both, so this choice only exists for one-Spark recipes.
+// Where an install is about to run, on a console that leads no fleet. A
+// recipe that needs two Sparks always runs across both, so this choice only
+// exists for one-Spark recipes. A console that leads a fleet asks the
+// controller for a placement plan instead and offers every Spark in it.
 type Placement = 'local' | 'peer'
 
 export default function Models({
@@ -85,6 +89,15 @@ export default function Models({
   const [storage, setStorage] = useState<StorageInfo | null>(null)
   const [tokens, setTokens] = useState<TokenUsage | null>(null)
   const [placement, setPlacement] = useState<Placement>('local')
+  // What the controller answered when it planned this install across the
+  // fleet: every Spark it would consider, and the one it recommends. null
+  // means the dialog offers the choice it has always offered, which is what a
+  // standalone Spark, a fleet member and a plan this console could not read
+  // all get.
+  const [placementPlan, setPlacementPlan] = useState<PlacementPlan | null>(null)
+  // The row of the "Run on" list that is picked now: a node id, or the word
+  // for "Choose for me".
+  const [placementChoice, setPlacementChoice] = useState('')
   const [peerPreflight, setPeerPreflight] = useState<Preflight | null>(null)
   const [peerChecking, setPeerChecking] = useState(false)
   const [peerError, setPeerError] = useState('')
@@ -273,6 +286,22 @@ export default function Models({
   // which is what says whether the fleet can adopt the model it runs.
   const targetOf = (recipe: Recipe, host?: FleetRow): ActionTarget =>
     ({ nodeID: host?.nodeID ?? '', recipeID: recipe.id, isSelf: host === undefined, host })
+
+  // Whether this console can offer the whole fleet in the install dialog.
+  // Only the Spark that leads the fleet plans placements, only a fleet of
+  // more than one Spark has a choice to make, and a controller that cannot
+  // name its own node could not tell a local install from a remote one.
+  const canPlaceAcrossFleet =
+    fleet !== null && fleet.nodes.length > 1 && fleet.controller_node_id !== ''
+  // The Spark the "Run on" list points at now, and whether it is another one.
+  // "Choose for me" resolves here, so every line the dialog writes about the
+  // target machine names the same Spark either way.
+  const targetSparkID = placedNodeID(placementChoice, placementPlan)
+  const targetSpark = targetSparkID ? sparks.find(spark => spark.nodeID === targetSparkID) : undefined
+  // The install runs on a Spark that is not this one. Everything the dialog
+  // says about disk, memory, versions and switching then belongs to that
+  // machine, and the fleet carries the install there.
+  const onFleetSpark = placementPlan !== null && targetSpark !== undefined && !targetSpark.isSelf
   const usage = useMemo(() => new Map((tokens?.models ?? []).map(item => [item.recipe_id, item])), [tokens])
   const sorted = useMemo(() => sortCatalog(recipes), [recipes])
   const detected = system?.hardware_scope.detected_spark_count ?? 0
@@ -338,6 +367,23 @@ export default function Models({
     }
   }
 
+  // Which Sparks the controller would place this model on. A model that needs
+  // more than one Spark runs across the whole fleet and has no placement to
+  // choose, so it is never planned. A plan this console cannot read leaves
+  // the dialog exactly as it was before the fleet existed, which is why the
+  // refusal is answered with null rather than raised.
+  const placementPlanFor = async (recipe: Recipe): Promise<PlacementPlan | null> => {
+    if (!canPlaceAcrossFleet || recipe.topology.spark_count !== 1) return null
+    try {
+      return await api<PlacementPlan>(PLACEMENT_PLAN_PATH, {
+        method: 'POST',
+        body: JSON.stringify({ recipe_id: recipe.id }),
+      })
+    } catch {
+      return null
+    }
+  }
+
   const startInstall = (recipe: Recipe) =>
     run(recipe.id, async () => {
       const preflight = await api<Preflight>(`/api/v1/preflight?recipe_id=${encodeURIComponent(recipe.id)}`)
@@ -347,6 +393,9 @@ export default function Models({
       // something before the new download can take over.
       const own = installed.get(recipe.id)
       const switchFrom = activeOther(recipe.id)?.recipe_id ?? (own?.active ? recipe.id : undefined)
+      const plan = await placementPlanFor(recipe)
+      setPlacementPlan(plan)
+      setPlacementChoice(initialPlacement(plan))
       setConfirm({ recipe, preflight, switchFrom })
       setLicence(false)
       setTerritoryEligibility(false)
@@ -383,11 +432,55 @@ export default function Models({
     return peerInstalled.get(confirm.recipe.id)?.active ? confirm.recipe.id : undefined
   }
 
+  // An install the fleet carries to another Spark. The controller plans it,
+  // reserves that machine, starts the job there and answers with the
+  // placement it made, so the progress window follows that Spark's own job
+  // through the placement stream every other fleet action already uses.
+  const installOnFleetSpark = async (recipe: Recipe, nodeID: string) => {
+    const host = sparks.find(spark => spark.nodeID === nodeID)
+    const answer = await api<{ deployment?: FleetDeploymentView }>(FLEET_DEPLOYMENTS_PATH, {
+      method: 'POST',
+      headers: idempotency(),
+      body: JSON.stringify(fleetInstallRequest(recipe.id, nodeID, installRequest(
+        licence,
+        territoryEligibility,
+        fleetSwitchFrom(host) ? activate : true,
+      ))),
+    })
+    const deployment = answer.deployment
+    const job = deployment?.job
+    // The window below follows one job on one placement. An answer carrying
+    // neither is not one this console can go on with, and saying so plainly
+    // beats opening a window on nothing.
+    if (!deployment?.deployment_id || !job) throw new Error(NO_PLACEMENT_BACK)
+    const deploymentID = deployment.deployment_id
+    dialogRef.current?.close()
+    setConfirm(null)
+    // The row locks on the placement it just gained, without waiting for the
+    // next placement poll to report it.
+    touchedPlacements.current.add(deploymentID)
+    setPlacements(previous => new Map(previous).set(deploymentKey(nodeID, recipe.id), deployment))
+    setStartedOnPlacement(previous => new Map(previous).set(deploymentID, job.id))
+    openFleetDeployment(deploymentID, job)
+  }
+
   const confirmInstall = () =>
     confirm &&
     run(confirm.recipe.id, async () => {
       const recipe = confirm.recipe
       if (!installConfirmationsComplete(recipe, licence, territoryEligibility)) return
+      // The fleet-wide list is in front, so this install goes where it
+      // points. A Spark that is not this one is installed on through the
+      // fleet, which reserves it there and answers with that Spark's own job.
+      if (placementPlan && recipe.topology.spark_count === 1) {
+        const route = installRoute(placementChoice, placementPlan, fleet?.controller_node_id ?? '')
+        if (route.where === 'none') throw new Error(NO_PLACEMENT_LEFT)
+        if (route.where === 'fleet') {
+          await installOnFleetSpark(recipe, route.nodeID)
+          return
+        }
+        // A local route falls through to the install call below, unchanged.
+      }
       // The picker is only ever shown with a peer in hand; without one there
       // is nothing to delegate to, and quietly installing here instead would
       // not be what was asked for.
@@ -1017,26 +1110,50 @@ export default function Models({
         {confirm && (() => {
           const recipe = confirm.recipe
           const onPeer = placement === 'peer'
+          // The fleet-wide list replaces the two-option picker whenever the
+          // controller planned this install. Both cannot be on screen at
+          // once: one names Sparks the fleet holds, the other names a Spark
+          // added by address only. A model that needs more than one Spark is
+          // never planned, and the gate is repeated here so the list cannot
+          // appear on such a model even for one render.
+          const fleetChoice = placementPlan !== null && recipe.topology.spark_count === 1
+          const options = fleetChoice
+            ? placementOptions(
+              joinCandidatesWithInventory(placementPlan, fleet),
+              placementPlan.recommended_node_id)
+            : []
+          // The Spark this install runs on, while that is not this one. Every
+          // number below then belongs to that machine, in what it last
+          // reported about itself.
+          const remote = fleetChoice && onFleetSpark ? targetSpark : undefined
+          // The picked row can only be sent if it names a Spark that can
+          // really take the model.
+          const placementReady = !fleetChoice ||
+            installRoute(placementChoice, placementPlan, fleet?.controller_node_id ?? '').where !== 'none'
           // Every number in here belongs to the machine that will actually
           // run the install, which is why the other Spark answers its own
           // preflight before anything below is shown for it.
           const shown = onPeer ? peerPreflight : confirm.preflight
-          const target = onPeer ? peerSummary?.system : system
-          const machine = onPeer && peer ? peer.name : 'This Spark'
-          const verb = verbFor(recipe, placement)
-          const switchFrom = switchFromFor(placement)
+          const target = onPeer ? peerSummary?.system : remote ? remote.inventory : system
+          const machine = onPeer && peer ? peer.name : remote ? remote.displayName : 'This Spark'
+          const verb = remote
+            ? fleetInstallVerb(remote, recipe.id, recipe.version)
+            : verbFor(recipe, placement)
+          const switchFrom = remote ? fleetSwitchFrom(remote) : switchFromFor(placement)
           const licences = licenceArtifacts(recipe)
           const territoryLabel = territoryEligibilityLabel(recipe)
           const confirmationsComplete = installConfirmationsComplete(recipe, licence, territoryEligibility)
           // An update has a version already installed on the target machine
           // to name. Only this Spark's disk is readable from this console, so
-          // a delegated update states the versions and leaves that Spark's
-          // files to that Spark.
+          // an update on any other machine states the versions and leaves
+          // that Spark's files to that Spark.
           const installedVersion = onPeer
             ? peerInstalled.get(recipe.id)?.recipe_version
-            : installed.get(recipe.id)?.recipe_version
+            : remote
+              ? remote.installedModels.find(model => model.recipe_id === recipe.id)?.recipe_version
+              : installed.get(recipe.id)?.recipe_version
           const isUpdate = verb === 'Update' && installedVersion !== undefined
-          const plan = isUpdate && !onPeer ? updatePlan(installedVersion, recipe, storage) : null
+          const plan = isUpdate && !onPeer && !remote ? updatePlan(installedVersion, recipe, storage) : null
           // "container" only when the plan names no kind at all; with a kind,
           // runtimeLabel spells it the way its own project does and falls
           // back to the recipe's own word rather than renaming it.
@@ -1066,9 +1183,35 @@ export default function Models({
                 <button type="button" className="dialog-close" onClick={close} aria-label="Close">×</button>
               </div>
               {/* A model that needs two Sparks always runs across both, so
-                  there is nothing to choose; a one-Spark model can run on
-                  either machine in the fleet. */}
-              {peer && recipe.topology.spark_count === 1 && (
+                  there is nothing to choose; a one-Spark model can run on any
+                  Spark in the fleet. The controller's plan names them, with
+                  what each machine has free, and states the reason beside a
+                  Spark it refuses rather than dropping that Spark from the
+                  list. */}
+              {fleetChoice ? (
+                <div className="install-choice" role="radiogroup" aria-label="Run on">
+                  <p className="kicker">Run on</p>
+                  {options.map(option => (
+                    <label className="confirm-check" key={option.key}>
+                      <input
+                        type="radio"
+                        name="install-placement"
+                        disabled={!option.eligible}
+                        checked={placementChoice === option.key}
+                        onChange={() => setPlacementChoice(option.key)}
+                      />
+                      <span>
+                        {option.name}
+                        <small>{option.note}</small>
+                      </span>
+                      <span className="row-check" />
+                    </label>
+                  ))}
+                  {!placementReady && (
+                    <p className="muted" style={{ fontSize: 12.5 }}>{NO_PLACEMENT_LEFT}</p>
+                  )}
+                </div>
+              ) : peer && recipe.topology.spark_count === 1 ? (
                 <div className="install-choice" role="radiogroup" aria-label="Run on">
                   <p className="kicker">Run on</p>
                   <label className="confirm-check">
@@ -1098,7 +1241,7 @@ export default function Models({
                     <span className="row-check" />
                   </label>
                 </div>
-              )}
+              ) : null}
               {onPeer && peerChecking ? (
                 <>
                   <p className="muted" style={{ fontSize: 12.5 }}>Checking {machine} for space, memory and licence…</p>
@@ -1110,7 +1253,14 @@ export default function Models({
                   <p className="muted" style={{ fontSize: 12.5 }}>Pick this Spark to install here instead.</p>
                   {foot(false)}
                 </>
-              ) : shown && shown.ready ? (
+              ) : remote || (shown && shown.ready) ? (
+                // Every check in a preflight reads one machine's own disk,
+                // memory and licences. This Spark's preflight says nothing
+                // about an install that will not run here, so it does not
+                // stand in the way of one. The Spark that will run it answers
+                // for itself: the plan already refused the Sparks that cannot
+                // take the model, and the controller runs that machine's own
+                // preflight before it places anything, in its own words.
                 <>
                   {isUpdate ? (
                     // Every line here is either a version number, something
@@ -1198,12 +1348,16 @@ export default function Models({
                       After downloading, the first start can take up to {startTimeoutMinutes(recipe)} minutes. Cancelling is safe; downloads resume later.
                     </p>
                   )}
-                  {!onPeer && anotherInstallRunning && (
+                  {/* Both downloads run on this Spark and share its
+                      bandwidth. An install on another Spark shares nothing
+                      with them. */}
+                  {!onPeer && !remote && anotherInstallRunning && (
                     <p className="muted" style={{ fontSize: 12.5 }}>Another download is running. Both continue, sharing bandwidth.</p>
                   )}
                   {switchFrom && (
                     <div className="install-choice" role="radiogroup" aria-label="After the download finishes">
-                      {peer && recipe.topology.spark_count === 1 && <p className="kicker">After the download finishes</p>}
+                      {(fleetChoice || (peer && recipe.topology.spark_count === 1)) &&
+                        <p className="kicker">After the download finishes</p>}
                       <label className="confirm-check">
                         <input
                           type="radio"
@@ -1289,7 +1443,7 @@ export default function Models({
                       </label>
                     )}
                   </div>
-                  {foot(confirmationsComplete)}
+                  {foot(confirmationsComplete && placementReady)}
                 </>
               ) : shown ? (
                 <>

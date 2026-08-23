@@ -537,6 +537,12 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   border-radius: 1px; transform: rotate(-45deg);
 }
 .install-choice .confirm-check:has(input:checked) .row-check { visibility: visible; }
+/* A Spark the placement plan refused. The row stays on screen and states the
+   reason, because a machine that quietly disappears explains nothing; it
+   simply cannot be picked. */
+.install-choice .confirm-check:has(input:disabled) { cursor: default; opacity: 0.55; }
+.install-choice .confirm-check:has(input:disabled):hover { background: var(--panel); border-color: var(--line); }
+.install-choice .confirm-check input:disabled { cursor: default; }
 .dialog-form { display: grid; gap: 14px; }
 .field small { font-size: 11.5px; }
 /* The pairing token is typed into the other console, so it wraps in full

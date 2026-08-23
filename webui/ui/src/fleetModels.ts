@@ -1,7 +1,7 @@
 import {
-  terminal,
+  formatBytes, terminal,
   type FleetDeploymentView, type FleetModelSnapshot, type FleetNodeSummary, type FleetSummary,
-  type NodeInventory, type Peer, type PlacementCandidate, type PlacementPlan,
+  type InstallRequest, type NodeInventory, type Peer, type PlacementCandidate, type PlacementPlan,
 } from './api'
 import { consoleKey, inFleet, isLocalNode, nodeName, nodeServing, nodeStatus, type NodeStatus } from './fleetInvite'
 
@@ -363,3 +363,138 @@ export function joinCandidatesWithInventory(
     }
   })
 }
+
+// ---- Which Spark a new install runs on ---------------------------------------
+
+// The last row of the "Run on" list. It is not a node id, and no node id can
+// look like it. It stands for the Spark the controller recommends, and it is
+// read at the moment the install is sent rather than when the dialog opened.
+export const CHOOSE_FOR_ME = 'choose-for-me'
+
+// The words that row shows, from the approved dialog.
+export const CHOOSE_FOR_ME_NAME = 'Choose for me'
+export const CHOOSE_FOR_ME_NOTE = 'Basement picks the Spark with room.'
+
+// What a refused Spark says when the plan sends no reason with it. The
+// manager always sends one, so this covers only an answer that arrives short
+// of that. A dead row must never be dead without a word for why.
+export const PLACEMENT_REFUSED = 'That Spark cannot take this model now.'
+
+// What the dialog says when every Spark in the list is refused. Each row
+// already carries its own reason; this is the whole list in one line, and the
+// install button stays dead beside it.
+export const NO_PLACEMENT_LEFT = 'No Spark in this fleet can take this model now.'
+
+// One row of the "Run on" list.
+export interface PlacementOption {
+  // The Spark this row installs on, or CHOOSE_FOR_ME.
+  key: string
+  name: string
+  // The line under the name: what that machine has free, or why the plan
+  // refused it.
+  note: string
+  eligible: boolean
+}
+
+// What one candidate Spark has free, in the dialog's own words. A number that
+// Spark has not reported reads n/a, exactly as the fleet line above the table
+// reads it, rather than showing an unreported machine as an empty one.
+export const machineNote = (candidate: PlacementCandidateView): string =>
+  `${formatBytes(candidate.memoryAvailableBytes)} memory free · ${formatBytes(candidate.storageAvailableBytes)} disk free`
+
+// The "Run on" list, in plan order, with "Choose for me" last. A Spark the
+// plan refused keeps its row and states the refusal, because a machine that
+// silently disappears from the list explains nothing. "Choose for me" is
+// offered only while the plan recommends a Spark that can really take the
+// model: with none, an offer to choose would promise what the fleet cannot do.
+export function placementOptions(
+  candidates: PlacementCandidateView[],
+  recommendedNodeID?: string,
+): PlacementOption[] {
+  const options: PlacementOption[] = candidates.map(candidate => ({
+    key: candidate.node_id,
+    name: candidate.display_name,
+    note: candidate.eligible ? machineNote(candidate) : candidate.reason || PLACEMENT_REFUSED,
+    eligible: candidate.eligible,
+  }))
+  const recommended = candidates.some(
+    candidate => candidate.node_id === recommendedNodeID && candidate.eligible)
+  if (recommended) {
+    options.push({ key: CHOOSE_FOR_ME, name: CHOOSE_FOR_ME_NAME, note: CHOOSE_FOR_ME_NOTE, eligible: true })
+  }
+  return options
+}
+
+// The row the dialog opens on: the Spark the controller recommends. Without a
+// usable recommendation it opens on the first Spark that could hold the
+// model, and with none of those it opens on nothing, which leaves the install
+// button dead rather than pointing it at a machine that would refuse.
+export function initialPlacement(plan: PlacementPlan | null): string {
+  const candidates = plan?.candidates ?? []
+  const recommended = plan?.recommended_node_id ?? ''
+  if (recommended && candidates.some(item => item.node_id === recommended && item.eligible)) return recommended
+  return candidates.find(candidate => candidate.eligible)?.node_id ?? ''
+}
+
+// The Spark one choice names. Everything after this reads a node id, so the
+// recommended Spark and a named Spark travel the same path.
+export const placedNodeID = (choice: string, plan: PlacementPlan | null): string =>
+  (choice === CHOOSE_FOR_ME ? plan?.recommended_node_id ?? '' : choice)
+
+// Where a confirmed install goes. This Spark keeps the local install call it
+// has always used. Another Spark is installed on through the fleet, which
+// reserves and starts the model there. "none" is what a list with nothing to
+// pick answers, so the button can stay dead instead of sending a request the
+// controller would only refuse.
+export type InstallRoute =
+  | { where: 'local' }
+  | { where: 'fleet'; nodeID: string }
+  | { where: 'none' }
+
+export function installRoute(
+  choice: string,
+  plan: PlacementPlan | null,
+  selfNodeID: string,
+): InstallRoute {
+  const nodeID = placedNodeID(choice, plan)
+  // Without its own node id this console cannot tell its machine from any
+  // other, and sending an install to the wrong one is worse than sending none.
+  if (nodeID === '' || selfNodeID === '') return { where: 'none' }
+  const candidate = (plan?.candidates ?? []).find(item => item.node_id === nodeID)
+  if (candidate === undefined || !candidate.eligible) return { where: 'none' }
+  return nodeID === selfNodeID ? { where: 'local' } : { where: 'fleet', nodeID }
+}
+
+// Where the controller plans a placement, and where the fleet makes one.
+export const PLACEMENT_PLAN_PATH = '/api/v1/fleet/placements/plan'
+export const FLEET_DEPLOYMENTS_PATH = '/api/v1/fleet/deployments'
+
+// The body the fleet's create-placement API reads (fleetDeployments POST in
+// internal/httpapi/fleet_deployments.go). It is the local install request with
+// the Spark to run on named beside it, so neither path can drop a
+// confirmation the other one sends.
+export interface FleetInstallRequest extends InstallRequest {
+  recipe_id: string
+  node_id: string
+}
+
+export const fleetInstallRequest = (
+  recipeID: string,
+  nodeID: string,
+  intent: InstallRequest,
+): FleetInstallRequest => ({ recipe_id: recipeID, node_id: nodeID, ...intent })
+
+// What the install button says for a Spark that is not this one. That Spark
+// reports which version it holds and nothing about part-finished downloads,
+// so a resume is never claimed for it.
+export function fleetInstallVerb(spark: FleetRow | undefined, recipeID: string, version: number): string {
+  const there = spark?.installedModels.find(model => model.recipe_id === recipeID)
+  return there && there.recipe_version < version ? 'Update' : 'Install'
+}
+
+// Which model has to stop on that Spark before this install can serve. A
+// Spark serving another model gives that one up; a Spark serving this same
+// model restarts it on the new version. A Spark serving nothing gives up
+// nothing.
+export const fleetSwitchFrom = (spark: FleetRow | undefined): string | undefined =>
+  spark?.serving?.recipe_id
