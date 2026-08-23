@@ -244,6 +244,9 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/fleet/invite/status", server.withReadAuth(server.fleetInviteStatus))
 	mux.HandleFunc("/api/v1/fleet/placements/plan", server.fleetPlacementPlan)
 	mux.HandleFunc("/api/v1/fleet/deployments", server.fleetDeployments)
+	// The exact path wins over the prefix below, so no deployment id can
+	// shadow adoption. Deployment ids always start with "deployment_".
+	mux.HandleFunc("/api/v1/fleet/deployments/adopt", server.fleetDeploymentAdopt)
 	mux.HandleFunc("/api/v1/fleet/deployments/", server.fleetDeploymentAction)
 	mux.HandleFunc("/api/v1/fleet/upgrade", server.withReadAuth(server.fleetUpgradeAPI))
 	// Two-Spark serving: the head node drives this node's own rank through

@@ -111,6 +111,32 @@ func (m *Manager) independentDeployment(w http.ResponseWriter, r *http.Request) 
 	writeFleetJSON(w, http.StatusAccepted, independentDeploymentResponse{Job: job, Created: created})
 }
 
+// independentDeploymentAdopt records an already-installed model as a fleet
+// deployment. Only this node's adopted controller may ask for it, exactly as
+// with every other placement handler here. The reply is 200, not 202: no work
+// starts, because the carrier job is terminal the moment it exists.
+func (m *Manager) independentDeploymentAdopt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		fleetMethodNotAllowed(w)
+		return
+	}
+	if err := m.requireControllerCaller(r); err != nil {
+		writeFleetError(w, http.StatusForbidden, err)
+		return
+	}
+	var request adoptDeploymentRequest
+	if err := decodeFleetBody(r, &request); err != nil {
+		writeFleetError(w, http.StatusBadRequest, err)
+		return
+	}
+	job, created, err := m.adoptIndependent(r.Context(), request)
+	if err != nil {
+		writeFleetError(w, http.StatusConflict, err)
+		return
+	}
+	writeFleetJSON(w, http.StatusOK, adoptDeploymentResponse{Job: job, Created: created})
+}
+
 func (m *Manager) independentJob(w http.ResponseWriter, r *http.Request) {
 	if err := m.requireControllerCaller(r); err != nil {
 		writeFleetError(w, http.StatusForbidden, err)

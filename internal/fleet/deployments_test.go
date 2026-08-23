@@ -1,10 +1,16 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -66,6 +72,31 @@ func (runtime *placementRuntime) CreateIndependentJob(ctx context.Context, selec
 	}
 	job, err = runtime.database.GetJob(ctx, job.ID)
 	return job, true, err
+}
+
+// AdoptIndependentJob mirrors the real runtime in internal/httpapi: it
+// refuses a model that is not installed or that sits at another version, and
+// it never touches the serving container. The carrier job is terminal at
+// once, so nothing here starts, stops, or restarts anything.
+func (runtime *placementRuntime) AdoptIndependentJob(ctx context.Context, selected recipe.Recipe, deploymentID, key string) (store.Job, bool, error) {
+	model, err := runtime.database.Model(ctx, selected.ID)
+	if err != nil {
+		return store.Job{}, false, errors.New("the model is not installed on that node")
+	}
+	if model.RecipeVersion != selected.Version {
+		return store.Job{}, false, errors.New("the installed model is a different version, so update it before you adopt it")
+	}
+	job, created, err := runtime.database.CreateJob(ctx, "adopt", selected.ID, key, map[string]any{"deployment_id": deploymentID})
+	if err != nil {
+		return store.Job{}, false, err
+	}
+	if created {
+		if err := runtime.database.UpdateJobState(ctx, job.ID, "ready", ""); err != nil {
+			return store.Job{}, false, err
+		}
+	}
+	job, err = runtime.database.GetJob(ctx, job.ID)
+	return job, created, err
 }
 
 func (runtime *placementRuntime) IndependentJob(ctx context.Context, jobID string) (store.Job, error) {
@@ -201,6 +232,166 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 	if err != nil || projected.OwnerJobID != actionJob.ID || projected.Job == nil || projected.Job.ID != actionJob.ID {
 		t.Fatalf("latest lifecycle projection=%+v action=%+v err=%v", projected, actionJob, err)
 	}
+}
+
+func TestAdoptIndependentDeploymentRecordsAnInstalledModel(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	independent := independentRecipes(t, recipes, 3)
+	serving, stale, absent := independent[0], independent[1], independent[2]
+	grouped := groupedRecipe(t, recipes)
+	controller, controllerStore := newPlacementManager(t, "controller", "192.168.99.30", recipes)
+	member, memberStore := newPlacementManager(t, "node-a", "192.168.99.31", recipes)
+	member.SetIndependentRuntime(&placementRuntime{database: memberStore, allocator: member.Allocator()})
+	controller.newClient = inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Both models were installed before fleet placement existed, so neither
+	// has a deployment record and neither owns a job anywhere.
+	if err := memberStore.SetInstalled(ctx, store.InstalledModel{RecipeID: serving.ID, RecipeVersion: serving.Version, Status: "ready", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memberStore.SetInstalled(ctx, store.InstalledModel{RecipeID: stale.ID, RecipeVersion: stale.Version + 1, Status: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+
+	adopted, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, serving.ID, "adopt-serving")
+	if err != nil || !created {
+		t.Fatalf("first adoption created=%v err=%v", created, err)
+	}
+	if adopted.Job == nil || adopted.Job.Kind != "adopt" || adopted.Job.State != "ready" {
+		t.Fatalf("the carrier job is not a terminal adopt job: %+v", adopted.Job)
+	}
+	if adopted.OwnerNodeID != member.identity.NodeID || adopted.RecipeID != serving.ID || adopted.OwnerJobID != adopted.Job.ID {
+		t.Fatalf("the adopted record does not name the model on its node: %+v", adopted)
+	}
+	if independentDeploymentIDOf(t, *adopted.Job) != adopted.DeploymentID {
+		t.Fatalf("the carrier job payload does not carry the deployment id: %s", adopted.Job.Payload)
+	}
+
+	// A second adoption with another key must reach the same record and must
+	// not create a second job. The deployment id comes from the fleet, the
+	// node, and the recipe, never from the key.
+	again, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, serving.ID, "adopt-serving-again")
+	if err != nil || created {
+		t.Fatalf("repeat adoption created=%v err=%v", created, err)
+	}
+	if again.DeploymentID != adopted.DeploymentID {
+		t.Fatalf("repeat adoption ids %s and %s differ", again.DeploymentID, adopted.DeploymentID)
+	}
+	memberJobs, err := memberStore.ListJobs(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memberJobs) != 1 || memberJobs[0].Kind != "adopt" {
+		t.Fatalf("adoption did not leave exactly one carrier job: %+v", memberJobs)
+	}
+	controllerJobs, err := controllerStore.ListJobs(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(controllerJobs) != 0 {
+		t.Fatalf("the controller created jobs of its own: %+v", controllerJobs)
+	}
+	// Nothing started, stopped, or restarted: the model still serves exactly
+	// as it did before the record appeared.
+	assertServingRecipe(t, memberStore, serving.ID)
+
+	for _, test := range []struct {
+		name     string
+		nodeID   string
+		recipeID string
+		key      string
+		want     string
+	}{
+		{name: "a two node recipe", nodeID: member.identity.NodeID, recipeID: grouped.ID, key: "adopt-grouped", want: "cannot use independent placement"},
+		{name: "a model that is not installed", nodeID: member.identity.NodeID, recipeID: absent.ID, key: "adopt-absent", want: "the model is not installed on that node"},
+		{name: "a model at another version", nodeID: member.identity.NodeID, recipeID: stale.ID, key: "adopt-stale", want: "the installed model is a different version"},
+		{name: "a node outside the fleet", nodeID: "node_missing", recipeID: serving.ID, key: "adopt-missing", want: "not an active fleet member"},
+		{name: "a model outside the catalogue", nodeID: member.identity.NodeID, recipeID: "no-such-model", key: "adopt-unknown", want: "not in this controller's current catalogue"},
+		{name: "no idempotency key", nodeID: member.identity.NodeID, recipeID: serving.ID, key: "", want: "a valid idempotency key is required"},
+	} {
+		_, created, err := controller.AdoptIndependentDeployment(ctx, test.nodeID, test.recipeID, test.key)
+		if err == nil || created {
+			t.Fatalf("%s: adoption was accepted", test.name)
+		}
+		if !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("%s: error %q does not name %q", test.name, err.Error(), test.want)
+		}
+	}
+	deployments, err := controller.Deployments(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deployments) != 1 || deployments[0].DeploymentID != adopted.DeploymentID {
+		t.Fatalf("a refused adoption left a record behind: %+v", deployments)
+	}
+
+	// Only this node's pinned controller may adopt on it. A stranger that
+	// completes mutual TLS is still not the fleet authority here.
+	stranger, _ := newPlacementManager(t, "stranger", "192.168.99.32", recipes)
+	body, err := json.Marshal(adoptDeploymentRequest{
+		RecipeID: serving.ID, RecipeVersion: serving.Version,
+		DeploymentID: adopted.DeploymentID, IdempotencyKey: "adopt-stranger",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://member.test/internal/fleet/v1/deployments/adopt", bytes.NewReader(body))
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{stranger.identity.Certificate}}
+	response := httptest.NewRecorder()
+	member.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("a node that is not the controller adopted: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func independentDeploymentIDOf(t *testing.T, job store.Job) string {
+	t.Helper()
+	var payload struct {
+		DeploymentID string `json:"deployment_id"`
+	}
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.DeploymentID
+}
+
+func independentRecipes(t *testing.T, recipes []recipe.Recipe, count int) []recipe.Recipe {
+	t.Helper()
+	var selected []recipe.Recipe
+	for _, item := range recipes {
+		if item.Topology.SparkCount == 1 {
+			selected = append(selected, item)
+		}
+		if len(selected) == count {
+			return selected
+		}
+	}
+	t.Fatalf("%d independent recipes are required", count)
+	return nil
+}
+
+func groupedRecipe(t *testing.T, recipes []recipe.Recipe) recipe.Recipe {
+	t.Helper()
+	for _, item := range recipes {
+		if item.Topology.SparkCount > 1 {
+			return item
+		}
+	}
+	t.Fatal("a multi-node recipe is required")
+	return recipe.Recipe{}
 }
 
 func newPlacementManager(t *testing.T, name, address string, recipes []recipe.Recipe) (*Manager, *store.Store) {

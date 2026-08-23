@@ -34,6 +34,7 @@ type IndependentIntent struct {
 type IndependentRuntime interface {
 	PreflightIndependent(context.Context, recipe.Recipe, string) (json.RawMessage, bool, error)
 	CreateIndependentJob(context.Context, recipe.Recipe, IndependentIntent, string, string, string) (store.Job, bool, error)
+	AdoptIndependentJob(context.Context, recipe.Recipe, string, string) (store.Job, bool, error)
 	IndependentJob(context.Context, string) (store.Job, error)
 	IndependentAction(context.Context, store.Job, string, string, IndependentIntent) (store.Job, error)
 }
@@ -121,6 +122,21 @@ type independentDeploymentRequest struct {
 }
 
 type independentDeploymentResponse struct {
+	Job     store.Job `json:"job"`
+	Created bool      `json:"created"`
+}
+
+// Adoption carries no grant and no reservation, because it claims nothing on
+// the target node. It only names the exact recipe the controller believes is
+// already installed there, and the deployment record it belongs to.
+type adoptDeploymentRequest struct {
+	RecipeID       string `json:"recipe_id"`
+	RecipeVersion  int    `json:"recipe_version"`
+	DeploymentID   string `json:"deployment_id"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type adoptDeploymentResponse struct {
 	Job     store.Job `json:"job"`
 	Created bool      `json:"created"`
 }
@@ -239,6 +255,88 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 	return Deployment{FleetDeployment: createdDeployment, Job: &job}, created && jobCreated, nil
 }
 
+// AdoptIndependentDeployment writes the deployment record that a model
+// installed before fleet placement never got. Such a model has no
+// deployment_id anywhere, so the controller cannot reach it through
+// /api/v1/fleet/deployments/{id}/{action}. Adoption creates the record and a
+// terminal carrier job on the owner node. It starts nothing, stops nothing,
+// and reserves nothing: the running container is left exactly as it is.
+func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipeID, idempotencyKey string) (Deployment, bool, error) {
+	if err := m.requireFleetMutationAllowed(ctx); err != nil {
+		return Deployment{}, false, err
+	}
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" || len(idempotencyKey) > 128 {
+		return Deployment{}, false, errors.New("a valid idempotency key is required")
+	}
+	selected, ok := recipe.Find(m.effectiveRecipes(), recipeID)
+	if !ok {
+		return Deployment{}, false, errors.New("the model is not in this controller's current catalogue")
+	}
+	if selected.Topology.SparkCount != 1 {
+		return Deployment{}, false, fmt.Errorf("%s requires %d nodes and cannot use independent placement", selected.DisplayName, selected.Topology.SparkCount)
+	}
+	fingerprint, err := RecipeFingerprint(selected)
+	if err != nil {
+		return Deployment{}, false, err
+	}
+	config, err := m.database.FleetConfig(ctx)
+	if err != nil {
+		return Deployment{}, false, err
+	}
+	if config.Role == "member" {
+		return Deployment{}, false, errors.New("a fleet member cannot adopt a deployment")
+	}
+	authority := config.FleetID
+	if authority == "" {
+		authority = m.identity.NodeID
+	}
+	// The deployment id comes from the fleet, the node, and the recipe. It
+	// never comes from the caller's idempotency key, so two consoles that
+	// adopt the same model on the same node reach the same single record.
+	deploymentID := stablePlacementID("deployment_", authority, "adopt:"+nodeID+":"+recipeID)
+	lock := m.placementLock(deploymentID)
+	lock.Lock()
+	defer lock.Unlock()
+	if existing, err := m.database.FleetDeployment(ctx, deploymentID); err == nil {
+		// An adopted record with an owner job is already what the caller
+		// wants, even if the catalogue moved on since. Hand it back.
+		if existing.OwnerJobID != "" {
+			view, viewErr := m.Deployment(ctx, deploymentID)
+			return view, false, viewErr
+		}
+		if existing.RecipeVersion != selected.Version || existing.RecipeFingerprint != fingerprint {
+			return Deployment{}, false, errors.New("an earlier adoption record for this model names a different version")
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Deployment{}, false, err
+	}
+	target, local, err := m.placementNode(ctx, nodeID)
+	if err != nil {
+		return Deployment{}, false, fmt.Errorf("node %s: %w", nodeID, err)
+	}
+	job, jobCreated, err := m.adoptOnNode(ctx, target, local, adoptDeploymentRequest{
+		RecipeID: selected.ID, RecipeVersion: selected.Version,
+		DeploymentID: deploymentID, IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return Deployment{}, false, fmt.Errorf("node %s cannot adopt %s: %w", nodeID, selected.DisplayName, err)
+	}
+	adopted, created, err := m.database.CreateFleetDeployment(ctx, store.FleetDeployment{
+		DeploymentID: deploymentID, RecipeID: selected.ID, RecipeVersion: selected.Version,
+		RecipeFingerprint: fingerprint, TopologyCount: 1, OwnerNodeID: nodeID, State: "adopting",
+	}, store.FleetDeploymentNode{NodeID: nodeID})
+	if err != nil {
+		return Deployment{}, false, err
+	}
+	observedAt := m.now().UTC().Format(time.RFC3339Nano)
+	if err := m.database.SetFleetDeploymentJob(ctx, deploymentID, job.ID, job.State, observedAt); err != nil {
+		return Deployment{}, false, err
+	}
+	adopted.OwnerJobID, adopted.State, adopted.LastObservedAt = job.ID, job.State, observedAt
+	return Deployment{FleetDeployment: adopted, Job: &job}, created && jobCreated, nil
+}
+
 func (m *Manager) placementLock(deploymentID string) *sync.Mutex {
 	m.placementMu.Lock()
 	defer m.placementMu.Unlock()
@@ -301,6 +399,38 @@ func (m *Manager) startOnNode(ctx context.Context, target store.FleetNode, local
 	var response independentDeploymentResponse
 	err = callFleetJSON(ctx, client, http.MethodPost, target.NodeURL+"/internal/fleet/v1/deployments/independent", independentDeploymentRequest{Grant: grant, Intent: intent}, &response)
 	return response.Job, response.Created, err
+}
+
+func (m *Manager) adoptOnNode(ctx context.Context, target store.FleetNode, local bool, request adoptDeploymentRequest) (store.Job, bool, error) {
+	if local {
+		return m.adoptIndependent(ctx, request)
+	}
+	client, err := m.clientForNode(target)
+	if err != nil {
+		return store.Job{}, false, err
+	}
+	var response adoptDeploymentResponse
+	err = callFleetJSON(ctx, client, http.MethodPost, target.NodeURL+"/internal/fleet/v1/deployments/adopt", request, &response)
+	return response.Job, response.Created, err
+}
+
+// adoptIndependent runs on the node that already holds the model. It confirms
+// the exact recipe the controller named, then asks the local runtime for the
+// carrier job. There is no grant to verify and no reservation to commit,
+// because adoption takes no resource this node has not already given.
+func (m *Manager) adoptIndependent(ctx context.Context, request adoptDeploymentRequest) (store.Job, bool, error) {
+	if request.DeploymentID == "" || request.RecipeID == "" || request.RecipeVersion <= 0 {
+		return store.Job{}, false, errors.New("the adoption request is incomplete")
+	}
+	selected, ok := recipe.FindVersion(m.recipes(), request.RecipeID, request.RecipeVersion)
+	if !ok || selected.Topology.SparkCount != 1 {
+		return store.Job{}, false, errors.New("the target node does not hold that exact independent recipe")
+	}
+	runtime := m.independentRuntime()
+	if runtime == nil {
+		return store.Job{}, false, errors.New("the target manager is not ready to adopt placements")
+	}
+	return runtime.AdoptIndependentJob(ctx, selected, request.DeploymentID, request.IdempotencyKey)
 }
 
 func (m *Manager) placementNode(ctx context.Context, nodeID string) (store.FleetNode, bool, error) {

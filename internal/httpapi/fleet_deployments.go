@@ -70,6 +70,41 @@ func (s *Server) CreateIndependentJob(ctx context.Context, selected recipe.Recip
 	return job, created, nil
 }
 
+// AdoptIndependentJob gives an already-installed model the deployment record
+// it never had. The job is only a carrier: its payload holds the
+// deployment_id, which is the one place independentDeploymentID reads it
+// from. The engine never sees this job. It is terminal from the moment it is
+// created, so the serving container is not touched.
+func (s *Server) AdoptIndependentJob(ctx context.Context, selected recipe.Recipe, deploymentID, idempotencyKey string) (store.Job, bool, error) {
+	if selected.Topology.SparkCount != 1 {
+		return store.Job{}, false, errors.New("only a single-node recipe can use independent placement")
+	}
+	if strings.TrimSpace(deploymentID) == "" {
+		return store.Job{}, false, errors.New("the deployment id is required")
+	}
+	if strings.TrimSpace(idempotencyKey) == "" || len(idempotencyKey) > 128 {
+		return store.Job{}, false, errors.New("a valid idempotency key is required")
+	}
+	model, err := s.store.Model(ctx, selected.ID)
+	if err != nil {
+		return store.Job{}, false, errors.New("the model is not installed on that node")
+	}
+	if model.RecipeVersion != selected.Version {
+		return store.Job{}, false, errors.New("the installed model is a different version, so update it before you adopt it")
+	}
+	job, created, err := s.store.CreateJob(ctx, "adopt", selected.ID, idempotencyKey, map[string]any{"deployment_id": deploymentID})
+	if err != nil {
+		return store.Job{}, false, err
+	}
+	if created {
+		if err := s.store.UpdateJobState(ctx, job.ID, "ready", ""); err != nil {
+			return store.Job{}, false, err
+		}
+	}
+	job, err = s.store.GetJob(ctx, job.ID)
+	return job, created, err
+}
+
 func boolPointer(value bool) *bool { return &value }
 
 func (s *Server) IndependentJob(ctx context.Context, jobID string) (store.Job, error) {
@@ -223,6 +258,44 @@ func (s *Server) fleetDeployments(w http.ResponseWriter, r *http.Request) {
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+// fleetDeploymentAdopt records a model that a node already runs as a fleet
+// deployment, so this controller's console can act on it. The deployment id
+// is deterministic from the fleet, the node, and the recipe. It does NOT come
+// from the Idempotency-Key: that header only guards the carrier job row on
+// the owner node. Adoption starts, stops, and restarts nothing.
+func (s *Server) fleetDeploymentAdopt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.fleetManager == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("fleet placement is unavailable"))
+		return
+	}
+	if err := s.auth.AuthorizeMutation(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	var request struct {
+		NodeID   string `json:"node_id"`
+		RecipeID string `json:"recipe_id"`
+	}
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	deployment, created, err := s.fleetManager.AdoptIndependentDeployment(r.Context(), request.NodeID, request.RecipeID, r.Header.Get("Idempotency-Key"))
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, map[string]any{"deployment": deployment, "created": created})
 }
 
 func (s *Server) fleetDeploymentAction(w http.ResponseWriter, r *http.Request) {

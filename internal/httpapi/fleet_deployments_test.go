@@ -54,6 +54,7 @@ func TestPublicAPIKeyCannotPlanOrCreateFleetDeployment(t *testing.T) {
 	}{
 		{path: "/api/v1/fleet/placements/plan", body: `{"recipe_id":"anything"}`, want: http.StatusUnauthorized},
 		{path: "/api/v1/fleet/deployments", body: `{"recipe_id":"anything","node_id":"anything","confirmed":true}`, want: http.StatusForbidden},
+		{path: "/api/v1/fleet/deployments/adopt", body: `{"recipe_id":"anything","node_id":"anything"}`, want: http.StatusForbidden},
 	} {
 		request := httptest.NewRequest(http.MethodPost, "http://manager.test"+test.path, bytes.NewBufferString(test.body))
 		request.Header.Set("Content-Type", "application/json")
