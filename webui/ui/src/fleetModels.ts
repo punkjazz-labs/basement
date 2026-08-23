@@ -385,13 +385,75 @@ export const PLACEMENT_REFUSED = 'That Spark cannot take this model now.'
 // install button stays dead beside it.
 export const NO_PLACEMENT_LEFT = 'No Spark in this fleet can take this model now.'
 
+// A Spark the plan named that the fleet table holds no row for. The table
+// drops a node with no console URL and de-duplicates two nodes that share
+// one, so such a Spark is one this console cannot open, cannot follow, and
+// cannot tell apart from another. It is named in the list and refused.
+export const NO_FLEET_ROW = 'This console cannot reach that Spark now.'
+
+// One Spark the "Run on" list offers, as both the screen and the request read
+// it. The plan says what the controller would do; the fleet table's row for
+// that same machine says what this console can reach. Both are resolved once,
+// here, so the facts the dialog shows and the Spark the install is sent to can
+// never name two different machines.
+export interface PlacementTarget {
+  nodeID: string
+  name: string
+  // The Spark this console runs on, which installs through its own API.
+  isSelf: boolean
+  memoryAvailableBytes?: number
+  storageAvailableBytes?: number
+  // The model that Spark holds active, as the plan reports it. It counts
+  // while it is still starting, because a model that is starting still has to
+  // stop before another one can have the machine.
+  currentModel?: FleetModelSnapshot
+  // Which version of this same model that Spark already holds, if any.
+  installedVersion?: number
+  eligible: boolean
+  // Why this Spark cannot be picked. Empty while it can.
+  reason: string
+}
+
+export function placementTargets(
+  plan: PlacementPlan | null,
+  summary: FleetSummary | null,
+  sparks: FleetRow[],
+  selfNodeID: string,
+): PlacementTarget[] {
+  const rows = new Map(sparks.map(spark => [spark.nodeID, spark]))
+  const recipeID = plan?.recipe_id ?? ''
+  return joinCandidatesWithInventory(plan, summary).map(candidate => {
+    const spark = rows.get(candidate.node_id)
+    // Two independent signals say this is the machine the console runs on:
+    // the controller's own node id, and the row the table already marked. A
+    // console always reaches its own Spark, with or without a row for it.
+    const isSelf = (selfNodeID !== '' && candidate.node_id === selfNodeID) || spark?.isSelf === true
+    const reachable = isSelf || spark !== undefined
+    const eligible = candidate.eligible && reachable
+    return {
+      nodeID: candidate.node_id,
+      // The plan and the table read the same membership summary, so both
+      // carry the same name. The row's name only fills a blank.
+      name: candidate.display_name || spark?.displayName || '',
+      isSelf,
+      memoryAvailableBytes: candidate.memoryAvailableBytes,
+      storageAvailableBytes: candidate.storageAvailableBytes,
+      currentModel: candidate.current_model,
+      installedVersion: spark?.installedModels
+        .find(model => model.recipe_id === recipeID)?.recipe_version,
+      eligible,
+      reason: eligible ? '' : candidate.eligible ? NO_FLEET_ROW : candidate.reason || PLACEMENT_REFUSED,
+    }
+  })
+}
+
 // One row of the "Run on" list.
 export interface PlacementOption {
   // The Spark this row installs on, or CHOOSE_FOR_ME.
   key: string
   name: string
-  // The line under the name: what that machine has free, or why the plan
-  // refused it.
+  // The line under the name: what that machine has free, or why it is
+  // refused.
   note: string
   eligible: boolean
 }
@@ -399,70 +461,75 @@ export interface PlacementOption {
 // What one candidate Spark has free, in the dialog's own words. A number that
 // Spark has not reported reads n/a, exactly as the fleet line above the table
 // reads it, rather than showing an unreported machine as an empty one.
-export const machineNote = (candidate: PlacementCandidateView): string =>
-  `${formatBytes(candidate.memoryAvailableBytes)} memory free · ${formatBytes(candidate.storageAvailableBytes)} disk free`
+export const machineNote = (
+  machine: { memoryAvailableBytes?: number; storageAvailableBytes?: number },
+): string =>
+  `${formatBytes(machine.memoryAvailableBytes)} memory free · ${formatBytes(machine.storageAvailableBytes)} disk free`
 
-// The "Run on" list, in plan order, with "Choose for me" last. A Spark the
-// plan refused keeps its row and states the refusal, because a machine that
-// silently disappears from the list explains nothing. "Choose for me" is
-// offered only while the plan recommends a Spark that can really take the
-// model: with none, an offer to choose would promise what the fleet cannot do.
+// The "Run on" list, in plan order, with "Choose for me" last. A refused Spark
+// keeps its row and states the refusal, because a machine that silently
+// disappears from the list explains nothing. "Choose for me" is offered only
+// while the recommended Spark can really take the model: with none, an offer
+// to choose would promise what the fleet cannot do.
 export function placementOptions(
-  candidates: PlacementCandidateView[],
+  targets: PlacementTarget[],
   recommendedNodeID?: string,
 ): PlacementOption[] {
-  const options: PlacementOption[] = candidates.map(candidate => ({
-    key: candidate.node_id,
-    name: candidate.display_name,
-    note: candidate.eligible ? machineNote(candidate) : candidate.reason || PLACEMENT_REFUSED,
-    eligible: candidate.eligible,
+  const options: PlacementOption[] = targets.map(target => ({
+    key: target.nodeID,
+    name: target.name,
+    note: target.eligible ? machineNote(target) : target.reason,
+    eligible: target.eligible,
   }))
-  const recommended = candidates.some(
-    candidate => candidate.node_id === recommendedNodeID && candidate.eligible)
-  if (recommended) {
+  if (targets.some(target => target.nodeID === recommendedNodeID && target.eligible)) {
     options.push({ key: CHOOSE_FOR_ME, name: CHOOSE_FOR_ME_NAME, note: CHOOSE_FOR_ME_NOTE, eligible: true })
   }
   return options
 }
 
 // The row the dialog opens on: the Spark the controller recommends. Without a
-// usable recommendation it opens on the first Spark that could hold the
+// usable recommendation it opens on the first Spark that could take the
 // model, and with none of those it opens on nothing, which leaves the install
 // button dead rather than pointing it at a machine that would refuse.
-export function initialPlacement(plan: PlacementPlan | null): string {
-  const candidates = plan?.candidates ?? []
-  const recommended = plan?.recommended_node_id ?? ''
-  if (recommended && candidates.some(item => item.node_id === recommended && item.eligible)) return recommended
-  return candidates.find(candidate => candidate.eligible)?.node_id ?? ''
+export function initialPlacement(targets: PlacementTarget[], recommendedNodeID?: string): string {
+  if (targets.some(target => target.nodeID === recommendedNodeID && target.eligible)) {
+    return recommendedNodeID ?? ''
+  }
+  return targets.find(target => target.eligible)?.nodeID ?? ''
 }
 
-// The Spark one choice names. Everything after this reads a node id, so the
-// recommended Spark and a named Spark travel the same path.
-export const placedNodeID = (choice: string, plan: PlacementPlan | null): string =>
-  (choice === CHOOSE_FOR_ME ? plan?.recommended_node_id ?? '' : choice)
+// The Spark one choice names, with every fact about it. "Choose for me" reads
+// the recommendation at the moment it is used, so both rows answer with the
+// same kind of row from here on.
+export function placedTarget(
+  choice: string,
+  targets: PlacementTarget[],
+  recommendedNodeID?: string,
+): PlacementTarget | undefined {
+  const nodeID = choice === CHOOSE_FOR_ME ? recommendedNodeID ?? '' : choice
+  if (nodeID === '') return undefined
+  return targets.find(target => target.nodeID === nodeID)
+}
 
 // Where a confirmed install goes. This Spark keeps the local install call it
 // has always used. Another Spark is installed on through the fleet, which
-// reserves and starts the model there. "none" is what a list with nothing to
-// pick answers, so the button can stay dead instead of sending a request the
-// controller would only refuse.
+// reserves and starts the model there. The route carries the whole target, so
+// the request and the dialog cannot read different machines. "none" is what a
+// list with nothing to pick answers, so the button stays dead instead of
+// sending a request the controller would only refuse.
 export type InstallRoute =
   | { where: 'local' }
-  | { where: 'fleet'; nodeID: string }
+  | { where: 'fleet'; target: PlacementTarget }
   | { where: 'none' }
 
 export function installRoute(
   choice: string,
-  plan: PlacementPlan | null,
-  selfNodeID: string,
+  targets: PlacementTarget[],
+  recommendedNodeID?: string,
 ): InstallRoute {
-  const nodeID = placedNodeID(choice, plan)
-  // Without its own node id this console cannot tell its machine from any
-  // other, and sending an install to the wrong one is worse than sending none.
-  if (nodeID === '' || selfNodeID === '') return { where: 'none' }
-  const candidate = (plan?.candidates ?? []).find(item => item.node_id === nodeID)
-  if (candidate === undefined || !candidate.eligible) return { where: 'none' }
-  return nodeID === selfNodeID ? { where: 'local' } : { where: 'fleet', nodeID }
+  const target = placedTarget(choice, targets, recommendedNodeID)
+  if (target === undefined || !target.eligible) return { where: 'none' }
+  return target.isSelf ? { where: 'local' } : { where: 'fleet', target }
 }
 
 // Where the controller plans a placement, and where the fleet makes one.
@@ -487,14 +554,61 @@ export const fleetInstallRequest = (
 // What the install button says for a Spark that is not this one. That Spark
 // reports which version it holds and nothing about part-finished downloads,
 // so a resume is never claimed for it.
-export function fleetInstallVerb(spark: FleetRow | undefined, recipeID: string, version: number): string {
-  const there = spark?.installedModels.find(model => model.recipe_id === recipeID)
-  return there && there.recipe_version < version ? 'Update' : 'Install'
+export const placementVerb = (target: PlacementTarget, version: number): string =>
+  (target.installedVersion !== undefined && target.installedVersion < version ? 'Update' : 'Install')
+
+// Which model has to stop on that Spark before this install can serve. The
+// plan names the model that Spark holds active, whether or not it has
+// finished starting, so a model that is still coming up is named too: it has
+// to stop all the same. A Spark holding this same model active restarts it on
+// the new version, and a Spark holding nothing active gives up nothing.
+export const placementSwitchFrom = (target: PlacementTarget | undefined): string | undefined =>
+  target?.currentModel?.recipe_id
+
+// ---- A model the fleet is still working on -----------------------------------
+
+// The placement that is still working on this model, on whichever Spark runs
+// it. A remote install is recorded as a placement the moment the controller
+// accepts it, but the Spark running it only names the model in a heartbeat
+// once that install has finished. In between, nothing a row reads knows the
+// work started: the table finds the Spark that holds a model by reading
+// heartbeats, so the row would keep a live Install button for the whole
+// download and a second click would create a second placement under a new
+// idempotency key. This reads the record instead of the heartbeat, so the row
+// locks from the first click, on every Spark.
+// kinds is the set of job kinds that change what runs, so a benchmark or a
+// smoke test on another Spark leaves the row alone, exactly as a local one
+// does: both run against a model that is already serving.
+export function workingPlacement(
+  placements: Map<string, FleetDeploymentView>,
+  startedJobs: ReadonlyMap<string, string>,
+  recipeID: string,
+  kinds: ReadonlySet<string>,
+): FleetDeploymentView | undefined {
+  for (const placement of placements.values()) {
+    if (placement.recipe_id !== recipeID) continue
+    // A placement this console has not read a job kind for is treated as work
+    // that changes what runs. Locking a row for a moment is safe; offering a
+    // second install is not.
+    const kind = placement.job?.kind ?? ''
+    if (kind !== '' && !kinds.has(kind)) continue
+    if (placementBusy(placement, startedJobs.get(placement.deployment_id))) return placement
+  }
+  return undefined
 }
 
-// Which model has to stop on that Spark before this install can serve. A
-// Spark serving another model gives that one up; a Spark serving this same
-// model restarts it on the new version. A Spark serving nothing gives up
-// nothing.
-export const fleetSwitchFrom = (spark: FleetRow | undefined): string | undefined =>
-  spark?.serving?.recipe_id
+// What that Spark is doing to the model, from the kind of job the placement
+// runs. A model the Spark does not name in a heartbeat yet is one being
+// installed, which is the case this exists for; the rest are named so a row
+// never invents "Installing" for work of another kind.
+const PLACEMENT_WORDS: Record<string, string> = {
+  install: 'Installing',
+  start: 'Starting',
+  stop: 'Stopping',
+  remove: 'Removing',
+}
+
+export const placementWord = (placement: FleetDeploymentView | undefined): string => {
+  if (placement === undefined) return ''
+  return PLACEMENT_WORDS[placement.job?.kind ?? ''] ?? 'Working'
+}

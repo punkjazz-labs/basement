@@ -3,13 +3,13 @@ import type {
   FleetDeploymentView, FleetModelSnapshot, FleetNodeSummary, FleetSummary, Job, NodeInventory, Peer, PlacementPlan,
 } from './api'
 import {
-  deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetInstallVerb,
-  fleetRows, fleetSwitchFrom, initialPlacement, installRoute, joinCandidatesWithInventory,
-  machineNote, mergePlacements, modelChips, placedNodeID, placementBusy, placementOptions,
-  rowActionRoute, rowPlacement,
+  deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
+  initialPlacement, installRoute, joinCandidatesWithInventory, machineNote, mergePlacements,
+  modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
+  placementVerb, placementWord, rowActionRoute, rowPlacement, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME, CHOOSE_FOR_ME_NOTE,
-  FLEET_DEPLOYMENT_ACTIONS, NO_PLACEMENT_BACK, PLACEMENT_REFUSED,
-  type ActionTarget, type FleetRow,
+  FLEET_DEPLOYMENT_ACTIONS, NO_FLEET_ROW, NO_PLACEMENT_BACK, PLACEMENT_REFUSED,
+  type ActionTarget, type FleetRow, type PlacementTarget,
 } from './fleetModels'
 
 const inventory = (overrides: Partial<NodeInventory> = {}): NodeInventory => ({
@@ -506,9 +506,16 @@ describe('what each candidate machine has free', () => {
   })
 })
 
-describe('the Run on list in the install dialog', () => {
+// ---- Where a new install runs ------------------------------------------------
+// Every function below reads one resolved list, so these build that list the
+// same way the dialog does: a plan from the controller, the membership summary
+// behind it, and the rows the fleet table kept.
+
+describe('the Run on list, resolved against the fleet table', () => {
+  const RECIPE = 'qwen36-35b-a3b-nvfp4-1s'
+
   const plan = (overrides: Partial<PlacementPlan> = {}): PlacementPlan => ({
-    recipe_id: 'qwen36-35b-a3b-nvfp4-1s',
+    recipe_id: RECIPE,
     recipe_version: 3,
     recipe_fingerprint: 'fingerprint',
     recommended_node_id: 'node-loft',
@@ -519,20 +526,15 @@ describe('the Run on list in the install dialog', () => {
     ...overrides,
   })
 
-  const refused = (reason: string): PlacementPlan =>
-    plan({
-      recommended_node_id: 'node-lead',
-      candidates: [
-        { node_id: 'node-lead', display_name: 'attic', eligible: true },
-        { node_id: 'node-loft', display_name: 'loft', eligible: false, reason },
-      ],
-    })
+  const bothNodes = () => summary({ nodes: [node(), member()] })
+  // The rows the table keeps for that same summary, which is what the dialog
+  // reads: the controller's own row is the self row.
+  const rows = (nodes = bothNodes()) => fleetRows(nodes, [], 'http://attic.local:7070', NOW)
+  const targets = (over: Partial<PlacementPlan> = {}, nodes = bothNodes()) =>
+    placementTargets(plan(over), nodes, rows(nodes), 'node-lead')
 
   it('names each Spark with what it has free', () => {
-    const options = placementOptions(
-      joinCandidatesWithInventory(plan(), summary({ nodes: [node(), member()] })),
-      'node-loft',
-    )
+    const options = placementOptions(targets(), 'node-loft')
     expect(options[0]).toEqual({
       key: 'node-lead', name: 'attic', eligible: true,
       note: '18.0 GB memory free · 1.1 TB disk free',
@@ -541,15 +543,44 @@ describe('the Run on list in the install dialog', () => {
   })
 
   it('reads a machine that reported nothing as n/a rather than as empty', () => {
-    const options = placementOptions(
-      joinCandidatesWithInventory(plan(), summary({ nodes: [node({ inventory: undefined })] })),
-      'node-lead',
-    )
-    expect(options[0].note).toBe('n/a memory free · n/a disk free')
+    const nodes = summary({ nodes: [node({ inventory: undefined }), member()] })
+    expect(placementOptions(targets({}, nodes), 'node-loft')[0].note)
+      .toBe('n/a memory free · n/a disk free')
+  })
+
+  it('marks the Spark this console runs on, and only that one', () => {
+    const list = targets()
+    expect(list.map(item => [item.nodeID, item.isSelf])).toEqual([
+      ['node-lead', true], ['node-loft', false],
+    ])
+  })
+
+  it('carries the version that Spark already holds of this same model', () => {
+    const nodes = summary({
+      nodes: [node(), member({ installed_models: [
+        { recipe_id: RECIPE, recipe_version: 2, status: 'ready', active: false },
+        { recipe_id: 'other', recipe_version: 9, status: 'ready', active: false },
+      ] })],
+    })
+    const list = targets({}, nodes)
+    expect(list[1].installedVersion).toBe(2)
+    expect(list[0].installedVersion).toBeUndefined()
+  })
+
+  it('carries the model that Spark holds active, from the plan', () => {
+    const current: FleetModelSnapshot =
+      { recipe_id: 'minimax-h3', recipe_version: 1, status: 'starting', active: true }
+    const list = targets({
+      candidates: [
+        { node_id: 'node-lead', display_name: 'attic', eligible: true },
+        { node_id: 'node-loft', display_name: 'loft', eligible: true, current_model: current },
+      ],
+    })
+    expect(list[1].currentModel).toEqual(current)
   })
 
   it('offers Choose for me last, in the words the dialog uses', () => {
-    const options = placementOptions(joinCandidatesWithInventory(plan(), summary()), 'node-loft')
+    const options = placementOptions(targets(), 'node-loft')
     expect(options[options.length - 1]).toEqual({
       key: CHOOSE_FOR_ME, name: CHOOSE_FOR_ME_NAME, note: CHOOSE_FOR_ME_NOTE, eligible: true,
     })
@@ -558,142 +589,159 @@ describe('the Run on list in the install dialog', () => {
 
   it('keeps a refused Spark on the list, dead, in the plan’s own words', () => {
     const reason = 'the node is stale and cannot accept a placement'
-    const options = placementOptions(
-      joinCandidatesWithInventory(refused(reason), summary({ nodes: [node(), member()] })),
-      'node-lead',
-    )
+    const options = placementOptions(targets({
+      recommended_node_id: 'node-lead',
+      candidates: [
+        { node_id: 'node-lead', display_name: 'attic', eligible: true },
+        { node_id: 'node-loft', display_name: 'loft', eligible: false, reason },
+      ],
+    }), 'node-lead')
     expect(options[1]).toEqual({ key: 'node-loft', name: 'loft', note: reason, eligible: false })
   })
 
   it('says something about a refusal that arrived with no reason', () => {
-    const options = placementOptions(joinCandidatesWithInventory(refused(''), summary()), 'node-lead')
+    const options = placementOptions(targets({
+      recommended_node_id: 'node-lead',
+      candidates: [
+        { node_id: 'node-lead', display_name: 'attic', eligible: true },
+        { node_id: 'node-loft', display_name: 'loft', eligible: false },
+      ],
+    }), 'node-lead')
     expect(options[1].note).toBe(PLACEMENT_REFUSED)
   })
 
+  // The table drops a node with no console URL and de-duplicates two that
+  // share one, so the plan can name a Spark no row speaks for. The dialog must
+  // not offer it: the facts it would show and the machine it would install on
+  // would be two different Sparks.
+  it('refuses a Spark the fleet table kept no row for', () => {
+    const nodes = summary({ nodes: [node(), member({ console_url: '' })] })
+    const list = targets({}, nodes)
+    expect(list[1]).toMatchObject({ nodeID: 'node-loft', eligible: false, reason: NO_FLEET_ROW })
+    expect(placementOptions(list, 'node-loft').map(option => option.key))
+      .toEqual(['node-lead', 'node-loft'])
+  })
+
+  it('refuses a Spark whose row another row already answers on', () => {
+    const nodes = summary({ nodes: [node(), member({ console_url: 'http://attic.local:7070' })] })
+    expect(targets({}, nodes)[1]).toMatchObject({ eligible: false, reason: NO_FLEET_ROW })
+  })
+
+  it('still reaches its own Spark when the table kept no row for it', () => {
+    const nodes = summary({ nodes: [node({ console_url: '' }), member()] })
+    expect(targets({}, nodes)[0]).toMatchObject({ nodeID: 'node-lead', isSelf: true, eligible: true })
+  })
+
   it('does not offer to choose when no Spark can take the model', () => {
-    const none = plan({
+    const list = targets({
       recommended_node_id: '',
       candidates: [{ node_id: 'node-loft', display_name: 'loft', eligible: false, reason: 'busy' }],
     })
-    const options = placementOptions(joinCandidatesWithInventory(none, summary()), none.recommended_node_id)
-    expect(options.map(option => option.key)).toEqual(['node-loft'])
+    expect(placementOptions(list, '').map(option => option.key)).toEqual(['node-loft'])
   })
 
   it('does not offer to choose a Spark the plan itself refused', () => {
-    const stale = plan({
+    const list = targets({
       recommended_node_id: 'node-loft',
       candidates: [{ node_id: 'node-loft', display_name: 'loft', eligible: false, reason: 'busy' }],
     })
-    expect(placementOptions(joinCandidatesWithInventory(stale, summary()), 'node-loft')).toHaveLength(1)
+    expect(placementOptions(list, 'node-loft')).toHaveLength(1)
   })
 
   it('says nothing at all without a plan', () => {
-    expect(placementOptions(joinCandidatesWithInventory(null, summary()), undefined)).toEqual([])
+    expect(placementTargets(null, summary(), rows(), 'node-lead')).toEqual([])
+    expect(placementOptions([], undefined)).toEqual([])
   })
 
-  it('formats one candidate on its own', () => {
-    expect(machineNote({ node_id: 'n', display_name: 'd', eligible: true, memoryAvailableBytes: 26_000_000_000 }))
+  it('formats one machine on its own', () => {
+    expect(machineNote({ memoryAvailableBytes: 26_000_000_000 }))
       .toBe('26.0 GB memory free · n/a disk free')
   })
 })
 
 describe('which Spark the dialog opens on', () => {
-  const plan = (overrides: Partial<PlacementPlan>): PlacementPlan => ({
-    recipe_id: 'qwen36-35b-a3b-nvfp4-1s',
-    recipe_version: 3,
-    recipe_fingerprint: 'fingerprint',
-    candidates: [],
-    ...overrides,
+  const target = (overrides: Partial<PlacementTarget>): PlacementTarget => ({
+    nodeID: 'node-lead', name: 'attic', isSelf: false, eligible: true, reason: '', ...overrides,
   })
 
   it('opens on the Spark the controller recommends', () => {
-    expect(initialPlacement(plan({
-      recommended_node_id: 'node-loft',
-      candidates: [
-        { node_id: 'node-lead', display_name: 'attic', eligible: true },
-        { node_id: 'node-loft', display_name: 'loft', eligible: true },
-      ],
-    }))).toBe('node-loft')
+    const list = [target({}), target({ nodeID: 'node-loft', name: 'loft' })]
+    expect(initialPlacement(list, 'node-loft')).toBe('node-loft')
   })
 
-  it('takes the first Spark that could hold it when nothing is recommended', () => {
-    expect(initialPlacement(plan({
-      candidates: [
-        { node_id: 'node-lead', display_name: 'attic', eligible: false, reason: 'busy' },
-        { node_id: 'node-loft', display_name: 'loft', eligible: true },
-      ],
-    }))).toBe('node-loft')
+  it('takes the first Spark that could take it when nothing is recommended', () => {
+    const list = [
+      target({ eligible: false, reason: 'busy' }),
+      target({ nodeID: 'node-loft', name: 'loft' }),
+    ]
+    expect(initialPlacement(list, undefined)).toBe('node-loft')
   })
 
-  it('ignores a recommendation the plan itself refused', () => {
-    expect(initialPlacement(plan({
-      recommended_node_id: 'node-lead',
-      candidates: [
-        { node_id: 'node-lead', display_name: 'attic', eligible: false, reason: 'busy' },
-        { node_id: 'node-loft', display_name: 'loft', eligible: true },
-      ],
-    }))).toBe('node-loft')
+  it('ignores a recommendation that is itself refused', () => {
+    const list = [
+      target({ eligible: false, reason: 'busy' }),
+      target({ nodeID: 'node-loft', name: 'loft' }),
+    ]
+    expect(initialPlacement(list, 'node-lead')).toBe('node-loft')
   })
 
   it('opens on nothing when no Spark can take the model', () => {
-    expect(initialPlacement(plan({
-      candidates: [{ node_id: 'node-lead', display_name: 'attic', eligible: false, reason: 'busy' }],
-    }))).toBe('')
-    expect(initialPlacement(null)).toBe('')
+    expect(initialPlacement([target({ eligible: false, reason: 'busy' })], 'node-lead')).toBe('')
+    expect(initialPlacement([], 'node-lead')).toBe('')
   })
 
   it('resolves Choose for me to the recommendation at the moment it is used', () => {
-    const recommended = plan({ recommended_node_id: 'node-loft' })
-    expect(placedNodeID(CHOOSE_FOR_ME, recommended)).toBe('node-loft')
-    expect(placedNodeID(CHOOSE_FOR_ME, plan({}))).toBe('')
-    expect(placedNodeID('node-lead', recommended)).toBe('node-lead')
+    const list = [target({}), target({ nodeID: 'node-loft', name: 'loft' })]
+    expect(placedTarget(CHOOSE_FOR_ME, list, 'node-loft')?.nodeID).toBe('node-loft')
+    expect(placedTarget(CHOOSE_FOR_ME, list, undefined)).toBeUndefined()
+    expect(placedTarget('node-lead', list, 'node-loft')?.nodeID).toBe('node-lead')
+    expect(placedTarget('node-shed', list, 'node-loft')).toBeUndefined()
   })
 })
 
 describe('where a confirmed install is sent', () => {
-  const plan = (): PlacementPlan => ({
-    recipe_id: 'qwen36-35b-a3b-nvfp4-1s',
-    recipe_version: 3,
-    recipe_fingerprint: 'fingerprint',
-    recommended_node_id: 'node-loft',
-    candidates: [
-      { node_id: 'node-lead', display_name: 'attic', eligible: true },
-      { node_id: 'node-loft', display_name: 'loft', eligible: true },
-      { node_id: 'node-shed', display_name: 'shed', eligible: false, reason: 'busy' },
-    ],
+  const target = (overrides: Partial<PlacementTarget>): PlacementTarget => ({
+    nodeID: 'node-lead', name: 'attic', isSelf: false, eligible: true, reason: '', ...overrides,
   })
+  const list = (): PlacementTarget[] => [
+    target({ isSelf: true }),
+    target({ nodeID: 'node-loft', name: 'loft' }),
+    target({ nodeID: 'node-shed', name: 'shed', eligible: false, reason: 'busy' }),
+  ]
 
   it('keeps this Spark on the install call it has always used', () => {
-    expect(installRoute('node-lead', plan(), 'node-lead')).toEqual({ where: 'local' })
+    expect(installRoute('node-lead', list(), 'node-loft')).toEqual({ where: 'local' })
   })
 
-  it('sends another Spark through the fleet', () => {
-    expect(installRoute('node-loft', plan(), 'node-lead')).toEqual({ where: 'fleet', nodeID: 'node-loft' })
+  it('sends another Spark through the fleet, with the row the dialog showed', () => {
+    const route = installRoute('node-loft', list(), 'node-loft')
+    expect(route.where).toBe('fleet')
+    expect(route.where === 'fleet' && route.target.name).toBe('loft')
   })
 
   it('sends Choose for me to the recommended Spark', () => {
-    expect(installRoute(CHOOSE_FOR_ME, plan(), 'node-lead')).toEqual({ where: 'fleet', nodeID: 'node-loft' })
+    const route = installRoute(CHOOSE_FOR_ME, list(), 'node-loft')
+    expect(route.where === 'fleet' && route.target.nodeID).toBe('node-loft')
   })
 
   it('sends Choose for me nowhere else when this Spark is the recommended one', () => {
-    expect(installRoute(CHOOSE_FOR_ME, plan(), 'node-loft')).toEqual({ where: 'local' })
+    expect(installRoute(CHOOSE_FOR_ME, list(), 'node-lead')).toEqual({ where: 'local' })
   })
 
-  it('sends nothing for a Spark the plan refused', () => {
-    expect(installRoute('node-shed', plan(), 'node-lead')).toEqual({ where: 'none' })
+  it('sends nothing for a refused, unknown or unpicked Spark', () => {
+    expect(installRoute('node-shed', list(), 'node-loft')).toEqual({ where: 'none' })
+    expect(installRoute('node-attic', list(), 'node-loft')).toEqual({ where: 'none' })
+    expect(installRoute('', list(), 'node-loft')).toEqual({ where: 'none' })
+    expect(installRoute(CHOOSE_FOR_ME, list(), undefined)).toEqual({ where: 'none' })
+    expect(installRoute('node-loft', [], 'node-loft')).toEqual({ where: 'none' })
   })
 
-  it('sends nothing for a Spark the plan never named', () => {
-    expect(installRoute('node-attic', plan(), 'node-lead')).toEqual({ where: 'none' })
-  })
-
-  it('sends nothing while nothing is picked', () => {
-    expect(installRoute('', plan(), 'node-lead')).toEqual({ where: 'none' })
-    expect(installRoute('node-loft', null, 'node-lead')).toEqual({ where: 'none' })
-  })
-
-  it('sends nothing when this console cannot name its own Spark', () => {
-    expect(installRoute('node-lead', plan(), '')).toEqual({ where: 'none' })
+  // The refusal above is what keeps the dialog and the request on one machine:
+  // a Spark with no fleet row is refused, so it can never be routed to while
+  // the dialog shows this Spark's own facts.
+  it('sends nothing to a Spark the fleet table kept no row for', () => {
+    const unreachable = [target({ nodeID: 'node-loft', eligible: false, reason: NO_FLEET_ROW })]
+    expect(installRoute('node-loft', unreachable, 'node-loft')).toEqual({ where: 'none' })
   })
 
   it('names the Spark beside every confirmation the local install sends', () => {
@@ -711,40 +759,114 @@ describe('where a confirmed install is sent', () => {
 })
 
 describe('what the dialog says about the Spark it targets', () => {
-  const snapshot = (recipeID: string, version: number, active = false): FleetModelSnapshot =>
-    ({ recipe_id: recipeID, recipe_version: version, status: active ? 'ready' : 'stopped', active })
-
-  const spark = (held: FleetModelSnapshot[]): FleetRow => ({
-    nodeID: 'node-loft',
-    displayName: 'loft',
-    isSelf: false,
-    consoleURL: 'http://loft.local:7070',
-    installedModels: held,
-    serving: held.find(model => model.active),
-    status: { word: 'Idle', dot: '' },
-    answering: true,
+  const target = (overrides: Partial<PlacementTarget>): PlacementTarget => ({
+    nodeID: 'node-loft', name: 'loft', isSelf: false, eligible: true, reason: '', ...overrides,
   })
 
   it('reads an older version on that Spark as an update', () => {
-    expect(fleetInstallVerb(spark([snapshot('qwen36-27b-nvfp4-1s', 2)]), 'qwen36-27b-nvfp4-1s', 3)).toBe('Update')
+    expect(placementVerb(target({ installedVersion: 2 }), 3)).toBe('Update')
   })
 
-  it('reads the same version, another model, or no Spark as an install', () => {
-    expect(fleetInstallVerb(spark([snapshot('qwen36-27b-nvfp4-1s', 3)]), 'qwen36-27b-nvfp4-1s', 3)).toBe('Install')
-    expect(fleetInstallVerb(spark([snapshot('qwen36-35b-a3b-nvfp4-1s', 1)]), 'qwen36-27b-nvfp4-1s', 3)).toBe('Install')
-    expect(fleetInstallVerb(undefined, 'qwen36-27b-nvfp4-1s', 3)).toBe('Install')
+  it('reads the same version, another model, or nothing held as an install', () => {
+    expect(placementVerb(target({ installedVersion: 3 }), 3)).toBe('Install')
+    expect(placementVerb(target({ installedVersion: 4 }), 3)).toBe('Install')
+    expect(placementVerb(target({}), 3)).toBe('Install')
   })
 
   it('names the model that has to stop on that Spark', () => {
-    expect(fleetSwitchFrom(spark([snapshot('qwen36-35b-a3b-nvfp4-1s', 1, true)]))).toBe('qwen36-35b-a3b-nvfp4-1s')
+    const current: FleetModelSnapshot =
+      { recipe_id: 'minimax-h3', recipe_version: 1, status: 'ready', active: true }
+    expect(placementSwitchFrom(target({ currentModel: current }))).toBe('minimax-h3')
   })
 
-  it('names this same model when that Spark is the one serving it', () => {
-    expect(fleetSwitchFrom(spark([snapshot('qwen36-27b-nvfp4-1s', 2, true)]))).toBe('qwen36-27b-nvfp4-1s')
+  // A model that is still starting holds the machine just as firmly as one
+  // that has finished. Reading only the serving fact would miss it, and the
+  // dialog would promise that nothing stops.
+  it('names a model that is active but still starting', () => {
+    const starting: FleetModelSnapshot =
+      { recipe_id: 'minimax-h3', recipe_version: 1, status: 'starting', active: true }
+    expect(placementSwitchFrom(target({ currentModel: starting }))).toBe('minimax-h3')
   })
 
-  it('names nothing when that Spark serves nothing', () => {
-    expect(fleetSwitchFrom(spark([snapshot('qwen36-27b-nvfp4-1s', 2)]))).toBeUndefined()
-    expect(fleetSwitchFrom(undefined)).toBeUndefined()
+  it('names this same model when that Spark is the one holding it active', () => {
+    const same: FleetModelSnapshot =
+      { recipe_id: 'qwen36-27b-nvfp4-1s', recipe_version: 2, status: 'ready', active: true }
+    expect(placementSwitchFrom(target({ currentModel: same }))).toBe('qwen36-27b-nvfp4-1s')
+  })
+
+  it('names nothing when that Spark holds nothing active', () => {
+    expect(placementSwitchFrom(target({}))).toBeUndefined()
+    expect(placementSwitchFrom(undefined)).toBeUndefined()
+  })
+})
+
+describe('a model the fleet is still working on', () => {
+  // The kinds that change what runs, exactly as the row reads them.
+  const DISRUPTIVE = new Set(['install', 'start', 'stop', 'remove'])
+
+  const job = (id: string, kind: string, state: string): Job =>
+    ({ id, kind, recipe_id: 'qwen36-35b-a3b-nvfp4-1s', state, created_at: '', updated_at: '', steps: [] })
+
+  const placed = (deployment: FleetDeploymentView): Map<string, FleetDeploymentView> =>
+    new Map([[deploymentKey(deployment.owner_node_id, deployment.recipe_id), deployment]])
+
+  // The exact state a remote install is in between the click and the finish:
+  // the record exists and its job is running, and no Spark names the model in
+  // a heartbeat yet.
+  const installing = deployment({ job: job('job-install', 'install', 'running') })
+
+  it('finds the placement that is still installing', () => {
+    expect(workingPlacement(placed(installing), new Map(), installing.recipe_id, DISRUPTIVE))
+      .toBe(installing)
+  })
+
+  it('finds it without any Spark holding the model', () => {
+    // fleetRows never sees this model: the target Spark installed_models is
+    // empty until the install lands. The record is the only signal there is.
+    const sparks = fleetRows(summary({ nodes: [node(), member()] }), [], 'http://attic.local:7070', NOW)
+    expect(sparks.every(spark => spark.installedModels.length === 0)).toBe(true)
+    expect(workingPlacement(placed(installing), new Map(), installing.recipe_id, DISRUPTIVE)).toBe(installing)
+  })
+
+  it('lets go once that job is finished and this console has seen it', () => {
+    const done = deployment({ job: job('job-install', 'install', 'ready') })
+    const started = new Map([[done.deployment_id, 'job-install']])
+    expect(workingPlacement(placed(done), started, done.recipe_id, DISRUPTIVE)).toBeUndefined()
+  })
+
+  it('holds on while the poll still reports the job this console started', () => {
+    const stale = deployment({ job: job('job-old', 'install', 'ready') })
+    const started = new Map([[stale.deployment_id, 'job-install']])
+    expect(workingPlacement(placed(stale), started, stale.recipe_id, DISRUPTIVE)).toBe(stale)
+  })
+
+  it('ignores work on another model', () => {
+    expect(workingPlacement(placed(installing), new Map(), 'qwen36-27b-nvfp4-1s', DISRUPTIVE)).toBeUndefined()
+    expect(workingPlacement(new Map(), new Map(), installing.recipe_id, DISRUPTIVE)).toBeUndefined()
+  })
+
+  it('leaves the row alone for a measurement on another Spark', () => {
+    const measuring = deployment({ job: job('job-bench', 'benchmark', 'running') })
+    expect(workingPlacement(placed(measuring), new Map(), measuring.recipe_id, DISRUPTIVE))
+      .toBeUndefined()
+  })
+
+  it('locks the row for a placement it has read no job kind for', () => {
+    const unread = deployment({ job: undefined })
+    const started = new Map([[unread.deployment_id, 'job-install']])
+    expect(workingPlacement(placed(unread), started, unread.recipe_id, DISRUPTIVE)).toBe(unread)
+  })
+
+  it('says what that Spark is doing, from the job it runs', () => {
+    expect(placementWord(installing)).toBe('Installing')
+    expect(placementWord(deployment({ job: job('j', 'start', 'running') }))).toBe('Starting')
+    expect(placementWord(deployment({ job: job('j', 'stop', 'running') }))).toBe('Stopping')
+    expect(placementWord(deployment({ job: job('j', 'remove', 'running') }))).toBe('Removing')
+  })
+
+  it('never invents a word for work of a kind it does not know', () => {
+    expect(placementWord(deployment({ job: job('j', 'benchmark', 'running') }))).toBe('Working')
+    expect(placementWord(deployment({ job: undefined }))).toBe('Working')
+    expect(placementWord(undefined)).toBe('')
   })
 })

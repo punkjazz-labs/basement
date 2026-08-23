@@ -12,12 +12,13 @@ import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS } from '../fleetInvite'
 import {
-  deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetInstallVerb,
-  fleetRows, fleetSwitchFrom, initialPlacement, installRoute, joinCandidatesWithInventory,
-  mergePlacements, modelChips, placedNodeID, placementBusy, placementOptions, rowActionRoute, rowPlacement,
+  deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
+  initialPlacement, installRoute, mergePlacements, modelChips, placedTarget, placementBusy,
+  placementOptions, placementSwitchFrom, placementTargets, placementVerb, placementWord,
+  rowActionRoute, rowPlacement, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, FLEET_DEPLOYMENTS_PATH, NOT_ANSWERING, NO_PLACEMENT_BACK,
   NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
-  type ActionTarget, type FleetDeploymentAction, type FleetRow,
+  type ActionTarget, type FleetDeploymentAction, type FleetRow, type PlacementTarget,
 } from '../fleetModels'
 
 const USE: Record<string, string> = {
@@ -293,15 +294,17 @@ export default function Models({
   // name its own node could not tell a local install from a remote one.
   const canPlaceAcrossFleet =
     fleet !== null && fleet.nodes.length > 1 && fleet.controller_node_id !== ''
-  // The Spark the "Run on" list points at now, and whether it is another one.
-  // "Choose for me" resolves here, so every line the dialog writes about the
-  // target machine names the same Spark either way.
-  const targetSparkID = placedNodeID(placementChoice, placementPlan)
-  const targetSpark = targetSparkID ? sparks.find(spark => spark.nodeID === targetSparkID) : undefined
-  // The install runs on a Spark that is not this one. Everything the dialog
-  // says about disk, memory, versions and switching then belongs to that
-  // machine, and the fleet carries the install there.
-  const onFleetSpark = placementPlan !== null && targetSpark !== undefined && !targetSpark.isSelf
+  // The "Run on" list, resolved once against both the plan and the fleet
+  // table. Everything the dialog shows about a Spark and everything it sends
+  // for that Spark read this same list, so the screen and the request cannot
+  // name two different machines.
+  const placementList = useMemo(
+    () => placementTargets(placementPlan, fleet, sparks, fleet?.controller_node_id ?? ''),
+    [placementPlan, fleet, sparks],
+  )
+  // The Spark the list points at now. "Choose for me" resolves here.
+  const placementTarget = placedTarget(
+    placementChoice, placementList, placementPlan?.recommended_node_id)
   const usage = useMemo(() => new Map((tokens?.models ?? []).map(item => [item.recipe_id, item])), [tokens])
   const sorted = useMemo(() => sortCatalog(recipes), [recipes])
   const detected = system?.hardware_scope.detected_spark_count ?? 0
@@ -395,7 +398,9 @@ export default function Models({
       const switchFrom = activeOther(recipe.id)?.recipe_id ?? (own?.active ? recipe.id : undefined)
       const plan = await placementPlanFor(recipe)
       setPlacementPlan(plan)
-      setPlacementChoice(initialPlacement(plan))
+      setPlacementChoice(initialPlacement(
+        placementTargets(plan, fleet, sparks, fleet?.controller_node_id ?? ''),
+        plan?.recommended_node_id))
       setConfirm({ recipe, preflight, switchFrom })
       setLicence(false)
       setTerritoryEligibility(false)
@@ -436,15 +441,14 @@ export default function Models({
   // reserves that machine, starts the job there and answers with the
   // placement it made, so the progress window follows that Spark's own job
   // through the placement stream every other fleet action already uses.
-  const installOnFleetSpark = async (recipe: Recipe, nodeID: string) => {
-    const host = sparks.find(spark => spark.nodeID === nodeID)
+  const installOnFleetSpark = async (recipe: Recipe, spark: PlacementTarget) => {
     const answer = await api<{ deployment?: FleetDeploymentView }>(FLEET_DEPLOYMENTS_PATH, {
       method: 'POST',
       headers: idempotency(),
-      body: JSON.stringify(fleetInstallRequest(recipe.id, nodeID, installRequest(
+      body: JSON.stringify(fleetInstallRequest(recipe.id, spark.nodeID, installRequest(
         licence,
         territoryEligibility,
-        fleetSwitchFrom(host) ? activate : true,
+        placementSwitchFrom(spark) ? activate : true,
       ))),
     })
     const deployment = answer.deployment
@@ -459,7 +463,7 @@ export default function Models({
     // The row locks on the placement it just gained, without waiting for the
     // next placement poll to report it.
     touchedPlacements.current.add(deploymentID)
-    setPlacements(previous => new Map(previous).set(deploymentKey(nodeID, recipe.id), deployment))
+    setPlacements(previous => new Map(previous).set(deploymentKey(spark.nodeID, recipe.id), deployment))
     setStartedOnPlacement(previous => new Map(previous).set(deploymentID, job.id))
     openFleetDeployment(deploymentID, job)
   }
@@ -473,10 +477,10 @@ export default function Models({
       // points. A Spark that is not this one is installed on through the
       // fleet, which reserves it there and answers with that Spark's own job.
       if (placementPlan && recipe.topology.spark_count === 1) {
-        const route = installRoute(placementChoice, placementPlan, fleet?.controller_node_id ?? '')
+        const route = installRoute(placementChoice, placementList, placementPlan.recommended_node_id)
         if (route.where === 'none') throw new Error(NO_PLACEMENT_LEFT)
         if (route.where === 'fleet') {
-          await installOnFleetSpark(recipe, route.nodeID)
+          await installOnFleetSpark(recipe, route.target)
           return
         }
         // A local route falls through to the install call below, unchanged.
@@ -668,7 +672,16 @@ export default function Models({
     const disruptive = new Set(['install', 'start', 'stop', 'remove'])
     const running = (kinds: (kind: string) => boolean) =>
       jobs.some(job => job.recipe_id === recipe.id && !terminal(job.state) && kinds(job.kind))
-    const busy = pending.has(recipe.id) || running(kind => disruptive.has(kind))
+    // A placement anywhere in the fleet that is still working on this model.
+    // It is the only thing that knows a remote install started: the Spark
+    // running it names the model in a heartbeat only once the install has
+    // finished, so without this the row would keep a live Install button for
+    // the whole download and a second click would start a second install.
+    const working = workingPlacement(placements, startedOnPlacement, recipe.id, disruptive)
+    const workingSpark = working ? sparks.find(spark => spark.nodeID === working.owner_node_id) : undefined
+    // Work anywhere in the fleet locks every button on this row, on every
+    // Spark. One model moves one way at a time.
+    const busy = pending.has(recipe.id) || running(kind => disruptive.has(kind)) || working !== undefined
     const measuring = running(kind => kind === 'benchmark' || kind === 'smoke-test')
     const isActive = Boolean(model?.active && model.status === 'ready')
     const fits = fitsOn(recipe)
@@ -696,13 +709,17 @@ export default function Models({
     // fleet speaks for one of its own members, because it also knows whether
     // that member still answers; a Spark added by address only still speaks
     // for itself.
-    const otherName = host ? host.displayName : peer?.name ?? ''
-    const otherURL = host ? host.consoleURL : peer?.base_url ?? ''
-    const otherWord = host ? hostWord : peerWord
+    // A Spark the fleet is working on speaks through its placement until it
+    // names the model itself, which is what puts the work on screen while an
+    // install runs there.
+    const otherName = host ? host.displayName : workingSpark?.displayName ?? peer?.name ?? ''
+    const otherURL = host ? host.consoleURL : workingSpark?.consoleURL ?? peer?.base_url ?? ''
+    const otherWord = host ? hostWord : working ? placementWord(working) : peerWord
     const otherServing = host
       ? hostServing && !notAnswering
       : Boolean(peerModel?.active && peerModel.status === 'ready')
-    const otherBusy = otherWord === 'Installing' || otherWord === 'Starting' || otherWord === 'Switching'
+    const otherBusy = working !== undefined ||
+      otherWord === 'Installing' || otherWord === 'Starting' || otherWord === 'Switching'
     // No button on another Spark's row while that Spark is already changing
     // this model, and none at all while it is not answering for it. The
     // placement locks the row from the moment the action is accepted; the
@@ -1118,28 +1135,33 @@ export default function Models({
           // appear on such a model even for one render.
           const fleetChoice = placementPlan !== null && recipe.topology.spark_count === 1
           const options = fleetChoice
-            ? placementOptions(
-              joinCandidatesWithInventory(placementPlan, fleet),
-              placementPlan.recommended_node_id)
+            ? placementOptions(placementList, placementPlan.recommended_node_id)
             : []
           // The Spark this install runs on, while that is not this one. Every
-          // number below then belongs to that machine, in what it last
-          // reported about itself.
-          const remote = fleetChoice && onFleetSpark ? targetSpark : undefined
+          // number below then belongs to that machine, and it is the same row
+          // the submit sends to.
+          const remote = fleetChoice && placementTarget && !placementTarget.isSelf
+            ? placementTarget
+            : undefined
           // The picked row can only be sent if it names a Spark that can
           // really take the model.
           const placementReady = !fleetChoice ||
-            installRoute(placementChoice, placementPlan, fleet?.controller_node_id ?? '').where !== 'none'
+            installRoute(placementChoice, placementList, placementPlan.recommended_node_id).where !== 'none'
           // Every number in here belongs to the machine that will actually
           // run the install, which is why the other Spark answers its own
           // preflight before anything below is shown for it.
           const shown = onPeer ? peerPreflight : confirm.preflight
-          const target = onPeer ? peerSummary?.system : remote ? remote.inventory : system
-          const machine = onPeer && peer ? peer.name : remote ? remote.displayName : 'This Spark'
-          const verb = remote
-            ? fleetInstallVerb(remote, recipe.id, recipe.version)
-            : verbFor(recipe, placement)
-          const switchFrom = remote ? fleetSwitchFrom(remote) : switchFromFor(placement)
+          const target = onPeer
+            ? peerSummary?.system
+            : remote
+              ? {
+                storage_available_bytes: remote.storageAvailableBytes ?? 0,
+                memory_available_bytes: remote.memoryAvailableBytes ?? 0,
+              }
+              : system
+          const machine = onPeer && peer ? peer.name : remote ? remote.name : 'This Spark'
+          const verb = remote ? placementVerb(remote, recipe.version) : verbFor(recipe, placement)
+          const switchFrom = remote ? placementSwitchFrom(remote) : switchFromFor(placement)
           const licences = licenceArtifacts(recipe)
           const territoryLabel = territoryEligibilityLabel(recipe)
           const confirmationsComplete = installConfirmationsComplete(recipe, licence, territoryEligibility)
@@ -1150,7 +1172,7 @@ export default function Models({
           const installedVersion = onPeer
             ? peerInstalled.get(recipe.id)?.recipe_version
             : remote
-              ? remote.installedModels.find(model => model.recipe_id === recipe.id)?.recipe_version
+              ? remote.installedVersion
               : installed.get(recipe.id)?.recipe_version
           const isUpdate = verb === 'Update' && installedVersion !== undefined
           const plan = isUpdate && !onPeer && !remote ? updatePlan(installedVersion, recipe, storage) : null
@@ -1443,7 +1465,10 @@ export default function Models({
                       </label>
                     )}
                   </div>
-                  {foot(confirmationsComplete && placementReady)}
+                  {/* run() already refuses a second call for a recipe it is
+                      still working on. Naming it here makes the guard one a
+                      person can see rather than one they only feel. */}
+                  {foot(confirmationsComplete && placementReady && !pending.has(recipe.id))}
                 </>
               ) : shown ? (
                 <>
