@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS generations (
   id TEXT PRIMARY KEY,
   recipe_id TEXT NOT NULL,
   mode TEXT NOT NULL,
+  first_frame TEXT NOT NULL DEFAULT '',
   prompt TEXT NOT NULL,
   blocks INTEGER NOT NULL,
   short_edge INTEGER NOT NULL,
@@ -263,6 +264,9 @@ CREATE TABLE IF NOT EXISTS generations (
 		return err
 	}
 	if err := s.migrateGenerationProgress(); err != nil {
+		return err
+	}
+	if err := s.migrateGenerationFirstFrame(); err != nil {
 		return err
 	}
 	if err := s.migrateFleetSchema(); err != nil {
@@ -708,6 +712,38 @@ func (s *Store) migrateGenerationProgress() error {
 		if _, err := s.db.Exec(`ALTER TABLE generations ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
 			return fmt.Errorf("add generations.%s: %w", column.name, err)
 		}
+	}
+	return nil
+}
+
+// migrateGenerationFirstFrame keeps the image-mode bridge additive for
+// databases created before image_to_video shipped, the same way
+// migrateGenerationProgress does for the progress columns.
+func (s *Store) migrateGenerationFirstFrame() error {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info('generations')`)
+	if err != nil {
+		return fmt.Errorf("inspect generations table: %w", err)
+	}
+	present := false
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			rows.Close()
+			return err
+		}
+		if column == "first_frame" {
+			present = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if present {
+		return nil
+	}
+	if _, err := s.db.Exec(`ALTER TABLE generations ADD COLUMN first_frame TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add generations.first_frame: %w", err)
 	}
 	return nil
 }
@@ -1440,18 +1476,21 @@ func (s *Store) TerritoryEligibilityConfirmed(ctx context.Context, recipeID stri
 // machine, and a gallery that shows a truncated prompt beside a clip is a
 // gallery you cannot reproduce anything from.
 type Generation struct {
-	ID        string `json:"id"`
-	RecipeID  string `json:"recipe_id"`
-	Mode      string `json:"mode"`
-	Prompt    string `json:"prompt"`
-	Blocks    int    `json:"blocks"`
-	ShortEdge int    `json:"short_edge"`
-	Width     int    `json:"width"`
-	Height    int    `json:"height"`
-	Frames    int    `json:"frames"`
-	Seed      int64  `json:"seed"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
+	ID       string `json:"id"`
+	RecipeID string `json:"recipe_id"`
+	Mode     string `json:"mode"`
+	// FirstFrame is the staged media id an image_to_video generation was made
+	// from. Empty for text_to_video, which never has one.
+	FirstFrame string `json:"first_frame,omitempty"`
+	Prompt     string `json:"prompt"`
+	Blocks     int    `json:"blocks"`
+	ShortEdge  int    `json:"short_edge"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	Frames     int    `json:"frames"`
+	Seed       int64  `json:"seed"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
 	// OutputPath is the file on this machine. It is absent until the
 	// generation finishes and is never a path outside the data directory.
 	OutputPath    string `json:"output_path,omitempty"`
@@ -1464,11 +1503,11 @@ type Generation struct {
 	FinishedAt    string `json:"finished_at,omitempty"`
 }
 
-const generationColumns = `id,recipe_id,mode,prompt,blocks,short_edge,width,height,frames,seed,status,error,output_path,bytes,progress_value,progress_max,progress_phase,created_at,started_at,finished_at`
+const generationColumns = `id,recipe_id,mode,first_frame,prompt,blocks,short_edge,width,height,frames,seed,status,error,output_path,bytes,progress_value,progress_max,progress_phase,created_at,started_at,finished_at`
 
 func scanGeneration(row interface{ Scan(...any) error }) (Generation, error) {
 	var g Generation
-	err := row.Scan(&g.ID, &g.RecipeID, &g.Mode, &g.Prompt, &g.Blocks, &g.ShortEdge, &g.Width, &g.Height, &g.Frames, &g.Seed,
+	err := row.Scan(&g.ID, &g.RecipeID, &g.Mode, &g.FirstFrame, &g.Prompt, &g.Blocks, &g.ShortEdge, &g.Width, &g.Height, &g.Frames, &g.Seed,
 		&g.Status, &g.Error, &g.OutputPath, &g.Bytes, &g.ProgressValue, &g.ProgressMax, &g.ProgressPhase, &g.CreatedAt, &g.StartedAt, &g.FinishedAt)
 	return g, err
 }
@@ -1484,8 +1523,8 @@ func (s *Store) CreateGeneration(ctx context.Context, g Generation) (Generation,
 	g.ID = id
 	g.Status = "queued"
 	g.CreatedAt = now()
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO generations(`+generationColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		g.ID, g.RecipeID, g.Mode, g.Prompt, g.Blocks, g.ShortEdge, g.Width, g.Height, g.Frames, g.Seed,
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO generations(`+generationColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		g.ID, g.RecipeID, g.Mode, g.FirstFrame, g.Prompt, g.Blocks, g.ShortEdge, g.Width, g.Height, g.Frames, g.Seed,
 		g.Status, "", "", 0, 0, 0, "", g.CreatedAt, "", ""); err != nil {
 		return Generation{}, err
 	}
@@ -1589,6 +1628,16 @@ func (s *Store) DeleteGeneration(ctx context.Context, id string) error {
 		return os.ErrNotExist
 	}
 	return nil
+}
+
+// GenerationReferencesFirstFrame reports whether any generation, whatever its
+// status, still names id as its first_frame. It is how the staged-media sweep
+// tells a source image nothing needs any more from one a completed or running
+// generation was actually made from.
+func (s *Store) GenerationReferencesFirstFrame(ctx context.Context, id string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM generations WHERE first_frame=?`, id).Scan(&count)
+	return count > 0, err
 }
 
 func randomID(prefix string) (string, error) {

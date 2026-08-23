@@ -1134,11 +1134,18 @@ func (h *HostExecutor) GenerationRoot(r recipe.Recipe) string {
 	return GenerationRoot(h.dataDir, r.ID)
 }
 
-// generationInputRoot is where source images are staged for the modes that
-// take one. It is a dot-directory inside the generation root so a listing of
-// results never has to skip it by name.
+// GenerationInputRoot is where source images are staged for the modes that
+// take one: the host side of the container's input directory. It is a
+// dot-directory inside the generation root so a listing of results never has
+// to skip it by name, and a plain function for the same reason GenerationRoot
+// is one: the container mount and the generation API's staging copy both need
+// the same answer.
+func GenerationInputRoot(dataDir, recipeID string) string {
+	return filepath.Join(GenerationRoot(dataDir, recipeID), ".input")
+}
+
 func (h *HostExecutor) generationInputRoot(r recipe.Recipe) string {
-	return filepath.Join(h.GenerationRoot(r), ".input")
+	return GenerationInputRoot(h.dataDir, r.ID)
 }
 
 // mediaMounts are the read-write bind mounts a media runtime needs, keyed by

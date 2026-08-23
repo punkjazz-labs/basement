@@ -1,20 +1,31 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
+	"io"
 	"math/big"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	_ "golang.org/x/image/webp"
 
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
@@ -236,13 +247,14 @@ func (s *Server) generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		ModelID string `json:"model_id"`
-		Mode    string `json:"mode"`
-		Prompt  string `json:"prompt"`
-		Blocks  int    `json:"blocks"`
-		Width   int    `json:"width"`
-		Height  int    `json:"height"`
-		Seed    *int64 `json:"seed"`
+		ModelID    string `json:"model_id"`
+		Mode       string `json:"mode"`
+		FirstFrame string `json:"first_frame"`
+		Prompt     string `json:"prompt"`
+		Blocks     int    `json:"blocks"`
+		Width      int    `json:"width"`
+		Height     int    `json:"height"`
+		Seed       *int64 `json:"seed"`
 	}
 	if err := decodeBody(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -266,9 +278,30 @@ func (s *Server) generateHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("a prompt is at most %d characters, and this one is %d", MaxPromptLength, length))
 		return
 	}
-	if err := validateMode(request.Mode, config); err != nil {
+	// Absent means text_to_video: the mode most requests still make, and the
+	// one every media recipe is required to offer.
+	mode := strings.TrimSpace(request.Mode)
+	if mode == "" {
+		mode = recipe.ModeTextToVideo
+	}
+	if err := validateMode(mode, config); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	firstFrame := strings.TrimSpace(request.FirstFrame)
+	switch {
+	case mode == recipe.ModeImageToVideo && firstFrame == "":
+		writeError(w, http.StatusBadRequest, errors.New("first_frame requires image mode"))
+		return
+	case mode != recipe.ModeImageToVideo && firstFrame != "":
+		writeError(w, http.StatusBadRequest, errors.New("first_frame is only for image mode"))
+		return
+	}
+	if mode == recipe.ModeImageToVideo {
+		if _, ok := findStagedMedia(s.dataDir, firstFrame); !ok {
+			writeError(w, http.StatusNotFound, errors.New("image not found"))
+			return
+		}
 	}
 	if request.Blocks < config.MinBlocks || request.Blocks > config.MaxBlocks {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("%s generates between %d and %d blocks of duration, and this request asked for %d",
@@ -286,7 +319,7 @@ func (s *Server) generateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, err := s.store.CreateGeneration(r.Context(), store.Generation{
-		RecipeID: target.ID, Mode: request.Mode, Prompt: prompt,
+		RecipeID: target.ID, Mode: mode, FirstFrame: firstFrame, Prompt: prompt,
 		Blocks: request.Blocks, ShortEdge: shortEdge,
 		Width: request.Width, Height: request.Height,
 		Frames: config.Frames(request.Blocks), Seed: seed,
@@ -334,14 +367,8 @@ func validateMode(mode string, config recipe.ComfyUIConfig) error {
 		for name := range config.Graphs {
 			modes = append(modes, name)
 		}
+		sort.Strings(modes)
 		return fmt.Errorf("mode must be one of: %s", strings.Join(modes, ", "))
-	}
-	if mode == recipe.ModeImageToVideo {
-		// The graph for this mode substitutes a source image file name, and
-		// nothing yet puts a file where it could be substituted from. Saying
-		// so is better than accepting a request that would fail inside the
-		// runtime with a message about a node.
-		return errors.New("generating from a source image is not available yet, so use text_to_video")
 	}
 	return nil
 }
@@ -385,6 +412,145 @@ func resolveSeed(requested *int64) (int64, error) {
 		return 0, err
 	}
 	return value.Int64(), nil
+}
+
+// mediaMaxUploadBytes caps a staged source image. basement's own canvas tops
+// out in the low megapixels, so a starting frame never has a legitimate
+// reason to be larger than this; the cap exists so one request cannot write
+// an unbounded amount to disk.
+const mediaMaxUploadBytes = 32 << 20
+
+// mediaStagingExtensions is the closed set of image kinds a starting frame
+// may arrive as, keyed by the format image.DecodeConfig reports, and the
+// extension basement stores it under. The set is closed because the staged
+// file is about to sit inside ComfyUI's input directory under a name
+// basement chose, and these are the formats the pinned LoadImage node reads.
+var mediaStagingExtensions = map[string]string{"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
+
+// stagedMediaIDPattern is the exact shape a staging id always has: the
+// lowercase hex sha256 of the bytes it names. Request input claiming to be
+// one is held to this before it ever reaches a filesystem glob, the same way
+// every other path this package resolves off request data is.
+var stagedMediaIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// mediaStagingDir is the shared, content-addressed home for staged source
+// images: one directory under the generations data area, not one per recipe,
+// because a source image is chosen before a mode or even a model is.
+func mediaStagingDir(dataDir string) string {
+	return filepath.Join(dataDir, "generations", "staged")
+}
+
+// findStagedMedia resolves id to the file basement staged for it, if any. The
+// extension is not part of the id a caller supplies, so this is the one place
+// that recovers it, by asking the directory rather than trusting anything
+// else.
+func findStagedMedia(dataDir, id string) (string, bool) {
+	if !stagedMediaIDPattern.MatchString(id) {
+		return "", false
+	}
+	matches, err := filepath.Glob(filepath.Join(mediaStagingDir(dataDir), id+".*"))
+	if err != nil || len(matches) == 0 {
+		return "", false
+	}
+	return matches[0], true
+}
+
+// mediaStage is POST /api/v1/generations/media: stage a source image for
+// image_to_video to load. The response id is the sha256 of the bytes, so a
+// re-upload of the same image is idempotent and the staged file name is safe
+// to build a container mount path from without ever trusting the client's own
+// file name.
+func (s *Server) mediaStage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if err := s.auth.AuthorizeMutation(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, mediaMaxUploadBytes)
+	if err := r.ParseMultipartForm(mediaMaxUploadBytes); err != nil {
+		if strings.Contains(err.Error(), "too large") {
+			writeError(w, http.StatusRequestEntityTooLarge, errors.New("too large"))
+			return
+		}
+		writeError(w, http.StatusBadRequest, errors.New("a file is required"))
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("a file is required"))
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	// The bytes are sniffed rather than trusted from a content type header or
+	// the client's file name: image.DecodeConfig only succeeds for a format
+	// this package registered a decoder for, so anything else, including a
+	// renamed non-image file, is refused here rather than reaching ComfyUI.
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	ext, recognized := mediaStagingExtensions[format]
+	if err != nil || !recognized {
+		writeError(w, http.StatusUnsupportedMediaType, errors.New("not an image"))
+		return
+	}
+	sum := sha256.Sum256(data)
+	id := hex.EncodeToString(sum[:])
+	dir := mediaStagingDir(s.dataDir)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.sweepStagedMedia(r.Context(), dir)
+	target := filepath.Join(dir, id+ext)
+	// Writing again over a re-upload is harmless: the bytes are exactly what
+	// this id already names, and doing so resets the file's age, so an image
+	// somebody is still actively using never goes stale under the sweep above.
+	if err := os.WriteFile(target, data, 0o640); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "bytes": len(data), "width": config.Width, "height": config.Height})
+}
+
+// sweepStagedMedia removes staged images old enough that no upload flow would
+// still be holding them, and that no generation on this machine ever turned
+// into a first_frame. It runs on the write path rather than on a timer: a
+// Spark that never stages an image never grows this directory, and one that
+// does gets swept exactly when it adds to it, the same reasoning
+// startGenerationWorker uses to avoid a goroutine for a feature nobody is
+// using.
+func (s *Server) sweepStagedMedia(ctx context.Context, dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		referenced, err := s.store.GenerationReferencesFirstFrame(ctx, id)
+		if err != nil || referenced {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
 }
 
 // startGenerationWorker brings the queue's single worker up the first time
@@ -479,10 +645,36 @@ func (s *Server) runOneGeneration(id string) {
 		fail("failed", err.Error())
 		return
 	}
-	graph, err := recipe.RenderGraph(raw, recipe.GraphInputs{
+	inputs := recipe.GraphInputs{
 		Prompt: record.Prompt, Seed: record.Seed, Frames: record.Frames,
 		Width: record.Width, Height: record.Height, Steps: config.SamplerSteps,
-	})
+	}
+	if record.Mode == recipe.ModeImageToVideo {
+		staged, ok := findStagedMedia(s.dataDir, record.FirstFrame)
+		if !ok {
+			fail("failed", "the source image for this generation is no longer staged on this Spark")
+			return
+		}
+		data, err := os.ReadFile(staged)
+		if err != nil {
+			fail("failed", err.Error())
+			return
+		}
+		inputRoot := operations.GenerationInputRoot(s.dataDir, target.ID)
+		if err := os.MkdirAll(inputRoot, 0o750); err != nil {
+			fail("failed", err.Error())
+			return
+		}
+		// The copy keeps the staged name: a content hash plus its sniffed
+		// extension, already unique, so the graph's image token names exactly
+		// the file this generation just put where the container reads it.
+		inputs.Image = filepath.Base(staged)
+		if err := os.WriteFile(filepath.Join(inputRoot, inputs.Image), data, 0o640); err != nil {
+			fail("failed", err.Error())
+			return
+		}
+	}
+	graph, err := recipe.RenderGraph(raw, inputs)
 	if err != nil {
 		fail("failed", err.Error())
 		return
@@ -559,6 +751,9 @@ func (s *Server) generationView(record store.Generation) map[string]any {
 		"blocks": record.Blocks, "short_edge": record.ShortEdge, "width": record.Width, "height": record.Height,
 		"frames": record.Frames, "seed": record.Seed, "status": record.Status,
 		"created_at": record.CreatedAt,
+	}
+	if record.FirstFrame != "" {
+		view["first_frame"] = record.FirstFrame
 	}
 	if record.Error != "" {
 		view["error"] = record.Error

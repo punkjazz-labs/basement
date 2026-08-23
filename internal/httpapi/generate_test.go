@@ -1,10 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +38,10 @@ type mediaRuntime struct {
 	// prompts is the order workflows actually reached the runtime in, read
 	// out of the rendered graph. It is what proves the queue keeps its word.
 	prompts []string
+	// images is the LoadImage file name each submitted i2v workflow carried,
+	// read out of the rendered graph the same way prompts is. It is what
+	// proves the staged file basement copied is the one the graph names.
+	images []string
 	// files maps a prompt id onto the file that run produced.
 	files      map[string]string
 	interrupts int
@@ -61,6 +69,16 @@ func newMediaRuntime(t *testing.T, outputRoot string) *mediaRuntime {
 		if node, ok := body.Prompt["4"]; ok {
 			if inputs, ok := node["inputs"].(map[string]any); ok {
 				runtime.prompts = append(runtime.prompts, inputs["text"].(string))
+			}
+		}
+		// Node 1 is recipetest.ImageToVideoGraph's LoadImage node; a
+		// text_to_video submission carries no such node, so this only ever
+		// captures something for an i2v request.
+		if node, ok := body.Prompt["1"]; ok {
+			if inputs, ok := node["inputs"].(map[string]any); ok {
+				if name, ok := inputs["image"].(string); ok {
+					runtime.images = append(runtime.images, name)
+				}
 			}
 		}
 		runtime.files[id] = id + ".mp4"
@@ -113,6 +131,12 @@ func (m *mediaRuntime) order() []string {
 	return append([]string(nil), m.prompts...)
 }
 
+func (m *mediaRuntime) submittedImages() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.images...)
+}
+
 func (m *mediaRuntime) interruptCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -135,6 +159,28 @@ type mediaConsole struct {
 func newMediaConsole(t *testing.T) *mediaConsole {
 	t.Helper()
 	recipetest.WithTextToVideoGraph(t)
+	return newMediaConsoleWithRecipe(t, recipetest.Copy(recipetest.Media()))
+}
+
+// newImageMediaConsole is the same paired console, with a recipe that also
+// offers image_to_video, for the tests that need first_frame accepted rather
+// than refused as not-offered.
+func newImageMediaConsole(t *testing.T) *mediaConsole {
+	t.Helper()
+	recipetest.WithGraphs(t, map[string]string{
+		"t2v.json": recipetest.TextToVideoGraph,
+		"i2v.json": recipetest.ImageToVideoGraph,
+	})
+	media := recipetest.Copy(recipetest.Media())
+	media.Service.ComfyUI.Graphs = map[string]string{
+		recipe.ModeTextToVideo:  "t2v.json",
+		recipe.ModeImageToVideo: "i2v.json",
+	}
+	return newMediaConsoleWithRecipe(t, media)
+}
+
+func newMediaConsoleWithRecipe(t *testing.T, media recipe.Recipe) *mediaConsole {
+	t.Helper()
 	previousInterval := operations.GenerationPollInterval
 	t.Cleanup(func() { operations.GenerationPollInterval = previousInterval })
 	operations.GenerationPollInterval = 5 * time.Millisecond
@@ -149,7 +195,6 @@ func newMediaConsole(t *testing.T) *mediaConsole {
 	if err != nil {
 		t.Fatal(err)
 	}
-	media := recipetest.Copy(recipetest.Media())
 	root := operations.GenerationRoot(dataDir, media.ID)
 	runtime := newMediaRuntime(t, root)
 	port, err := strconv.Atoi(runtime.server.URL[strings.LastIndex(runtime.server.URL, ":")+1:])
@@ -202,6 +247,57 @@ func (c *mediaConsole) generate(t *testing.T, body string) (int, map[string]any)
 	var decoded map[string]any
 	_ = json.Unmarshal(raw, &decoded)
 	return response.StatusCode, decoded
+}
+
+// stageMedia posts filename/data as a multipart upload the way the console
+// does, and decodes whatever the endpoint answered.
+func (c *mediaConsole) stageMedia(t *testing.T, filename string, data []byte) (int, map[string]any) {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, c.server.URL+"/api/v1/generations/media", &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	for _, cookie := range c.cookies {
+		request.AddCookie(cookie)
+	}
+	for key, value := range c.headers {
+		request.Header.Set(key, value)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	raw, _ := io.ReadAll(response.Body)
+	var decoded map[string]any
+	_ = json.Unmarshal(raw, &decoded)
+	return response.StatusCode, decoded
+}
+
+// testPNG encodes a tiny, deterministic-content PNG for the staging tests, so
+// they exercise the real sniff-and-decode path rather than a canned byte
+// string that happens to start with a PNG signature.
+func testPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func (c *mediaConsole) show(t *testing.T, id string) map[string]any {
@@ -379,6 +475,176 @@ func TestGenerateAcceptsBothCanvasOrientations(t *testing.T) {
 				t.Fatalf("stored canvas=%dx%d short_edge=%d", record.Width, record.Height, record.ShortEdge)
 			}
 		})
+	}
+}
+
+// TestMediaStageAcceptsAnImage covers the staging endpoint's happy path: the
+// bytes are sniffed rather than trusted, the response carries the dimensions
+// the console needs for fit-to-image sizing, and a re-upload of the same
+// bytes is idempotent because the id is the content hash.
+func TestMediaStageAcceptsAnImage(t *testing.T) {
+	console := newMediaConsole(t)
+	data := testPNG(t)
+	status, first := console.stageMedia(t, "source.png", data)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%#v", status, first)
+	}
+	if first["width"] != float64(2) || first["height"] != float64(2) {
+		t.Fatalf("dims=%#vx%#v, want 2x2", first["width"], first["height"])
+	}
+	if first["bytes"] != float64(len(data)) {
+		t.Fatalf("bytes=%#v, want %d", first["bytes"], len(data))
+	}
+	id, ok := first["id"].(string)
+	if !ok || len(id) != 64 {
+		t.Fatalf("id=%#v, want a 64-character sha256 hex string", first["id"])
+	}
+	status, second := console.stageMedia(t, "same-bytes-different-name.png", data)
+	if status != http.StatusOK {
+		t.Fatalf("re-upload status=%d body=%#v", status, second)
+	}
+	if second["id"] != id {
+		t.Fatalf("re-upload id=%#v, want the same id %q the first upload got", second["id"], id)
+	}
+}
+
+func TestMediaStageRejectsNonImages(t *testing.T) {
+	console := newMediaConsole(t)
+	status, body := console.stageMedia(t, "notes.txt", []byte("this is not an image, just text"))
+	if status != http.StatusUnsupportedMediaType || body["error"] != "not an image" {
+		t.Fatalf("status=%d body=%#v", status, body)
+	}
+}
+
+func TestMediaStageRejectsOversizeUploads(t *testing.T) {
+	console := newMediaConsole(t)
+	oversize := make([]byte, mediaMaxUploadBytes+1)
+	status, body := console.stageMedia(t, "big.png", oversize)
+	if status != http.StatusRequestEntityTooLarge || body["error"] != "too large" {
+		t.Fatalf("status=%d body=%#v", status, body)
+	}
+}
+
+// TestMediaStageSweepsStaleUnreferencedFiles is the GC contract: a staged
+// file older than 24 hours that no generation ever turned into a first_frame
+// is removed, and one a generation still names survives regardless of age.
+// The sweep runs on the staging write path, so uploading a new image is what
+// triggers it here.
+func TestMediaStageSweepsStaleUnreferencedFiles(t *testing.T) {
+	console := newMediaConsole(t)
+	dir := filepath.Join(console.dataDir, "generations", "staged")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeStale := func(name string) {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-25 * time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleUnreferenced := strings.Repeat("a", 64)
+	staleReferenced := strings.Repeat("b", 64)
+	writeStale(staleUnreferenced + ".png")
+	writeStale(staleReferenced + ".png")
+	if _, err := console.store.CreateGeneration(t.Context(), store.Generation{
+		RecipeID: console.recipe.ID, Mode: recipe.ModeImageToVideo, FirstFrame: staleReferenced,
+		Prompt: "x", Blocks: 1, ShortEdge: 768, Width: 1152, Height: 768, Frames: 22, Seed: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Staging a new image exercises the write path the sweep runs on.
+	status, _ := console.stageMedia(t, "trigger.png", testPNG(t))
+	if status != http.StatusOK {
+		t.Fatalf("trigger upload status=%d", status)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, staleUnreferenced+".png")); !os.IsNotExist(err) {
+		t.Fatalf("a stale, unreferenced staged file survived the sweep: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, staleReferenced+".png")); err != nil {
+		t.Fatalf("a stale but still-referenced staged file was swept: %v", err)
+	}
+}
+
+// TestGenerateFirstFrameModeMismatch is the pairing rule: first_frame and
+// image_to_video stand or fall together, in either direction.
+func TestGenerateFirstFrameModeMismatch(t *testing.T) {
+	console := newImageMediaConsole(t)
+	_, staged := console.stageMedia(t, "source.png", testPNG(t))
+	id := staged["id"].(string)
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"image mode without first_frame", `{"model_id":"media-test-1s","mode":"image_to_video","prompt":"x","blocks":1,"width":1152,"height":768}`, "first_frame requires image mode"},
+		{"first_frame without image mode", `{"model_id":"media-test-1s","mode":"text_to_video","first_frame":"` + id + `","prompt":"x","blocks":1,"width":1152,"height":768}`, "first_frame is only for image mode"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, body := console.generate(t, test.body)
+			if status != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%#v", status, body)
+			}
+			if body["error"] != test.want {
+				t.Fatalf("error=%#v, want %q", body["error"], test.want)
+			}
+		})
+	}
+}
+
+// TestGenerateImageToVideoRequiresAStagedFile proves a first_frame naming
+// nothing on disk is refused before a job is ever created, with the same 404
+// a missing generation gets.
+func TestGenerateImageToVideoRequiresAStagedFile(t *testing.T) {
+	console := newImageMediaConsole(t)
+	status, body := console.generate(t, `{"model_id":"media-test-1s","mode":"image_to_video","first_frame":"`+strings.Repeat("a", 64)+`","prompt":"x","blocks":1,"width":1152,"height":768}`)
+	if status != http.StatusNotFound || body["error"] != "image not found" {
+		t.Fatalf("status=%d body=%#v", status, body)
+	}
+}
+
+// TestGenerateImageToVideoStagesAndSubmitsTheSourceImage is the full path:
+// stage an image, create an i2v generation from it, and prove the copy into
+// the container's input directory happened and the submitted workflow names
+// the file that copy produced.
+func TestGenerateImageToVideoStagesAndSubmitsTheSourceImage(t *testing.T) {
+	console := newImageMediaConsole(t)
+	data := testPNG(t)
+	_, staged := console.stageMedia(t, "source.png", data)
+	id := staged["id"].(string)
+
+	status, accepted := console.generate(t,
+		`{"model_id":"media-test-1s","mode":"image_to_video","first_frame":"`+id+`","prompt":"a portrait comes alive","blocks":1,"width":1152,"height":768}`)
+	if status != http.StatusAccepted {
+		t.Fatalf("status=%d body=%#v", status, accepted)
+	}
+	genID := accepted["generation_id"].(string)
+	view := console.awaitStatus(t, genID, "completed", "failed")
+	if view["status"] != "completed" {
+		t.Fatalf("generation did not complete: %#v", view)
+	}
+	if view["mode"] != recipe.ModeImageToVideo || view["first_frame"] != id {
+		t.Fatalf("view did not persist mode/first_frame: %#v", view)
+	}
+
+	wantName := id + ".png"
+	images := console.runtime.submittedImages()
+	if len(images) != 1 || images[0] != wantName {
+		t.Fatalf("submitted graph image=%#v, want [%q]", images, wantName)
+	}
+	inputRoot := operations.GenerationInputRoot(console.dataDir, console.recipe.ID)
+	copied, err := os.ReadFile(filepath.Join(inputRoot, wantName))
+	if err != nil {
+		t.Fatalf("the staged file was not copied into the container's input directory: %v", err)
+	}
+	if !bytes.Equal(copied, data) {
+		t.Fatal("the copy into the input directory does not match the staged bytes")
 	}
 }
 
@@ -770,6 +1036,7 @@ func TestGenerationEndpointsRequireASession(t *testing.T) {
 		{http.MethodPost, "/api/v1/generate", goodRequest},
 		{http.MethodGet, "/api/v1/generations", ""},
 		{http.MethodGet, "/api/v1/generations/events", ""},
+		{http.MethodPost, "/api/v1/generations/media", ""},
 		{http.MethodGet, "/api/v1/generations/gen_x", ""},
 		{http.MethodGet, "/api/v1/generations/gen_x/file", ""},
 		{http.MethodPost, "/api/v1/generations/gen_x/cancel", ""},

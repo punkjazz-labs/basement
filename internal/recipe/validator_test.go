@@ -86,9 +86,12 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if h3.Service.InternalPort != 8188 || h3.Service.DefaultHostPort != 8188 {
 		t.Fatalf("MiniMax H3 does not use ComfyUI's port: %#v", h3.Service)
 	}
+	if h3.Version != 3 {
+		t.Fatalf("MiniMax H3 version=%d, want 3 now that image_to_video ships", h3.Version)
+	}
 	config, media := h3.MediaGeneration()
-	if !media || len(config.Graphs) != 1 || config.Graphs[ModeTextToVideo] != "minimax-h3-t2v.json" {
-		t.Fatalf("MiniMax H3 does not expose only its reachable text-to-video graph: %#v", config.Graphs)
+	if !media || len(config.Graphs) != 2 || config.Graphs[ModeTextToVideo] != "minimax-h3-t2v.json" || config.Graphs[ModeImageToVideo] != "minimax-h3-i2v.json" {
+		t.Fatalf("MiniMax H3 does not expose both its text-to-video and image-to-video graphs: %#v", config.Graphs)
 	}
 	if config.DefaultShortEdge != 768 || config.MaxShortEdge != 1440 || config.MaxLongEdge != 2560 {
 		t.Fatalf("MiniMax H3 canvas=%#v, want the measured default and QHD cap", config)

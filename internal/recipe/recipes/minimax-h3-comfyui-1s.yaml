@@ -3,18 +3,18 @@ id: minimax-h3-comfyui-1s
 # MiniMax H3 served through the pinned basement ComfyUI image. The four
 # files below are the optimized text-to-video set read from the pinned
 # Hugging Face tree on 2026-08-05. Their exact byte counts sum to the
-# measured 42,470,585,471-byte artifact total.
+# measured 42,470,585,471-byte artifact total. Both graphs load the same
+# four files; adding image_to_video pins no new artifact.
 #
-# Only text_to_video ships in this version. The image_to_video graph is
-# already pinned in the binary, and the prompt composer design includes an
-# optional starting image, but the generation API does not stage a source
-# image into ComfyUI yet. Declaring that graph here would offer a mode the
-# backend explicitly refuses.
-# Version 2 splits the sampler step count in two: a generation still runs 20,
+# Version 3 adds image_to_video. The generation API now stages a source
+# image into the container's input directory before it submits the graph,
+# so the i2v graph pinned in the binary since the start can finally be
+# offered instead of refused.
+# Version 2 split the sampler step count in two: a generation still runs 20,
 # and the install and start proof runs 1. Version 1 proved itself with a
 # full-quality generation, which cost about eighteen minutes of waiting every
 # time the model was installed or started.
-version: 2
+version: 3
 display_name: MiniMax H3
 publisher: MiniMax + Comfy-Org
 model_by: MiniMax
@@ -88,6 +88,7 @@ service:
   comfyui:
     graphs:
       text_to_video: minimax-h3-t2v.json
+      image_to_video: minimax-h3-i2v.json
     output_directory: /output
     input_directory: /input
     default_short_edge: 768

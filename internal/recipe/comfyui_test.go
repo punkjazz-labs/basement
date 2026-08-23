@@ -150,8 +150,11 @@ func TestShippedRecipesUseTheirRuntimePortAndVerification(t *testing.T) {
 			if got := recipe.InferenceVerification(r.Runtime.Kind); got != "verify_media_generation" {
 				t.Fatalf("%s (%s) verifies with %s", r.ID, r.Runtime.Kind, got)
 			}
-			if _, available := config.Graphs[recipe.ModeImageToVideo]; available {
-				t.Fatalf("%s offers image_to_video before source-image staging exists", r.ID)
+			// Image-to-video ships from this version: the generation API now
+			// stages a source image before it submits the graph, so the
+			// pinned i2v graph is finally something a request can reach.
+			if _, available := config.Graphs[recipe.ModeImageToVideo]; !available {
+				t.Fatalf("%s does not offer image_to_video even though source-image staging exists", r.ID)
 			}
 			continue
 		}
