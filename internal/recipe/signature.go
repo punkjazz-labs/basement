@@ -8,15 +8,15 @@ import (
 )
 
 // IndexPublicKeyBase64 verifies the detached signature over the remote
-// recipe index. This is a PLACEHOLDER key: it was generated once to produce
-// a syntactically real ed25519 public key, and the matching private key was
-// discarded immediately after generation and was never written to disk, a
-// commit, a log, or anywhere else — nothing signed with it should ever be
-// trusted. Before the recipe index is published for real, generate a real
-// keypair out of band (see `make sign-index` and docs/plans/04, "reporting"),
-// keep the private key off this machine and out of version control, and
-// replace this constant with the real public key.
-const IndexPublicKeyBase64 = "R1LNvKqdbMBWhGcRY4I9KUr3LV1wfkI8kpowaMk5JtM="
+// recipe index. This is the REAL feed key, generated in the 2026-08-23 key
+// ceremony (owner item #65). The private half lives only in the owner
+// laptop's login keychain (service basement-recipe-feed, account simo,
+// the same custody pattern as the release update key) and was never
+// written to this repository, a log, or a command line. Binaries built
+// before this constant landed carry the old placeholder key and ignore
+// the real feed; the first release that ships this constant is the one
+// that turns the over-the-air recipe channel on for its fleet.
+const IndexPublicKeyBase64 = "nnN/8YJHfjsMglhSYqwH+2/GwOghge3NwjeAiu0zxjc="
 
 // IndexPublicKey decodes the embedded placeholder constant. It panics on a
 // malformed constant, which can only happen if this file itself is edited
