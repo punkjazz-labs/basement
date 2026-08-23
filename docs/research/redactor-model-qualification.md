@@ -284,3 +284,45 @@ Known limits, which a reader of the results table should hold in mind:
   these documents. A candidate that flags something reasonable but unlabeled is scored as
   over-redaction, which is the right default for a leak-first metric and still worth
   reading the actual findings for before dismissing a model.
+
+## 2026-08-23: Spark confirmation at NVFP4
+
+The Studio bake-off left one condition open: the winner had to hold its leak
+score at the quantization a Spark would really serve, on the hardware that
+serves it. That run is now done.
+
+Setup: one GB10 (edgexpert-37c4, otherwise idle), basement's pinned vLLM
+image `vllm/vllm-openai@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f`
+(the same image the qwen36-27b-nvfp4-1s recipe pins), checkpoint
+`llmat/Qwen3-4B-Instruct-2507-NVFP4` (llmcompressor NVFP4, linear layers,
+lm_head excluded), temperature 0, the same 27-document corpus and
+`cmd/docredact-bench` as the bake-off.
+
+| Configuration | Leaks | Chunks failed | Hallucinated | Avg time per doc | Memory above idle |
+|---|---|---|---|---|---|
+| 16384 context, 0.12 GPU memory fraction | 6/242 (2.5%) | 0 | 6 (all dropped) | 4.017 s | about 18 GB |
+| 8192 context, 0.06 GPU memory fraction | 6/242 (2.5%) | 0 | 6 (all dropped) | 3.997 s | about 11 GB |
+
+What this settles:
+
+- **Quality holds at NVFP4.** 6 leaks of 242, the same count the q8_0 arm
+  measured on the Studio. The two failure lists were not compared literal by
+  literal; the count and the zero failed chunks are the acceptance signal.
+- **The footprint is small enough for co-residency.** At an 8192 context the
+  whole serving stack sits about 11 GB above the idle baseline. The chunker
+  sends at most 6000 bytes per request, so the short context loses nothing.
+- **Latency is per-document seconds, not minutes.** About 4 s per corpus
+  document on the GB10, in line with the Studio's 2.7 s per doc on q8_0.
+
+What this still does not settle: behaviour on documents longer than one
+chunk (the corpus limit recorded above), and the checkpoint provenance
+decision for the recipe pin. The measured checkpoint is a community
+llmcompressor export; OPENZEKA and kaitchup publish alternatives that were
+not measured. The `redactor` role recipe should pin whichever checkpoint
+passes a provenance review, and re-run this bench once against the pinned
+bytes if that choice lands on a different repository.
+
+One tooling note for the next operator: `-base-url` takes the server root
+(`http://host:8300`), not the `/v1` prefix. A doubled `/v1/v1` path fails
+every chunk quietly and the leak table then reproduces pattern-only exactly;
+read the `CHUNKS FAILED` column before reading the leak column.
