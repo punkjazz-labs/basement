@@ -1,3 +1,15 @@
+# build-index builds index.json, the unsigned document at the heart of the
+# remote recipe feed (ADR 0009), from the recipes embedded in this binary.
+# See cmd/build-index/main.go for the flags and docs/RECIPE-FEED.md for the
+# complete publish flow: build-index, then sign-index below, then push both
+# files to the feed repository.
+#
+# Usage:
+#   make build-index OUT=path/to/index.json
+.PHONY: build-index
+build-index:
+	go run ./cmd/build-index -out "$${OUT:-index.json}"
+
 # sign-index produces index.json.minisig for the remote recipe index
 # (docs/plans/04-remote-recipe-index.md). The private key never appears in
 # this repository, in this Makefile, or in CI config: it must already exist
