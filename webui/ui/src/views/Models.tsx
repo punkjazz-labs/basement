@@ -1,14 +1,17 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  api, idempotency, terminal, formatBytes, formatTokens, runtimeLabel, startTimeoutMinutes, modelStateWord, peerModelList,
+  api, fetchFleetDeployments, idempotency, terminal, formatBytes, formatTokens, runtimeLabel, startTimeoutMinutes,
+  modelStateWord, peerModelList,
   updatePlan, installRequest, installConfirmationsComplete, licenceArtifacts, territoryEligibilityLabel, trustLine,
-  type InstalledModel, type Job, type Peer, type Preflight, type Recipe, type StorageInfo, type PeerSummary,
-  type TokenUsage,
+  type FleetSummary, type InstalledModel, type Job, type Peer, type Preflight, type Recipe, type StorageInfo,
+  type PeerSummary, type TokenUsage,
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
+import { fleetSummary, MEMBERSHIP_POLL_MS } from '../fleetInvite'
+import { deploymentIndex, fleetRows, type FleetRow } from '../fleetModels'
 
 const USE: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
@@ -33,6 +36,36 @@ interface ConfirmState {
   recipe: Recipe
   preflight: Preflight
   switchFrom?: string
+}
+
+// The name of one Spark on a model's row. live means that Spark serves this
+// model right now.
+interface NodeChip {
+  nodeID: string
+  name: string
+  live: boolean
+}
+
+// The fleet in one line above the table: every Spark, whether it serves
+// something, and how much memory and disk it has free. Every number is one
+// that Spark reported about itself, and n/a means it has reported none yet.
+function FleetStrip({ sparks }: { sparks: FleetRow[] }) {
+  return (
+    <div className="fleet-strip" role="status">
+      <span className="fs-label">Fleet</span>
+      {sparks.map(spark => (
+        <span className="fs-node" key={spark.nodeID}>
+          <i className={`sdot ${spark.status.dot}`} aria-hidden="true" />
+          <span className="fs-name">{spark.displayName}</span>
+          <b>
+            {formatBytes(spark.inventory?.memory_available_bytes)} memory ·{' '}
+            {formatBytes(spark.inventory?.storage_available_bytes)} disk
+          </b>
+        </span>
+      ))}
+      <span className="fs-end">{sparks.length} Sparks</span>
+    </div>
+  )
 }
 
 // Where an install is about to run. A recipe that needs two Sparks always
@@ -64,6 +97,14 @@ export default function Models({
   // honestly say in between. It clears as soon as the model shows up.
   const [delegated, setDelegated] = useState<Set<string>>(new Set())
   const dialogRef = useRef<HTMLDialogElement>(null)
+  // Every Spark in the fleet, as the Spark that leads it reports them. null
+  // means this console has no fleet to show: a standalone Spark, a member, or
+  // a summary this console could not read.
+  const [fleet, setFleet] = useState<FleetSummary | null>(null)
+  // Which placement owns which model on which Spark. Nothing on this screen
+  // reads it yet; row actions do, and they need it fresh, so it is polled
+  // beside the summary rather than fetched at the moment of a click.
+  const placements = useRef<Map<string, string>>(new Map())
 
   // Storage tells us which recipes already have model files on disk, so a
   // partially downloaded model can offer to resume instead of start over.
@@ -123,6 +164,57 @@ export default function Models({
     }
   }, [peerID])
 
+  // The fleet-wide table is a controller feature: only the console of the
+  // Spark that leads the fleet holds rows for the other Sparks, so only that
+  // console keeps reading. Every other console asks once, learns it leads
+  // nothing, and stops there.
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setInterval> | undefined
+    // The first read always runs, because a tab that opens in the background
+    // still has to learn what this console leads. Later rounds skip a hidden
+    // tab, as every other poll in the console does.
+    const read = async (first = false) => {
+      if (!first && document.hidden) return
+      try {
+        const summary = fleetSummary(await api<unknown>('/api/v1/fleet'))
+        if (cancelled) return
+        const controller = summary !== null && summary.role === 'controller'
+        setFleet(controller ? summary : null)
+        if (controller && timer === undefined) timer = setInterval(read, MEMBERSHIP_POLL_MS)
+      } catch {
+        if (!cancelled) setFleet(null)
+      }
+    }
+    void read(true)
+    return () => {
+      cancelled = true
+      if (timer !== undefined) clearInterval(timer)
+    }
+  }, [])
+
+  const leadsFleet = fleet !== null
+
+  useEffect(() => {
+    if (!leadsFleet) return
+    let cancelled = false
+    const read = async (first = false) => {
+      if (!first && document.hidden) return
+      try {
+        const deployments = await fetchFleetDeployments()
+        if (!cancelled) placements.current = deploymentIndex(deployments)
+      } catch {
+        /* the next read tries again */
+      }
+    }
+    void read(true)
+    const timer = setInterval(read, MEMBERSHIP_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [leadsFleet])
+
   const peerModels = peerModelList(peerSummary)
   const peerInstalled = new Map(peerModels.map(model => [model.recipe_id, model]))
 
@@ -136,6 +228,25 @@ export default function Models({
       return next.size === previous.size ? previous : next
     })
   }, [peerSummary]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Every Spark this console can speak for, in table order. Only the console
+  // that leads the fleet has more than its own machine to show, so on every
+  // other console the fleet line and the chips below stay off and the screen
+  // reads exactly as it did before the fleet existed.
+  const sparks = useMemo(() => fleetRows(fleet, peers, window.location.origin), [fleet, peers])
+  const showFleet = leadsFleet && sparks.length > 1
+  // Which Sparks hold this model, and which one serves it now. The Spark this
+  // console runs on is named only while another Spark is on screen beside it.
+  const nodeChips = (recipeID: string): NodeChip[] => {
+    if (!showFleet) return []
+    return sparks
+      .filter(spark => spark.installedModels.some(model => model.recipe_id === recipeID))
+      .map(spark => ({
+        nodeID: spark.nodeID,
+        name: spark.displayName,
+        live: spark.serving?.recipe_id === recipeID,
+      }))
+  }
 
   const installed = useMemo(() => new Map(models.map(model => [model.recipe_id, model])), [models])
   const usage = useMemo(() => new Map((tokens?.models ?? []).map(item => [item.recipe_id, item])), [tokens])
@@ -407,6 +518,7 @@ export default function Models({
     const served = usage.get(recipe.id)
     const servedTotal = served ? served.prompt_tokens + served.generation_tokens : 0
     const updateAvailable = Boolean(model && model.recipe_version < recipe.version)
+    const chips = nodeChips(recipe.id)
     const open = expanded === recipe.id
     const toggle = () => setExpanded(open ? '' : recipe.id)
     // Buttons act without toggling the row; empty space anywhere else in the
@@ -437,6 +549,14 @@ export default function Models({
                 {recipe.display_name}{' '}
                 {recipe.id === RECOMMENDED_ID && !revocation.installBlocked && <span className="tag">Recommended</span>}
                 {revocation.revoked && <span className="tag revoked">Revoked</span>}
+                {/* Which Sparks in the fleet hold this model. The lit chip is
+                    the one serving it now. */}
+                {chips.map(chip => (
+                  <span key={chip.nodeID} className={`node-chip ${chip.live ? 'live' : ''}`}>
+                    <i aria-hidden="true" />
+                    {chip.name}
+                  </span>
+                ))}
               </div>
               <div className="use">{USE[recipe.id] ?? 'Local model for your Spark.'}</div>
             </div>
@@ -676,6 +796,8 @@ export default function Models({
           </div>
         </section>
       )}
+
+      {showFleet && <FleetStrip sparks={sparks} />}
 
       <div className="mtable">
         <div className="mthead" aria-hidden="true">

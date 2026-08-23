@@ -471,7 +471,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
       ) : (
         <div className="mtable fleet">
           <div className="mthead" aria-hidden="true">
-            <span>Spark</span><span>Serving</span><span className="r">Memory free</span><span className="r">Version</span><span style={{ paddingLeft: 20 }}>Status</span><span /><span />
+            <span>Spark</span><span>Serving</span><span className="r">Memory free</span><span className="r">Disk free</span><span className="r">Version</span><span style={{ paddingLeft: 20 }}>Status</span><span /><span />
           </div>
 
           <div className="mrow">
@@ -492,6 +492,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
               )}
             </div>
             <div className="m-num"><span className="n">{formatBytes(system?.memory_available_bytes)}</span></div>
+            <div className="m-num"><span className="n">{formatBytes(system?.storage_available_bytes)}</span></div>
             <div className="m-num"><span className="n">{system?.manager_version || 'n/a'}</span></div>
             <div className="m-status">
               <span className={`sdot ${thisModel ? 'on' : ''}`} aria-hidden="true" />
@@ -551,6 +552,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                     )}
                   </div>
                   <div className="m-num"><span className="n">{reachable ? formatBytes(summary?.system?.memory_available_bytes) : 'n/a'}</span></div>
+                  <div className="m-num"><span className="n">{reachable ? formatBytes(summary?.system?.storage_available_bytes) : 'n/a'}</span></div>
                   <div className="m-num"><span className="n">{reachable ? (summary?.system?.manager_version || 'n/a') : 'n/a'}</span></div>
                   <div className="m-status">
                     <span className={`sdot ${dotClass}`} aria-hidden="true" />
@@ -645,6 +647,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                     )}
                   </div>
                   <div className="m-num"><span className="n">{formatBytes(node.inventory?.memory_available_bytes)}</span></div>
+                  <div className="m-num"><span className="n">{formatBytes(node.inventory?.storage_available_bytes)}</span></div>
                   <div className="m-num"><span className="n">{node.manager_version || 'n/a'}</span></div>
                   <div className="m-status">
                     <span className={`sdot ${status.dot}`} aria-hidden="true" />

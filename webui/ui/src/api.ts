@@ -642,6 +642,66 @@ export interface FleetInvitation {
   expires_at: string
 }
 
+// ---- Fleet placement --------------------------------------------------------
+// One model the controller placed on a Spark in the fleet, as the manager
+// stores it (store.FleetDeployment). A one-Spark placement holds one node
+// row; the rank orders the nodes of a placement that spans more than one.
+
+export interface FleetDeploymentNode {
+  deployment_id: string
+  node_id: string
+  node_role: string
+  rank: number
+  reservation_id: string
+  fabric_interface?: string
+}
+
+export interface FleetDeployment {
+  deployment_id: string
+  recipe_id: string
+  recipe_version: number
+  recipe_fingerprint: string
+  topology_count: number
+  owner_node_id: string
+  owner_job_id: string
+  state: string
+  last_observed_at: string
+  created_at: string
+  updated_at: string
+  nodes: FleetDeploymentNode[]
+}
+
+// What the fleet API answers with: the stored placement, the owner job when
+// the controller could read it, and whether the owner node has stopped
+// answering for it.
+export interface FleetDeploymentView extends FleetDeployment {
+  job?: Job
+  stale: boolean
+}
+
+// One Spark a model could be placed on, and why it cannot be. current_model
+// is that node's own heartbeat snapshot of what it serves now.
+export interface PlacementCandidate {
+  node_id: string
+  display_name: string
+  eligible: boolean
+  reason?: string
+  current_model?: FleetModelSnapshot
+}
+
+export interface PlacementPlan {
+  recipe_id: string
+  recipe_version: number
+  recipe_fingerprint: string
+  candidates: PlacementCandidate[]
+  recommended_node_id?: string
+}
+
+// Every placement this fleet holds. Only the console of the Spark that leads
+// the fleet has rows to answer with, so only that console asks.
+export const fetchFleetDeployments = (): Promise<FleetDeploymentView[]> =>
+  api<FleetDeploymentView[]>('/api/v1/fleet/deployments')
+
 let csrf = ''
 export const setCSRF = (token: string) => {
   csrf = token

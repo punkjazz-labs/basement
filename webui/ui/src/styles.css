@@ -292,6 +292,31 @@ input[type='text'], input[type='password'], textarea {
   color: var(--fail); background: transparent;
   border-color: color-mix(in srgb, var(--fail) 45%, var(--line));
 }
+/* The Spark a model sits on, beside the model's name. Quieter than a tag: it
+   answers "where", not "what". The lit one is serving the model now. */
+.node-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: 10px; font-weight: 550; letter-spacing: 0.02em;
+  color: var(--muted); background: var(--surface-2); border: 1px solid var(--line-strong);
+  border-radius: 4px; padding: 1px 6px; white-space: nowrap;
+}
+.node-chip i { width: 5px; height: 5px; border-radius: 50%; background: var(--line-strong); flex: none; }
+.node-chip.live { color: var(--ink); border-color: color-mix(in srgb, var(--live) 40%, var(--line-strong)); }
+.node-chip.live i { background: var(--live); }
+
+/* The whole fleet in one line over the table: each Spark, what it has free,
+   and how many Sparks that is. It uses the same dot as every status cell. */
+.fleet-strip {
+  display: flex; align-items: center; gap: 20px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 14px; font-size: 12px; color: var(--muted);
+  overflow: hidden; white-space: nowrap;
+}
+.fleet-strip .fs-label { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+.fleet-strip .fs-node { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.fleet-strip .fs-node b { font-weight: 500; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--faint); font-size: 11.5px; }
+.fleet-strip .fs-name { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
+.fleet-strip .fs-end { margin-left: auto; color: var(--faint); font-size: 11.5px; }
 
 /* expanded detail — the "A depth" inside a row */
 .mdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }
@@ -430,7 +455,7 @@ input[type='text'], input[type='password'], textarea {
 /* ---- Fleet: same row idiom as Models, one extra identity column for the
    serving model, so widths differ but nothing else does. */
 .mtable.fleet .mthead, .mtable.fleet .mrow {
-  grid-template-columns: minmax(150px, 1.1fr) minmax(150px, 1fr) 88px 76px 130px minmax(112px, auto) 18px;
+  grid-template-columns: minmax(150px, 1.2fr) minmax(130px, 1fr) 88px 88px 72px 112px minmax(104px, auto) 18px;
 }
 
 .field { display: grid; gap: 4px; }
@@ -974,12 +999,15 @@ button.chip:hover { color: var(--ink); }
    absolute: the strip scrolls sideways, and an absolute menu inside it would
    be clipped by that scroller. */
 .run { position: relative; flex: none; }
-.use {
+/* Scoped to the button's own wrapper. Bare .use is the description line under
+   a name in the Models, Fleet and Roles tables, and an unscoped rule here took
+   those lines out of their rows and pinned them to the corner of the page. */
+.use-wrap .use {
   position: absolute; top: 5px; right: 5px; padding: 3px 6px; border-radius: 4px;
   background: rgb(0 0 0 / 0.6); border: 1px solid rgb(255 255 255 / 0.14);
   color: var(--ink); font-family: var(--mono); font-size: 10px; font-weight: 650; line-height: 1.4;
 }
-.use:hover { background: rgb(0 0 0 / 0.82); border-color: rgb(255 255 255 / 0.3); }
+.use-wrap .use:hover { background: rgb(0 0 0 / 0.82); border-color: rgb(255 255 255 / 0.3); }
 .usemenu {
   position: fixed; z-index: 20; width: 168px; padding: 4px; display: grid; gap: 2px;
   background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: 7px;
