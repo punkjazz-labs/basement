@@ -459,6 +459,175 @@ func TestRestartReconcilesHealthBeforeRestoringReady(t *testing.T) {
 	t.Fatalf("model was not reconciled: %#v", model)
 }
 
+// A fleet upgrade restarts the manager while the upgrade's maintenance
+// reservation still closes runtime admission, so the restarted manager's one
+// recovery attempt lands inside that window and fails on the reservation
+// conflict. Hardware proved it three times (2026-08-12 twice, 2026-08-23
+// once): the model then stays recovering forever, because nothing retries.
+// Recovery must retry a conflict-failed start until admission reopens.
+func TestRecoveryRetriesAfterMaintenanceWindow(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, _ := recipe.Builtin()
+	id := singleSpark(recipes).ID
+	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: id, RecipeVersion: 1, Status: "ready", ArtifactPath: "/managed/" + id, ContainerID: "existing-container", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	runner := New(s, &fakeExecutor{image: true, artifact: true, config: true, container: true, running: true}, recipes)
+	runner.recoveryRetryDelay = 20 * time.Millisecond
+	if err := runner.Reservations().Reconcile(ctx, recipes); err != nil {
+		t.Fatal(err)
+	}
+	maintID := fleet.ReservationID(fleet.ClaimKindUpdate, "test-upgrade")
+	if _, _, err := runner.Reservations().Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: maintID, DeploymentID: "upgrade:test-upgrade", DriverNodeID: "local",
+		RecipeID: "basement-manager", RecipeVersion: 1,
+		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindUpdate, Runtime: true, Ports: []int{}, FabricInterfaces: []string{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Reservations().Commit(ctx, maintID, fleet.LocalPrepareToken(maintID), []byte(`{"kind":"test"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Reservations().ActivateMaintenance(ctx, maintID); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.ReconcileActiveModel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The first attempt must fail on the closed admission and leave the model
+	// recovering, not failed.
+	sawConflict := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		jobs, err := s.ListJobs(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, job := range jobs {
+			if job.Kind == "start" && job.State == "failed" && strings.Contains(job.Error, store.ErrReservationConflict.Error()) {
+				sawConflict = true
+			}
+		}
+		if sawConflict {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !sawConflict {
+		t.Fatal("the recovery start never hit the maintenance conflict this test holds open")
+	}
+	// Admission reopens, as it does when the fleet upgrade finalizes. The
+	// retry must bring the model to ready with no further calls.
+	if err := runner.Reservations().Release(ctx, maintID); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		model, err := s.Model(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if model.Status == "ready" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	jobs, _ := s.ListJobs(ctx, 5)
+	model, _ := s.Model(ctx, id)
+	t.Fatalf("recovery never reached ready after the window closed; model=%q jobs=%+v", model.Status, jobs)
+}
+
+func countStartJobs(t *testing.T, s *store.Store, recipeID string) int {
+	t.Helper()
+	jobs, err := s.ListJobs(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, job := range jobs {
+		if job.Kind == "start" && job.RecipeID == recipeID {
+			count++
+		}
+	}
+	return count
+}
+
+func recoveringModel(t *testing.T, path string, recipes []recipe.Recipe, id string) *store.Store {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: id, RecipeVersion: 1, Status: "ready", ArtifactPath: "/managed/" + id, ContainerID: "existing-container", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// A recovery start that fails for any reason other than a reservation
+// conflict must not retry: the failure is real, and repeating it would only
+// repeat the damage report.
+func TestRecoveryDoesNotRetryNonConflictFailures(t *testing.T) {
+	ctx := context.Background()
+	recipes, _ := recipe.Builtin()
+	id := singleSpark(recipes).ID
+	s := recoveringModel(t, filepath.Join(t.TempDir(), "manager.db"), recipes, id)
+	defer s.Close()
+	runner := New(s, &fakeExecutor{failPull: true}, recipes)
+	runner.recoveryRetryDelay = 20 * time.Millisecond
+	if err := runner.Reservations().Reconcile(ctx, recipes); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.ReconcileActiveModel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		jobs, err := s.ListJobs(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed := false
+		for _, job := range jobs {
+			if job.Kind == "start" && job.State == "failed" {
+				if strings.Contains(job.Error, store.ErrReservationConflict.Error()) {
+					t.Fatalf("this test needs a non-conflict failure, got: %s", job.Error)
+				}
+				failed = true
+			}
+		}
+		if failed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if count := countStartJobs(t, s, id); count != 1 {
+		t.Fatalf("a non-conflict failure must not retry; start jobs = %d", count)
+	}
+}
+
 func TestSwitchMakesOnlyVerifiedTargetActive(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))

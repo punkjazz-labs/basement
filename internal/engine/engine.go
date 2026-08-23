@@ -54,6 +54,15 @@ type Engine struct {
 	// switchGuard is taken around the part of a job that changes which model
 	// serves; see SetSwitchGuard. Held atomically for the same reason.
 	switchGuard atomic.Pointer[SwitchGuard]
+	// recoveryRetryDelay paces the retries of a recovery start whose
+	// reservation was refused. A fleet upgrade restarts the manager while the
+	// upgrade's maintenance reservation still closes runtime admission, so
+	// the first recovery attempt after an upgrade reliably lands inside that
+	// window; without a retry the model stays recovering until the next
+	// restart (proved on hardware, 2026-08-12 and 2026-08-23).
+	recoveryRetryDelay time.Duration
+	// recovering guards one recovery loop per recipe under mu.
+	recovering map[string]bool
 }
 
 // TokenSampler takes a reading of a model's runtime token counters.
@@ -104,7 +113,7 @@ type plannedOperation struct {
 // overlaid yet. SetRecipes takes over both from the first background
 // recipe-index refresh onward.
 func New(s *store.Store, executor operations.Executor, recipes []recipe.Recipe) *Engine {
-	e := &Engine{store: s, executor: executor, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1), reservations: fleet.NewAllocator(s, "local")}
+	e := &Engine{store: s, executor: executor, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1), reservations: fleet.NewAllocator(s, "local"), recoveryRetryDelay: 15 * time.Second, recovering: map[string]bool{}}
 	e.SetRecipes(recipes, recipes)
 	return e
 }
@@ -669,8 +678,94 @@ func (e *Engine) ReconcileActiveModel(ctx context.Context) error {
 			return err
 		}
 		e.Start(job.ID)
+		e.watchRecovery(model.RecipeID, job.ID)
 	}
 	return nil
+}
+
+// watchRecovery follows one recovery start job and retries it while the
+// refusal is a reservation conflict. That refusal is transient by design:
+// a fleet upgrade holds the node's maintenance reservation across the
+// manager restart that triggers recovery, so the first attempt after an
+// upgrade reliably collides with it. The retry stops on any other failure,
+// on success, when the model stops being an active recovering model, or
+// after the attempt budget; every attempt is an ordinary recorded job.
+func (e *Engine) watchRecovery(recipeID, jobID string) {
+	e.mu.Lock()
+	if e.recovering[recipeID] {
+		e.mu.Unlock()
+		return
+	}
+	e.recovering[recipeID] = true
+	e.mu.Unlock()
+	go func() {
+		defer func() {
+			e.mu.Lock()
+			delete(e.recovering, recipeID)
+			e.mu.Unlock()
+		}()
+		ctx := context.Background()
+		// The budget bounds retries of a genuine standing conflict, one
+		// that is not the maintenance latch. Waiting out the latch costs no
+		// budget: a fleet upgrade holds it for as long as the whole fleet
+		// needs (a member parks in awaiting_fleet until the last node
+		// finishes, and a failed run holds it until an operator resolves
+		// it), so any fixed budget spent against it would recreate the
+		// stuck-forever bug for slow fleets.
+		const attemptBudget = 8
+		currentJobID := jobID
+		for attempt := 0; attempt < attemptBudget; attempt++ {
+			job, ok := e.waitJobTerminal(ctx, currentJobID)
+			if !ok {
+				return
+			}
+			if job.State != "failed" || !strings.Contains(job.Error, store.ErrReservationConflict.Error()) {
+				return
+			}
+			if attempt == attemptBudget-1 {
+				// Budget spent. The failed jobs are the durable trace.
+				return
+			}
+			for {
+				active, err := e.reservations.MaintenanceActive(ctx)
+				if err != nil || !active {
+					break
+				}
+				time.Sleep(e.recoveryRetryDelay)
+			}
+			time.Sleep(e.recoveryRetryDelay)
+			model, err := e.store.Model(ctx, recipeID)
+			if err != nil || !model.Active || model.Status != "recovering" {
+				return
+			}
+			next, _, err := e.store.CreateJob(ctx, "start", recipeID, fmt.Sprintf("reconcile-%d", time.Now().UnixNano()), map[string]any{"recovery": true})
+			if err != nil {
+				return
+			}
+			e.Start(next.ID)
+			currentJobID = next.ID
+		}
+	}()
+}
+
+// waitJobTerminal polls a job to a terminal state. The false return covers a
+// job the store can no longer report and a job that never settles inside the
+// deadline; both end the watch rather than hold its recipe's recovery slot
+// forever. The deadline is generous because a start job may run a real
+// verification generation.
+func (e *Engine) waitJobTerminal(ctx context.Context, jobID string) (store.Job, bool) {
+	deadline := time.Now().Add(time.Hour)
+	for time.Now().Before(deadline) {
+		job, err := e.store.GetJob(ctx, jobID)
+		if err != nil {
+			return store.Job{}, false
+		}
+		if terminal(job.State) {
+			return job, true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return store.Job{}, false
 }
 
 func (e *Engine) Start(jobID string) {
