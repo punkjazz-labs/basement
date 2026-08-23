@@ -3,8 +3,9 @@ import type {
   FleetDeploymentView, FleetModelSnapshot, FleetNodeSummary, FleetSummary, Job, NodeInventory, Peer, PlacementPlan,
 } from './api'
 import {
-  deploymentIndex, deploymentKey, fleetRows, joinCandidatesWithInventory, modelChips, placementBusy,
-  rowActionRoute, rowPlacement, ACTION_REFUSAL, FLEET_DEPLOYMENT_ACTIONS, type ActionTarget, type FleetRow,
+  deploymentActionPath, deploymentIndex, deploymentKey, fleetRows, joinCandidatesWithInventory, modelChips,
+  placementBusy, rowActionRoute, rowPlacement, ACTION_REFUSAL, ADOPT_PATH, FLEET_DEPLOYMENT_ACTIONS,
+  type ActionTarget, type FleetRow,
 } from './fleetModels'
 
 const inventory = (overrides: Partial<NodeInventory> = {}): NodeInventory => ({
@@ -129,6 +130,22 @@ describe('one row per Spark', () => {
     expect(rows.map(row => row.nodeID)).toEqual(['node-lead'])
   })
 
+  it('says whether each Spark still answers this console', () => {
+    const answers = (status: string) =>
+      fleetRows(summary({ nodes: [member({ status })] }), [], '')[0].answering
+    expect(answers('fresh')).toBe(true)
+    expect(answers('version-mismatch')).toBe(true)
+    expect(answers('stale')).toBe(false)
+    expect(answers('unreachable')).toBe(false)
+    // A Spark the fleet has not finished admitting answers for nothing yet.
+    expect(answers('adopting')).toBe(false)
+  })
+
+  it('says a Spark added by address answers for nothing', () => {
+    const rows = fleetRows(summary(), [peer('shed', 'http://shed.local:7070')], 'http://attic.local:7070')
+    expect(rows[1].answering).toBe(false)
+  })
+
   it('says nothing without a fleet summary', () => {
     expect(fleetRows(null, [], 'http://attic.local:7070')).toEqual([])
   })
@@ -163,6 +180,18 @@ describe('where one row action goes', () => {
   const index = (...views: FleetDeploymentView[]) => deploymentIndex(views)
   const loft = (recipeID: string): ActionTarget =>
     ({ nodeID: 'node-loft', recipeID, isSelf: false })
+  // The Spark that holds the model, as the table already built its row.
+  const loftRow = (overrides: Partial<FleetRow> = {}): FleetRow => ({
+    nodeID: 'node-loft',
+    displayName: 'loft',
+    isSelf: false,
+    consoleURL: 'http://loft.local:7070',
+    installedModels: [{ recipe_id: 'qwen36-35b-a3b-nvfp4-1s', recipe_version: 3, status: 'ready', active: true }],
+    status: { word: 'Serving', dot: 'on' },
+    answering: true,
+    ...overrides,
+  })
+  const held = (recipeID: string, host: FleetRow = loftRow()): ActionTarget => ({ ...loft(recipeID), host })
 
   it('leaves the Spark this console runs on with its own calls', () => {
     const route = rowActionRoute({ nodeID: 'node-lead', recipeID: 'anything', isSelf: true }, new Map(), 'stop')
@@ -190,9 +219,57 @@ describe('where one row action goes', () => {
     expect(route).toEqual({ where: 'none', reason: 'unsupported' })
   })
 
-  it('refuses a model on another Spark that no placement owns', () => {
+  it('refuses a model on another Spark no row speaks for', () => {
     const route = rowActionRoute(loft('qwen36-27b-nvfp4-1s'), index(deployment()), 'stop')
     expect(route).toEqual({ where: 'none', reason: 'no-placement' })
+  })
+
+  it('adopts a model another Spark runs that the fleet never placed', () => {
+    const route = rowActionRoute(held('qwen36-35b-a3b-nvfp4-1s'), new Map(), 'stop')
+    expect(route).toEqual({ where: 'adopt', nodeID: 'node-loft', recipeID: 'qwen36-35b-a3b-nvfp4-1s' })
+  })
+
+  it('offers every action the fleet API takes on a model it has not placed yet', () => {
+    for (const action of FLEET_DEPLOYMENT_ACTIONS) {
+      expect(rowActionRoute(held('qwen36-35b-a3b-nvfp4-1s'), new Map(), action)).toMatchObject({ where: 'adopt' })
+    }
+  })
+
+  it('uses the placement it already has rather than adopting again', () => {
+    const route = rowActionRoute(held('qwen36-35b-a3b-nvfp4-1s'), index(deployment()), 'stop')
+    expect(route).toMatchObject({ where: 'fleet', deploymentID: 'deployment_one' })
+  })
+
+  it('refuses to adopt onto a Spark that has stopped answering', () => {
+    const route = rowActionRoute(held('qwen36-35b-a3b-nvfp4-1s', loftRow({ answering: false })), new Map(), 'stop')
+    expect(route).toEqual({ where: 'none', reason: 'not-answering' })
+  })
+
+  it('refuses to adopt onto a Spark added by address that never joined', () => {
+    const shed = loftRow({ legacyPeerOnly: true, answering: false })
+    expect(rowActionRoute(held('qwen36-35b-a3b-nvfp4-1s', shed), new Map(), 'stop'))
+      .toEqual({ where: 'none', reason: 'no-placement' })
+  })
+
+  it('refuses to adopt a model that Spark does not report', () => {
+    const empty = loftRow({ installedModels: [] })
+    expect(rowActionRoute(held('qwen36-35b-a3b-nvfp4-1s', empty), new Map(), 'stop'))
+      .toEqual({ where: 'none', reason: 'no-placement' })
+  })
+
+  it('refuses an action the fleet API does not take before adopting anything', () => {
+    expect(rowActionRoute(held('qwen36-35b-a3b-nvfp4-1s'), new Map(), 'install'))
+      .toEqual({ where: 'none', reason: 'unsupported' })
+  })
+
+  it('leaves the Spark this console runs on alone even with a row in hand', () => {
+    const target: ActionTarget = { ...held('qwen36-35b-a3b-nvfp4-1s'), isSelf: true }
+    expect(rowActionRoute(target, new Map(), 'stop')).toEqual({ where: 'local' })
+  })
+
+  it('names the fleet API once for both halves of the flow', () => {
+    expect(ADOPT_PATH).toBe('/api/v1/fleet/deployments/adopt')
+    expect(deploymentActionPath('deployment_one', 'stop')).toBe('/api/v1/fleet/deployments/deployment_one/stop')
   })
 
   it('refuses a placement whose Spark has stopped answering', () => {
@@ -279,6 +356,7 @@ describe('the Sparks named on a model row', () => {
     installedModels: held,
     serving: held.find(model => model.active),
     status: { word: 'Idle', dot: '' },
+    answering: true,
   })
 
   it('names each Spark that holds a one-Spark model', () => {

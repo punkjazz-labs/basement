@@ -12,8 +12,9 @@ import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS } from '../fleetInvite'
 import {
-  deploymentIndex, fleetRows, modelChips, placementBusy, rowActionRoute, rowPlacement,
-  ACTION_REFUSAL, NOT_ANSWERING,
+  deploymentActionPath, deploymentIndex, deploymentKey, fleetRows, modelChips,
+  placementBusy, rowActionRoute, rowPlacement,
+  ACTION_REFUSAL, ADOPT_PATH, NOT_ANSWERING,
   type ActionTarget, type FleetDeploymentAction, type FleetRow,
 } from '../fleetModels'
 
@@ -257,9 +258,11 @@ export default function Models({
       spark.installedModels.some(model => model.recipe_id === recipe.id))
   }
   // The model and the machine one row acts on. Without a host the row acts on
-  // this Spark, which is what it has always done.
+  // this Spark, which is what it has always done. The host row travels with
+  // the target because it carries what that Spark reported about itself,
+  // which is what says whether the fleet can adopt the model it runs.
   const targetOf = (recipe: Recipe, host?: FleetRow): ActionTarget =>
-    ({ nodeID: host?.nodeID ?? '', recipeID: recipe.id, isSelf: host === undefined })
+    ({ nodeID: host?.nodeID ?? '', recipeID: recipe.id, isSelf: host === undefined, host })
   const usage = useMemo(() => new Map((tokens?.models ?? []).map(item => [item.recipe_id, item])), [tokens])
   const sorted = useMemo(() => sortCatalog(recipes), [recipes])
   const detected = system?.hardware_scope.detected_spark_count ?? 0
@@ -411,7 +414,10 @@ export default function Models({
   // One action on one model, sent to the Spark that holds it. This Spark keeps
   // the call it has always used. Another Spark is reached through the
   // placement that owns the model on it, and answers with its own job, which
-  // the placement's own stream then follows.
+  // the placement's own stream then follows. A model that Spark already runs
+  // with no placement behind it is adopted first, which records it and starts
+  // nothing, and then the action goes out exactly as it would on any other
+  // placed row.
   const sendAction = async (
     recipe: Recipe,
     host: FleetRow | undefined,
@@ -424,13 +430,34 @@ export default function Models({
       acceptJob(await local())
       return
     }
+    const dispatch = async (deploymentID: string, path: string) => {
+      const result = await api<{ job: Job }>(path, { method: 'POST', headers: idempotency(), body })
+      setStartedOnPlacement(previous => new Map(previous).set(deploymentID, result.job.id))
+      openFleetDeployment(deploymentID, result.job)
+    }
+    if (route.where === 'fleet') {
+      await dispatch(route.deploymentID, route.path)
+      return
+    }
+    // The first action on a model this fleet never placed. The manager
+    // refuses an adoption it cannot make, in its own words, and run() shows
+    // those words unchanged rather than replacing them with a guess.
+    if (route.where === 'adopt') {
+      const { deployment } = await api<{ deployment: FleetDeploymentView }>(ADOPT_PATH, {
+        method: 'POST',
+        headers: idempotency(),
+        body: JSON.stringify({ node_id: route.nodeID, recipe_id: route.recipeID }),
+      })
+      // From here the row reads the placement it just gained, so it locks on
+      // the action below without waiting for the next placement poll.
+      setPlacements(previous => new Map(previous).set(deploymentKey(route.nodeID, route.recipeID), deployment))
+      await dispatch(deployment.deployment_id, deploymentActionPath(deployment.deployment_id, action))
+      return
+    }
     // A row only offers a button the route allows, so anything else here is
     // the fleet moving between the render and the click. run() turns this into
     // the same notice every other refused action gets.
-    if (route.where !== 'fleet') throw new Error(ACTION_REFUSAL[route.reason])
-    const result = await api<{ job: Job }>(route.path, { method: 'POST', headers: idempotency(), body })
-    setStartedOnPlacement(previous => new Map(previous).set(route.deploymentID, result.job.id))
-    openFleetDeployment(route.deploymentID, result.job)
+    throw new Error(ACTION_REFUSAL[route.reason])
   }
 
   const simpleAction = (recipe: Recipe, host: FleetRow | undefined, action: FleetDeploymentAction) =>
@@ -537,14 +564,14 @@ export default function Models({
     const host = hostOf(recipe)
     const hostModel = host?.installedModels.find(item => item.recipe_id === recipe.id)
     const placement = host ? rowPlacement(targetOf(recipe, host), placements) : undefined
-    // The owner of this placement has stopped answering the controller for it,
-    // so every state below is only the last one this console was told.
-    const notAnswering = placement?.stale === true
+    // That Spark has stopped answering, so every state below is only the last
+    // one this console was told. A placement carries the fresher answer: the
+    // controller read that Spark for it moments ago. Without one, the Spark's
+    // own heartbeat is the only signal there is, and it is the same one the
+    // route reads before it offers to adopt.
+    const notAnswering = placement ? placement.stale === true : host !== undefined && !host.answering
     const hostServing = Boolean(hostModel?.active && hostModel.status === 'ready')
     const hostWord = notAnswering ? NOT_ANSWERING : hostModel ? modelStateWord(hostModel) : ''
-    // A row can only act on a placement, so a Spark holding a model the fleet
-    // has no placement for keeps the fallback this console has always offered.
-    const hostPlaced = host !== undefined && placement !== undefined
     // What the paired Spark says about this same model. Its own word for its
     // own state, plus the one thing this console knows that it cannot see
     // yet: an install this session asked it to run.
@@ -653,12 +680,12 @@ export default function Models({
             </span>
           </div>
           <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
-            {/* This model lives on another Spark in the fleet and the fleet
-                holds the placement that owns it there, so the row acts on that
-                Spark. While it is not answering, its buttons stay in place and
-                stay dead: the row says what it last knew, and promises
-                nothing. */}
-            {hostPlaced && host ? (
+            {/* This model lives on another Spark in the fleet, so the row acts
+                on that Spark. The fleet may hold no placement for it yet; the
+                first action records one. While that Spark is not answering,
+                its buttons stay in place and stay dead: the row says what it
+                last knew, and promises nothing. */}
+            {host ? (
               <>
                 {hostServing ? (
                   <button
@@ -831,10 +858,10 @@ export default function Models({
                 </Fragment>
               ))}
             </dl>
-            {/* The same tools, on the machine that holds the model. A
-                placement on another Spark carries them there; without one
-                there is nothing here to run them against. */}
-            {(model || hostPlaced) && (() => {
+            {/* The same tools, on the machine that holds the model. Another
+                Spark in the fleet carries them there, through the placement
+                its first action records. */}
+            {(model || host) && (() => {
               // A tool on this Spark's own row answers to this Spark alone.
               // What another Spark is doing with the same recipe has never
               // stopped a local button and must not start now.

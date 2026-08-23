@@ -3,7 +3,7 @@ import {
   type FleetDeploymentView, type FleetModelSnapshot, type FleetNodeSummary, type FleetSummary,
   type NodeInventory, type Peer, type PlacementCandidate, type PlacementPlan,
 } from './api'
-import { consoleKey, isLocalNode, nodeName, nodeServing, nodeStatus, type NodeStatus } from './fleetInvite'
+import { consoleKey, inFleet, isLocalNode, nodeName, nodeServing, nodeStatus, type NodeStatus } from './fleetInvite'
 
 // The Models view, read across the whole fleet. Everything here is pure: one
 // row per Spark, which placement owns which model on which Spark, and what a
@@ -31,6 +31,10 @@ export interface FleetRow {
   // uses for it.
   serving?: FleetModelSnapshot
   status: NodeStatus
+  // Whether this console can still act on that Spark, which is not the same
+  // as it being in the fleet: a member that has stopped sending heartbeats is
+  // still a member, and an action sent to it would only fail.
+  answering: boolean
   // A Spark added by address that never joined the fleet. This console knows
   // its name and nothing else about it, so its row carries no machine facts
   // and no status word.
@@ -38,6 +42,16 @@ export interface FleetRow {
 }
 
 const LEGACY_PEER_STATUS: NodeStatus = { word: '', dot: '' }
+
+// The membership states in which a Spark has gone quiet. The controller keeps
+// the last thing it was told about such a node, and can act on none of it.
+const SILENT_MEMBERSHIP = new Set(['stale', 'unreachable'])
+
+// Whether the controller is still in touch with that Spark. A node it has not
+// finished admitting answers for nothing yet, and one that has gone quiet
+// answers for nothing any more.
+const nodeAnswering = (node: FleetNodeSummary): boolean =>
+  inFleet(node) && !SILENT_MEMBERSHIP.has(node.status)
 
 // One row per Spark, de-duplicated on the console URL exactly as
 // membershipRows does. A membership row comes first because it is the only
@@ -71,6 +85,9 @@ export function fleetRows(
       consoleURL: peer.base_url,
       installedModels: [],
       status: LEGACY_PEER_STATUS,
+      // The fleet holds no membership row for this Spark, so it reports
+      // nothing to this console and nothing here can act on it.
+      answering: false,
       legacyPeerOnly: true,
     })
   }
@@ -91,6 +108,7 @@ function membershipRow(
     installedModels: node.installed_models ?? [],
     serving: nodeServing(node),
     status: nodeStatus(node),
+    answering: nodeAnswering(node),
   }
 }
 
@@ -133,14 +151,29 @@ export interface ActionTarget {
   // The Spark this console runs on. It answers its own API, so nothing about
   // the fleet applies to it.
   isSelf: boolean
+  // The other Spark's own row, when this model lives there. It is what says
+  // whether the fleet could adopt the model that Spark already runs. The
+  // caller only attaches it for a model one Spark can run on its own, so a
+  // model that spans the fleet never reaches the adoption path.
+  host?: FleetRow
 }
 
-// Where a row action has to be sent. "none" carries the reason, so a row can
-// say why a button is dead rather than offering one that would fail.
+// Where a row action has to be sent. "adopt" means the fleet holds no
+// placement yet for a model another Spark already runs: recording one is the
+// first half of the action. "none" carries the reason, so a row can say why a
+// button is dead rather than offering one that would fail.
 export type ActionRoute =
   | { where: 'local' }
   | { where: 'fleet'; deploymentID: string; path: string }
+  | { where: 'adopt'; nodeID: string; recipeID: string }
   | { where: 'none'; reason: 'no-placement' | 'not-answering' | 'unsupported' }
+
+// Where the fleet API takes one action on one placement.
+export const deploymentActionPath = (deploymentID: string, action: string): string =>
+  `/api/v1/fleet/deployments/${encodeURIComponent(deploymentID)}/${action}`
+
+// Where the fleet API records a model a Spark already runs.
+export const ADOPT_PATH = '/api/v1/fleet/deployments/adopt'
 
 // The word a row shows for a Spark that has stopped answering for its own
 // placement. The controller keeps the last state it saw, and this says plainly
@@ -185,7 +218,10 @@ export function rowPlacement(
 
 // The one decision every row action makes. This Spark keeps the local call it
 // has always used. Another Spark is reached through the placement that owns
-// the model on it, and only while that Spark still answers for it.
+// the model on it, and only while that Spark still answers for it. A model
+// another Spark already runs that the fleet never placed is adopted first, so
+// that every row offers the same actions whether the fleet installed the
+// model or found it there.
 export function rowActionRoute(
   target: ActionTarget,
   placements: Map<string, FleetDeploymentView>,
@@ -194,13 +230,28 @@ export function rowActionRoute(
   if (target.isSelf) return { where: 'local' }
   if (!ACTIONS.has(action)) return { where: 'none', reason: 'unsupported' }
   const placement = rowPlacement(target, placements)
-  if (placement === undefined) return { where: 'none', reason: 'no-placement' }
+  if (placement === undefined) return adoptRoute(target)
   if (placement.stale) return { where: 'none', reason: 'not-answering' }
   return {
     where: 'fleet',
     deploymentID: placement.deployment_id,
-    path: `/api/v1/fleet/deployments/${encodeURIComponent(placement.deployment_id)}/${action}`,
+    path: deploymentActionPath(placement.deployment_id, action),
   }
+}
+
+// What to do about a model the fleet holds no placement for. Only a Spark in
+// the fleet can be adopted onto, and only for a model it reports it holds:
+// the manager refuses anything else, and a row must not offer a button that
+// would only be refused. A Spark added by address is not in the fleet, and
+// one that has gone quiet cannot be asked.
+function adoptRoute(target: ActionTarget): ActionRoute {
+  const host = target.host
+  if (host === undefined || host.legacyPeerOnly === true ||
+    !host.installedModels.some(model => model.recipe_id === target.recipeID)) {
+    return { where: 'none', reason: 'no-placement' }
+  }
+  if (!host.answering) return { where: 'none', reason: 'not-answering' }
+  return { where: 'adopt', nodeID: target.nodeID, recipeID: target.recipeID }
 }
 
 // ---- The Sparks named on a model's row ---------------------------------------
