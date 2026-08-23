@@ -144,3 +144,78 @@ export function capturePoster(videoURL: string): Promise<string> {
     video.currentTime = 0
   })
 }
+
+// One frame of a run as a full-size PNG, for staging it as the first frame of
+// the next run. Full size and lossless, unlike a poster: this image is the
+// source a generation is built from, not a thumbnail of one. The video is
+// same-origin (a Blob URL this console made), so the canvas stays clean and
+// toBlob is allowed to read it.
+export function captureFrameBlob(video: HTMLVideoElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    const context = canvas.width > 0 && canvas.height > 0 ? canvas.getContext('2d') : null
+    if (!context) {
+      reject(new Error('This video has no frame to take yet.'))
+      return
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height)
+    canvas.toBlob(blob => {
+      if (blob) resolve(blob)
+      else reject(new Error('Could not take a frame from this video.'))
+    }, 'image/png')
+  })
+}
+
+// The frame of a run that is not the one on the stage. It has no playhead of
+// its own, so it is decoded off screen and read at its start.
+export function runFrameBlob(videoURL: string): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video')
+    let frameHandle: number | null = null
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutHandle)
+      video.removeEventListener('loadeddata', onFrame)
+      video.removeEventListener('error', onError)
+      if (frameHandle !== null) video.cancelVideoFrameCallback(frameHandle)
+      video.removeAttribute('src')
+      video.load()
+    }
+
+    const timeoutHandle = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('This video took too long to open.'))
+    }, 30000)
+
+    const onFrame = () => {
+      captureFrameBlob(video).then(blob => {
+        cleanup()
+        resolve(blob)
+      }).catch(problem => {
+        cleanup()
+        reject(problem)
+      })
+    }
+
+    const onError = () => {
+      cleanup()
+      reject(new Error('Could not open this video.'))
+    }
+
+    video.addEventListener('error', onError, { once: true })
+
+    if (typeof video.requestVideoFrameCallback === 'function') {
+      frameHandle = video.requestVideoFrameCallback(onFrame)
+    } else {
+      video.addEventListener('loadeddata', onFrame, { once: true })
+    }
+
+    video.muted = true
+    video.playsInline = true
+    video.preload = 'auto'
+    video.src = videoURL
+    video.currentTime = 0
+  })
+}

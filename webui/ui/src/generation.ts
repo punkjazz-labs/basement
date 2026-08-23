@@ -1,4 +1,4 @@
-import type { Generation, MediaGenerationConfig } from './api'
+import type { Generation, MediaGenerationConfig, StagedMedia } from './api'
 
 export type CanvasShape = 'horizontal' | 'vertical' | 'square'
 
@@ -33,6 +33,37 @@ export const canvasShapes = (): CanvasShapeOption[] => [
   { shape: 'vertical', label: 'Vertical', ratio: '9:16' },
   { shape: 'square', label: 'Square', ratio: '1:1' },
 ]
+
+// ---- Modes ------------------------------------------------------------------
+
+// The two modes basement drives. A recipe declares its own graphs, so a newer
+// recipe can name a mode this build has never heard of; the row shows that
+// name rather than hiding a mode the engine would accept.
+export const MODE_TEXT_TO_VIDEO = 'text_to_video'
+export const MODE_IMAGE_TO_VIDEO = 'image_to_video'
+
+export interface ModeOption {
+  mode: string
+  label: string
+}
+
+const MODE_LABELS: Record<string, string> = {
+  [MODE_TEXT_TO_VIDEO]: 'Text to video',
+  [MODE_IMAGE_TO_VIDEO]: 'Image to video',
+}
+
+// A recipe reports its modes sorted by name, which puts image before text.
+// The row reads text first instead: it is the mode every media recipe offers
+// and the one a new run starts in.
+const MODE_ORDER = [MODE_TEXT_TO_VIDEO, MODE_IMAGE_TO_VIDEO]
+
+export const modeLabel = (mode: string): string => MODE_LABELS[mode] ?? mode.replace(/_/g, ' ')
+
+export function modeOptions(config: MediaGenerationConfig): ModeOption[] {
+  const known = MODE_ORDER.filter(mode => config.modes.includes(mode))
+  const extra = config.modes.filter(mode => !MODE_ORDER.includes(mode))
+  return [...known, ...extra].map(mode => ({ mode, label: modeLabel(mode) }))
+}
 
 // 16:9 is the shape moving pictures are made in, and unlike 4:3 or 3:2 it
 // lands exactly on a 32-pixel grid at useful sizes, so nothing here is a
@@ -86,6 +117,80 @@ export function defaultCanvasTier(config: MediaGenerationConfig): number {
   ))
 }
 
+export interface FitCanvas {
+  shape: CanvasShape
+  shortEdge: number
+  width: number
+  height: number
+}
+
+// The canvas a staged source image asks for: the largest rung that fits
+// inside the image, so the run is never asked to invent pixels the source
+// does not have. The shape is read off the source as well, because putting a
+// portrait photograph on a landscape canvas is cropping rather than sizing.
+// An image smaller than every rung still has to run somewhere, so it gets the
+// smallest one instead of nothing.
+export function fitCanvasToImage(
+  config: MediaGenerationConfig,
+  sourceWidth: number,
+  sourceHeight: number,
+): FitCanvas | null {
+  if (sourceWidth <= 0 || sourceHeight <= 0) return null
+  const shape: CanvasShape = sourceWidth > sourceHeight
+    ? 'horizontal'
+    : sourceWidth < sourceHeight ? 'vertical' : 'square'
+  const options = canvasSizes(config, shape)
+  if (options.length === 0) return null
+  const fitting = options.filter(option => option.width <= sourceWidth && option.height <= sourceHeight)
+  const chosen = fitting.length > 0 ? fitting[fitting.length - 1] : options[0]
+  return { shape, shortEdge: chosen.shortEdge, width: chosen.width, height: chosen.height }
+}
+
+// The source and the canvas side by side, under the size picker. It reads the
+// two sizes in play right now rather than the fit's own answer, so changing
+// the size by hand leaves a true line instead of a stale one.
+export const fitArithmetic = (
+  sourceWidth: number,
+  sourceHeight: number,
+  width: number,
+  height: number,
+): string => `${sourceWidth}×${sourceHeight} → ${width}×${height}`
+
+// ---- The staged first frame -------------------------------------------------
+
+// The formats the staging endpoint accepts. It sniffs the bytes rather than
+// trusting a name, and this list is the same closed set, so the file picker
+// offers exactly what the Spark will keep.
+export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const
+export const IMAGE_ACCEPT = IMAGE_TYPES.join(',')
+
+// The first file worth sending from a drop or a picker. A file the browser
+// gave no type for is still sent: the Spark reads the bytes, and refusing it
+// here would be a guess made from a file name.
+export function pickImage<T extends { type: string }>(files: readonly T[]): T | null {
+  return files.find(file => (IMAGE_TYPES as readonly string[]).includes(file.type)) ?? files[0] ?? null
+}
+
+export interface StagedFrame {
+  id: string
+  name: string
+  width: number
+  height: number
+}
+
+// What the Spark answered about a staged image, joined to the name of the
+// file that was sent. The size comes from the answer rather than from a
+// decode in this browser, because the Spark measured the bytes it stored. An
+// answer carrying neither size cannot fit a canvas, so it is refused here
+// instead of fitting to a zero.
+export function stagedFrame(name: string, response: StagedMedia): StagedFrame | null {
+  if (!response.id || !(response.width > 0) || !(response.height > 0)) return null
+  return { id: response.id, name, width: response.width, height: response.height }
+}
+
+export const stagedFrameCaption = (frame: StagedFrame): string =>
+  `${frame.name} · ${frame.width}×${frame.height}`
+
 const secondsLabel = (seconds: number): string => {
   const rounded = Math.round(seconds * 10) / 10
   return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}s`
@@ -134,6 +239,47 @@ export function sizeWaitHint(config: MediaGenerationConfig): string {
 export function durationArithmetic(config: MediaGenerationConfig, blocks: number): string {
   const frames = config.frame_block * blocks + config.frame_offset
   return `= ${frames} frames at ${config.frames_per_second} fps`
+}
+
+export interface GenerationRequest {
+  model_id: string
+  mode: string
+  prompt: string
+  blocks: number
+  width: number
+  height: number
+  seed?: number
+  first_frame?: string
+}
+
+export interface GenerationRequestInput {
+  recipeID: string
+  mode: string
+  prompt: string
+  blocks: number
+  width: number
+  height: number
+  seed?: number
+  firstFrame?: string | null
+}
+
+// The body POST /api/v1/generate is given. mode always travels, even when it
+// is the default one, so a request names the graph it wants rather than
+// leaning on what the server reads an absent field as. first_frame travels
+// only with image mode: the server refuses either mismatch, and a frame still
+// staged from an earlier image run must not ride along with a text run.
+export function generationRequest(input: GenerationRequestInput): GenerationRequest {
+  const request: GenerationRequest = {
+    model_id: input.recipeID,
+    mode: input.mode,
+    prompt: input.prompt.trim(),
+    blocks: input.blocks,
+    width: input.width,
+    height: input.height,
+  }
+  if (input.seed !== undefined) request.seed = input.seed
+  if (input.mode === MODE_IMAGE_TO_VIDEO && input.firstFrame) request.first_frame = input.firstFrame
+  return request
 }
 
 export interface ReuseValues {

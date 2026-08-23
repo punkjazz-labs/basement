@@ -3,8 +3,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
   canvasSizes, canvasTiers, defaultCanvasTier, durationArithmetic, durationOptions, finishedTransitions,
-  generationElapsedSeconds, generationState, generationStatusMap, generationTerminal, markUnseen,
-  playableVideoBlob, reuseValues, sizeWaitHint, sizeWaitLabel, sortGenerationsNewestFirst,
+  fitArithmetic, fitCanvasToImage, generationElapsedSeconds, generationRequest, generationState,
+  generationStatusMap, generationTerminal, IMAGE_ACCEPT, markUnseen, modeOptions, pickImage,
+  playableVideoBlob, reuseValues, sizeWaitHint, sizeWaitLabel, sortGenerationsNewestFirst, stagedFrame,
+  stagedFrameCaption,
 } from './generation'
 import type { Generation, MediaGenerationConfig } from './api'
 import { GenerationProgress } from './views/Generate'
@@ -83,6 +85,125 @@ describe('canvasSizes', () => {
   it('offers nothing rather than an approximation when the grid excludes 16:9', () => {
     expect(canvasTiers(config({ max_short_edge: 200, max_long_edge: 400 }))).toEqual([])
     expect(canvasSizes(config({ max_short_edge: 200, max_long_edge: 400 }), 'horizontal')).toEqual([])
+  })
+})
+
+describe('modeOptions', () => {
+  it('reads text to video first, whatever order the recipe reports its graphs in', () => {
+    expect(modeOptions(config({ modes: ['image_to_video', 'text_to_video'] }))).toEqual([
+      { mode: 'text_to_video', label: 'Text to video' },
+      { mode: 'image_to_video', label: 'Image to video' },
+    ])
+  })
+
+  it('offers exactly what the recipe declares, and nothing else', () => {
+    expect(modeOptions(config()).map(option => option.mode)).toEqual(['text_to_video'])
+  })
+
+  // A recipe can name a graph this build has never heard of. Hiding it would
+  // hide a mode the engine would honour, so the raw name is shown instead.
+  it('shows a mode it does not know by its own name', () => {
+    expect(modeOptions(config({ modes: ['text_to_video', 'video_to_video'] }))).toEqual([
+      { mode: 'text_to_video', label: 'Text to video' },
+      { mode: 'video_to_video', label: 'video to video' },
+    ])
+  })
+})
+
+describe('fitCanvasToImage', () => {
+  it('picks the largest canvas that fits inside the source image', () => {
+    // The rungs are 1024×576, 1536×864, 2048×1152 and 2560×1440.
+    expect(fitCanvasToImage(h3, 1620, 912)).toEqual({
+      shape: 'horizontal', shortEdge: 864, width: 1536, height: 864,
+    })
+  })
+
+  it('reads the shape off the source rather than cropping it to the current one', () => {
+    expect(fitCanvasToImage(h3, 912, 1620)?.shape).toBe('vertical')
+    expect(fitCanvasToImage(h3, 1200, 1200)?.shape).toBe('square')
+  })
+
+  it('gives a source smaller than every rung the smallest one', () => {
+    expect(fitCanvasToImage(h3, 640, 360)).toEqual({
+      shape: 'horizontal', shortEdge: 576, width: 1024, height: 576,
+    })
+  })
+
+  it('never returns a canvas wider or taller than the source when one fits', () => {
+    const fit = fitCanvasToImage(h3, 2100, 1180)
+    expect(fit).not.toBeNull()
+    expect(fit!.width).toBeLessThanOrEqual(2100)
+    expect(fit!.height).toBeLessThanOrEqual(1180)
+    expect(fit!.width).toBe(2048)
+  })
+
+  it('has nothing to answer when the source has no size or the ladder is empty', () => {
+    expect(fitCanvasToImage(h3, 0, 0)).toBeNull()
+    expect(fitCanvasToImage(config({ max_short_edge: 200, max_long_edge: 400 }), 1620, 912)).toBeNull()
+  })
+})
+
+describe('fitArithmetic', () => {
+  it('shows the source and the canvas, and nothing it had to guess', () => {
+    expect(fitArithmetic(1620, 912, 1536, 864)).toBe('1620×912 → 1536×864')
+  })
+})
+
+describe('stagedFrame', () => {
+  it('joins the name that was sent to the size the Spark measured', () => {
+    const frame = stagedFrame('tram-dusk.jpg', { id: 'abc123', bytes: 812_004, width: 1620, height: 912 })
+    expect(frame).toEqual({ id: 'abc123', name: 'tram-dusk.jpg', width: 1620, height: 912 })
+    expect(stagedFrameCaption(frame!)).toBe('tram-dusk.jpg · 1620×912')
+  })
+
+  it('refuses an answer that cannot size a canvas', () => {
+    expect(stagedFrame('x.png', { id: 'abc123', bytes: 10, width: 0, height: 912 })).toBeNull()
+    expect(stagedFrame('x.png', { id: '', bytes: 10, width: 1620, height: 912 })).toBeNull()
+  })
+})
+
+describe('pickImage', () => {
+  it('takes the first file in a format the staging endpoint keeps', () => {
+    const files = [{ type: 'text/plain' }, { type: 'image/webp' }, { type: 'image/png' }]
+    expect(pickImage(files)).toBe(files[1])
+    expect(IMAGE_ACCEPT).toBe('image/png,image/jpeg,image/webp')
+  })
+
+  // The Spark sniffs the bytes, so a file the browser named nothing is still
+  // worth sending; refusing it here would be a guess made from a file name.
+  it('still sends a file the browser gave no type for', () => {
+    const files = [{ type: '' }]
+    expect(pickImage(files)).toBe(files[0])
+    expect(pickImage([])).toBeNull()
+  })
+})
+
+describe('generationRequest', () => {
+  const base = { recipeID: 'minimax-h3-comfyui-1s', prompt: '  a tram at dusk  ', blocks: 7, width: 1536, height: 864 }
+
+  it('names the mode even when it is the default one', () => {
+    expect(generationRequest({ ...base, mode: 'text_to_video' })).toEqual({
+      model_id: 'minimax-h3-comfyui-1s', mode: 'text_to_video', prompt: 'a tram at dusk',
+      blocks: 7, width: 1536, height: 864,
+    })
+  })
+
+  it('carries the staged frame in image mode', () => {
+    expect(generationRequest({ ...base, mode: 'image_to_video', firstFrame: 'sha256hex' })).toMatchObject({
+      mode: 'image_to_video', first_frame: 'sha256hex',
+    })
+  })
+
+  // The server refuses this pair, and a frame kept in the slot across a
+  // switch back to text must not silently turn a text run into an image one.
+  it('never carries a staged frame in text mode', () => {
+    expect(generationRequest({ ...base, mode: 'text_to_video', firstFrame: 'sha256hex' }))
+      .not.toHaveProperty('first_frame')
+  })
+
+  it('sends a seed only when one was typed', () => {
+    expect(generationRequest({ ...base, mode: 'text_to_video', seed: 0 })).toMatchObject({ seed: 0 })
+    expect(generationRequest({ ...base, mode: 'text_to_video' })).not.toHaveProperty('seed')
   })
 })
 

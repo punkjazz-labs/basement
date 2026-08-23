@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  api, apiBlob, idempotency,
-  type GenerateResponse, type Generation, type MediaGenerationConfig, type Recipe,
+  api, apiBlob, apiUpload, copyText, idempotency,
+  type GenerateResponse, type Generation, type MediaGenerationConfig, type Recipe, type StagedMedia,
 } from '../api'
 import {
   canvasShapes, canvasSizes, defaultCanvasTier, durationArithmetic, durationOptions, finishedTransitions,
-  formatElapsed, generationActive, generationElapsedSeconds, generationState, generationStatusMap,
-  generationTerminal, markUnseen, playableVideoBlob, reuseValues, sizeWaitHint, sizeWaitLabel,
-  sortGenerationsNewestFirst, type CanvasShape, type GenerationStatusMap,
+  fitArithmetic, fitCanvasToImage, formatElapsed, generationActive, generationElapsedSeconds,
+  generationRequest, generationState, generationStatusMap, generationTerminal, IMAGE_ACCEPT, markUnseen,
+  MODE_IMAGE_TO_VIDEO, MODE_TEXT_TO_VIDEO, modeOptions, pickImage, playableVideoBlob, reuseValues,
+  sizeWaitHint, sizeWaitLabel, sortGenerationsNewestFirst, stagedFrame, stagedFrameCaption,
+  type CanvasShape, type GenerationStatusMap, type StagedFrame,
 } from '../generation'
-import { cachedPoster, capturePoster, forgetPoster, storePoster } from '../posters'
+import { cachedPoster, capturePoster, captureFrameBlob, forgetPoster, runFrameBlob, storePoster } from '../posters'
 import { readableWeights } from '../catalog'
 import { confirmBox, noticeBox } from '../confirm'
 
@@ -137,7 +139,12 @@ export function GenerationProgress({ generation }: { generation: Generation }) {
 // The file endpoint deliberately says attachment. Fetching it through the
 // authenticated helper and giving the resulting Blob its own URL is what
 // makes local playback possible without exposing the runtime or a host path.
-function GenerationVideo({ generation }: { generation: Generation }) {
+function GenerationVideo({ generation, videoRef }: {
+  generation: Generation
+  // Held by the view so a frame can be taken from the run being watched, at
+  // the point it is being watched at.
+  videoRef?: React.RefObject<HTMLVideoElement | null>
+}) {
   const [url, setURL] = useState('')
   const [error, setError] = useState('')
   const [retry, setRetry] = useState(0)
@@ -187,6 +194,7 @@ function GenerationVideo({ generation }: { generation: Generation }) {
   return (
     <div className="gen-video-wrap">
       <video
+        ref={videoRef}
         controls
         preload="metadata"
         src={url}
@@ -243,11 +251,25 @@ function Thumb({ generation, modelName, poster, selected, onSelect }: {
   )
 }
 
+// A staged frame plus the local preview of the exact bytes that were staged.
+// The preview is a Blob URL rather than a read back from the Spark: the
+// staging endpoint stores an image, it does not serve one.
+interface ComposerFrame extends StagedFrame {
+  preview: string
+}
+
 export default function Generate({ recipe, recipes }: GenerateProps) {
   const config = recipe.media_generation
   const [shape, setShape] = useState<CanvasShape>('horizontal')
   const sizes = useMemo(() => config ? canvasSizes(config, shape) : [], [config, shape])
   const durations = useMemo(() => config ? durationOptions(config) : [], [config])
+  const modes = useMemo(() => config ? modeOptions(config) : [], [config])
+  const [mode, setMode] = useState<string>(MODE_TEXT_TO_VIDEO)
+  const [frame, setFrame] = useState<ComposerFrame | null>(null)
+  const [frameError, setFrameError] = useState('')
+  const [staging, setStaging] = useState(false)
+  const [copiedSeed, setCopiedSeed] = useState(false)
+  const [useMenu, setUseMenu] = useState<{ id: string; top: number; right: number } | null>(null)
   const [prompt, setPrompt] = useState('')
   const [shortEdge, setShortEdge] = useState(0)
   const [blocks, setBlocks] = useState(0)
@@ -268,6 +290,12 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   // current capture finishes, without generations itself having changed.
   const [posterTick, setPosterTick] = useState(0)
   const formRef = useRef<HTMLFormElement>(null)
+  const frameInputRef = useRef<HTMLInputElement>(null)
+  const stageVideoRef = useRef<HTMLVideoElement>(null)
+  const useMenuRef = useRef<HTMLDivElement>(null)
+  // The Blob URL the slot is showing, kept outside state so replacing or
+  // clearing the frame can release the previous one without a render.
+  const framePreviewRef = useRef('')
   const audioCtxRef = useRef<AudioContext | null>(null)
   const statusRef = useRef<GenerationStatusMap>({})
   const inFlightPosterRef = useRef<{ id: string; controller: AbortController } | null>(null)
@@ -285,6 +313,43 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     const preferred = durations.find(option => option.blocks === config?.default_blocks) ?? durations[0]
     setBlocks(current => durations.some(option => option.blocks === current) ? current : preferred?.blocks ?? 0)
   }, [durations, config?.default_blocks])
+
+  // A recipe update can retire the mode this screen is standing in, and the
+  // first offered mode is text to video wherever a recipe offers it.
+  useEffect(() => {
+    if (modes.length === 0) return
+    setMode(current => modes.some(option => option.mode === current) ? current : modes[0].mode)
+  }, [modes])
+
+  // The last preview outlives every render, so only a real unmount releases
+  // it. Every other release happens where the frame itself is replaced.
+  useEffect(() => () => {
+    if (framePreviewRef.current) URL.revokeObjectURL(framePreviewRef.current)
+  }, [])
+
+  // The Use menu closes on anything that is not a click inside it. It is
+  // positioned against the viewport, so a scroll or a resize would leave it
+  // pointing at a card that has moved; both close it instead.
+  useEffect(() => {
+    if (!useMenu) return
+    const close = () => setUseMenu(null)
+    const outside = (event: Event) => {
+      if (!(event.target instanceof Node) || !useMenuRef.current?.contains(event.target)) close()
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close()
+    }
+    document.addEventListener('pointerdown', outside)
+    document.addEventListener('keydown', escape)
+    window.addEventListener('resize', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      document.removeEventListener('pointerdown', outside)
+      document.removeEventListener('keydown', escape)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [useMenu])
 
   const loadGenerations = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true)
@@ -487,14 +552,15 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   if (!config) return null
 
   const selectedSize = sizes.find(option => option.shortEdge === shortEdge)
-  const textMode = config.modes.includes('text_to_video')
-  const imageMode = config.modes.includes('image_to_video')
+  const imageMode = mode === MODE_IMAGE_TO_VIDEO
+  const modeOffered = modes.some(option => option.mode === mode)
   // Counted in code points so this agrees with the server, which counts
   // runes. prompt.length would count UTF-16 units and disagree the moment
   // anyone writes an emoji.
   const promptLength = [...prompt.trim()].length
   const promptTooLong = promptLength > config.max_prompt_length
-  const canSubmit = textMode && Boolean(prompt.trim()) && !promptTooLong && Boolean(selectedSize) && blocks > 0 && !submitting
+  const canSubmit = modeOffered && (!imageMode || Boolean(frame)) && Boolean(prompt.trim()) && !promptTooLong
+    && Boolean(selectedSize) && blocks > 0 && !submitting && !staging
   const quantization = recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant : undefined
   const staged = generations.find(generation => generation.id === stagedID)
 
@@ -502,6 +568,70 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   const chooseShape = (value: CanvasShape) => { setShape(value); setFilledNote(false) }
   const chooseSize = (value: number) => { setShortEdge(value); setFilledNote(false) }
   const chooseDuration = (value: number) => { setBlocks(value); setFilledNote(false) }
+  // The staged frame survives a trip through text mode: the image is already
+  // on this Spark, and coming back to find the slot empty would mean staging
+  // it again for nothing.
+  const chooseMode = (value: string) => { setMode(value); setFrameError('') }
+
+  const holdFrame = (next: ComposerFrame | null) => {
+    if (framePreviewRef.current && framePreviewRef.current !== next?.preview) {
+      URL.revokeObjectURL(framePreviewRef.current)
+    }
+    framePreviewRef.current = next?.preview ?? ''
+    setFrame(next)
+  }
+
+  // One path for both ways an image reaches the slot: a file that was chosen
+  // here, and a frame taken from a finished run. Either way it is staged on
+  // this Spark first, and the slot fills only once the Spark has answered
+  // with the id a generation can name.
+  const addFrame = async (name: string, produce: () => Promise<Blob>) => {
+    setFrameError('')
+    setStaging(true)
+    try {
+      const blob = await produce()
+      const response = await apiUpload<StagedMedia>('/api/v1/generations/media', blob, name)
+      const image = stagedFrame(name, response)
+      if (!image) throw new Error('Could not read the image size.')
+      holdFrame({ ...image, preview: URL.createObjectURL(blob) })
+      setFilledNote(false)
+      const fit = fitCanvasToImage(config, image.width, image.height)
+      if (fit) {
+        setShape(fit.shape)
+        setShortEdge(fit.shortEdge)
+      }
+    } catch (problem) {
+      setFrameError(problem instanceof Error ? problem.message : 'Could not add this image')
+    } finally {
+      setStaging(false)
+    }
+  }
+
+  const chooseFrameFile = (files: FileList | null) => {
+    const file = pickImage([...(files ?? [])])
+    if (file) void addFrame(file.name, async () => file)
+  }
+
+  // The run on the stage hands over its own element, so the frame taken is
+  // the one on screen at its playhead. Any other run has no playhead to read,
+  // so it is decoded off screen and gives up its first frame instead.
+  const runFrame = async (source: Generation): Promise<Blob> => {
+    const element = stageVideoRef.current
+    if (element && source.id === stagedID && element.videoWidth > 0) return captureFrameBlob(element)
+    const file = playableVideoBlob(await apiBlob(generationFilePath(source)))
+    const url = URL.createObjectURL(file)
+    try {
+      return await runFrameBlob(url)
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+  }
+
+  const useAsFirstFrame = (source: Generation) => {
+    setUseMenu(null)
+    setMode(MODE_IMAGE_TO_VIDEO)
+    void addFrame(`${source.id}.png`, () => runFrame(source))
+  }
 
   const reuseThisPrompt = (source: Generation) => {
     const values = reuseValues(source, config)
@@ -511,6 +641,21 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
     setBlocks(values.blocks)
     setSeed('')
     setFilledNote(true)
+  }
+
+  const copySeed = async (value: number) => {
+    await copyText(String(value))
+    setCopiedSeed(true)
+    setTimeout(() => setCopiedSeed(false), 1600)
+  }
+
+  const toggleUseMenu = (source: Generation, event: React.MouseEvent<HTMLButtonElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    setUseMenu(current => current?.id === source.id ? null : {
+      id: source.id,
+      top: rect.bottom + 4,
+      right: Math.max(window.innerWidth - rect.right, 8),
+    })
   }
 
   // AudioContext creation stays behind an actual user gesture (browsers
@@ -535,7 +680,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
     setFormError('')
-    if (!selectedSize || !textMode) return
+    if (!selectedSize || !modeOffered || (imageMode && !frame)) return
     let parsedSeed: number | undefined
     if (seed.trim()) {
       parsedSeed = Number(seed)
@@ -550,15 +695,16 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
       await api<GenerateResponse>('/api/v1/generate', {
         method: 'POST',
         headers: idempotency(),
-        body: JSON.stringify({
-          model_id: recipe.id,
-          mode: 'text_to_video',
-          prompt: prompt.trim(),
+        body: JSON.stringify(generationRequest({
+          recipeID: recipe.id,
+          mode,
+          prompt,
           blocks,
           width: selectedSize.width,
           height: selectedSize.height,
-          ...(parsedSeed === undefined ? {} : { seed: parsedSeed }),
-        }),
+          seed: parsedSeed,
+          firstFrame: frame?.id,
+        })),
       })
       setPrompt('')
       setFilledNote(false)
@@ -626,20 +772,26 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
 
         <section className="card">
           <form ref={formRef} className="gen-form" onSubmit={submit}>
-            <div>
+            {/*
+              One mode is not a choice, so the row is not drawn for it: the
+              screen keeps exactly the layout it had before modes existed.
+            */}
+            {modes.length > 1 && (
               <div className="pill-group" role="radiogroup" aria-label="Mode">
-                <label className={!textMode ? 'disabled' : ''}>
-                  <input type="radio" name="gen-mode" checked={textMode} disabled={!textMode} readOnly />
-                  Text to video
-                </label>
-                {imageMode && (
-                  <label className="disabled" title="Image to video is not available yet">
-                    <input type="radio" name="gen-mode" disabled />
-                    Image to video
+                {modes.map(option => (
+                  <label key={option.mode}>
+                    <input
+                      type="radio"
+                      name="gen-mode"
+                      value={option.mode}
+                      checked={mode === option.mode}
+                      onChange={() => chooseMode(option.mode)}
+                    />
+                    {option.label}
                   </label>
-                )}
+                ))}
               </div>
-            </div>
+            )}
 
             <div className="composer gen-composer">
               {/*
@@ -664,6 +816,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                 }}
               />
             </div>
+            {imageMode && <p className="gen-prompt-hint">The image sets the look. The prompt sets the motion.</p>}
             {/*
               Shown from three quarters of the way, not always: a counter on
               an empty field is noise, and one that appears only at the
@@ -679,6 +832,61 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
             {filledNote && (
               <div className="filled-note" role="status">
                 <p>Filled from the staged result. Seed cleared for a new take.</p>
+              </div>
+            )}
+
+            {imageMode && (
+              <div className="field">
+                <span>First frame</span>
+                {/*
+                  The whole slot takes a drop; the button inside it is what
+                  opens the picker, so choosing an image never depends on a
+                  pointer. An empty slot is the only reason Generate is off in
+                  this mode, which is why it carries no explaining line.
+                */}
+                <div
+                  className={`frame-slot${frame ? ' filled' : ''}`}
+                  onDragOver={event => event.preventDefault()}
+                  onDrop={event => {
+                    event.preventDefault()
+                    chooseFrameFile(event.dataTransfer.files)
+                  }}
+                >
+                  {frame ? (
+                    <>
+                      <img className="frame-pic" src={frame.preview} alt="" />
+                      <span className="frame-cap">{stagedFrameCaption(frame)}</span>
+                      <button
+                        type="button"
+                        className="frame-clear"
+                        aria-label="Remove the first frame"
+                        onClick={() => { holdFrame(null); setFrameError('') }}
+                      >
+                        ×
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="frame-pick"
+                      disabled={staging}
+                      onClick={() => frameInputRef.current?.click()}
+                    >
+                      {staging ? 'Adding the image' : 'Drop an image or click to choose'}
+                    </button>
+                  )}
+                  <input
+                    ref={frameInputRef}
+                    type="file"
+                    accept={IMAGE_ACCEPT}
+                    hidden
+                    onChange={event => {
+                      chooseFrameFile(event.target.files)
+                      event.target.value = ''
+                    }}
+                  />
+                </div>
+                {frameError && <div className="error-note" role="alert"><p>{frameError}</p></div>}
               </div>
             )}
 
@@ -723,6 +931,11 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                       )
                     })}
                   </div>
+                  {imageMode && frame && selectedSize && (
+                    <span className="hint fit-line">
+                      {fitArithmetic(frame.width, frame.height, selectedSize.width, selectedSize.height)}
+                    </span>
+                  )}
                   <span className="hint">{sizeWaitHint(config)}</span>
                 </div>
               </div>
@@ -757,7 +970,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
             </div>
 
             {sizes.length === 0 && <p className="error-text">No canvas size fits this model&apos;s grid.</p>}
-            {!textMode && <p className="error-text">Text to video is not available for this model.</p>}
+            {modes.length === 0 && <p className="error-text">This model offers no generation mode.</p>}
             {formError && <div className="error-note" role="alert"><p>{formError}</p></div>}
 
             <div className="gen-foot">
@@ -790,7 +1003,18 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
           <>
             <div className="stage">
               {staged?.status === 'completed' ? (
-                <GenerationVideo generation={staged} />
+                <div className="stage-player">
+                  <GenerationVideo generation={staged} videoRef={stageVideoRef} />
+                  {/* The two numbers a run has to be repeated from, on the
+                      run itself, so reproducing it is not archaeology. */}
+                  <div className="stage-chips">
+                    <span className="chip"><span className="k">SIZE</span>{staged.width}×{staged.height}</span>
+                    <span className="chip"><span className="k">SEED</span>{staged.seed}</span>
+                    <button type="button" className="chip copy" onClick={() => void copySeed(staged.seed)}>
+                      {copiedSeed ? 'Copied' : 'Copy seed'}
+                    </button>
+                  </div>
+                </div>
               ) : staged && generationActive(staged.status) ? (
                 <div className="stage-empty">
                   {staged.status === 'running'
@@ -815,9 +1039,12 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                   <div className="stage-meta">
                     <span className={`gen-state ${staged.status}`}>{generationState(staged.status)}</span>
                     <span className="stage-model">{generationModelName(recipes, staged)}</span>
-                    <span>{staged.width} × {staged.height}</span>
+                    {/* On a completed run the player's chips carry size and
+                        seed; repeating them here would say the same numbers
+                        twice on one screen. */}
+                    {staged.status !== 'completed' && <span>{staged.width} × {staged.height}</span>}
                     <span>{durationString(staged, config)}</span>
-                    <span>Seed {staged.seed}</span>
+                    {staged.status !== 'completed' && <span>Seed {staged.seed}</span>}
                     {finalElapsed !== null && <span>Generated in {formatElapsed(finalElapsed)}</span>}
                   </div>
                   <p className="stage-prompt">{staged.prompt}</p>
@@ -847,14 +1074,52 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                 </div>
                 <div className="strip">
                   {generations.map(generation => (
-                    <Thumb
-                      key={generation.id}
-                      generation={generation}
-                      modelName={generationModelName(recipes, generation)}
-                      poster={posters.get(generation.id) ?? null}
-                      selected={generation.id === stagedID}
-                      onSelect={() => setStagedID(generation.id)}
-                    />
+                    <div className="run" key={generation.id}>
+                      <Thumb
+                        generation={generation}
+                        modelName={generationModelName(recipes, generation)}
+                        poster={posters.get(generation.id) ?? null}
+                        selected={generation.id === stagedID}
+                        onSelect={() => setStagedID(generation.id)}
+                      />
+                      {generation.status === 'completed' && (
+                        <div className="use-wrap" ref={useMenu?.id === generation.id ? useMenuRef : undefined}>
+                          <button
+                            type="button"
+                            className="use"
+                            aria-haspopup="menu"
+                            aria-expanded={useMenu?.id === generation.id}
+                            onClick={event => toggleUseMenu(generation, event)}
+                          >
+                            Use <span aria-hidden="true">▾</span>
+                          </button>
+                          {useMenu?.id === generation.id && (
+                            // Placed against the viewport: the strip scrolls
+                            // sideways and would otherwise cut the menu off.
+                            <div
+                              className="usemenu"
+                              role="menu"
+                              style={{ top: useMenu.top, right: useMenu.right }}
+                            >
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => { setUseMenu(null); reuseThisPrompt(generation) }}
+                              >
+                                Use the prompt
+                              </button>
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => useAsFirstFrame(generation)}
+                              >
+                                Use as first frame
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   ))}
                 </div>
               </>

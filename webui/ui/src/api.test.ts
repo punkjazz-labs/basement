@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  api, apiBlob, ApiError, formatTokens, installConfirmationsComplete, installRequest, licenceArtifacts,
-  OfflineError, runtimeLabel, territoryEligibilityLabel, type Artifact, type Recipe,
+  api, apiBlob, ApiError, apiUpload, formatTokens, installConfirmationsComplete, installRequest,
+  licenceArtifacts, OfflineError, runtimeLabel, setCSRF, territoryEligibilityLabel,
+  type Artifact, type Recipe,
 } from './api'
 
 const jsonResponse = (body: unknown, init: { status?: number; ok?: boolean } = {}) => ({
@@ -62,6 +63,40 @@ describe('api', () => {
       '/api/v1/generations/gen-1/file',
       expect.objectContaining({ credentials: 'same-origin' }),
     )
+  })
+
+  it('stages an image as multipart with the same authentication a JSON mutation carries', async () => {
+    setCSRF('csrf-token')
+    const fetch = vi.fn().mockResolvedValue(
+      jsonResponse({ id: 'sha256hex', bytes: 4, width: 1620, height: 912 }),
+    )
+    vi.stubGlobal('fetch', fetch)
+
+    await expect(apiUpload('/api/v1/generations/media', new Blob(['png!']), 'tram.png'))
+      .resolves.toEqual({ id: 'sha256hex', bytes: 4, width: 1620, height: 912 })
+
+    const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/v1/generations/media')
+    expect(init.method).toBe('POST')
+    expect(init.credentials).toBe('same-origin')
+    const headers = new Headers(init.headers)
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-token')
+    // Only the browser can write the multipart boundary, so setting a
+    // content type here would produce a body the server cannot parse.
+    expect(headers.get('Content-Type')).toBeNull()
+    const form = init.body as FormData
+    expect(form).toBeInstanceOf(FormData)
+    expect((form.get('file') as File).name).toBe('tram.png')
+  })
+
+  it('surfaces the staging endpoint’s own refusal', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse({ error: 'not an image' }, { ok: false, status: 415 }),
+    ))
+    const problem = await apiUpload('/api/v1/generations/media', new Blob(['x']), 'notes.txt').catch(error => error)
+    expect(problem).toBeInstanceOf(ApiError)
+    expect((problem as ApiError).status).toBe(415)
+    expect((problem as ApiError).message).toBe('not an image')
   })
 })
 

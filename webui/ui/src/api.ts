@@ -148,6 +148,10 @@ export interface Generation {
   id: string
   model_id: string
   mode: string
+  // The staged image an image_to_video run started from. Absent on every
+  // text run, and on an image run only while the server is older than the
+  // field itself.
+  first_frame?: string
   prompt: string
   blocks: number
   short_edge: number
@@ -166,6 +170,16 @@ export interface Generation {
   progress_max?: number
   progress_phase?: string
   file_url?: string
+}
+
+// One staged source image, as POST /api/v1/generations/media answers for it.
+// The id is the sha256 of the bytes, so staging the same image twice names
+// the same file; width and height are the Spark's own read of those bytes.
+export interface StagedMedia {
+  id: string
+  bytes: number
+  width: number
+  height: number
 }
 
 export interface GenerateResponse {
@@ -702,6 +716,26 @@ export async function apiBlob(path: string, options: RequestInit = {}): Promise<
     throw new ApiError(response.status, (body as { error?: string }).error ?? response.statusText)
   }
   return response.blob()
+}
+
+// The multipart sibling of api(): the same session cookie, the same CSRF
+// token, the same offline and server-error behavior. Content-Type is left to
+// the browser on purpose, because only the browser can write the multipart
+// boundary that goes with it.
+export async function apiUpload<T>(path: string, file: Blob, name: string): Promise<T> {
+  const form = new FormData()
+  form.append('file', file, name)
+  const headers = new Headers({ 'X-CSRF-Token': csrf })
+  let response: Response
+  try {
+    response = await fetch(path, { method: 'POST', body: form, headers, credentials: 'same-origin' })
+  } catch (cause) {
+    if (isAbort(cause)) throw cause
+    throw new OfflineError()
+  }
+  const body = await response.json().catch(() => ({ error: response.statusText }))
+  if (!response.ok) throw new ApiError(response.status, (body as { error?: string }).error ?? response.statusText)
+  return body as T
 }
 
 // crypto.randomUUID exists only in secure contexts (https / localhost); the
