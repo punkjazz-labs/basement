@@ -27,3 +27,16 @@ sign-index:
 		exit 1; \
 	fi
 	go run ./cmd/sign-index -index "$${INDEX:-index.json}" -key "$$BASEMENT_SIGN_KEY"
+
+# publish-feed runs the complete recipe feed publish flow: apply the safe
+# subset of upstream pin moves (cmd/feed-watch), build and sign a fresh
+# index.json, push it to the feed repository, and verify the published bytes
+# match what was pushed. See packaging/publish-feed.sh and docs/RECIPE-FEED.md
+# section 4. It reads the feed signing key from the macOS Keychain itself, so
+# it needs no BASEMENT_SIGN_KEY.
+#
+# Usage:
+#   make publish-feed
+.PHONY: publish-feed
+publish-feed:
+	packaging/publish-feed.sh

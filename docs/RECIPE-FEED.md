@@ -139,34 +139,65 @@ in this repository's history.
 
 ## 4. How an upstream update becomes a version bump
 
-This section describes a direction. No part of it is built yet. Treat every
-sentence in this section as a plan, not as a description of running code.
+`cmd/feed-watch` is the tool that watches for upstream changes. It has two
+modes.
 
-A watcher will run on a schedule. It will check each recipe's upstream
-source (the model repository, the container image) for a change.
+`feed-watch -mode check` scans every embedded recipe. For each artifact, it
+compares the pinned revision to the Hugging Face API's current revision. For
+each GitHub source, it compares the pinned revision to the repository's
+current default-branch commit. It writes a JSON report and prints one line
+per change. It never writes to a recipe file.
 
-When the watcher finds a change, it will draft a version bump. The draft will
-carry new pins: a new artifact revision, a new expected byte count, a new
-runtime image digest, or some combination of these.
+`feed-watch -mode bump` runs the same scan. Then it applies one fixed, safe
+set of changes on its own. It writes every other change to the report
+instead, for a maintainer to read later.
 
-Every pin in a draft will be verified live before anyone acts on it. The
-verification will check four things: the actual bytes, the actual digest,
-the actual licence, and a pass through the same strict validator that gates
-every recipe today.
+feed-watch bumps a recipe on its own in exactly two cases:
 
-A human owner will approve each draft, or the owner's stated policy will
-allow automatic approval for the narrow case of a pin bump that passes every
-live verification. The owner sets that policy. This runbook does not set it.
+- A whole-snapshot artifact (no `files:` list) moved to a new revision, the
+  live licence tag still matches the recipe's own `licence` field, and a
+  LICENSE or LICENSE.md file still exists at the new revision if one existed
+  at the old revision. feed-watch rewrites the artifact's `revision`, its
+  `expected_bytes`, and the revision inside `licence_url` when that URL
+  carries the old revision. It raises the recipe's `version` by one.
+- A per-file-pinned artifact moved to a new revision, and every pinned file
+  still exists there under the same name and the same size. feed-watch
+  rewrites the artifact's `revision` and the revision inside `licence_url`.
+  It raises the recipe's `version` by one. It leaves `expected_bytes` alone,
+  because every pinned file's own size did not change.
 
-Once a draft is approved, it becomes a normal commit in this repository. The
-publish flow in section 3 then carries it to the feed, the same way it
-carries any other recipe change.
+feed-watch never bumps a recipe on its own in any other case: a moved source
+repository, a changed licence, a pinned file that changed size or vanished,
+or any artifact change outside the two cases above. It writes these to the
+report with the reason "needs judgment". A maintainer session reads the
+report and decides what to do.
 
-This direction connects to one other recorded plan. PRD section 7.4 records a
+Every edit feed-watch makes is a surgical text edit on the recipe's own raw
+YAML file. It is never a full rewrite. A recipe's comments survive the edit
+byte for byte, outside the lines that changed. After editing, feed-watch
+decodes the file with the same strict decoder and validator every recipe
+already passes today. A result that fails that check is discarded before it
+is written, so the file on disk stays exactly as it was.
+
+feed-watch never runs git and never publishes anything.
+`packaging/publish-feed.sh` owns commit, sign, and publish. One command runs
+the whole flow:
+
+```
+make publish-feed
+```
+
+This command applies the safe subset of bumps, commits and pushes them if
+there were any, builds and signs a fresh `index.json`, publishes it to the
+feed repository, and verifies the published bytes match what was pushed
+byte for byte. Section 6 describes the schedule that runs this command on
+its own.
+
+This tool connects to one other recorded plan. PRD section 7.4 records a
 future discovery agent that scans public sources (X, Hugging Face) and
-drafts new candidate recipes, not version bumps of existing ones. Both paths
-end at the same gate: a draft, live verification, human or policy approval,
-then the publish flow above. Neither path skips the gate.
+drafts new candidate recipes, not version bumps of existing ones. That path
+still ends at a human commit to this repository, the same as every recipe
+change does today.
 
 ## 5. Revocations
 
@@ -232,3 +263,30 @@ The console shows a revoked recipe's reason exactly as written in the
 `reason` field. It never shortens the reason and it never replaces the
 reason with a generic message. Write every reason so it can stand alone in
 front of the person who owns the affected model.
+
+## 6. Automation
+
+`make publish-feed` is safe to run on a schedule. Every step in it verifies
+its own result, or the step fails and the run stops before it. A step that
+cannot confirm its own result never hands control to the step after it.
+
+One `launchd` job runs `make publish-feed` once a day, on the owner's laptop.
+The job file is `packaging/macos/com.punkjazz.basement.feed-publish.plist`.
+It runs at 10:00. It does not run the moment it is loaded. It writes its log
+to `~/Library/Logs/basement-feed-publish.log`.
+
+Install the job with one command:
+
+```
+launchctl load ~/Library/LaunchAgents/com.punkjazz.basement.feed-publish.plist
+```
+
+Copy the plist file into `~/Library/LaunchAgents/` first. The plist carries
+literal paths for the owner's own laptop, because `launchd` does not expand
+`~` or `$HOME` inside a plist file. Update those paths if the checkout ever
+moves, then unload and load the job again.
+
+A green scheduled run does not mean nothing needs attention. feed-watch can
+still leave a "needs judgment" entry in its report for a recipe that moved
+in a way it will not bump on its own. Read the log now and then, and act on
+what it finds.

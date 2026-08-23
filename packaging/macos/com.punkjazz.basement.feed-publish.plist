@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Runs packaging/publish-feed.sh once a day on the owner's laptop
+     (docs/RECIPE-FEED.md section 6). This file is a per-machine template:
+     the paths below are literal, because launchd does not expand ~ or
+     $HOME in a plist string, and the owner's laptop is the one machine
+     this job runs on. Install with:
+
+       cp packaging/macos/com.punkjazz.basement.feed-publish.plist \
+         ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.punkjazz.basement.feed-publish.plist
+
+     If the checkout ever moves, update ProgramArguments, WorkingDirectory
+     and the two log paths below, then reload the job:
+
+       launchctl unload ~/Library/LaunchAgents/com.punkjazz.basement.feed-publish.plist
+       launchctl load ~/Library/LaunchAgents/com.punkjazz.basement.feed-publish.plist -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.punkjazz.basement.feed-publish</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/simo/Library/CloudStorage/Dropbox/Projects/runonspark-manager/packaging/publish-feed.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/simo/Library/CloudStorage/Dropbox/Projects/runonspark-manager</string>
+	<!-- launchd's own default PATH carries none of these, and publish-feed.sh
+	     needs go, git and security on it. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<!-- Daily at 10:00. RunAtLoad is false: loading the job (at login, or
+	     right after this plist is installed) must not itself trigger a
+	     publish; the job runs only on its own schedule. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>10</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/simo/Library/Logs/basement-feed-publish.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/simo/Library/Logs/basement-feed-publish.log</string>
+</dict>
+</plist>
