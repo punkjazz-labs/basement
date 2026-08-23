@@ -47,11 +47,36 @@ const LEGACY_PEER_STATUS: NodeStatus = { word: '', dot: '' }
 // the last thing it was told about such a node, and can act on none of it.
 const SILENT_MEMBERSHIP = new Set(['stale', 'unreachable'])
 
+// How old a heartbeat can be and still count as recent. This mirrors the
+// manager's own bound, HeartbeatFreshness in internal/fleet/heartbeat.go. It
+// has to be repeated here because one status word arrives with that reading
+// already thrown away, and for no other reason: everywhere else the manager's
+// own word is what this file reads.
+const HEARTBEAT_FRESHNESS_MS = 30_000
+
+// Whether that Spark has sent a heartbeat recently enough to be acted on. A
+// Spark that has never sent one has reported nothing at all, so it answers
+// for nothing. The reading is made against this browser's clock, which is the
+// only clock a console has.
+const heartbeatRecent = (node: FleetNodeSummary, nowMs: number): boolean => {
+  const received = Date.parse(node.last_heartbeat_at ?? '')
+  return Number.isFinite(received) && nowMs - received <= HEARTBEAT_FRESHNESS_MS
+}
+
 // Whether the controller is still in touch with that Spark. A node it has not
 // finished admitting answers for nothing yet, and one that has gone quiet
 // answers for nothing any more.
-const nodeAnswering = (node: FleetNodeSummary): boolean =>
-  inFleet(node) && !SILENT_MEMBERSHIP.has(node.status)
+//
+// One word needs more than itself. The manager writes "version-mismatch" over
+// "stale" and over "unreachable" alike (internal/fleet/membership.go), so a
+// Spark of another version that went offline hours ago carries the same word
+// as one that answered a second ago. For that word only, the row reads the
+// heartbeat time itself. A healthy Spark of another version keeps its buttons.
+const nodeAnswering = (node: FleetNodeSummary, nowMs: number): boolean => {
+  if (!inFleet(node) || SILENT_MEMBERSHIP.has(node.status)) return false
+  if (node.status === 'version-mismatch') return heartbeatRecent(node, nowMs)
+  return true
+}
 
 // One row per Spark, de-duplicated on the console URL exactly as
 // membershipRows does. A membership row comes first because it is the only
@@ -63,6 +88,7 @@ export function fleetRows(
   summary: FleetSummary | null,
   peers: Peer[],
   selfConsoleURL: string,
+  nowMs: number,
 ): FleetRow[] {
   const taken = new Set<string>()
   const rows: FleetRow[] = []
@@ -71,7 +97,7 @@ export function fleetRows(
       const key = consoleKey(node.console_url)
       if (key === '' || taken.has(key)) continue
       taken.add(key)
-      rows.push(membershipRow(summary, node, selfConsoleURL))
+      rows.push(membershipRow(summary, node, selfConsoleURL, nowMs))
     }
   }
   for (const peer of peers) {
@@ -98,6 +124,7 @@ function membershipRow(
   summary: FleetSummary,
   node: FleetNodeSummary,
   selfConsoleURL: string,
+  nowMs: number,
 ): FleetRow {
   return {
     nodeID: node.node_id,
@@ -108,7 +135,7 @@ function membershipRow(
     installedModels: node.installed_models ?? [],
     serving: nodeServing(node),
     status: nodeStatus(node),
-    answering: nodeAnswering(node),
+    answering: nodeAnswering(node, nowMs),
   }
 }
 
@@ -132,6 +159,34 @@ export function deploymentIndex(deployments: FleetDeploymentView[]): Map<string,
     }
   }
   return index
+}
+
+// What the table holds after one read of the fleet's placements. The read is
+// the authority for everything except a record this console wrote while that
+// read was already in flight: the controller stores a placement before it
+// answers the console that asked for it, so every read that begins later
+// carries it, and one that began earlier cannot. Losing it for one round
+// would unlock the row and let a second click start a second real job, so a
+// record this console has acted on is kept until a read reports it. The
+// manager never deletes a placement row, so nothing is kept alive here that
+// the fleet has really let go of.
+//
+// polled is the map this returns. deploymentIndex builds a fresh one on every
+// read, so nothing else is holding it.
+export function mergePlacements(
+  polled: Map<string, FleetDeploymentView>,
+  previous: Map<string, FleetDeploymentView>,
+  touched: ReadonlySet<string>,
+): Map<string, FleetDeploymentView> {
+  if (touched.size === 0) return polled
+  const listed = new Set<string>()
+  for (const placement of polled.values()) listed.add(placement.deployment_id)
+  for (const [key, placement] of previous) {
+    if (!touched.has(placement.deployment_id)) continue
+    if (listed.has(placement.deployment_id) || polled.has(key)) continue
+    polled.set(key, placement)
+  }
+  return polled
 }
 
 // ---- Where one row action goes ----------------------------------------------
@@ -188,6 +243,10 @@ export const ACTION_REFUSAL: Record<'no-placement' | 'not-answering' | 'unsuppor
   'not-answering': 'That Spark is not answering for this model.',
   unsupported: 'The deployment action is not supported.',
 }
+
+// An adoption that answered without the record it was asked to make. The
+// action after it has nothing to act on, so it is never sent.
+export const NO_PLACEMENT_BACK = 'The controller gave no placement back.'
 
 // Whether a placement is already mid-change, so its row must not send it a
 // second action. A local row learns this from the job list it polls every few

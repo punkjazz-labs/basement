@@ -12,9 +12,9 @@ import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS } from '../fleetInvite'
 import {
-  deploymentActionPath, deploymentIndex, deploymentKey, fleetRows, modelChips,
+  deploymentActionPath, deploymentIndex, deploymentKey, fleetRows, mergePlacements, modelChips,
   placementBusy, rowActionRoute, rowPlacement,
-  ACTION_REFUSAL, ADOPT_PATH, NOT_ANSWERING,
+  ACTION_REFUSAL, ADOPT_PATH, NOT_ANSWERING, NO_PLACEMENT_BACK,
   type ActionTarget, type FleetDeploymentAction, type FleetRow,
 } from '../fleetModels'
 
@@ -109,6 +109,10 @@ export default function Models({
   // without this a row would unlock while its own action was still starting
   // and a second click would create a second job.
   const [startedOnPlacement, setStartedOnPlacement] = useState<Map<string, string>>(new Map())
+  // Every placement this console has recorded or acted on in this session. It
+  // is a ref rather than state because only the placement poll reads it, and
+  // it must not restart that poll when it grows.
+  const touchedPlacements = useRef<Set<string>>(new Set())
 
   // Storage tells us which recipes already have model files on disk, so a
   // partially downloaded model can offer to resume instead of start over.
@@ -206,7 +210,10 @@ export default function Models({
       if (!first && document.hidden) return
       try {
         const deployments = await fetchFleetDeployments()
-        if (!cancelled) setPlacements(deploymentIndex(deployments))
+        if (!cancelled) {
+          setPlacements(previous =>
+            mergePlacements(deploymentIndex(deployments), previous, touchedPlacements.current))
+        }
       } catch {
         /* the next read tries again */
       }
@@ -237,7 +244,10 @@ export default function Models({
   // that leads the fleet has more than its own machine to show, so on every
   // other console the fleet line and the chips below stay off and the screen
   // reads exactly as it did before the fleet existed.
-  const sparks = useMemo(() => fleetRows(fleet, peers, window.location.origin), [fleet, peers])
+  // Read at the moment the summary arrives, which is the only moment any of
+  // it is fresh: one row's answer depends on how old its heartbeat is, and
+  // the summary this reads is replaced on every poll.
+  const sparks = useMemo(() => fleetRows(fleet, peers, window.location.origin, Date.now()), [fleet, peers])
   const showFleet = leadsFleet && sparks.length > 1
   // Which Sparks hold this model, and which one serves it now. The Spark this
   // console runs on is named only while another Spark is on screen beside it.
@@ -431,6 +441,7 @@ export default function Models({
       return
     }
     const dispatch = async (deploymentID: string, path: string) => {
+      touchedPlacements.current.add(deploymentID)
       const result = await api<{ job: Job }>(path, { method: 'POST', headers: idempotency(), body })
       setStartedOnPlacement(previous => new Map(previous).set(deploymentID, result.job.id))
       openFleetDeployment(deploymentID, result.job)
@@ -443,14 +454,25 @@ export default function Models({
     // refuses an adoption it cannot make, in its own words, and run() shows
     // those words unchanged rather than replacing them with a guess.
     if (route.where === 'adopt') {
-      const { deployment } = await api<{ deployment: FleetDeploymentView }>(ADOPT_PATH, {
+      const answer = await api<{ deployment?: FleetDeploymentView }>(ADOPT_PATH, {
         method: 'POST',
         headers: idempotency(),
         body: JSON.stringify({ node_id: route.nodeID, recipe_id: route.recipeID }),
       })
+      const deployment = answer.deployment
+      // Everything below acts on a record. An answer carrying none is not one
+      // this console can go on with, and saying so plainly beats a broken
+      // path built from nothing.
+      if (!deployment?.deployment_id) throw new Error(NO_PLACEMENT_BACK)
       // From here the row reads the placement it just gained, so it locks on
       // the action below without waiting for the next placement poll.
+      touchedPlacements.current.add(deployment.deployment_id)
       setPlacements(previous => new Map(previous).set(deploymentKey(route.nodeID, route.recipeID), deployment))
+      // An adoption can find a Spark that has since gone quiet. The record is
+      // real and the row keeps it, which is what makes the row read "Not
+      // answering" from here; the action itself would only fail, so it is not
+      // sent.
+      if (deployment.stale) throw new Error(ACTION_REFUSAL['not-answering'])
       await dispatch(deployment.deployment_id, deploymentActionPath(deployment.deployment_id, action))
       return
     }

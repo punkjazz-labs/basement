@@ -3,8 +3,9 @@ import type {
   FleetDeploymentView, FleetModelSnapshot, FleetNodeSummary, FleetSummary, Job, NodeInventory, Peer, PlacementPlan,
 } from './api'
 import {
-  deploymentActionPath, deploymentIndex, deploymentKey, fleetRows, joinCandidatesWithInventory, modelChips,
-  placementBusy, rowActionRoute, rowPlacement, ACTION_REFUSAL, ADOPT_PATH, FLEET_DEPLOYMENT_ACTIONS,
+  deploymentActionPath, deploymentIndex, deploymentKey, fleetRows, joinCandidatesWithInventory,
+  mergePlacements, modelChips, placementBusy, rowActionRoute, rowPlacement,
+  ACTION_REFUSAL, ADOPT_PATH, FLEET_DEPLOYMENT_ACTIONS, NO_PLACEMENT_BACK,
   type ActionTarget, type FleetRow,
 } from './fleetModels'
 
@@ -19,6 +20,11 @@ const inventory = (overrides: Partial<NodeInventory> = {}): NodeInventory => ({
   ...overrides,
 })
 
+// The moment every row below is read at, and a heartbeat that landed ten
+// seconds before it: inside the manager's own 30 s freshness bound.
+const NOW = Date.parse('2026-08-23T10:00:00Z')
+const RECENT = '2026-08-23T09:59:50Z'
+
 const node = (overrides: Partial<FleetNodeSummary> = {}): FleetNodeSummary => ({
   node_id: 'node-lead',
   display_name: 'attic',
@@ -27,6 +33,7 @@ const node = (overrides: Partial<FleetNodeSummary> = {}): FleetNodeSummary => ({
   console_url: 'http://attic.local:7070',
   node_url: 'https://attic.local:7071',
   manager_version: 'v0.5.16',
+  last_heartbeat_at: RECENT,
   inventory: inventory(),
   installed_models: [],
   ...overrides,
@@ -80,12 +87,12 @@ const deployment = (overrides: Partial<FleetDeploymentView> = {}): FleetDeployme
 
 describe('one row per Spark', () => {
   it('marks the Spark this console runs on', () => {
-    const rows = fleetRows(summary({ nodes: [node(), member()] }), [], 'http://attic.local:7070')
+    const rows = fleetRows(summary({ nodes: [node(), member()] }), [], 'http://attic.local:7070', NOW)
     expect(rows.map(row => [row.displayName, row.isSelf])).toEqual([['attic', true], ['loft', false]])
   })
 
   it('carries what each Spark reported about itself', () => {
-    const rows = fleetRows(summary({ nodes: [member()] }), [], 'http://attic.local:7070')
+    const rows = fleetRows(summary({ nodes: [member()] }), [], 'http://attic.local:7070', NOW)
     expect(rows[0].inventory?.memory_available_bytes).toBe(26_000_000_000)
     expect(rows[0].inventory?.storage_available_bytes).toBe(1_100_000_000_000)
     expect(rows[0].status).toEqual({ word: 'Idle', dot: '' })
@@ -96,7 +103,7 @@ describe('one row per Spark', () => {
       { recipe_id: 'qwen36-27b-nvfp4-1s', recipe_version: 2, status: 'stopped', active: false },
       { recipe_id: 'qwen36-35b-a3b-nvfp4-1s', recipe_version: 3, status: 'ready', active: true },
     ]
-    const rows = fleetRows(summary({ nodes: [member({ installed_models: installed })] }), [], '')
+    const rows = fleetRows(summary({ nodes: [member({ installed_models: installed })] }), [], '', NOW)
     expect(rows[0].installedModels).toHaveLength(2)
     expect(rows[0].serving?.recipe_id).toBe('qwen36-35b-a3b-nvfp4-1s')
     expect(rows[0].status).toEqual({ word: 'Serving', dot: 'on' })
@@ -107,6 +114,7 @@ describe('one row per Spark', () => {
       summary({ nodes: [node(), member()] }),
       [peer('loft', 'http://loft.local:7070/')],
       'http://attic.local:7070',
+      NOW,
     )
     expect(rows.map(row => row.displayName)).toEqual(['attic', 'loft'])
     expect(rows[1].legacyPeerOnly).toBeUndefined()
@@ -114,7 +122,7 @@ describe('one row per Spark', () => {
   })
 
   it('keeps a Spark added by address that never joined the fleet', () => {
-    const rows = fleetRows(summary(), [peer('shed', 'http://shed.local:7070')], 'http://attic.local:7070')
+    const rows = fleetRows(summary(), [peer('shed', 'http://shed.local:7070')], 'http://attic.local:7070', NOW)
     expect(rows[1]).toMatchObject({
       nodeID: 'shed',
       displayName: 'shed',
@@ -126,28 +134,43 @@ describe('one row per Spark', () => {
   })
 
   it('leaves out a node no row can be told apart from', () => {
-    const rows = fleetRows(summary({ nodes: [node(), member({ console_url: '' })] }), [], '')
+    const rows = fleetRows(summary({ nodes: [node(), member({ console_url: '' })] }), [], '', NOW)
     expect(rows.map(row => row.nodeID)).toEqual(['node-lead'])
   })
 
   it('says whether each Spark still answers this console', () => {
     const answers = (status: string) =>
-      fleetRows(summary({ nodes: [member({ status })] }), [], '')[0].answering
+      fleetRows(summary({ nodes: [member({ status })] }), [], '', NOW)[0].answering
     expect(answers('fresh')).toBe(true)
-    expect(answers('version-mismatch')).toBe(true)
     expect(answers('stale')).toBe(false)
     expect(answers('unreachable')).toBe(false)
     // A Spark the fleet has not finished admitting answers for nothing yet.
     expect(answers('adopting')).toBe(false)
   })
 
+  it('reads the heartbeat itself for a Spark of another version', () => {
+    // The manager writes "version-mismatch" over "stale" and "unreachable"
+    // alike, so this one word says nothing about whether that Spark is there.
+    const answers = (last_heartbeat_at?: string) =>
+      fleetRows(
+        summary({ nodes: [member({ status: 'version-mismatch', last_heartbeat_at })] }), [], '', NOW,
+      )[0].answering
+    expect(answers(RECENT)).toBe(true)
+    // Exactly the manager's own bound, then past it.
+    expect(answers('2026-08-23T09:59:30Z')).toBe(true)
+    expect(answers('2026-08-23T09:59:29Z')).toBe(false)
+    expect(answers('2026-08-23T06:00:00Z')).toBe(false)
+    expect(answers(undefined)).toBe(false)
+    expect(answers('')).toBe(false)
+  })
+
   it('says a Spark added by address answers for nothing', () => {
-    const rows = fleetRows(summary(), [peer('shed', 'http://shed.local:7070')], 'http://attic.local:7070')
+    const rows = fleetRows(summary(), [peer('shed', 'http://shed.local:7070')], 'http://attic.local:7070', NOW)
     expect(rows[1].answering).toBe(false)
   })
 
   it('says nothing without a fleet summary', () => {
-    expect(fleetRows(null, [], 'http://attic.local:7070')).toEqual([])
+    expect(fleetRows(null, [], 'http://attic.local:7070', NOW)).toEqual([])
   })
 })
 
@@ -173,6 +196,46 @@ describe('which placement owns a model on a Spark', () => {
 
   it('answers with an empty index when the fleet holds no placement', () => {
     expect(deploymentIndex([]).size).toBe(0)
+  })
+})
+
+describe('what one read of the fleet placements leaves the table with', () => {
+  const key = deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s')
+  const adopted = deployment({ deployment_id: 'deployment_adopted' })
+  const held = new Map([[key, adopted]])
+
+  it('keeps a record this console acted on that the read does not carry', () => {
+    const merged = mergePlacements(deploymentIndex([]), held, new Set(['deployment_adopted']))
+    expect(merged.get(key)?.deployment_id).toBe('deployment_adopted')
+  })
+
+  it('lets the read speak for a record this console never touched', () => {
+    expect(mergePlacements(deploymentIndex([]), held, new Set(['deployment_other'])).size).toBe(0)
+    expect(mergePlacements(deploymentIndex([]), held, new Set()).size).toBe(0)
+  })
+
+  it('prefers what the read carries for the same Spark and model', () => {
+    const listed = deployment({ deployment_id: 'deployment_listed' })
+    const merged = mergePlacements(deploymentIndex([listed]), held, new Set(['deployment_adopted']))
+    expect(merged.get(key)?.deployment_id).toBe('deployment_listed')
+    expect(merged.size).toBe(1)
+  })
+
+  it('keeps nothing twice when the read already carries that record', () => {
+    const merged = mergePlacements(deploymentIndex([adopted]), held, new Set(['deployment_adopted']))
+    expect(merged.size).toBe(1)
+    expect(merged.get(key)?.deployment_id).toBe('deployment_adopted')
+  })
+
+  it('leaves every other Spark in the read alone', () => {
+    const elsewhere = deployment({
+      deployment_id: 'deployment_shed',
+      nodes: [{ deployment_id: 'deployment_shed', node_id: 'node-shed', node_role: 'owner', rank: 0, reservation_id: '' }],
+    })
+    const merged = mergePlacements(deploymentIndex([elsewhere]), held, new Set(['deployment_adopted']))
+    expect([...merged.keys()].sort()).toEqual(
+      [key, deploymentKey('node-shed', 'qwen36-35b-a3b-nvfp4-1s')].sort(),
+    )
   })
 })
 
@@ -341,6 +404,10 @@ describe('why a row action was refused', () => {
 
   it('says a Spark is not answering in the words the row uses', () => {
     expect(ACTION_REFUSAL['not-answering']).toContain('not answering')
+  })
+
+  it('has a line for an adoption that answered with no record', () => {
+    expect(NO_PLACEMENT_BACK).toBe('The controller gave no placement back.')
   })
 })
 
