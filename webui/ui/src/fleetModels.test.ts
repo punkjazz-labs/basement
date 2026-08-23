@@ -6,7 +6,7 @@ import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
   initialPlacement, installRoute, joinCandidatesWithInventory, machineNote, mergePlacements,
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
-  placementVerb, placementWord, rowActionRoute, rowPlacement, workingPlacement,
+  placementVerb, placementWord, recipeBusy, rowActionRoute, rowPlacement, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME, CHOOSE_FOR_ME_NOTE,
   FLEET_DEPLOYMENT_ACTIONS, NO_FLEET_ROW, NO_PLACEMENT_BACK, PLACEMENT_REFUSED,
   type ActionTarget, type FleetRow, type PlacementTarget,
@@ -868,5 +868,31 @@ describe('a model the fleet is still working on', () => {
     expect(placementWord(deployment({ job: job('j', 'benchmark', 'running') }))).toBe('Working')
     expect(placementWord(deployment({ job: undefined }))).toBe('Working')
     expect(placementWord(undefined)).toBe('')
+  })
+})
+
+describe('what locks one row', () => {
+  const working = deployment({ state: 'installing' })
+
+  it('locks a model this Spark does not hold while the fleet installs it', () => {
+    expect(recipeBusy(false, false, working)).toBe(true)
+  })
+
+  // A model installed here is its own. A remote install of the same recipe
+  // downloads other files onto another machine: it does not stop this one,
+  // start it, or touch what it serves, so Stop, Update, Open and the row's
+  // tools stay live.
+  it('leaves a model this Spark holds alone while the fleet installs it', () => {
+    expect(recipeBusy(false, true, working)).toBe(false)
+  })
+
+  it('locks either row while this Spark is doing the work', () => {
+    expect(recipeBusy(true, true, undefined)).toBe(true)
+    expect(recipeBusy(true, false, undefined)).toBe(true)
+  })
+
+  it('locks nothing when neither Spark is working', () => {
+    expect(recipeBusy(false, false, undefined)).toBe(false)
+    expect(recipeBusy(false, true, undefined)).toBe(false)
   })
 })

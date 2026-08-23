@@ -612,3 +612,23 @@ export const placementWord = (placement: FleetDeploymentView | undefined): strin
   if (placement === undefined) return ''
   return PLACEMENT_WORDS[placement.job?.kind ?? ''] ?? 'Working'
 }
+
+// Whether a row can act at all, once local work and fleet work are both read.
+//
+// Local work always locks it. Work the fleet is doing elsewhere locks only a
+// row this Spark holds no model for. A model installed here is its own: a
+// remote install of the same recipe downloads other files onto another
+// machine, and it neither stops this one, starts it, nor touches what it
+// serves. So Stop, Update, Open, Generate and the row's tools answer to local
+// work alone, and stay live through an install running on another Spark.
+//
+// A row with no model here has no local work to read. The placement record is
+// then the only thing that knows an install started at all, because the Spark
+// running it names the model in a heartbeat only once that install has
+// finished. There, the fleet's work is the whole lock: without it the row
+// would offer Install again for the length of the download.
+export const recipeBusy = (
+  localBusy: boolean,
+  hasLocalModel: boolean,
+  working: FleetDeploymentView | undefined,
+): boolean => localBusy || (!hasLocalModel && working !== undefined)

@@ -15,7 +15,7 @@ import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
   initialPlacement, installRoute, mergePlacements, modelChips, placedTarget, placementBusy,
   placementOptions, placementSwitchFrom, placementTargets, placementVerb, placementWord,
-  rowActionRoute, rowPlacement, workingPlacement,
+  recipeBusy, rowActionRoute, rowPlacement, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, FLEET_DEPLOYMENTS_PATH, NOT_ANSWERING, NO_PLACEMENT_BACK,
   NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
   type ActionTarget, type FleetDeploymentAction, type FleetRow, type PlacementTarget,
@@ -45,6 +45,12 @@ interface ConfirmState {
   preflight: Preflight
   switchFrom?: string
 }
+
+// The job kinds that change what a model is doing, and so the only ones that
+// lock a row. A benchmark and a smoke test run against a model that is
+// already serving, so Open must stay live through them. The table rows, the
+// first-run hero and the fleet's own placements all read this one set.
+const DISRUPTIVE_KINDS = new Set(['install', 'start', 'stop', 'remove'])
 
 // The fleet in one line above the table: every Spark, whether it serves
 // something, and how much memory and disk it has free. Every number is one
@@ -669,19 +675,21 @@ export default function Models({
     const isMedia = Boolean(recipe.media_generation)
     // Only jobs that change what is running should lock the row. Smoke tests
     // and benchmarks run against a serving model — Open must stay available.
-    const disruptive = new Set(['install', 'start', 'stop', 'remove'])
     const running = (kinds: (kind: string) => boolean) =>
       jobs.some(job => job.recipe_id === recipe.id && !terminal(job.state) && kinds(job.kind))
     // A placement anywhere in the fleet that is still working on this model.
     // It is the only thing that knows a remote install started: the Spark
     // running it names the model in a heartbeat only once the install has
-    // finished, so without this the row would keep a live Install button for
-    // the whole download and a second click would start a second install.
-    const working = workingPlacement(placements, startedOnPlacement, recipe.id, disruptive)
+    // finished, so without this a row with no model here would keep a live
+    // Install button for the whole download, and a second click would start a
+    // second install.
+    const working = workingPlacement(placements, startedOnPlacement, recipe.id, DISRUPTIVE_KINDS)
     const workingSpark = working ? sparks.find(spark => spark.nodeID === working.owner_node_id) : undefined
-    // Work anywhere in the fleet locks every button on this row, on every
-    // Spark. One model moves one way at a time.
-    const busy = pending.has(recipe.id) || running(kind => disruptive.has(kind)) || working !== undefined
+    // A model this Spark holds answers to this Spark's own work and nothing
+    // else, so an install running on another Spark never takes its buttons
+    // away. See recipeBusy.
+    const localBusy = pending.has(recipe.id) || running(kind => DISRUPTIVE_KINDS.has(kind))
+    const busy = recipeBusy(localBusy, model !== undefined, working)
     const measuring = running(kind => kind === 'benchmark' || kind === 'smoke-test')
     const isActive = Boolean(model?.active && model.status === 'ready')
     const fits = fitsOn(recipe)
@@ -1038,12 +1046,18 @@ export default function Models({
             </div>
             <div className="hero-get">
               {(() => {
-                // Same lock the table rows use: a running install/start/stop/
-                // remove for this recipe means the hero must say so too, not
-                // offer a second Install.
-                const heroBusy = pending.has(featured.id) ||
-                  jobs.some(job => job.recipe_id === featured.id && !terminal(job.state) &&
-                    ['install', 'start', 'stop', 'remove'].includes(job.kind))
+                // Same lock the table rows use, read the same way: work on
+                // this Spark, and work the fleet is doing on another Spark.
+                // The hero is only shown before anything is installed here,
+                // so a placement is the whole of what it can learn about an
+                // install already running for this model.
+                const heroBusy = recipeBusy(
+                  pending.has(featured.id) ||
+                    jobs.some(job => job.recipe_id === featured.id && !terminal(job.state) &&
+                      DISRUPTIVE_KINDS.has(job.kind)),
+                  installed.has(featured.id),
+                  workingPlacement(placements, startedOnPlacement, featured.id, DISRUPTIVE_KINDS),
+                )
                 const heroFits = fitsOn(featured)
                 if (!heroFits && pairable(featured)) {
                   return <button className="brand" onClick={openFleet}>Pair a second Spark</button>
