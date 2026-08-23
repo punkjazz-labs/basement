@@ -37,6 +37,25 @@ func evaluateBump(a recipe.Artifact, drift artifactDrift, hf *hfClient) (edit ar
 		if oldRevisionInfo.hasLicenseFile() && !drift.NewHasLicense {
 			return artifactEdit{}, "the new revision no longer carries a LICENSE or LICENSE.md file", false
 		}
+		// A whole-snapshot pin downloads everything the revision holds, so a
+		// large size swing is a different artifact in practice even when the
+		// licence held: publishers add sibling quantizations or remove
+		// shards, and users would pay the delta on every install. Small
+		// swings (README and metadata edits) pass; past ten percent either
+		// way a person decides. Live example that forced this rule: poolside
+		// grew a 72 GB snapshot by 28 GB in place.
+		if a.ExpectedBytes > 0 {
+			delta := drift.NewTotalBytes - a.ExpectedBytes
+			if delta < 0 {
+				delta = -delta
+			}
+			if delta*10 > a.ExpectedBytes {
+				return artifactEdit{}, fmt.Sprintf(
+					"snapshot size moved %d -> %d bytes, past the ten percent line a bump may cross on its own",
+					a.ExpectedBytes, drift.NewTotalBytes,
+				), false
+			}
+		}
 		base.UpdateExpectedBytes = true
 		base.NewExpectedBytes = drift.NewTotalBytes
 		return base, "", true

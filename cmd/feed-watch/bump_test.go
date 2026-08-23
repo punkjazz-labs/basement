@@ -318,3 +318,63 @@ func TestIndexRecipeFilesMatchesByDecodedID(t *testing.T) {
 		t.Fatalf("index = %+v, want the fixture's own id as a key", index)
 	}
 }
+
+func TestBumpRefusesLargeSnapshotGrowth(t *testing.T) {
+	dir, path, original := copyRecipeFixture(t, "qwen38-27b-nvfp4-1s.yaml")
+	r, err := recipe.DecodeStrict(original)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	index, ok := r.ArtifactIndex("primary")
+	if !ok {
+		t.Fatal("fixture has no primary artifact")
+	}
+	artifact := r.Artifacts[index]
+	const newRevision = "4444444444444444444444444444444444444444"
+	// Twenty percent growth: a publisher added sibling files. The licence
+	// held, every rule the safe subset checks passes, and the bump must
+	// still refuse, because a whole-snapshot install now downloads all of
+	// the growth.
+	newTotal := artifact.ExpectedBytes + artifact.ExpectedBytes/5
+
+	base := newHFTestServer(t, &hfFixture{
+		modelInfo: map[string]hfModelInfo{
+			artifact.Repository: {SHA: newRevision, CardData: hfCardData{License: "apache-2.0"}},
+		},
+		revisionInfo: map[string]hfRevisionInfo{
+			artifact.Repository + "@" + artifact.Revision: {
+				SHA: artifact.Revision, Siblings: []hfSibling{{RFilename: "LICENSE", Size: 100}},
+			},
+			artifact.Repository + "@" + newRevision: {
+				SHA: newRevision, Siblings: []hfSibling{
+					{RFilename: "model.safetensors", Size: newTotal - 100},
+					{RFilename: "LICENSE", Size: 100},
+				},
+			},
+		},
+	})
+	hf := newHFClient(base)
+
+	drift, err := scanArtifact(artifact, hf)
+	if err != nil {
+		t.Fatalf("scanArtifact: %v", err)
+	}
+	scan := recipeScan{Recipe: r, Artifacts: []artifactDrift{drift}}
+	findings, bumped, err := applyBumps([]recipeScan{scan}, dir, hf)
+	if err != nil {
+		t.Fatalf("applyBumps: %v", err)
+	}
+	if len(bumped) != 0 {
+		t.Fatalf("bumped = %+v, want none: growth past ten percent needs judgment", bumped)
+	}
+	if len(findings) != 1 || !strings.Contains(findings[0].Details, "ten percent") {
+		t.Fatalf("findings = %+v, want one needs-judgment finding naming the ten percent line", findings)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recipe after refused bump: %v", err)
+	}
+	if string(after) != string(original) {
+		t.Fatal("a refused bump must leave the recipe file byte-identical")
+	}
+}
