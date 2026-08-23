@@ -12,7 +12,13 @@ id: laguna-s-2-1-nvfp4-dflash-1s
 # repository is unchanged and still governs both artifacts. feed-watch
 # refused this bump on its own twice over (size swing past ten percent,
 # missing licence tag), which is exactly the case a person decides.
-version: 6
+# v7: hardware decided the context length. On GB10 at utilization 0.85 the
+# 99.7 GB rebuild leaves 5.76 GiB for KV cache; the 262144 context needs
+# 9.18 GiB, so vLLM refuses to start (measured on edgexpert-2051,
+# 2026-08-23; vLLM's own ceiling estimate was 162544). 131072 fits with
+# margin. Utilization stays 0.85 because the host memory is unified and
+# the manager and other services need the rest.
+version: 7
 display_name: Laguna S 2.1 + DFlash
 publisher: poolside
 model_by: poolside
@@ -74,7 +80,7 @@ service:
     moe_backend: ""
     linear_backend: ""
     gpu_memory_utilization: "0.85"
-    max_model_len: 262144
+    max_model_len: 131072
     max_num_seqs: 32
     max_num_batched_tokens: 0
     multimodal_image_limit: 0
