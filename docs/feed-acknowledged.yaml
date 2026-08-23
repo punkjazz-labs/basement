@@ -1,0 +1,42 @@
+# Maintainer rulings on upstream drift feed-watch keeps finding.
+#
+# Each entry matches one finding by recipe, kind, role and the exact
+# upstream revision the ruling covered. When upstream moves past that
+# revision, the finding opens again and a person looks again. Removing an
+# entry also reopens the finding. This file never authorizes a bump; it
+# only records that a drift was judged and what the judgment was.
+- recipe: qwen36-27b-nvfp4-1s
+  kind: source
+  revision: eb84ca38d833bb58ab151bde34f2c1f0a1e2f8ed
+  reason: >-
+    2026-08-23: upstream switched to DFlash speculative decoding on an
+    unpinned nightly image with --privileged, then moved to a new
+    repository (Qwen3.6-27B-NVFP4-DFlash-DGX-Spark). Our recipe implements
+    the method validated at the pinned revision. The DFlash method is a
+    tracked candidate for a future recipe version, not this recipe's
+    lineage.
+- recipe: deepseek-v4-flash-0731-2s
+  kind: source
+  revision: f104c39a8c6fa68d4ea0b342ad6eed172bc0e635
+  reason: >-
+    2026-08-23: upstream rewrote its history (the pinned commit and today's
+    main share no ancestor) and hardened its stack with new patches, a
+    Dockerfile and CI. Our recipe implements the method validated at the
+    pinned revision, which still resolves. The hardened stack is a tracked
+    candidate for a future recipe version.
+- recipe: laguna-s-2-1-nvfp4-dflash-1s
+  kind: artifact
+  role: primary
+  revision: 64734b3a449a05c79657451513d97544f2f53436
+  reason: >-
+    2026-08-23 owner ruling: the drafter repository dropped its licence
+    tag, so this model line gets no updates. The snapshot growth to 99.7
+    GB is part of the same upstream reshuffle and is not taken.
+- recipe: laguna-s-2-1-nvfp4-dflash-1s
+  kind: artifact
+  role: drafter
+  revision: b3b5921a900b9e0a1e27e50bdaeb480692a6d19b
+  reason: >-
+    2026-08-23 owner ruling: the licence tag is gone upstream. No licence
+    means no update. The pinned revision keeps its OpenMDW-1.1 licence and
+    stays exactly as validated.

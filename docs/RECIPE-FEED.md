@@ -193,6 +193,13 @@ feed repository, and verifies the published bytes match what was pushed
 byte for byte. Section 6 describes the schedule that runs this command on
 its own.
 
+A drift a maintainer has judged goes into `docs/feed-acknowledged.yaml`.
+Each entry names the recipe, the kind, the role for an artifact, the exact
+upstream revision the ruling covered, and the reason. feed-watch reports a
+covered finding as acknowledged, not open, and it does not count toward the
+exit code. When upstream moves past the covered revision, the finding opens
+again. The file never authorizes a bump. It only records a decision.
+
 This tool connects to one other recorded plan. PRD section 7.4 records a
 future discovery agent that scans public sources (X, Hugging Face) and
 drafts new candidate recipes, not version bumps of existing ones. That path

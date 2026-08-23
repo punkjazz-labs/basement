@@ -14,10 +14,14 @@ import (
 // bump mode did not or could not fix automatically. Bumped is empty in
 // check mode, since check mode never writes a file.
 type Report struct {
-	GeneratedAt time.Time    `json:"generated_at"`
-	Mode        string       `json:"mode"`
-	Findings    []Finding    `json:"findings"`
-	Bumped      []BumpResult `json:"bumped,omitempty"`
+	GeneratedAt time.Time `json:"generated_at"`
+	Mode        string    `json:"mode"`
+	Findings    []Finding `json:"findings"`
+	// Acknowledged holds findings a maintainer ruling in the
+	// acknowledgements file covers: still true upstream, already judged,
+	// not open work. They never count toward the exit code.
+	Acknowledged []Finding    `json:"acknowledged,omitempty"`
+	Bumped       []BumpResult `json:"bumped,omitempty"`
 }
 
 // Finding is one thing feed-watch found and did not resolve on its own: a
@@ -135,8 +139,12 @@ func exitCode(findings []Finding) int {
 }
 
 // printSummary writes the one-line-per-drift human summary, and in bump
-// mode, the list of files bump mode changed.
-func printSummary(w io.Writer, mode string, findings []Finding, bumped []BumpResult) {
+// mode, the list of files bump mode changed. Acknowledged findings print
+// one quiet line each, so the daily log still shows the ruling exists.
+func printSummary(w io.Writer, mode string, findings, acknowledged []Finding, bumped []BumpResult) {
+	for _, f := range acknowledged {
+		fmt.Fprintf(w, "%s: %s drift at %s acknowledged\n", f.RecipeID, roleOrKind(f), f.Current)
+	}
 	for _, f := range findings {
 		switch f.Kind {
 		case "error":
@@ -158,7 +166,7 @@ func printSummary(w io.Writer, mode string, findings []Finding, bumped []BumpRes
 				fmt.Fprintf(w, "  %s (version %d -> %d)\n", b.File, b.OldVersion, b.NewVersion)
 			}
 		}
-	} else if len(findings) == 0 {
+	} else if len(findings) == 0 && len(acknowledged) == 0 {
 		fmt.Fprintln(w, "no drift")
 	}
 }

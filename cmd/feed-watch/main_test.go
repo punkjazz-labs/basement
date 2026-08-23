@@ -31,7 +31,7 @@ func TestRunCheckModeNoDriftExitsZero(t *testing.T) {
 
 	out := filepath.Join(t.TempDir(), "report.json")
 	var stdout bytes.Buffer
-	code, err := run(recipes, "check", out, "", hfBase, "https://api.github.com", &stdout)
+	code, err := run(recipes, "check", out, "", "", hfBase, "https://api.github.com", &stdout)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestRunCheckModeDriftExitsThree(t *testing.T) {
 
 	out := filepath.Join(t.TempDir(), "report.json")
 	var stdout bytes.Buffer
-	code, err := run(recipes, "check", out, "", hfBase, "https://api.github.com", &stdout)
+	code, err := run(recipes, "check", out, "", "", hfBase, "https://api.github.com", &stdout)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestRunCheckModeOnlyErrorsExitsFour(t *testing.T) {
 	recipes := []recipe.Recipe{minimalRecipe("recipe-a", "org/repo", pinnedSHA, 100)}
 
 	out := filepath.Join(t.TempDir(), "report.json")
-	code, err := run(recipes, "check", out, "", hfBase, "https://api.github.com", &bytes.Buffer{})
+	code, err := run(recipes, "check", out, "", "", hfBase, "https://api.github.com", &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestRunBumpModeAppliesSafeSubsetAndReportsTheRest(t *testing.T) {
 
 	out := filepath.Join(t.TempDir(), "report.json")
 	var stdout bytes.Buffer
-	code, err := run(recipes, "bump", out, recipesDir, hfBase, githubBase, &stdout)
+	code, err := run(recipes, "bump", out, recipesDir, "", hfBase, githubBase, &stdout)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

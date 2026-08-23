@@ -56,6 +56,7 @@ func main() {
 	mode := flag.String("mode", "check", "scan mode: check (report only) or bump (apply the safe subset)")
 	out := flag.String("out", "feed-watch-report.json", "path to write the JSON drift report to")
 	recipesDir := flag.String("recipes-dir", "internal/recipe/recipes", "directory of recipe YAML files this tool may rewrite in bump mode")
+	acknowledged := flag.String("acknowledged", "docs/feed-acknowledged.yaml", "maintainer rulings file; findings it covers are reported as acknowledged instead of open")
 	// hfAPIBase and githubAPIBase exist so tests can point this tool at an
 	// httptest server instead of the real APIs; production runs leave them
 	// unset and get the real hosts, by way of BASEMENT_HF_API /
@@ -76,7 +77,7 @@ func main() {
 	}
 
 	code, err := run(
-		recipes, *mode, *out, *recipesDir,
+		recipes, *mode, *out, *recipesDir, *acknowledged,
 		resolveBase(*hfAPIBase, "BASEMENT_HF_API", defaultHFAPIBase),
 		resolveBase(*githubAPIBase, "BASEMENT_GITHUB_API", defaultGitHubAPIBase),
 		os.Stdout,
@@ -105,9 +106,14 @@ func resolveBase(flagValue, envName, fallback string) string {
 // code the caller should use. recipes is a parameter, not a call to
 // recipe.Builtin() here, so a test can hand it two or three synthetic
 // recipes instead of driving the whole embedded pack through a fake server.
-func run(recipes []recipe.Recipe, mode, outPath, recipesDir, hfBase, githubBase string, stdout io.Writer) (int, error) {
+func run(recipes []recipe.Recipe, mode, outPath, recipesDir, ackPath, hfBase, githubBase string, stdout io.Writer) (int, error) {
 	hf := newHFClient(hfBase)
 	gh := newGitHubClient(githubBase)
+
+	acks, err := loadAcknowledgements(ackPath)
+	if err != nil {
+		return 0, err
+	}
 
 	scans := make([]recipeScan, 0, len(recipes))
 	for _, r := range recipes {
@@ -116,7 +122,6 @@ func run(recipes []recipe.Recipe, mode, outPath, recipesDir, hfBase, githubBase 
 
 	var findings []Finding
 	var bumped []BumpResult
-	var err error
 	if mode == "bump" {
 		findings, bumped, err = applyBumps(scans, recipesDir, hf)
 		if err != nil {
@@ -125,16 +130,18 @@ func run(recipes []recipe.Recipe, mode, outPath, recipesDir, hfBase, githubBase 
 	} else {
 		findings = buildCheckFindings(scans)
 	}
+	open, acknowledged := partitionAcknowledged(findings, acks)
 
 	report := Report{
-		GeneratedAt: time.Now().UTC(),
-		Mode:        mode,
-		Findings:    findings,
-		Bumped:      bumped,
+		GeneratedAt:  time.Now().UTC(),
+		Mode:         mode,
+		Findings:     open,
+		Acknowledged: acknowledged,
+		Bumped:       bumped,
 	}
 	if err := writeReport(outPath, report); err != nil {
 		return 0, err
 	}
-	printSummary(stdout, mode, findings, bumped)
-	return exitCode(findings), nil
+	printSummary(stdout, mode, open, acknowledged, bumped)
+	return exitCode(open), nil
 }

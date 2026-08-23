@@ -260,3 +260,38 @@ Round 2.
   model. This entry is different in kind: the owner asked for this model
   itself, it ships under its own name, and the recipe states what it is in
   plain words. Explicit, labeled, candidate.
+
+## Round 5 — 2026-08-23, upstream drift the watcher parked
+
+Both entries come from the first supervised feed-watch run. Both source
+pins stay where validation happened; the rulings live in
+docs/feed-acknowledged.yaml.
+
+### Qwen3.6-27B DFlash (tracked, future recipe version)
+
+- The MiaAI-Lab launcher repo abandoned the method our qwen36-27b-nvfp4-1s
+  recipe validated (vLLM v0.24.0, MTP speculation, marlin MoE) and moved to
+  DFlash speculative decoding with a separate drafter checkpoint
+  (z-lab/Qwen3.6-27B-DFlash, 10 speculative tokens), flashinfer_b12x MoE,
+  flash_attn attention, bfloat16 KV, gpu-mem 0.84. Then the repo itself
+  moved: github.com/MiaAI-Lab/Qwen3.6-27B-NVFP4-DFlash-DGX-Spark.
+- Not adoptable as published: the launcher runs an unpinned
+  vllm/vllm-openai:nightly-aarch64 image with --privileged. basement pins
+  images by digest and refuses privileged containers.
+- Becomes a recipe version when: a pinned image digest serves it, the
+  drafter checkpoint has a verified licence, and the DFlash gain is
+  measured here (the laguna-s recipe is the in-pack pattern for a
+  drafter-carrying recipe).
+
+### DeepSeek V4 Flash DSpark, hardened stack (tracked, future recipe version)
+
+- Upstream rewrote its history (our pinned commit 914c35b and today's main
+  f104c39 share no ancestor; the pin still resolves) and grew a hardened
+  stack: new kernel patches, a Dockerfile, CI, an AUDIT.md, changed
+  launcher scripts.
+- Our deepseek-v4-flash-0731-2s recipe implements the method validated at
+  the pin; the model artifacts did not change (the 2s snapshot bump to
+  7872f01 was metadata-only and shipped as version 4).
+- Becomes a recipe version when: the rewritten tree's method is re-read
+  end to end and the bind-mounted-patch objections recorded in Round 4 for
+  the single-Spark variant are re-evaluated against the hardened stack.
