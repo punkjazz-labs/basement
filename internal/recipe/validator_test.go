@@ -335,6 +335,28 @@ func TestValidateAcceptsMinimalSGLangRecipe(t *testing.T) {
 	}
 }
 
+// TestValidateAcceptsSGLangHybridAttentionFields exercises the fields a
+// hybrid Gated-DeltaNet (linear-attention) plus full-attention model's
+// qualified launcher configuration needs, none of which the minimal
+// acceptance test above sets.
+func TestValidateAcceptsSGLangHybridAttentionFields(t *testing.T) {
+	candidate := sglangCandidate(t)
+	candidate.Service.SGLang.TrustRemoteCode = true
+	candidate.Service.SGLang.ChunkedPrefillSize = 8192
+	candidate.Service.SGLang.DisablePrefillCUDAGraph = true
+	candidate.Service.SGLang.MambaSSMDType = "bfloat16"
+	candidate.Service.SGLang.MambaFullMemoryRatio = "4.21"
+	candidate.Service.SGLang.MambaRadixCacheStrategy = "extra_buffer_lazy"
+	candidate.Service.SGLang.MaxMambaCacheSize = 40
+	candidate.Service.SGLang.SpeculativeAlgorithm = "EAGLE"
+	candidate.Service.SGLang.SpeculativeNumDraftTokens = 4
+	candidate.Service.SGLang.SpeculativeNumSteps = 3
+	candidate.Service.SGLang.SpeculativeEagleTopK = 1
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate()=%v, want nil", err)
+	}
+}
+
 func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
 	vllmBlock := func() *VLLMConfig {
 		recipes, err := Builtin()
@@ -365,6 +387,18 @@ func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
 		{"quantization outside policy", func(r *Recipe) { r.Service.SGLang.Quantization = "gguf" }, "outside the recipe policy"},
 		{"memory fraction overcommit", func(r *Recipe) { r.Service.SGLang.MemFractionStatic = "0.95" }, "does not preserve the per-node memory reserve"},
 		{"unsafe chat template", func(r *Recipe) { r.Service.SGLang.ChatTemplateFile = "../../etc/passwd" }, "chat template file is unsafe"},
+		{"mamba radix cache strategy outside policy", func(r *Recipe) { r.Service.SGLang.MambaRadixCacheStrategy = "other" }, "outside the recipe policy"},
+		{"mamba full memory ratio too low", func(r *Recipe) { r.Service.SGLang.MambaFullMemoryRatio = "0" }, "mamba_full_memory_ratio must be a decimal above 0 and no greater than 16"},
+		{"mamba full memory ratio too high", func(r *Recipe) { r.Service.SGLang.MambaFullMemoryRatio = "17" }, "mamba_full_memory_ratio must be a decimal above 0 and no greater than 16"},
+		{"sampling defaults outside policy", func(r *Recipe) { r.Service.SGLang.SamplingDefaults = "openai" }, "outside the recipe policy"},
+		{"speculative num steps without an algorithm", func(r *Recipe) { r.Service.SGLang.SpeculativeNumSteps = 3 }, "speculative_num_steps requires speculative_algorithm"},
+		{"speculative eagle topk with a non-EAGLE algorithm", func(r *Recipe) {
+			r.Service.SGLang.SpeculativeAlgorithm = "NGRAM"
+			r.Service.SGLang.SpeculativeNumDraftTokens = 4
+			r.Service.SGLang.SpeculativeEagleTopK = 1
+		}, "speculative_eagle_topk requires speculative_algorithm EAGLE or EAGLE3"},
+		{"chunked prefill size too large", func(r *Recipe) { r.Service.SGLang.ChunkedPrefillSize = 65537 }, "chunked_prefill_size must be between 0 and 65536"},
+		{"max mamba cache size too large", func(r *Recipe) { r.Service.SGLang.MaxMambaCacheSize = 4097 }, "max_mamba_cache_size must be between 0 and 4096"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

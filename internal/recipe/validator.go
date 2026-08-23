@@ -650,9 +650,22 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 		"kv":           {"": true, "auto": true, "fp8_e5m2": true, "fp8_e4m3": true, "bf16": true, "nvfp4": true},
 		"attention":    {"": true, "flashinfer": true, "triton": true, "torch_native": true, "fa3": true},
 		"spec":         {"": true, "EAGLE": true, "EAGLE3": true, "NEXTN": true, "STANDALONE": true, "NGRAM": true},
+		// mamba_ssm_dtype is checked against the two dtypes a qualified
+		// hybrid-attention launcher has actually run Mamba state in.
+		"mamba_dtype": {"": true, "bfloat16": true, "float32": true},
+		// mamba_radix_cache_strategy names SGLang's own buffering modes for
+		// reusing Mamba state inside the radix cache, and both are ones a
+		// qualified launcher has run with.
+		"mamba_radix": {"": true, "extra_buffer": true, "extra_buffer_lazy": true},
+		// sampling_defaults chooses where SGLang reads its default sampling
+		// parameters from; "model" is the only non-empty source a qualified
+		// launcher pins.
+		"sampling_defaults": {"": true, "model": true},
 	}
 	if !allowed["quantization"][s.Quantization] || !allowed["kv"][s.KVCacheDType] ||
-		!allowed["attention"][s.AttentionBackend] || !allowed["spec"][s.SpeculativeAlgorithm] {
+		!allowed["attention"][s.AttentionBackend] || !allowed["spec"][s.SpeculativeAlgorithm] ||
+		!allowed["mamba_dtype"][s.MambaSSMDType] || !allowed["mamba_radix"][s.MambaRadixCacheStrategy] ||
+		!allowed["sampling_defaults"][s.SamplingDefaults] {
 		return errors.New("sglang setting is outside the recipe policy")
 	}
 	if !parserNamePattern.MatchString(s.ToolCallParser) || !parserNamePattern.MatchString(s.ReasoningParser) {
@@ -662,6 +675,28 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 	if err != nil || fraction <= 0 || fraction > 0.95 {
 		return errors.New("sglang mem_fraction_static must be a decimal above 0 and no greater than 0.95")
 	}
+	if s.MambaFullMemoryRatio != "" {
+		// Mamba state and the full-attention KV cache are two different
+		// pools sized independently, so this is a ratio rather than a
+		// fraction of one pool; 16 is the widest a qualified launcher has
+		// asked for, so it bounds a typo rather than a real deployment.
+		ratio, err := strconv.ParseFloat(s.MambaFullMemoryRatio, 64)
+		if err != nil || ratio <= 0 || ratio > 16 {
+			return errors.New("sglang mamba_full_memory_ratio must be a decimal above 0 and no greater than 16")
+		}
+	}
+	// chunked_prefill_size bounds the token budget one prefill chunk may
+	// spend. 65536 is comfortably above any context this pack has qualified,
+	// so the bound catches a typo rather than a real deployment.
+	if s.ChunkedPrefillSize < 0 || s.ChunkedPrefillSize > 65536 {
+		return errors.New("sglang chunked_prefill_size must be between 0 and 65536")
+	}
+	// max_mamba_cache_size is how many recurrent states SGLang keeps
+	// resident; each one is memory nothing else on a GB10 gets back, so the
+	// bound is the largest count a qualified launcher has run with.
+	if s.MaxMambaCacheSize < 0 || s.MaxMambaCacheSize > 4096 {
+		return errors.New("sglang max_mamba_cache_size must be between 0 and 4096")
+	}
 	if s.SpeculativeAlgorithm == "" && (s.SpeculativeNumDraftTokens != 0 || s.SpeculativeModelRole != "") {
 		return errors.New("sglang speculative settings require speculative_algorithm")
 	}
@@ -670,6 +705,24 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 	}
 	if s.SpeculativeModelRole != "" && (!roles[s.SpeculativeModelRole] || s.SpeculativeModelRole == "primary") {
 		return errors.New("sglang speculative_model_role must name a declared non-primary artifact role")
+	}
+	// speculative_num_steps shapes how many draft steps EAGLE-family
+	// speculation runs; it means nothing without a speculative algorithm to
+	// shape.
+	if s.SpeculativeNumSteps < 0 || s.SpeculativeNumSteps > 32 {
+		return errors.New("sglang speculative_num_steps must be between 0 and 32")
+	}
+	if s.SpeculativeNumSteps > 0 && s.SpeculativeAlgorithm == "" {
+		return errors.New("sglang speculative_num_steps requires speculative_algorithm")
+	}
+	// speculative_eagle_topk is EAGLE and EAGLE3's own branching factor; a
+	// value set for any other algorithm asks the runtime for a knob it will
+	// not read.
+	if s.SpeculativeEagleTopK < 0 || s.SpeculativeEagleTopK > 32 {
+		return errors.New("sglang speculative_eagle_topk must be between 0 and 32")
+	}
+	if s.SpeculativeEagleTopK > 0 && s.SpeculativeAlgorithm != "EAGLE" && s.SpeculativeAlgorithm != "EAGLE3" {
+		return errors.New("sglang speculative_eagle_topk requires speculative_algorithm EAGLE or EAGLE3")
 	}
 	return validateChatTemplateFile(s.ChatTemplateFile)
 }

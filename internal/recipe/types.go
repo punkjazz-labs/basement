@@ -405,6 +405,52 @@ type SGLangConfig struct {
 	ToolCallParser       string `yaml:"tool_call_parser" json:"tool_call_parser"`
 	ReasoningParser      string `yaml:"reasoning_parser" json:"reasoning_parser"`
 	AttentionBackend     string `yaml:"attention_backend" json:"attention_backend"`
+	// TrustRemoteCode turns on --trust-remote-code, letting SGLang import
+	// model code the checkpoint ships instead of only its own registered
+	// architectures. A hybrid Gated-DeltaNet model needs it because its
+	// forward pass is not built into every runtime release.
+	TrustRemoteCode bool `yaml:"trust_remote_code" json:"trust_remote_code"`
+	// ChunkedPrefillSize is --chunked-prefill-size, the token budget one
+	// prefill chunk may spend before it yields. 0 leaves the flag off and
+	// SGLang's own default stands.
+	ChunkedPrefillSize int `yaml:"chunked_prefill_size" json:"chunked_prefill_size"`
+	// DisablePrefillCUDAGraph turns off CUDA graph capture for the prefill
+	// path with --disable-prefill-cuda-graph. A hybrid attention model mixes
+	// linear-attention and full-attention layers whose prefill shapes vary
+	// more than a uniform-attention model's, which is the case a qualified
+	// hybrid-attention launcher has needed this off for.
+	DisablePrefillCUDAGraph bool `yaml:"disable_prefill_cuda_graph" json:"disable_prefill_cuda_graph"`
+	// MambaSSMDType is --mamba-ssm-dtype, the numeric type the state-space
+	// (linear-attention) layers keep their recurrent state in. It is separate
+	// from kv_cache_dtype because a hybrid model's Mamba state and its
+	// full-attention KV cache are two different memory pools with two
+	// different precision needs.
+	MambaSSMDType string `yaml:"mamba_ssm_dtype" json:"mamba_ssm_dtype"`
+	// MambaFullMemoryRatio is --mamba-full-memory-ratio, the share of the
+	// memory sized for full attention that Mamba's own state is allowed to
+	// claim on top of it. It stays a string for the same reason
+	// mem_fraction_static does: the recipe's exact decimal reaches the
+	// runtime unrounded.
+	MambaFullMemoryRatio string `yaml:"mamba_full_memory_ratio" json:"mamba_full_memory_ratio"`
+	// MambaRadixCacheStrategy is --mamba-radix-cache-strategy, how SGLang
+	// buffers Mamba state for reuse inside its radix cache.
+	MambaRadixCacheStrategy string `yaml:"mamba_radix_cache_strategy" json:"mamba_radix_cache_strategy"`
+	// MaxMambaCacheSize is --max-mamba-cache-size, the number of Mamba
+	// recurrent states SGLang keeps resident at once. 0 leaves the flag off
+	// and SGLang's own default stands.
+	MaxMambaCacheSize int `yaml:"max_mamba_cache_size" json:"max_mamba_cache_size"`
+	// SpeculativeNumSteps is --speculative-num-steps, how many draft steps
+	// EAGLE-family speculation runs before verifying. It shapes a speculative
+	// algorithm rather than standing on its own, so it means nothing without
+	// one.
+	SpeculativeNumSteps int `yaml:"speculative_num_steps" json:"speculative_num_steps"`
+	// SpeculativeEagleTopK is --speculative-eagle-topk, the branching factor
+	// EAGLE and EAGLE3 draft with at each step. Every other speculative
+	// algorithm has no top-k to speak of.
+	SpeculativeEagleTopK int `yaml:"speculative_eagle_topk" json:"speculative_eagle_topk"`
+	// SamplingDefaults is --sampling-defaults, which source SGLang reads its
+	// default sampling parameters from when a request states none of its own.
+	SamplingDefaults string `yaml:"sampling_defaults" json:"sampling_defaults"`
 }
 
 // LlamaCppConfig mirrors the subset of llama-server arguments a recipe is

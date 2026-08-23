@@ -420,6 +420,9 @@ func sglangRecipe() recipe.Recipe {
 				Quantization: "modelopt_fp4", KVCacheDType: "fp8_e4m3", AttentionBackend: "flashinfer",
 				SpeculativeAlgorithm: "EAGLE3", SpeculativeNumDraftTokens: 4, SpeculativeModelRole: "drafter",
 				ChatTemplateFile: "chat_template.jinja", ToolCallParser: "qwen3_coder", ReasoningParser: "qwen3",
+				TrustRemoteCode: true, ChunkedPrefillSize: 8192, DisablePrefillCUDAGraph: true,
+				MambaSSMDType: "bfloat16", MambaFullMemoryRatio: "4.21", MambaRadixCacheStrategy: "extra_buffer_lazy",
+				MaxMambaCacheSize: 40, SpeculativeNumSteps: 3, SpeculativeEagleTopK: 1, SamplingDefaults: "model",
 			},
 		},
 	}
@@ -452,6 +455,16 @@ func TestSGLangCommandIsPinnedAndComplete(t *testing.T) {
 		"--chat-template", "/model/chat_template.jinja",
 		"--tool-call-parser", "qwen3_coder",
 		"--reasoning-parser", "qwen3",
+		"--trust-remote-code",
+		"--chunked-prefill-size", "8192",
+		"--disable-prefill-cuda-graph",
+		"--mamba-ssm-dtype", "bfloat16",
+		"--mamba-full-memory-ratio", "4.21",
+		"--mamba-radix-cache-strategy", "extra_buffer_lazy",
+		"--max-mamba-cache-size", "40",
+		"--speculative-num-steps", "3",
+		"--speculative-eagle-topk", "1",
+		"--sampling-defaults", "model",
 	}
 	if strings.Join(args, " ") != strings.Join(want, " ") {
 		t.Fatalf("sglang arguments\n got: %s\nwant: %s", strings.Join(args, " "), strings.Join(want, " "))
@@ -463,11 +476,22 @@ func TestSGLangCommandIsPinnedAndComplete(t *testing.T) {
 func TestSGLangCommandOmitsUnsetFields(t *testing.T) {
 	r := sglangRecipe()
 	r.Service.SGLang = &recipe.SGLangConfig{TensorParallelSize: 1, MemFractionStatic: "0.7", ContextLength: 8192, MaxRunningRequests: 1}
-	joined := strings.Join(sglangArgs(r, Placement{}), " ")
+	args := sglangArgs(r, Placement{})
+	joined := strings.Join(args, " ")
 	want := "--model-path /model --host 0.0.0.0 --port 8000 --served-model-name example-lab/Example-NVFP4 " +
 		"--enable-metrics --tp-size 1 --mem-fraction-static 0.7 --context-length 8192 --max-running-requests 1"
 	if joined != want {
 		t.Fatalf("sglang arguments\n got: %s\nwant: %s", joined, want)
+	}
+	for _, flag := range []string{
+		"--trust-remote-code", "--chunked-prefill-size", "--disable-prefill-cuda-graph",
+		"--mamba-ssm-dtype", "--mamba-full-memory-ratio", "--mamba-radix-cache-strategy",
+		"--max-mamba-cache-size", "--speculative-num-steps", "--speculative-eagle-topk",
+		"--sampling-defaults",
+	} {
+		if hasArgument(args, flag) {
+			t.Fatalf("sglang arguments carry %s with every hybrid-attention field unset", flag)
+		}
 	}
 }
 

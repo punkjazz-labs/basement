@@ -879,6 +879,28 @@ func sglangArgs(r recipe.Recipe, placement Placement) []string {
 	}
 	args = appendOptional(args, "--tool-call-parser", s.ToolCallParser)
 	args = appendOptional(args, "--reasoning-parser", s.ReasoningParser)
+	if s.TrustRemoteCode {
+		args = append(args, "--trust-remote-code")
+	}
+	if s.ChunkedPrefillSize > 0 {
+		args = append(args, "--chunked-prefill-size", fmt.Sprint(s.ChunkedPrefillSize))
+	}
+	if s.DisablePrefillCUDAGraph {
+		args = append(args, "--disable-prefill-cuda-graph")
+	}
+	args = appendOptional(args, "--mamba-ssm-dtype", s.MambaSSMDType)
+	args = appendOptional(args, "--mamba-full-memory-ratio", s.MambaFullMemoryRatio)
+	args = appendOptional(args, "--mamba-radix-cache-strategy", s.MambaRadixCacheStrategy)
+	if s.MaxMambaCacheSize > 0 {
+		args = append(args, "--max-mamba-cache-size", fmt.Sprint(s.MaxMambaCacheSize))
+	}
+	if s.SpeculativeNumSteps > 0 {
+		args = append(args, "--speculative-num-steps", fmt.Sprint(s.SpeculativeNumSteps))
+	}
+	if s.SpeculativeEagleTopK > 0 {
+		args = append(args, "--speculative-eagle-topk", fmt.Sprint(s.SpeculativeEagleTopK))
+	}
+	args = appendOptional(args, "--sampling-defaults", s.SamplingDefaults)
 	return append(args, sglangDistributedArgs(placement)...)
 }
 
