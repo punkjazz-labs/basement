@@ -43,8 +43,14 @@ fi
 
 echo "==> feed-watch -mode bump"
 bump_report="$work/feed-watch-report.json"
+# feed-watch speaks through its exit code (0 clean, 3 drift left for a
+# maintainer, 4 upstream unreachable), and `go run` collapses every nonzero
+# program exit into its own exit 1, so the code must come from the compiled
+# binary itself.
+feed_watch_bin="$work/feed-watch"
+go build -o "$feed_watch_bin" ./cmd/feed-watch
 set +e
-go run ./cmd/feed-watch -mode bump -out "$bump_report"
+"$feed_watch_bin" -mode bump -out "$bump_report"
 bump_exit=$?
 set -e
 case "$bump_exit" in
