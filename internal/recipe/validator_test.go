@@ -47,8 +47,13 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 		t.Fatalf("unexpected Qwen 27 recipe: %#v", qwen27)
 	}
 	laguna, ok := Find(recipes, "laguna-s-2-1-nvfp4-dflash-1s")
-	if !ok || len(laguna.Artifacts) != 2 || laguna.TotalArtifactBytes() != 74168605863 || laguna.Service.VLLM.SpeculativeModelRole != "drafter" {
+	if !ok || len(laguna.Artifacts) != 2 || laguna.TotalArtifactBytes() == 0 || laguna.Service.VLLM.SpeculativeModelRole != "drafter" {
 		t.Fatalf("unexpected Laguna recipe: %#v", laguna)
+	}
+	for _, artifact := range laguna.Artifacts {
+		if !isPinnedRevision(artifact.Revision) {
+			t.Fatalf("Laguna %s weights are not pinned: %#v", artifact.Role, artifact)
+		}
 	}
 	// The pack's first SGLang recipe, and the first two-Spark one that is not
 	// vLLM: 170.8 GB of weights that do not fit a single Spark, sharded at

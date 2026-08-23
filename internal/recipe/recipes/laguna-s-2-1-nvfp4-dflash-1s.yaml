@@ -5,7 +5,14 @@ id: laguna-s-2-1-nvfp4-dflash-1s
 # template's own default (thinking on) won and, because the pinned image's
 # poolside_v1 parser fails token initialization (vLLM #49379), raw reasoning
 # streamed into content and leaked into the playground.
-version: 5
+# v6 adopts poolside's rebuilt checkpoint (owner order 2026-08-23): the old
+# 15-shard 71.9 GB set was replaced upstream by a 49-shard 99.7 GB build
+# with changed config and model code. The drafter repository lost only its
+# metadata licence tag; the family OpenMDW-1.1 licence in the base
+# repository is unchanged and still governs both artifacts. feed-watch
+# refused this bump on its own twice over (size swing past ten percent,
+# missing licence tag), which is exactly the case a person decides.
+version: 6
 display_name: Laguna S 2.1 + DFlash
 publisher: poolside
 model_by: poolside
@@ -14,7 +21,7 @@ trust: basement-candidate
 verification: candidate
 source:
   url: https://huggingface.co/poolside/Laguna-S-2.1-NVFP4
-  revision: 07614121b31898586430f189d27a25a0be310843
+  revision: 64734b3a449a05c79657451513d97544f2f53436
 topology:
   spark_count: 1
 runtime:
@@ -32,19 +39,20 @@ runtime:
 artifacts:
   - role: primary
     repository: poolside/Laguna-S-2.1-NVFP4
-    revision: 07614121b31898586430f189d27a25a0be310843
-    expected_bytes: 71938632401
+    revision: 64734b3a449a05c79657451513d97544f2f53436
+    expected_bytes: 99717279862
     licence: OpenMDW-1.1
-    licence_url: https://huggingface.co/poolside/Laguna-S-2.1-NVFP4/blob/07614121b31898586430f189d27a25a0be310843/LICENSE.md
+    licence_url: https://huggingface.co/poolside/Laguna-S-2.1-NVFP4/blob/64734b3a449a05c79657451513d97544f2f53436/LICENSE.md
   - role: drafter
     repository: poolside/Laguna-S-2.1-DFlash-NVFP4
-    revision: 4cdcc6e9b29105e8ff5790885cadccbeb4f33f54
-    expected_bytes: 2229973462
+    revision: b3b5921a900b9e0a1e27e50bdaeb480692a6d19b
+    expected_bytes: 2229973463
     licence: OpenMDW-1.1
-    # The drafter repository ships no licence file at this revision; the family
-    # licence text lives in the base repository. Link the drafter's own pinned
-    # tree so the user sees the artifact they are accepting (ADR 0006).
-    licence_url: https://huggingface.co/poolside/Laguna-S-2.1-DFlash-NVFP4/tree/4cdcc6e9b29105e8ff5790885cadccbeb4f33f54
+    # The drafter repository ships no licence file and, since this revision,
+    # no metadata licence tag either; the family licence text lives in the
+    # base repository and is unchanged. Link the drafter's own pinned tree so
+    # the user sees the artifact they are accepting (ADR 0006).
+    licence_url: https://huggingface.co/poolside/Laguna-S-2.1-DFlash-NVFP4/tree/b3b5921a900b9e0a1e27e50bdaeb480692a6d19b
 requirements:
   architecture: aarch64
   dgx_spark: true

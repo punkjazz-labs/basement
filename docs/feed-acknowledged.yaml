@@ -24,19 +24,6 @@
     Dockerfile and CI. Our recipe implements the method validated at the
     pinned revision, which still resolves. The hardened stack is a tracked
     candidate for a future recipe version.
-- recipe: laguna-s-2-1-nvfp4-dflash-1s
-  kind: artifact
-  role: primary
-  revision: 64734b3a449a05c79657451513d97544f2f53436
-  reason: >-
-    2026-08-23 owner ruling: the drafter repository dropped its licence
-    tag, so this model line gets no updates. The snapshot growth to 99.7
-    GB is part of the same upstream reshuffle and is not taken.
-- recipe: laguna-s-2-1-nvfp4-dflash-1s
-  kind: artifact
-  role: drafter
-  revision: b3b5921a900b9e0a1e27e50bdaeb480692a6d19b
-  reason: >-
-    2026-08-23 owner ruling: the licence tag is gone upstream. No licence
-    means no update. The pinned revision keeps its OpenMDW-1.1 licence and
-    stays exactly as validated.
+# The two laguna rulings recorded here on 2026-08-23 were superseded the
+# same night: the owner ordered the rebuilt checkpoint adopted, and recipe
+# version 6 pins it, so the drift itself is gone.
