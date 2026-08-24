@@ -157,7 +157,7 @@ function fenceOpen(text: string): boolean {
       length = marker.length
       continue
     }
-    if (marker[0] === open && marker.length >= length && /^[ \t]*$/.test(rest)) {
+    if (marker[0] === open && marker.length >= length && /^ *$/.test(rest)) {
       open = ''
       length = 0
     }

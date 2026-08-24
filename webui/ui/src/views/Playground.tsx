@@ -591,7 +591,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   // immediate; anywhere else the owner is asked first, because those turns are
   // work and nothing brings them back.
   const retry = async (index: number) => {
-    if (streaming || !ready) return
+    if (streaming || streamingRef.current || !ready) return
     let at = index - 1
     while (at >= 0 && messages[at].role !== 'user') at -= 1
     if (at < 0) return
@@ -605,7 +605,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
         confirmLabel: 'Ask again',
         danger: true,
       })
-      if (!ok) return
+      if (!ok || streamingRef.current) return
     }
     void ask(messages[at].content, messages.slice(0, at))
   }

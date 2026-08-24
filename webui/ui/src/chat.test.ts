@@ -216,8 +216,13 @@ describe('splitStreamTail', () => {
 
   // Spaces and tabs are all a closing line may carry.
   it('closes on a fence line that carries only spaces', () => {
-    const text = 'Look:\n\n```go\nx := 1\n```  \t\n\nThen run'
-    expect(splitStreamTail(text)).toEqual({ closed: 'Look:\n\n```go\nx := 1\n```  \t\n\n', tail: 'Then run' })
+    const text = 'Look:\n\n```go\nx := 1\n```  \n\nThen run'
+    expect(splitStreamTail(text)).toEqual({ closed: 'Look:\n\n```go\nx := 1\n```  \n\n', tail: 'Then run' })
+  })
+
+  it('a fence line with a trailing tab does not close, as the renderer reads it', () => {
+    const text = 'Look:\n\n```go\nx := 1\n```\t\n\nstill inside'
+    expect(splitStreamTail(text)).toEqual({ closed: '', tail: text })
   })
 
   // A longer fence takes a fence at least as long to close it, so the three
