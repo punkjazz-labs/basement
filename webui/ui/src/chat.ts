@@ -124,9 +124,10 @@ export interface StreamSplit {
 }
 
 // A fence line: three or more backticks or three or more tildes, indented by
-// no more than three spaces. Markdown allows both characters, and a fence
-// closes only on the character that opened it.
-const FENCE = /^ {0,3}(`{3,}|~{3,})/gm
+// no more than three spaces, and whatever else the line carries. Markdown
+// allows both characters, and a fence closes only on the character that opened
+// it. The rest of the line decides opener from closer.
+const FENCE = /^ {0,3}(`{3,}|~{3,})([^\n\r]*)/gm
 
 // A blank line, whichever line ending the runtime writes. A model that answers
 // with CRLF is answering the same markdown, and a run of blank lines closes
@@ -135,20 +136,28 @@ const BLANK_LINE = /\r?\n(?:[ \t]*\r?\n)+/g
 
 // Whether a fence is still open at the end of this text. Inside an open fence
 // a blank line closes nothing, so a cut there would leave both halves parsing
-// as broken markdown. A run of the opening character at least as long as the
-// one that opened the fence closes it; a run of the other character, or a
-// shorter run, is content.
+// as broken markdown.
+//
+// A line closes the fence only when it is the opening character, run at least
+// as long as the run that opened the fence, and nothing after it but spaces or
+// tabs. That last rule matters: an answer about markdown writes a "```js" line
+// inside its block, and the renderer reads that line as content because a
+// closing fence carries no information string. A splitter that took it for the
+// end of the block would cut there and leave a code block running away down
+// the closed part until the real closing line arrived. An opening line may
+// carry a name, so only the closer is held to it.
 function fenceOpen(text: string): boolean {
   let open = ''
   let length = 0
   for (const match of text.matchAll(FENCE)) {
     const marker = match[1]
+    const rest = match[2]
     if (open === '') {
       open = marker[0]
       length = marker.length
       continue
     }
-    if (marker[0] === open && marker.length >= length) {
+    if (marker[0] === open && marker.length >= length && /^[ \t]*$/.test(rest)) {
       open = ''
       length = 0
     }

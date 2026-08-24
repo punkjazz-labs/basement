@@ -184,6 +184,42 @@ describe('splitStreamTail', () => {
     expect(splitStreamTail(text)).toEqual({ closed: 'Look:\n\n', tail: '```md\n~~~\n\nnot the end\n' })
   })
 
+  // The renderer reads a fence line that carries a name as content, because a
+  // closing fence carries no name. A split that took it for the end of the
+  // block would leave a code block running away down the closed part until the
+  // real closing line arrived.
+  it('keeps a backtick fence open through an inner fence line that carries a name', () => {
+    const open = 'Read this:\n\n```md\nOpen a block like this:\n```js\n\nand close it again.\n'
+    expect(splitStreamTail(open)).toEqual({
+      closed: 'Read this:\n\n',
+      tail: '```md\nOpen a block like this:\n```js\n\nand close it again.\n',
+    })
+    const closed = `${open}\`\`\`\n\nThat is the whole block.`
+    expect(splitStreamTail(closed)).toEqual({
+      closed: 'Read this:\n\n```md\nOpen a block like this:\n```js\n\nand close it again.\n```\n\n',
+      tail: 'That is the whole block.',
+    })
+  })
+
+  it('keeps a tilde fence open through an inner fence line that carries a name', () => {
+    const open = 'Read this:\n\n~~~md\nOpen a block like this:\n~~~js\n\nand close it again.\n'
+    expect(splitStreamTail(open)).toEqual({
+      closed: 'Read this:\n\n',
+      tail: '~~~md\nOpen a block like this:\n~~~js\n\nand close it again.\n',
+    })
+    const closed = `${open}~~~\n\nThat is the whole block.`
+    expect(splitStreamTail(closed)).toEqual({
+      closed: 'Read this:\n\n~~~md\nOpen a block like this:\n~~~js\n\nand close it again.\n~~~\n\n',
+      tail: 'That is the whole block.',
+    })
+  })
+
+  // Spaces and tabs are all a closing line may carry.
+  it('closes on a fence line that carries only spaces', () => {
+    const text = 'Look:\n\n```go\nx := 1\n```  \t\n\nThen run'
+    expect(splitStreamTail(text)).toEqual({ closed: 'Look:\n\n```go\nx := 1\n```  \t\n\n', tail: 'Then run' })
+  })
+
   // A longer fence takes a fence at least as long to close it, so the three
   // backticks the answer is quoting stay inside the block.
   it('closes a long fence only on one as long', () => {

@@ -27,8 +27,9 @@ interface Message {
   // Which model the composer was set to when this turn was sent. A
   // conversation can change model between turns, so the turn records the one
   // that answered it rather than the one the picker holds now. Turns from
-  // before the console recorded this carry nothing.
-  model?: { id: string; name: string }
+  // before the console recorded this carry nothing, and a council turn carries
+  // the name without an id because a council is more than one model.
+  model?: { id?: string; name: string }
   // A stream that failed keeps the text that had already arrived. The reason
   // it stopped goes here, under that text.
   error?: string
@@ -164,12 +165,19 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   // typed. The first of them sends itself when the answer ends.
   const [queue, setQueue] = useState<Queued[]>([])
   const queuedIDRef = useRef(0)
-  // The state of the answer, in one word, for a screen reader. The transcript
-  // itself says nothing: it changes tens of times a second.
+  // The state of the answer, in a few words, for a screen reader: it is
+  // answering, the answer is ready, it stopped, it failed, or a question of
+  // yours waits for it. The transcript itself says nothing: it changes tens of
+  // times a second.
   const [status, setStatus] = useState('')
   // Which answer the owner has just copied, so its button can say so.
   const [copied, setCopied] = useState(-1)
   const abortRef = useRef<AbortController | null>(null)
+  // Whether an answer is arriving, without waiting for a render. The queue
+  // starts the next answer from an effect, so between that effect and the
+  // render it causes, the state still reads false while a stream is running.
+  // Anything that would throw work away asks the ref, not the state.
+  const streamingRef = useRef(false)
   const chatRef = useRef<HTMLDivElement>(null)
   const draftRef = useRef<HTMLTextAreaElement>(null)
   // Whether the transcript follows the answer. The ref decides that on every
@@ -433,8 +441,10 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       council: message.council,
     })))
     // The answer records the model the composer resolved now, so the turn can
-    // say who wrote it long after the picker has moved on.
-    const wrote = targetName ? { id: targetID ?? '', name: targetName } : undefined
+    // say who wrote it long after the picker has moved on. A council is not one
+    // model and has no id of its own; the name is what the reader sees and what
+    // a retry compares.
+    const wrote = targetName ? { id: council ? undefined : targetID, name: targetName } : undefined
     // Where this answer sits in the transcript. The receipt lands on that turn
     // by its place, not on whatever turn is last when the stream ends: the
     // next question in the queue can start the moment this one finishes.
@@ -443,6 +453,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
     // A retry drops the turns under the question, so a work panel that was
     // open on one of them has nothing left to show.
     setOpenWork(previous => previous.filter(item => item < prior.length))
+    streamingRef.current = true
     setStreaming(true)
     setStatus('Answering')
     receiptRef.current = ''
@@ -528,6 +539,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       // left to count.
       setStats('')
       if (!failed) setStatus(controller.signal.aborted ? 'Stopped' : 'Answer ready')
+      streamingRef.current = false
       setStreaming(false)
       setCouncilStage(null)
       abortRef.current = null
@@ -548,6 +560,9 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
     setDraft('')
     if (choice === 'queue') {
       setQueue(previous => [...previous, { id: (queuedIDRef.current += 1), content }])
+      // The bubble and the empty composer say it on the screen. This is the
+      // same news for a reader who hears the console instead.
+      setStatus('A question waits')
       // The question the owner just asked comes into view, queued or sent.
       pinToLatest()
       return
@@ -604,6 +619,11 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   // A long conversation is work, and every other destructive action in this
   // console asks first.
   const clearConversation = async () => {
+    // The control is hidden while an answer arrives, but the queue can start
+    // the next answer between that render and this click, and the owner can
+    // take a long time over the dialog. The ref is the state of the stream
+    // right now, and an answer on its way is never thrown away under it.
+    if (streamingRef.current) return
     // A question still waiting in the line is work as much as one that was
     // answered, so it is counted and it goes with the rest.
     const question = clearQuestion(
@@ -611,7 +631,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       messages.filter(message => message.role === 'user').length + queue.length,
     )
     const { ok } = await confirmBox({ ...question, confirmLabel: 'Clear conversation', danger: true })
-    if (!ok) return
+    if (!ok || streamingRef.current) return
     setMessages([])
     setQueue([])
     setStats('')
