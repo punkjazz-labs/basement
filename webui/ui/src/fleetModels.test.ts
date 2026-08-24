@@ -955,8 +955,10 @@ describe('which tab a model sits under', () => {
   const flagship = recipe('deepseek-v4-flash-0731-2s', 2)
   const catalogue = [fast, coder, agent, flagship]
 
+  const none: ReadonlySet<string> = new Set()
+
   it('puts a model this Spark holds on the first tab', () => {
-    const split = splitModels(catalogue, new Set([fast.id]), [])
+    const split = splitModels(catalogue, new Set([fast.id]), none, [])
     expect(split.held).toEqual([fast])
     expect(split.oneSpark).toEqual([coder, agent])
     expect(split.twoSparks).toEqual([flagship])
@@ -964,14 +966,26 @@ describe('which tab a model sits under', () => {
   })
 
   it('puts a model another Spark in the fleet holds on the first tab', () => {
-    const split = splitModels(catalogue, new Set(), [row('attic'), row('loft', [snapshot(coder.id)])])
+    const split = splitModels(catalogue, none, none, [row('attic'), row('loft', [snapshot(coder.id)])])
     expect(split.held).toEqual([coder])
     expect(split.oneSpark).toEqual([fast, agent])
   })
 
+  // A Spark added by address is in no fleet, so its row reports nothing. Its
+  // own summary is what the row on screen already reads, and the tab has to
+  // agree with the row: one cannot say "Installed on shed" under the other
+  // saying "not installed".
+  it('puts a model the paired Spark holds on the first tab', () => {
+    const split = splitModels(catalogue, none, new Set([agent.id]), [byAddress('shed')])
+    expect(split.held).toEqual([agent])
+    expect(split.oneSpark).toEqual([fast, coder])
+    expect(split.twoSparks).toEqual([flagship])
+    expect(split.catalogCount).toBe(3)
+  })
+
   it('puts a model that spans two Sparks on the first tab', () => {
     const sparks = [row('attic', [snapshot(flagship.id)]), row('loft', [snapshot(flagship.id)])]
-    const split = splitModels(catalogue, new Set(), sparks)
+    const split = splitModels(catalogue, none, none, sparks)
     expect(split.held).toEqual([flagship])
     expect(split.twoSparks).toEqual([])
     expect(split.catalogCount).toBe(3)
@@ -979,38 +993,44 @@ describe('which tab a model sits under', () => {
 
   it('names a model once, whichever Spark holds it', () => {
     const sparks = [row('attic', [snapshot(fast.id)]), row('loft', [snapshot(fast.id)])]
-    const split = splitModels(catalogue, new Set([fast.id]), sparks)
+    const split = splitModels(catalogue, new Set([fast.id]), new Set([fast.id]), sparks)
     expect(split.held).toEqual([fast])
     expect(split.held.length + split.catalogCount).toBe(catalogue.length)
   })
 
   it('keeps the order it was given inside each group', () => {
-    const split = splitModels(catalogue, new Set(), [])
+    const split = splitModels(catalogue, none, none, [])
     expect(split.held).toEqual([])
     expect(split.oneSpark).toEqual([fast, coder, agent])
     expect(split.twoSparks).toEqual([flagship])
     expect(split.catalogCount).toBe(4)
   })
 
-  // The first run: nothing is installed anywhere, so the first tab is empty
-  // and the view shows the hero and one plain list instead of tabs.
+  // The first run: nothing is installed on any machine this console speaks
+  // for, so the first tab is empty. The view reads that same emptiness, and
+  // shows the hero and one plain list instead of tabs.
   it('holds nothing on the first tab before anything is installed', () => {
-    expect(splitModels(catalogue, new Set(), [row('attic'), byAddress('shed')]).held).toEqual([])
+    expect(splitModels(catalogue, none, none, [row('attic'), byAddress('shed')]).held).toEqual([])
   })
 
   it('leaves the catalog empty once every model is on a Spark', () => {
-    const split = splitModels(catalogue, new Set(catalogue.map(item => item.id)), [])
+    const split = splitModels(catalogue, new Set(catalogue.map(item => item.id)), none, [])
     expect(split.held).toEqual(catalogue)
     expect(split.catalogCount).toBe(0)
     expect(split.oneSpark).toEqual([])
     expect(split.twoSparks).toEqual([])
   })
 
-  it('reads a Spark added by address as holding nothing', () => {
-    expect(heldSomewhere(fast.id, new Set(), [byAddress('shed')])).toBe(false)
-    expect(heldSomewhere(fast.id, new Set([fast.id]), [])).toBe(true)
-    expect(heldSomewhere(fast.id, new Set(), [row('loft', [snapshot(fast.id)])])).toBe(true)
-    expect(heldSomewhere(fast.id, new Set(), [row('loft', [snapshot(coder.id)])])).toBe(false)
+  it('reads a Spark added by address through its own summary, not its fleet row', () => {
+    expect(heldSomewhere(fast.id, none, none, [byAddress('shed')])).toBe(false)
+    expect(heldSomewhere(fast.id, none, new Set([fast.id]), [byAddress('shed')])).toBe(true)
+    expect(heldSomewhere(fast.id, none, new Set([coder.id]), [byAddress('shed')])).toBe(false)
+  })
+
+  it('reads this Spark and every fleet Spark as well', () => {
+    expect(heldSomewhere(fast.id, new Set([fast.id]), none, [])).toBe(true)
+    expect(heldSomewhere(fast.id, none, none, [row('loft', [snapshot(fast.id)])])).toBe(true)
+    expect(heldSomewhere(fast.id, none, none, [row('loft', [snapshot(coder.id)])])).toBe(false)
   })
 
   it('says Spark for one machine and Sparks for more', () => {

@@ -279,6 +279,13 @@ export default function Models({
 
   const peerModels = peerModelList(peerSummary)
   const peerInstalled = new Map(peerModels.map(model => [model.recipe_id, model]))
+  // What the paired Spark holds, for the tab split below. That Spark is in no
+  // fleet, so no fleet row speaks for it and only this summary knows what
+  // lives there. The rows already read it, so the tabs have to read it too.
+  const peerRecipeIDs = useMemo(
+    () => new Set(peerModels.map(model => model.recipe_id)),
+    [peerSummary], // eslint-disable-line react-hooks/exhaustive-deps
+  )
 
   // A delegated install has landed once the peer lists that model itself;
   // from then on its own status is the truthful thing to show. The map read
@@ -687,20 +694,24 @@ export default function Models({
   const reclaimFrom = (preflight: Preflight) =>
     preflight.checks.find(check => !check.ok && check.operation === 'verify_disk')?.receipt?.reclaim_candidates
 
-  const firstRun = models.length === 0
+  // The two tabs over the table: the models the owner already has, and the
+  // models the owner can still get. Both keep the curated order they arrive
+  // in, and every row below renders the same way whichever tab holds it.
+  const localRecipeIDs = useMemo(() => new Set(installed.keys()), [installed])
+  const split = splitModels(sorted, localRecipeIDs, peerRecipeIDs, sparks)
+  // Nothing is installed on any machine this console speaks for. That, and
+  // only that, is the first run: it keeps the hero and the one plain table it
+  // has always had, and it shows no tabs. The hero and the tabs read the same
+  // signal, so they can never both be on screen. The split above is read
+  // before this, and over the whole catalog rather than over the rows below,
+  // because the rows are what the hero has already taken its model out of.
+  const firstRun = split.held.length === 0
+  const showTabs = !firstRun
   // A recipe the publisher has withdrawn is never the first thing a new owner
   // is offered. It keeps its place in the table below, where the row says it
   // is revoked and why, instead of being recommended and then refused.
   const featured = firstRun ? sorted.find(recipe => recipe.id === RECOMMENDED_ID && !recipe.revoked) : undefined
   const rows = featured ? sorted.filter(recipe => recipe.id !== featured.id) : sorted
-  // The two tabs over the table: the models the owner already has, and the
-  // models the owner can still get. Both keep the curated order they arrive
-  // in, and every row below renders the same way whichever tab holds it.
-  const localRecipeIDs = useMemo(() => new Set(installed.keys()), [installed])
-  const split = splitModels(rows, localRecipeIDs, sparks)
-  // Nothing is installed anywhere, so there is only one list to show. The
-  // first run keeps the hero and the plain table it has always had.
-  const showTabs = split.held.length > 0
 
   const rowFor = (recipe: Recipe) => {
     const model = installed.get(recipe.id)

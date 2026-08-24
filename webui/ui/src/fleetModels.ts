@@ -680,18 +680,24 @@ export interface TabbedRecipe {
   topology: { spark_count: number }
 }
 
-// Whether this model already lives on a machine this console speaks for. The
-// local model list answers for this Spark. Every other Spark answers through
-// the fleet rows, which carry what each machine last reported it holds, so a
-// model on another Spark and a model that spans two Sparks are both found the
-// same way. A Spark added by address only reports nothing, so it adds nothing
-// here.
+// Whether this model already lives on a machine this console speaks for.
+//
+// Three sources answer, because three kinds of machine report differently.
+// The local model list answers for this Spark. The fleet rows answer for
+// every Spark in the fleet, and carry what each machine last reported it
+// holds, so a model on another Spark and a model that spans two Sparks are
+// both found the same way. A Spark added by address is in no fleet, so its
+// row carries no model list at all; its own summary is the only thing that
+// knows what it holds, and the row on screen already reads that summary.
+// Without it the tab and the row would contradict each other: the row would
+// say "Installed on shed" from under a tab that means "not installed".
 export function heldSomewhere(
   recipeID: string,
   localRecipeIDs: ReadonlySet<string>,
+  peerRecipeIDs: ReadonlySet<string>,
   sparks: readonly FleetRow[],
 ): boolean {
-  if (localRecipeIDs.has(recipeID)) return true
+  if (localRecipeIDs.has(recipeID) || peerRecipeIDs.has(recipeID)) return true
   return sparks.some(spark => spark.installedModels.some(model => model.recipe_id === recipeID))
 }
 
@@ -712,11 +718,12 @@ export interface ModelsSplit<T> {
 export function splitModels<T extends TabbedRecipe>(
   recipes: readonly T[],
   localRecipeIDs: ReadonlySet<string>,
+  peerRecipeIDs: ReadonlySet<string>,
   sparks: readonly FleetRow[],
 ): ModelsSplit<T> {
   const split: ModelsSplit<T> = { held: [], oneSpark: [], twoSparks: [], catalogCount: 0 }
   for (const recipe of recipes) {
-    if (heldSomewhere(recipe.id, localRecipeIDs, sparks)) {
+    if (heldSomewhere(recipe.id, localRecipeIDs, peerRecipeIDs, sparks)) {
       split.held.push(recipe)
       continue
     }
