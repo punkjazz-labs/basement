@@ -656,7 +656,9 @@ dialog.confirm-box h2 { font-size: 15.5px; }
    it owns the scrollbar, and the composer is docked under it. */
 .playground { display: flex; flex-direction: column; min-height: 0; }
 .chatpane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.chat-scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-gutter: stable; }
+/* The transcript is the container the work panel measures itself against: the
+   reading column inside it is narrower than the panel wants to be. */
+.chat-scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-gutter: stable; container-type: inline-size; }
 .thread {
   max-width: var(--read); margin: 0 auto;
   padding: 14px 0 24px; display: grid; gap: 24px; align-content: start;
@@ -728,11 +730,16 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .msg .chat-error { margin: 6px 0 0; font-size: 12.5px; }
 /* Each answer carries its own tools and its own numbers, so an earlier turn
    keeps the receipt it earned. */
-.turn-foot { display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+/* The meta line names the model as well as the numbers now, so it takes its
+   own row under the tools when the two do not fit on one. */
+.turn-foot { display: flex; align-items: center; gap: 4px; margin-top: 2px; flex-wrap: wrap; }
 .turn-foot .copy-btn { padding: 2px 7px; font-size: 11.5px; }
 .turn-foot .copy-btn:disabled { opacity: 0.4; cursor: default; }
 .turn-foot .copy-btn:disabled:hover { color: var(--faint); background: none; }
 .turn-foot .chat-meta { margin-left: auto; padding-right: 4px; }
+/* A question that waits for the answer says so in the quiet voice the byline
+   uses, next to the one control that takes it back. */
+.queued-note { color: var(--faint); font-size: 11.5px; }
 .chat-hint { color: var(--faint); text-align: center; margin: 0; }
 /* The first screen names the model and sits in the middle of the empty
    transcript. */
@@ -783,9 +790,7 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   box-shadow: 0 6px 18px rgb(0 0 0 / 0.5);
 }
 .jump:hover { border-color: var(--faint); }
-.composer-note { margin: 8px 0 0; text-align: center; color: var(--muted); font-size: 11.5px; }
 .composer-hint { margin: 8px 0 0; text-align: center; color: var(--faint); font-size: 11.5px; }
-.composer-note + .composer-hint { margin-top: 3px; }
 .composer-hint b { font-weight: 550; color: var(--muted); }
 
 /* ---- Council ------------------------------------------------------------- */
@@ -817,6 +822,19 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .work {
   margin-top: 10px; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--panel); overflow: hidden;
+}
+/* The panel leaves the reading column. Three answers side by side at 64ch are
+   three columns of one word, and the panel is a table of work, not prose. It
+   is a row of the turn, so 100% is the reading column and the two margins take
+   it out to the width of the transcript, centred on the same middle. The
+   column resumes under it. */
+.turn > .work {
+  --panel-wide: min(880px, 100cqi);
+  width: var(--panel-wide);
+  /* The turn already gives its rows six pixels. */
+  margin-top: 4px;
+  margin-left: calc((100% - var(--panel-wide)) / 2);
+  margin-right: calc((100% - var(--panel-wide)) / 2);
 }
 .work-head {
   padding: 9px 14px; border-bottom: 1px solid var(--line); display: flex;

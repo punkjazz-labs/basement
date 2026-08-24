@@ -5,9 +5,9 @@ import { copyText } from '../api'
 import { logoFor } from '../catalog'
 import { confirmBox } from '../confirm'
 import {
-  answerMeter, clearQuestion, composerHeight, hasDelta, jumpInFlight, mergeDelta, pinnedToBottom,
-  retryQuestion, shouldReleasePin, splitStreamTail, stoppedMeter, tokenMeter, waitMeter, withCaret,
-  NO_DELTA, type PendingDelta,
+  answerMeta, answerMeter, clearQuestion, composerHeight, hasDelta, jumpInFlight, mergeDelta,
+  pinnedToBottom, retryQuestion, sendChoice, shouldReleasePin, splitStreamTail, stoppedMeter,
+  tokenMeter, waitMeter, withCaret, NO_DELTA, type PendingDelta,
 } from '../chat'
 import {
   COUNCIL_STAGES, councilByline, councilHistory, councilOffered, runCouncil, seedFrom, stageState,
@@ -24,9 +24,22 @@ interface Message {
   // What this answer cost and how fast it came. The numbers belong to the
   // turn that produced them, so an earlier turn keeps its own receipt.
   meter?: string
+  // Which model the composer was set to when this turn was sent. A
+  // conversation can change model between turns, so the turn records the one
+  // that answered it rather than the one the picker holds now. Turns from
+  // before the console recorded this carry nothing.
+  model?: { id: string; name: string }
   // A stream that failed keeps the text that had already arrived. The reason
   // it stopped goes here, under that text.
   error?: string
+}
+
+// A question the owner asked while an answer was arriving. It waits in the
+// transcript until the answer ends, then sends itself. The id survives a
+// removal in the middle of the line, which an index does not.
+interface Queued {
+  id: number
+  content: string
 }
 
 // Thinking models sometimes leak reasoning into the text stream in two
@@ -147,9 +160,10 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   const [councilWanted, setCouncilWanted] = useState(false)
   const [councilStage, setCouncilStage] = useState<CouncilStage | null>(null)
   const [openWork, setOpenWork] = useState<number[]>([])
-  // Enter during a stream has no effect. It says so, once, until the answer
-  // ends.
-  const [busyNote, setBusyNote] = useState(false)
+  // The questions typed while an answer was arriving, in the order they were
+  // typed. The first of them sends itself when the answer ends.
+  const [queue, setQueue] = useState<Queued[]>([])
+  const queuedIDRef = useRef(0)
   // The state of the answer, in one word, for a screen reader. The transcript
   // itself says nothing: it changes tens of times a second.
   const [status, setStatus] = useState('')
@@ -242,7 +256,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   // and the trip then go to the same place.
   useEffect(() => {
     if (pinnedRef.current) toLatest(jumpInFlight(performance.now(), jumpUntilRef.current))
-  }, [messages])
+  }, [messages, queue])
   // A draft that changes without a keystroke, a send that empties the box.
   useEffect(resizeDraft, [draft])
   // Escape stops the answer wherever the caret is, for as long as one is
@@ -255,7 +269,6 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [streaming])
-  useEffect(() => { if (!streaming) setBusyNote(false) }, [streaming])
   useEffect(() => () => {
     abortRef.current?.abort()
     if (tickRef.current !== null) window.clearInterval(tickRef.current)
@@ -419,12 +432,18 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       content: message.role === 'assistant' ? visibleText(message.content) : message.content,
       council: message.council,
     })))
-    setMessages([...prior, { role: 'user', content }, { role: 'assistant', content: '' }])
+    // The answer records the model the composer resolved now, so the turn can
+    // say who wrote it long after the picker has moved on.
+    const wrote = targetName ? { id: targetID ?? '', name: targetName } : undefined
+    // Where this answer sits in the transcript. The receipt lands on that turn
+    // by its place, not on whatever turn is last when the stream ends: the
+    // next question in the queue can start the moment this one finishes.
+    const turnAt = prior.length + 1
+    setMessages([...prior, { role: 'user', content }, { role: 'assistant', content: '', model: wrote }])
     // A retry drops the turns under the question, so a work panel that was
     // open on one of them has nothing left to show.
     setOpenWork(previous => previous.filter(item => item < prior.length))
     setStreaming(true)
-    setBusyNote(false)
     setStatus('Answering')
     receiptRef.current = ''
     pendingRef.current = NO_DELTA
@@ -498,8 +517,10 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
         : receiptRef.current || live
       if (receipt) {
         setMessages(previous => {
+          const turn = previous[turnAt]
+          if (!turn || turn.role !== 'assistant') return previous
           const next = [...previous]
-          next[next.length - 1] = { ...next[next.length - 1], meter: receipt }
+          next[turnAt] = { ...turn, meter: receipt }
           return next
         })
       }
@@ -516,12 +537,38 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
     }
   }
 
+  // Enter, wherever the answer is. A quiet moment sends the question; an
+  // answer on its way puts it in the line instead, and the composer is empty
+  // either way so the next question can be written at once.
   const send = () => {
+    if (!ready) return
+    const choice = sendChoice(streaming, queue, draft)
+    if (choice === 'nothing') return
     const content = draft.trim()
-    if (!content || streaming || !ready) return
     setDraft('')
+    if (choice === 'queue') {
+      setQueue(previous => [...previous, { id: (queuedIDRef.current += 1), content }])
+      // The question the owner just asked comes into view, queued or sent.
+      pinToLatest()
+      return
+    }
     void ask(content, messages)
   }
+
+  // A question waits only until the owner changes their mind about it.
+  const removeQueued = (id: number) => setQueue(previous => previous.filter(item => item.id !== id))
+
+  // The line moves when the answer ends, however it ended: finished, stopped
+  // or broken. This runs after the render that both cleared `streaming` and
+  // put the receipt on the finished turn, so the queued question is asked with
+  // a settled transcript above it and the numbers of the turn before it are
+  // already where they belong.
+  useEffect(() => {
+    if (streaming || !ready || queue.length === 0) return
+    const [next, ...rest] = queue
+    setQueue(rest)
+    void ask(next.content, messages)
+  }, [streaming, queue, ready, messages])
 
   // The same question again, in place of the answer it produced. The model
   // reads the history that answer read, so everything under the answer goes
@@ -535,8 +582,13 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
     if (at < 0) return
     const under = messages.slice(index + 1).filter(message => message.role === 'user').length
     if (under > 0) {
+      // The retry asks whichever model the composer holds now. When that is
+      // not the model that wrote the answer, the question says so before the
+      // work goes.
       const { ok } = await confirmBox({
-        ...retryQuestion(under), confirmLabel: 'Ask again', danger: true,
+        ...retryQuestion(under, targetName, messages[index].model?.name),
+        confirmLabel: 'Ask again',
+        danger: true,
       })
       if (!ok) return
     }
@@ -552,13 +604,16 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   // A long conversation is work, and every other destructive action in this
   // console asks first.
   const clearConversation = async () => {
+    // A question still waiting in the line is work as much as one that was
+    // answered, so it is counted and it goes with the rest.
     const question = clearQuestion(
       targetName ?? 'your model',
-      messages.filter(message => message.role === 'user').length,
+      messages.filter(message => message.role === 'user').length + queue.length,
     )
     const { ok } = await confirmBox({ ...question, confirmLabel: 'Clear conversation', danger: true })
     if (!ok) return
     setMessages([])
+    setQueue([])
     setStats('')
     setStatus('')
     setOpenWork([])
@@ -640,9 +695,10 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
             Show thinking
           </label>
         )}
-        {/* A conversation that is on the screen is the only one there is to
-            clear, and stopping the answer comes first while one arrives. */}
-        {messages.length > 0 && !streaming && (
+        {/* A conversation that is on the screen, or a question still waiting
+            for one, is the only thing there is to clear. Stopping the answer
+            comes first while one arrives. */}
+        {(messages.length > 0 || queue.length > 0) && !streaming && (
           <button className="quiet" onClick={clearConversation}>Clear conversation</button>
         )}
       </div>
@@ -679,6 +735,9 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
               const waiting = live && !text
               const record = message.council
               const byline = record ? councilByline(record) : null
+              // A council turn already names its models in the byline under
+              // the answer, so the meta line does not name them again.
+              const meta = answerMeta(record ? undefined : message.model?.name, message.meter)
               return (
                 <div key={index} className="turn">
                   <div className={`msg assistant ${live ? 'streaming' : ''}`}>
@@ -705,27 +764,28 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
                         short answer reads under it. */}
                     {message.error && <p className="chat-error error-text">{message.error}</p>}
                     {byline && (
-                      <>
-                        <div className="byline">
-                          <span className="mono">{byline.model}</span>{byline.text}
-                          <button
-                            onClick={() => setOpenWork(previous =>
-                              previous.includes(index) ? previous.filter(item => item !== index) : [...previous, index])}
-                          >
-                            Show the work
-                          </button>
-                        </div>
-                        {openWork.includes(index) && record && work(record)}
-                      </>
+                      <div className="byline">
+                        <span className="mono">{byline.model}</span>{byline.text}
+                        <button
+                          onClick={() => setOpenWork(previous =>
+                            previous.includes(index) ? previous.filter(item => item !== index) : [...previous, index])}
+                        >
+                          Show the work
+                        </button>
+                      </div>
                     )}
                   </div>
+                  {/* The panel is a row of the turn rather than a part of the
+                      answer, so it can take the width of the transcript while
+                      the answer keeps the reading column. */}
+                  {byline && openWork.includes(index) && record && work(record)}
                   {/* The tools wait for the answer to finish: text that is still
                       arriving is not text to take away yet. */}
                   {live ? (
                     stats !== '' && (
                       <div className="turn-foot"><span className="chat-meta live">{stats}</span></div>
                     )
-                  ) : (text || message.error || message.meter) ? (
+                  ) : (text || message.error || meta) ? (
                     <div className="turn-foot">
                       {text && (
                         <button className="copy-btn" onClick={() => copyAnswer(index, text)}>
@@ -733,12 +793,24 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
                         </button>
                       )}
                       <button className="copy-btn" onClick={() => void retry(index)} disabled={streaming}>Retry</button>
-                      {message.meter && <span className="chat-meta">{message.meter}</span>}
+                      {meta && <span className="chat-meta">{meta}</span>}
                     </div>
                   ) : null}
                 </div>
               )
             })}
+            {/* The questions that wait for the answer. Each one is the bubble
+                it will be when it sends, with the word that says it has not
+                gone yet and the one control that takes it back. */}
+            {queue.map(item => (
+              <div key={`queued-${item.id}`} className="turn user">
+                <div className="msg user">{item.content}</div>
+                <div className="turn-foot">
+                  <span className="queued-note">Waits for the answer</span>
+                  <button className="copy-btn" onClick={() => removeQueued(item.id)}>Remove</button>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
         <div className="composer-dock">
@@ -768,10 +840,6 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
                   // Korean input. Sending there sends half a sentence.
                   if (event.nativeEvent.isComposing) return
                   event.preventDefault()
-                  if (streaming) {
-                    setBusyNote(true)
-                    return
-                  }
                   send()
                 }}
               />
@@ -787,7 +855,6 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
                 </button>
               )}
             </div>
-            {busyNote && <p className="composer-note">The model is answering. Press Stop first.</p>}
             <p className="composer-hint">
               <b>Enter</b> sends. <b>Shift</b> and <b>Enter</b> add a line. <b>Esc</b> stops the answer.
             </p>

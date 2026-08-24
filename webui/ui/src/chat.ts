@@ -79,6 +79,36 @@ export function stoppedMeter(meter: string): string {
   return meter ? `${meter} · Stopped` : 'Stopped'
 }
 
+// The line under a finished answer: who wrote it, then what it cost. The
+// model leads because the composer can change model between turns, and a
+// receipt says nothing about speed until you know whose speed it is. A turn
+// that carries no name, which is every turn from before the console recorded
+// one, reads exactly as it did.
+export function answerMeta(model: string | undefined, meter: string | undefined): string {
+  return [model, meter].filter(Boolean).join(' · ')
+}
+
+// ---- The queue ------------------------------------------------------------
+
+// What Enter does with the draft.
+//
+// A question typed while the model answers is neither lost nor allowed to cut
+// the answer short: it waits in the transcript and sends itself when the
+// answer ends. A question typed while other questions already wait goes behind
+// them, so the answers arrive in the order the questions were asked. The queue
+// is passed whole rather than as a count so the caller can hold whatever shape
+// of item it needs.
+export type SendChoice = 'nothing' | 'queue' | 'send'
+
+export function sendChoice(
+  streaming: boolean,
+  queue: readonly unknown[],
+  draft: string,
+): SendChoice {
+  if (draft.trim() === '') return 'nothing'
+  return streaming || queue.length > 0 ? 'queue' : 'send'
+}
+
 // ---- The answer while it arrives ------------------------------------------
 
 export interface StreamSplit {
@@ -93,22 +123,56 @@ export interface StreamSplit {
   tail: string
 }
 
-// A fence that is still open makes the two halves of a cut parse as broken
-// markdown, so a cut is only allowed where the count of fence lines above it
-// is even.
-const balancedFences = (text: string) => (text.match(/^ {0,3}```/gm) ?? []).length % 2 === 0
+// A fence line: three or more backticks or three or more tildes, indented by
+// no more than three spaces. Markdown allows both characters, and a fence
+// closes only on the character that opened it.
+const FENCE = /^ {0,3}(`{3,}|~{3,})/gm
+
+// A blank line, whichever line ending the runtime writes. A model that answers
+// with CRLF is answering the same markdown, and a run of blank lines closes
+// the block at the last of them, exactly where a single blank line closes it.
+const BLANK_LINE = /\r?\n(?:[ \t]*\r?\n)+/g
+
+// Whether a fence is still open at the end of this text. Inside an open fence
+// a blank line closes nothing, so a cut there would leave both halves parsing
+// as broken markdown. A run of the opening character at least as long as the
+// one that opened the fence closes it; a run of the other character, or a
+// shorter run, is content.
+function fenceOpen(text: string): boolean {
+  let open = ''
+  let length = 0
+  for (const match of text.matchAll(FENCE)) {
+    const marker = match[1]
+    if (open === '') {
+      open = marker[0]
+      length = marker.length
+      continue
+    }
+    if (marker[0] === open && marker.length >= length) {
+      open = ''
+      length = 0
+    }
+  }
+  return open !== ''
+}
 
 export function splitStreamTail(text: string): StreamSplit {
-  let from = text.length
-  for (;;) {
-    const blank = text.lastIndexOf('\n\n', from - 1)
+  // Every place a blank line could cut the answer, in the order they arrived.
+  const cuts: number[] = []
+  for (const match of text.matchAll(BLANK_LINE)) {
+    const at = match.index ?? 0
     // A blank line at the very start closes nothing worth keeping.
-    if (blank <= 0) return { closed: '', tail: text }
-    const cut = blank + 2
-    const closed = text.slice(0, cut)
-    if (balancedFences(closed)) return { closed, tail: text.slice(cut) }
-    from = blank
+    if (at <= 0) continue
+    cuts.push(at + match[0].length)
   }
+  // The last cut that leaves no fence open. An open fence pushes the cut
+  // further up the answer, and a fence that opened and has not closed yet
+  // keeps the whole answer in the tail until it does.
+  for (let index = cuts.length - 1; index >= 0; index -= 1) {
+    const closed = text.slice(0, cuts[index])
+    if (!fenceOpen(closed)) return { closed, tail: text.slice(cuts[index]) }
+  }
+  return { closed: '', tail: text }
 }
 
 // The caret marks the place the next word appears, so it goes inside the last
@@ -174,11 +238,19 @@ export function clearQuestion(model: string, turns: number): { title: string; bo
 // Asking a question again replaces the answer to it, and the turns under that
 // answer go with it. On the last answer there is nothing under it and the
 // question is not asked at all.
-export function retryQuestion(turns: number): { title: string; body: string } {
+//
+// A retry asks the model the composer is set to now, which is not always the
+// model that wrote the answer. `asks` is the model that would answer now and
+// `wrote` is the model recorded on the turn, so the sentence appears only when
+// the two differ. A turn from before the console recorded the model has no
+// name to compare, and a guess reads worse than silence.
+export function retryQuestion(turns: number, asks?: string, wrote?: string): { title: string; body: string } {
   const one = turns === 1
+  const changed = Boolean(asks && wrote && asks !== wrote)
   return {
     title: 'Ask this question again?',
     body: `The new answer replaces this one, and ${one ? 'the turn' : `the ${turns} turns`} under it ${
-      one ? 'goes' : 'go'} as well. You cannot get ${one ? 'it' : 'them'} back.`,
+      one ? 'goes' : 'go'} as well. You cannot get ${one ? 'it' : 'them'} back.${
+      changed ? ` The new answer comes from ${asks}.` : ''}`,
   }
 }

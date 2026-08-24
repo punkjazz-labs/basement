@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  COMPOSER_MAX_HEIGHT, NO_DELTA, PIN_GAP, answerMeter, clearQuestion, composerHeight, hasDelta,
-  jumpInFlight, mergeDelta, pinnedToBottom, retryQuestion, shouldReleasePin, splitStreamTail,
-  stoppedMeter, tokenMeter, waitMeter, withCaret,
+  COMPOSER_MAX_HEIGHT, NO_DELTA, PIN_GAP, answerMeta, answerMeter, clearQuestion, composerHeight,
+  hasDelta, jumpInFlight, mergeDelta, pinnedToBottom, retryQuestion, sendChoice, shouldReleasePin,
+  splitStreamTail, stoppedMeter, tokenMeter, waitMeter, withCaret,
 } from './chat'
 
 describe('pinnedToBottom', () => {
@@ -156,6 +156,118 @@ describe('splitStreamTail', () => {
   it('keeps everything as tail when the only blank line opens the answer', () => {
     expect(splitStreamTail('\n\nstill arriving')).toEqual({ closed: '', tail: '\n\nstill arriving' })
   })
+
+  // A tilde fence is a code fence like any other, and a blank line inside one
+  // closes nothing.
+  it('never cuts inside an open tilde fence', () => {
+    const text = 'Try this:\n\n~~~go\nserver := &http.Server{\n\n    Handler: mux,'
+    expect(splitStreamTail(text)).toEqual({
+      closed: 'Try this:\n\n',
+      tail: '~~~go\nserver := &http.Server{\n\n    Handler: mux,',
+    })
+  })
+
+  it('closes a tilde block once its fence is closed', () => {
+    const text = 'Try this:\n\n~~~go\nx := 1\n~~~\n\nThen run'
+    expect(splitStreamTail(text)).toEqual({ closed: 'Try this:\n\n~~~go\nx := 1\n~~~\n\n', tail: 'Then run' })
+  })
+
+  // A fence closes only on the character that opened it. Backticks inside a
+  // tilde block are the answer talking about markdown, not the end of it.
+  it('keeps a tilde fence open through a run of backticks', () => {
+    const text = 'Look:\n\n~~~md\n```\n\nnot the end\n'
+    expect(splitStreamTail(text)).toEqual({ closed: 'Look:\n\n', tail: '~~~md\n```\n\nnot the end\n' })
+  })
+
+  it('keeps a backtick fence open through a run of tildes', () => {
+    const text = 'Look:\n\n```md\n~~~\n\nnot the end\n'
+    expect(splitStreamTail(text)).toEqual({ closed: 'Look:\n\n', tail: '```md\n~~~\n\nnot the end\n' })
+  })
+
+  // A longer fence takes a fence at least as long to close it, so the three
+  // backticks the answer is quoting stay inside the block.
+  it('closes a long fence only on one as long', () => {
+    const text = 'Look:\n\n````md\n```\n\nstill inside\n'
+    expect(splitStreamTail(text)).toEqual({ closed: 'Look:\n\n', tail: '````md\n```\n\nstill inside\n' })
+  })
+
+  // What the stream actually does: the fence opens in one delta and closes
+  // several deltas later. Until it closes, the whole block stays in the tail.
+  it('holds the block in the tail from the delta that opens the fence to the one that closes it', () => {
+    const opens = 'Steps:\n\n~~~sh\nrun this\n'
+    expect(splitStreamTail(opens)).toEqual({ closed: 'Steps:\n\n', tail: '~~~sh\nrun this\n' })
+    const grows = `${opens}\nand this\n`
+    expect(splitStreamTail(grows)).toEqual({ closed: 'Steps:\n\n', tail: '~~~sh\nrun this\n\nand this\n' })
+    const closes = `${grows}~~~\n\nThen read the output`
+    expect(splitStreamTail(closes)).toEqual({
+      closed: 'Steps:\n\n~~~sh\nrun this\n\nand this\n~~~\n\n',
+      tail: 'Then read the output',
+    })
+  })
+
+  // An answer with CRLF endings is the same markdown. Before this it never
+  // closed a block at all, so the whole answer parsed again on every token.
+  it('closes a paragraph on a blank line with CRLF endings', () => {
+    expect(splitStreamTail('One.\r\n\r\nTwo so')).toEqual({ closed: 'One.\r\n\r\n', tail: 'Two so' })
+  })
+
+  it('closes a paragraph on a blank line that mixes the two endings', () => {
+    expect(splitStreamTail('One.\r\n\nTwo so')).toEqual({ closed: 'One.\r\n\n', tail: 'Two so' })
+    expect(splitStreamTail('One.\n\r\nTwo so')).toEqual({ closed: 'One.\n\r\n', tail: 'Two so' })
+  })
+
+  it('never cuts inside an open fence written with CRLF', () => {
+    const text = 'Try this:\r\n\r\n```go\r\nserver := &http.Server{\r\n\r\n    Handler: mux,'
+    expect(splitStreamTail(text)).toEqual({
+      closed: 'Try this:\r\n\r\n',
+      tail: '```go\r\nserver := &http.Server{\r\n\r\n    Handler: mux,',
+    })
+  })
+
+  // A line of spaces is a blank line, and a run of blank lines closes the
+  // block at the last of them.
+  it('cuts after the last of a run of blank lines', () => {
+    expect(splitStreamTail('One.\n\n\nTwo so')).toEqual({ closed: 'One.\n\n\n', tail: 'Two so' })
+    expect(splitStreamTail('One.\n   \nTwo so')).toEqual({ closed: 'One.\n   \n', tail: 'Two so' })
+  })
+})
+
+describe('sendChoice', () => {
+  it('sends when nothing is arriving and nothing waits', () => {
+    expect(sendChoice(false, [], 'What is a Spark?')).toBe('send')
+  })
+
+  it('queues the question typed while the answer arrives', () => {
+    expect(sendChoice(true, [], 'And after that?')).toBe('queue')
+  })
+
+  // The line keeps the order the questions were asked in, so a question typed
+  // in the moment between two answers goes behind the ones already waiting.
+  it('queues behind the questions already waiting', () => {
+    expect(sendChoice(false, ['first'], 'second')).toBe('queue')
+  })
+
+  it('does nothing with an empty draft', () => {
+    expect(sendChoice(false, [], '')).toBe('nothing')
+    expect(sendChoice(true, [], '   \n ')).toBe('nothing')
+  })
+})
+
+describe('answerMeta', () => {
+  it('leads with the model that wrote the answer', () => {
+    expect(answerMeta('Laguna S 2.1 + DFlash', '412 tokens · 56.1 tok/s · first token in 709 ms'))
+      .toBe('Laguna S 2.1 + DFlash · 412 tokens · 56.1 tok/s · first token in 709 ms')
+  })
+
+  // A turn from before the console recorded the model reads as it always did.
+  it('states the numbers alone when no model was recorded', () => {
+    expect(answerMeta(undefined, '412 tokens')).toBe('412 tokens')
+  })
+
+  it('states the model alone when there are no numbers', () => {
+    expect(answerMeta('Qwen 3.6 27B', undefined)).toBe('Qwen 3.6 27B')
+    expect(answerMeta(undefined, undefined)).toBe('')
+  })
 })
 
 describe('withCaret', () => {
@@ -253,5 +365,25 @@ describe('retryQuestion', () => {
   it('counts one turn as one turn', () => {
     expect(retryQuestion(1).body)
       .toBe('The new answer replaces this one, and the turn under it goes as well. You cannot get it back.')
+  })
+
+  // A retry asks the model the composer holds now, which is not always the
+  // model that wrote the answer.
+  it('names the model when the retry asks a different one', () => {
+    expect(retryQuestion(1, 'Qwen 3.6 27B', 'Laguna S 2.1 + DFlash').body).toBe(
+      'The new answer replaces this one, and the turn under it goes as well. You cannot get it back.'
+      + ' The new answer comes from Qwen 3.6 27B.',
+    )
+  })
+
+  it('says nothing about the model when it does not change', () => {
+    expect(retryQuestion(2, 'Laguna S 2.1 + DFlash', 'Laguna S 2.1 + DFlash').body)
+      .toBe(retryQuestion(2).body)
+  })
+
+  // An old turn recorded no model, and a guess reads worse than silence.
+  it('says nothing when the turn recorded no model', () => {
+    expect(retryQuestion(1, 'Qwen 3.6 27B', undefined).body).toBe(retryQuestion(1).body)
+    expect(retryQuestion(1, undefined, 'Qwen 3.6 27B').body).toBe(retryQuestion(1).body)
   })
 })
