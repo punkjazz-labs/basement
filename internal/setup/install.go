@@ -25,6 +25,14 @@ var updaterSystemdUnit string
 //go:embed assets/basement-updater.path
 var updaterPathUnit string
 
+// The embedded grant is a byte-for-byte copy of
+// packaging/sudoers/basement-power; the same test enforces that. It names the
+// two command lines internal/power can ever run and nothing else, so reading
+// it is the whole answer to what this service may do as root.
+//
+//go:embed assets/basement-power.sudoers
+var powerSudoers string
+
 const (
 	installDir          = "/usr/lib/basement"
 	binaryPath          = installDir + "/basement"
@@ -34,6 +42,8 @@ const (
 	updaterPathUnitPath = "/etc/systemd/system/basement-updater.path"
 	dropInDir           = "/etc/systemd/system/basement.service.d"
 	dropInPath          = dropInDir + "/listen.conf"
+	sudoersDir          = "/etc/sudoers.d"
+	sudoersPath         = sudoersDir + "/basement-power"
 	stagingPath         = "/tmp/basement.staged"
 	updaterStagingPath  = "/tmp/basement-updater.staged"
 	serviceUser         = "basement"
@@ -247,6 +257,38 @@ ln -s current/basement "$flat"
 install -m 0755 "$updater" "$install_root/updater/basement-updater"
 `
 
+// installSudoersScript delivers the GPU power grant, and everything in it
+// exists for one guarantee: /etc/sudoers.d never holds a file with the real
+// name and the wrong bytes. A broken file there makes every sudo on the machine
+// fail, including the one that would repair it.
+//
+// So the bytes land under a temporary name in the same directory, are checked
+// with visudo, and only then move into place. A move inside one directory is
+// atomic, so a reader sees the old grant or the new one and never half of
+// either. The temporary name starts with a dot and carries a second one, and
+// sudo ignores any file in that directory whose name carries a dot, so debris
+// from an interrupted run is inert and the next run clears it.
+//
+// A machine without visudo cannot be checked, so it is left alone and the
+// install goes on. Such a machine has no sudo either, so the grant would buy it
+// nothing; the power switch says so in its own words rather than through a
+// failed install.
+const installSudoersScript = `set -eu
+if ! command -v visudo >/dev/null 2>&1; then
+  echo "this machine has no visudo, so the GPU power grant was not installed" >&2
+  exit 0
+fi
+install -d -o root -g root -m 0755 ` + sudoersDir + `
+temporary=$(mktemp ` + sudoersDir + `/.basement-power.XXXXXX)
+trap 'rm -f "$temporary"' EXIT
+tee "$temporary" >/dev/null
+chown root:root "$temporary"
+chmod 0440 "$temporary"
+visudo -cf "$temporary" >/dev/null
+mv -f "$temporary" ` + sudoersPath + `
+trap - EXIT
+`
+
 // validateARM64ELF rejects binaries that cannot run on a GB10 machine before
 // any bytes travel: ELF magic plus the aarch64 machine type.
 func validateARM64ELF(payload []byte) error {
@@ -329,6 +371,10 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	}
 	if _, err := runner.RunPrivileged(ctx, "tee "+updaterPathUnitPath+" >/dev/null", strings.NewReader(updaterPathUnit)); err != nil {
 		return InstallResult{}, fmt.Errorf("write updater path unit: %w", err)
+	}
+	logf("granting the service the two GPU clock commands")
+	if _, err := runner.RunPrivileged(ctx, installSudoersScript, strings.NewReader(powerSudoers)); err != nil {
+		return InstallResult{}, fmt.Errorf("write %s: %w", sudoersPath, err)
 	}
 
 	listen, err := resolveListen(ctx, runner, opts.Listen)

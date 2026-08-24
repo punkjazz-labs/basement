@@ -41,6 +41,11 @@ for unit_name in basement.service basement-updater.service basement-updater.path
     exit 1
   fi
 done
+sudoers_source="$(dirname "$0")/sudoers/basement-power"
+if [ ! -f "$sudoers_source" ]; then
+  echo "GPU power grant not found at $sudoers_source; keep install.sh next to its sudoers/ directory from the release package" >&2
+  exit 1
+fi
 
 if ! getent group basement >/dev/null 2>&1; then groupadd --system basement; fi
 if ! getent passwd basement >/dev/null 2>&1; then
@@ -113,6 +118,28 @@ install -m 0755 "$3" /usr/lib/basement/updater/basement-updater
 install -m 0644 "$unit_dir/basement.service" /etc/systemd/system/basement.service
 install -m 0644 "$unit_dir/basement-updater.service" /etc/systemd/system/basement-updater.service
 install -m 0644 "$unit_dir/basement-updater.path" /etc/systemd/system/basement-updater.path
+
+# The GPU clock belongs to root and the manager is not root, so the power switch
+# runs its two commands through sudo. This is the whole grant: two command
+# lines, no password, nothing else.
+#
+# The file is checked before it carries its real name. A broken file in
+# /etc/sudoers.d makes every sudo on the machine fail, including the one that
+# would repair it, so the bytes go to a temporary name in the same directory,
+# pass visudo, and only then move into place. sudo ignores a name in that
+# directory that carries a dot, so debris from an interrupted run is inert.
+# Keep in sync with installSudoersScript in internal/setup/install.go.
+if command -v visudo >/dev/null 2>&1; then
+  install -d -o root -g root -m 0755 /etc/sudoers.d
+  sudoers_tmp=$(mktemp /etc/sudoers.d/.basement-power.XXXXXX)
+  trap 'rm -f "$sudoers_tmp"' EXIT
+  install -o root -g root -m 0440 "$sudoers_source" "$sudoers_tmp"
+  visudo -cf "$sudoers_tmp" >/dev/null
+  mv -f "$sudoers_tmp" /etc/sudoers.d/basement-power
+  trap - EXIT
+else
+  echo "this machine has no visudo, so the GPU power grant was not installed" >&2
+fi
 
 # The console binds loopback unless the operator deliberately chooses an
 # interface here (or pre-seeds BASEMENT_LISTEN for unattended installs).

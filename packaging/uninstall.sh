@@ -27,6 +27,9 @@ systemctl disable --now basement.service 2>/dev/null || true
 rm -f /etc/systemd/system/basement.service
 rm -f /etc/systemd/system/basement-updater.service
 rm -f /etc/systemd/system/basement-updater.path
+# The GPU power grant goes with the service that used it. Leaving it behind
+# would name a service account that no longer exists.
+rm -f /etc/sudoers.d/basement-power
 rm -f /usr/lib/basement/basement
 rm -f /usr/lib/basement/current
 rm -rf /usr/lib/basement/versions

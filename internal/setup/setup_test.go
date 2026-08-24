@@ -133,6 +133,7 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 		"tee " + unitPath,
 		"tee " + updaterUnitPath,
 		"tee " + updaterPathUnitPath,
+		`mv -f "$temporary" ` + sudoersPath,
 		"tee " + dropInPath,
 		"systemctl daemon-reload && systemctl enable basement.service basement-updater.service basement-updater.path && systemctl restart basement.service && systemctl start basement-updater.service && systemctl start basement-updater.path && systemctl is-active --quiet basement.service && systemctl is-active --quiet basement-updater.path && test -x /usr/lib/basement/updater/basement-updater",
 		"tee " + dataDir + "/fleet.json",
@@ -475,23 +476,68 @@ func TestInstallLeavesNewInstallAloneWhenLegacyRemnantsExist(t *testing.T) {
 }
 
 // The embedded units must stay identical to the packaged units so both
-// install paths produce the same services.
+// install paths produce the same services. The GPU power grant is held to the
+// same rule for the same reason: two installers, one machine, one grant.
 func TestEmbeddedUnitMatchesPackaging(t *testing.T) {
 	for _, fixture := range []struct {
-		name     string
+		path     string
 		embedded string
 	}{
-		{name: "basement.service", embedded: systemdUnit},
-		{name: "basement-updater.service", embedded: updaterSystemdUnit},
-		{name: "basement-updater.path", embedded: updaterPathUnit},
+		{path: "systemd/basement.service", embedded: systemdUnit},
+		{path: "systemd/basement-updater.service", embedded: updaterSystemdUnit},
+		{path: "systemd/basement-updater.path", embedded: updaterPathUnit},
+		{path: "sudoers/basement-power", embedded: powerSudoers},
 	} {
-		packaged, err := os.ReadFile("../../packaging/systemd/" + fixture.name)
+		packaged, err := os.ReadFile("../../packaging/" + fixture.path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if string(packaged) != fixture.embedded {
-			t.Fatalf("internal setup asset %s differs from its packaged systemd unit", fixture.name)
+			t.Fatalf("internal setup asset for %s differs from the packaged file", fixture.path)
 		}
+	}
+}
+
+// The grant is the one file this installer writes that can lock an owner out of
+// their own machine. It is written under a name sudo ignores, checked with
+// visudo, and only then moved onto the real name at mode 0440.
+func TestInstallWritesTheCheckedPowerGrant(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["docker info"] = "nvidia runc \n"
+	runner.outputs["pairing-token"] = "tok\n"
+	if _, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"}, Options{}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var command, payload string
+	for candidate, written := range runner.writes {
+		if strings.Contains(candidate, sudoersPath) {
+			command, payload = candidate, written
+		}
+	}
+	if command == "" {
+		t.Fatalf("the install wrote no GPU power grant:\n%s", strings.Join(runner.privileged, "\n"))
+	}
+	if payload != powerSudoers {
+		t.Errorf("the grant written is %q, want the embedded one", payload)
+	}
+	for _, required := range []string{
+		"mktemp " + sudoersDir + "/.basement-power.",
+		"chmod 0440",
+		"visudo -cf",
+		"mv -f",
+	} {
+		if !strings.Contains(command, required) {
+			t.Errorf("the grant step is missing %q:\n%s", required, command)
+		}
+	}
+	// visudo runs before the file can carry its real name, never after.
+	if strings.Index(command, "visudo -cf") > strings.Index(command, "mv -f") {
+		t.Errorf("the grant is moved into place before it is checked:\n%s", command)
+	}
+	// A machine with no visudo is left alone rather than failing the install.
+	if !strings.Contains(command, "command -v visudo") {
+		t.Errorf("the grant step does not survive a machine without visudo:\n%s", command)
 	}
 }
 

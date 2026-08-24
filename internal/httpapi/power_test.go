@@ -102,6 +102,19 @@ func (h *powerHarness) run(_ context.Context, args ...string) error {
 	return nil
 }
 
+// coolCommand is the command line the applier builds for the cap on the
+// machine these tests run on. It comes from the applier rather than being
+// written out here: whether the command goes through sudo depends on who this
+// process is, and that question belongs to internal/power, not to these doors.
+func coolCommand(t *testing.T) string {
+	t.Helper()
+	line, err := power.CommandLine(store.PowerModeCool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(line, " ")
+}
+
 func (h *powerHarness) commands() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -170,7 +183,7 @@ func TestPowerModeAPIReadsAndSetsTheModeForTheConsoleOnly(t *testing.T) {
 	if applied.Mode != store.PowerModeCool || applied.Failure != "" {
 		t.Fatalf("the answer reads %+v", applied)
 	}
-	if commands := h.commands(); len(commands) != 1 || commands[0] != "-lgc 0,2200" {
+	if commands := h.commands(); len(commands) != 1 || commands[0] != coolCommand(t) {
 		t.Fatalf("the GPU was asked for %v", commands)
 	}
 
@@ -292,7 +305,7 @@ func TestFleetPowerModeSetsTheNamedSpark(t *testing.T) {
 	if answer.NodeID != self || answer.Mode != store.PowerModeCool || answer.Failure != "" {
 		t.Fatalf("the fleet answer reads %+v", answer)
 	}
-	if commands := h.commands(); len(commands) != 1 || commands[0] != "-lgc 0,2200" {
+	if commands := h.commands(); len(commands) != 1 || commands[0] != coolCommand(t) {
 		t.Fatalf("the GPU was asked for %v", commands)
 	}
 

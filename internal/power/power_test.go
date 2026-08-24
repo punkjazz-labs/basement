@@ -37,6 +37,10 @@ func (f *fakeSMI) recorded() [][]string {
 
 func newTestController(t *testing.T) (*Controller, *store.Store, *fakeSMI) {
 	t.Helper()
+	// Every controller test that is not about the privilege path runs as root,
+	// so the recorded command line is the tool and its own arguments. The two
+	// tests that are about it say so.
+	asRoot(t)
 	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +48,19 @@ func newTestController(t *testing.T) (*Controller, *store.Store, *fakeSMI) {
 	t.Cleanup(func() { database.Close() })
 	smi := &fakeSMI{}
 	return NewController(database, smi.run), database, smi
+}
+
+// asRoot and asService put this process on one side of the root boundary for
+// the length of one test. Only these two touch processEUID.
+func asRoot(t *testing.T) { setEUID(t, 0) }
+
+func asService(t *testing.T) { setEUID(t, 1000) }
+
+func setEUID(t *testing.T, euid int) {
+	t.Helper()
+	restore := processEUID
+	t.Cleanup(func() { processEUID = restore })
+	processEUID = func() int { return euid }
 }
 
 // The two modes are two exact commands and nothing else.
@@ -69,17 +86,81 @@ func TestEachModeRunsItsOwnCommand(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("the GPU was asked %d times: %v", len(calls), calls)
 	}
-	if strings.Join(calls[0], " ") != "-lgc 0,2200" {
-		t.Fatalf("cool ran nvidia-smi %v", calls[0])
+	if strings.Join(calls[0], " ") != "nvidia-smi -lgc 0,2200" {
+		t.Fatalf("cool ran %v", calls[0])
 	}
-	if strings.Join(calls[1], " ") != "-rgc" {
-		t.Fatalf("full ran nvidia-smi %v", calls[1])
+	if strings.Join(calls[1], " ") != "nvidia-smi -rgc" {
+		t.Fatalf("full ran %v", calls[1])
 	}
 	if _, err := controller.SetPowerMode(ctx, "turbo"); !errors.Is(err, store.ErrPowerMode) {
 		t.Fatalf("an unknown mode was accepted: %v", err)
 	}
 	if len(smi.recorded()) != 2 {
 		t.Fatal("a refused mode still ran a command")
+	}
+}
+
+// The manager is not root on a Spark, and the driver will not take a clock
+// change from anyone else, so the command goes through sudo. Both shapes are
+// pinned here: the one a Spark runs, and the one a root manager runs.
+func TestTheCommandGoesThroughSudoWhenTheManagerIsNotRoot(t *testing.T) {
+	ctx := context.Background()
+	controller, _, smi := newTestController(t)
+
+	if _, err := controller.SetPowerMode(ctx, store.PowerModeCool); err != nil {
+		t.Fatal(err)
+	}
+	asService(t)
+	if _, err := controller.SetPowerMode(ctx, store.PowerModeCool); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := smi.recorded()
+	if len(calls) != 2 {
+		t.Fatalf("the GPU was asked %d times: %v", len(calls), calls)
+	}
+	if strings.Join(calls[0], " ") != "nvidia-smi -lgc 0,2200" {
+		t.Fatalf("a root manager ran %v", calls[0])
+	}
+	if strings.Join(calls[1], " ") != "/usr/bin/sudo -n nvidia-smi -lgc 0,2200" {
+		t.Fatalf("a service manager ran %v", calls[1])
+	}
+	// Full speed takes the same road.
+	if _, err := controller.SetPowerMode(ctx, store.PowerModeFull); err != nil {
+		t.Fatal(err)
+	}
+	if last := smi.recorded()[2]; strings.Join(last, " ") != "/usr/bin/sudo -n nvidia-smi -rgc" {
+		t.Fatalf("a service manager releasing the cap ran %v", last)
+	}
+}
+
+// The grant on the machine and the arguments in this file are one fact kept in
+// two places, read by two different programs. This is what holds them together:
+// a command line the applier can run that the grant does not name is a switch
+// that fails on every Spark.
+func TestTheShippedGrantNamesTheTwoCommandsAndNoOther(t *testing.T) {
+	grant, err := os.ReadFile("../../packaging/sudoers/basement-power")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(grant)
+	for _, mode := range []string{store.PowerModeCool, store.PowerModeFull} {
+		arguments, err := Arguments(mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// sudoers separates its own list items with commas, so a comma inside
+		// one command line is escaped there and only there.
+		granted := strings.ReplaceAll("/usr/bin/"+nvidiaSMI+" "+strings.Join(arguments, " "), ",", `\,`)
+		if !strings.Contains(text, granted) {
+			t.Fatalf("the grant does not name %q:\n%s", granted, text)
+		}
+	}
+	if count := strings.Count(text, nvidiaSMI); count != 2 {
+		t.Fatalf("the grant names %d commands, want exactly the two above:\n%s", count, text)
+	}
+	if !strings.HasPrefix(text, "basement ALL=(root) NOPASSWD: ") {
+		t.Fatalf("the grant is not a passwordless root grant to the service account:\n%s", text)
 	}
 }
 
@@ -105,7 +186,7 @@ func TestTheCommandBoundHoldsWhenAChildHoldsTheOutput(t *testing.T) {
 	commandTimeout, pipeGrace = 300*time.Millisecond, 200*time.Millisecond
 
 	started := time.Now()
-	err := Command(context.Background(), "-rgc")
+	err := Command(context.Background(), "nvidia-smi", "-rgc")
 	elapsed := time.Since(started)
 
 	// Generous next to the bound and far below the five seconds the child
@@ -118,6 +199,69 @@ func TestTheCommandBoundHoldsWhenAChildHoldsTheOutput(t *testing.T) {
 	}
 	if sentence := failureSentence(err); sentence != timeoutSentence {
 		t.Fatalf("a held pipe reads %q", sentence)
+	}
+}
+
+// "It failed" is the wrong word for a machine that would not let this manager
+// try. Both refusals are here, the driver's and sudo's, against the real
+// Command, and so is the failure that is still only a failure.
+func TestARefusedClockChangeReadsAsAPermissionFailure(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("this test needs a POSIX shell to stand in for nvidia-smi and sudo")
+	}
+	directory := t.TempDir()
+	writeScript := func(name, body string) string {
+		t.Helper()
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	restoreSudo := sudoPath
+	t.Cleanup(func() { sudoPath = restoreSudo })
+	sudoPath = writeScript("sudo", "#!/bin/sh\nshift\nexec \"$@\"\n")
+
+	// The driver's own refusal, in the words and with the exit code a GB10 gave
+	// from the unprivileged unit.
+	writeScript("nvidia-smi", "#!/bin/sh\necho 'The current user does not have permission to change clocks' >&2\nexit 4\n")
+	asRoot(t)
+	line, err := CommandLine(store.PowerModeCool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := Command(context.Background(), line...)
+	if sentence := failureSentence(failure); sentence != permissionSentence {
+		t.Fatalf("the driver's refusal reads %q", sentence)
+	}
+	if failure == nil || !strings.Contains(failure.Error(), "permission to change clocks") {
+		t.Fatalf("the driver's own words did not reach the log: %v", failure)
+	}
+
+	// sudo's own refusal, which happens when the grant is missing. The tool
+	// would have worked, so only sudo can be the reason.
+	writeScript("nvidia-smi", "#!/bin/sh\nexit 0\n")
+	sudoPath = writeScript("sudo", "#!/bin/sh\necho 'sudo: a password is required' >&2\nexit 1\n")
+	asService(t)
+	line, err = CommandLine(store.PowerModeCool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sentence := failureSentence(Command(context.Background(), line...)); sentence != permissionSentence {
+		t.Fatalf("a missing grant reads %q", sentence)
+	}
+
+	// A machine with the grant runs the command and reports nothing.
+	sudoPath = writeScript("sudo", "#!/bin/sh\nshift\nexec \"$@\"\n")
+	if err := Command(context.Background(), line...); err != nil {
+		t.Fatalf("a granted command through sudo failed: %v", err)
+	}
+
+	// And a failure that is only a failure keeps the sentence it always had.
+	writeScript("nvidia-smi", "#!/bin/sh\necho 'Setting locked clocks is not supported for GPU 00000000:01:00.0' >&2\nexit 3\n")
+	if sentence := failureSentence(Command(context.Background(), line...)); sentence != commandSentence {
+		t.Fatalf("an unsupported operation reads %q", sentence)
 	}
 }
 
@@ -157,6 +301,20 @@ func TestAFailingCommandFailsOpenAndKeepsTheChosenMode(t *testing.T) {
 		t.Fatalf("a driver refusal reads %q", other.Failure)
 	}
 
+	// A machine that refuses the change has its own sentence, and it is the one
+	// an owner can act on.
+	smi.err = errNoPermission
+	refused, err := controller.SetPowerMode(ctx, store.PowerModeCool)
+	if err != nil {
+		t.Fatalf("a machine that refused the change reported an error: %v", err)
+	}
+	if refused.Mode != store.PowerModeCool {
+		t.Fatalf("a refused change lost the chosen mode: %+v", refused)
+	}
+	if refused.Failure != permissionSentence {
+		t.Fatalf("a refused change reads %q", refused.Failure)
+	}
+
 	// And the machine heals: the next attempt that works clears the sentence.
 	smi.err = nil
 	healed, err := controller.SetPowerMode(ctx, store.PowerModeCool)
@@ -185,7 +343,7 @@ func TestStartupAppliesTheStoredModeOnce(t *testing.T) {
 		t.Fatalf("startup left %+v", state)
 	}
 	calls := smi.recorded()
-	if len(calls) != 1 || strings.Join(calls[0], " ") != "-lgc 0,2200" {
+	if len(calls) != 1 || strings.Join(calls[0], " ") != "nvidia-smi -lgc 0,2200" {
 		t.Fatalf("startup ran %v, want one cool command", calls)
 	}
 }

@@ -32,6 +32,19 @@ func (r *recordingSMI) recorded() []string {
 	return append([]string(nil), r.calls...)
 }
 
+// coolCommand is the command line the applier builds for the cap on the machine
+// these tests run on. It comes from the applier rather than being written out
+// here: whether the command goes through sudo depends on who this process is,
+// and that question belongs to internal/power, not to the fleet plane.
+func coolCommand(t *testing.T) string {
+	t.Helper()
+	line, err := power.CommandLine(store.PowerModeCool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(line, " ")
+}
+
 // One controller, one member, one switch. The choice travels over the mutual
 // TLS fleet plane, the member writes it into its own store and asks its own
 // GPU for it, and the controller learns the mode of every node from the
@@ -70,7 +83,7 @@ func TestControllerSetsAMemberPowerModeOverTheFleetPlane(t *testing.T) {
 	if stored.Mode != store.PowerModeCool {
 		t.Fatalf("the member store holds %+v", stored)
 	}
-	if calls := memberSMI.recorded(); len(calls) != 1 || calls[0] != "-lgc 0,2200" {
+	if calls := memberSMI.recorded(); len(calls) != 1 || calls[0] != coolCommand(t) {
 		t.Fatalf("the member GPU was asked for %v", calls)
 	}
 	if calls := controllerSMI.recorded(); len(calls) != 0 {
@@ -82,7 +95,7 @@ func TestControllerSetsAMemberPowerModeOverTheFleetPlane(t *testing.T) {
 	if _, err := controller.SetNodePowerMode(ctx, controller.identity.NodeID, store.PowerModeCool); err != nil {
 		t.Fatal(err)
 	}
-	if calls := controllerSMI.recorded(); len(calls) != 1 || calls[0] != "-lgc 0,2200" {
+	if calls := controllerSMI.recorded(); len(calls) != 1 || calls[0] != coolCommand(t) {
 		t.Fatalf("the controller GPU was asked for %v", calls)
 	}
 

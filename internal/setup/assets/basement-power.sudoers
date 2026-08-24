@@ -1,0 +1,1 @@
+basement ALL=(root) NOPASSWD: /usr/bin/nvidia-smi -lgc 0\,2200, /usr/bin/nvidia-smi -rgc
