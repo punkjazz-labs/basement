@@ -32,7 +32,7 @@ func TestNodeFailureSaysWhatIsWrongInPlainWords(t *testing.T) {
 		err  error
 		want string
 	}{
-		{name: "an address that does not answer", err: dialFailure, want: "loft is not answering."},
+		{name: "an address that does not answer", err: dialFailure, want: "loft does not answer."},
 		{name: "a member with no such endpoint", err: nodeStatus{status: http.StatusNotFound},
 			want: "loft runs another manager version, so update the fleet first."},
 		{name: "a member that refuses the method", err: nodeStatus{status: http.StatusMethodNotAllowed},
@@ -48,11 +48,15 @@ func TestNodeFailureSaysWhatIsWrongInPlainWords(t *testing.T) {
 		{name: "a member that refused the placement on its release", err: errors.New(nodeReleaseSkew),
 			want: "loft runs another manager version, so update the fleet first."},
 		{name: "a reason the member gave itself", err: errors.New("the model is not installed on that node"),
-			want: "loft could not do this: the model is not installed on that node"},
+			want: "loft could not do this: the model is not installed on that node."},
 		{name: "a status with no reason in it", err: nodeStatus{status: http.StatusInternalServerError},
-			want: "loft could not do this: fleet manager returned status 500"},
+			want: "loft could not do this: fleet manager returned status 500."},
 		{name: "a certificate this controller does not trust", err: pinFailure,
-			want: "loft could not do this: fleet server certificate does not match its pin"},
+			want: "loft could not do this: fleet server certificate does not match its pin."},
+		// One full stop, never two: a manager that already wrote a sentence
+		// keeps the one it wrote.
+		{name: "a reason that already ends in a full stop", err: errors.New("that model runs on two Sparks."),
+			want: "loft could not do this: that model runs on two Sparks."},
 	} {
 		got := nodeFailure("loft", test.err)
 		if got == nil || got.Error() != test.want {
@@ -148,14 +152,14 @@ func TestAdoptionReportsASilentOrOlderMemberByName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The Spark stopped answering between the last heartbeat and this click.
+	// The Spark went quiet between the last heartbeat and this click.
 	controller.newClient = func(string) *http.Client {
 		return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return nil, errors.New("connect: connection refused")
 		})}
 	}
 	_, _, err = controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, serving.ID, "adopt-silent")
-	if err == nil || err.Error() != "loft is not answering." {
+	if err == nil || err.Error() != "loft does not answer." {
 		t.Fatalf("a silent member reads as %v", err)
 	}
 

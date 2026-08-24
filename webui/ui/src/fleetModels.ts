@@ -240,17 +240,13 @@ export const deploymentActionPath = (deploymentID: string, action: string): stri
 // Where the fleet API records a model a Spark already runs.
 export const ADOPT_PATH = '/api/v1/fleet/deployments/adopt'
 
-// The word a row shows for a Spark that has stopped answering for its own
-// placement. The controller keeps the last state it saw, and this says plainly
-// that it is only the last one.
-export const NOT_ANSWERING = 'Not answering'
-
 // Why a row action could not be sent. A row only offers a button its route
 // allows, so these are what the owner reads when the fleet moved between the
-// render and the click.
+// render and the click. The keys are for this code alone; only the sentences
+// reach a screen.
 export const ACTION_REFUSAL: Record<'no-placement' | 'not-answering' | 'unsupported', string> = {
   'no-placement': 'The fleet holds no placement for this model on that Spark.',
-  'not-answering': 'That Spark is not answering for this model.',
+  'not-answering': 'That Spark does not answer for this model.',
   unsupported: 'The deployment action is not supported.',
 }
 

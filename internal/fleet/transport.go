@@ -400,7 +400,7 @@ func callFleetJSON(ctx context.Context, client *http.Client, method, endpoint st
 	if err != nil {
 		// Marked, not reworded: the text still reads as it always did for the
 		// logs, and the mark is what lets a console sentence say plainly that
-		// a Spark is not answering (see failures.go).
+		// a Spark does not answer (see failures.go).
 		return nodeUnreachable{err: err}
 	}
 	defer response.Body.Close()

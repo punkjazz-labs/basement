@@ -177,6 +177,11 @@ export interface NodeStatus {
   dot: string
 }
 
+// The word for a Spark that has gone quiet. The membership rows say it and
+// the model rows say it, so it is written once: two spellings of one state
+// would read as two different states.
+export const NO_ANSWER = 'No answer'
+
 // The status cell, in the words the rest of the console already uses. Every
 // answer traces to the membership state the manager stored: a state this
 // console does not know is shown as it arrived rather than guessed at.
@@ -186,7 +191,7 @@ export function nodeStatus(node: FleetNodeSummary): NodeStatus {
     case 'fresh':
       return nodeServing(node) ? { word: 'Serving', dot: 'on' } : { word: 'Idle', dot: '' }
     case 'stale':
-      return { word: 'Not answering', dot: '' }
+      return { word: NO_ANSWER, dot: '' }
     case 'unreachable':
       return { word: 'Unreachable', dot: 'fail' }
     case 'version-mismatch':

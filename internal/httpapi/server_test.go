@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/store"
+	_ "modernc.org/sqlite"
 )
 
 type readyInventory struct{}
@@ -970,6 +972,94 @@ func TestDelegatedInstallIsRefusedOnAFleetMember(t *testing.T) {
 	}
 	if len(jobs) != 1 {
 		t.Fatalf("the refused delegated install left %d jobs behind: %+v", len(jobs), jobs)
+	}
+}
+
+// TestManagedMemberRefusalFailsClosedOnAStoreError pins the direction this
+// door fails in. A fleet role this manager cannot read is not evidence that
+// the machine is free to change: on the delegated path it would hand a bearer
+// key exactly the authority the fleet took away from it. The answer is a
+// plain 500 that claims nothing about a controller nobody has read.
+func TestManagedMemberRefusalFailsClosedOnAStoreError(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "manager.db")
+	database, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authManager, err := auth.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := singleSpark(recipes)
+	executor := &apiExecutor{done: map[string]bool{}}
+	server := New("test", directory, authManager, database, readyInventory{}, executor, engine.New(database, executor, recipes), recipes)
+	t.Cleanup(server.Close)
+	manager, err := fleet.NewManager(ctx, fleet.Options{
+		DataDir: directory, Database: database, Inventory: readyInventory{}, Version: "test", BuildIdentity: "test-build",
+		DisplayName: "node-member", ConsoleURL: "http://192.168.99.20:7070", NodeURL: "https://192.168.99.20:7071",
+		Recipes: recipes, EffectiveRecipes: recipes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetFleetManager(manager)
+	_, key, err := database.CreateAPIKey(ctx, "head spark")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Break the fleet role read and nothing else. A second connection drops
+	// the one table, so the key still verifies and the request still reaches
+	// the door under test.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `DROP TABLE fleet_config`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.FleetConfig(ctx); err == nil {
+		t.Fatal("the fleet role is still readable, so this test proves nothing")
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "http://manager.test/api/v1/models/"+selected.ID+"/install",
+		bytes.NewBufferString(`{"confirmed":true,"accept_licence":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+key)
+	request.Header.Set("Idempotency-Key", "delegated-broken-store")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("a delegated install on an unreadable fleet role status=%d body=%s, want 500", response.Code, response.Body.String())
+	}
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&refusal); err != nil {
+		t.Fatal(err)
+	}
+	if refusal.Error != "this node cannot read its own fleet role now, so it changed nothing" {
+		t.Fatalf("the refusal says something else: %q", refusal.Error)
+	}
+	if strings.Contains(refusal.Error, "managed by") {
+		t.Fatalf("the refusal claims a controller nobody read: %q", refusal.Error)
+	}
+	jobs, err := database.ListJobs(ctx, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("the refused install left %d jobs behind: %+v", len(jobs), jobs)
 	}
 }
 

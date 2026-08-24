@@ -340,7 +340,7 @@ describe('a Spark that joined the fleet without ever being a peer', () => {
   it('says what it is doing in the words the rest of the table uses', () => {
     expect(nodeStatus(loft())).toEqual({ word: 'Serving', dot: 'on' })
     expect(nodeStatus(loft({ installed_models: [] }))).toEqual({ word: 'Idle', dot: '' })
-    expect(nodeStatus(loft({ status: 'stale' }))).toEqual({ word: 'Not answering', dot: '' })
+    expect(nodeStatus(loft({ status: 'stale' }))).toEqual({ word: 'No answer', dot: '' })
     expect(nodeStatus(loft({ status: 'unreachable' }))).toEqual({ word: 'Unreachable', dot: 'fail' })
     expect(nodeStatus(loft({ status: 'version-mismatch' }))).toEqual({ word: 'Different version', dot: '' })
     expect(nodeStatus(loft({ status: 'adopting' }))).toEqual({ word: 'Joining', dot: 'busy' })

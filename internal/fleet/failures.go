@@ -22,10 +22,15 @@ import (
 // writes the fourth into the answer it refuses a placement with. They are
 // constants so that the console sentence can recognise a release gap without
 // guessing at wording that could drift away from it.
+//
+// The first three are read twice over: the install dialog shows one under the
+// name of the Spark it refused, and nodeFailure can put one after "<name>
+// could not do this:". Each one therefore speaks about a part of that Spark
+// and never about the Spark itself, so that no line has two subjects in it.
 const (
-	nodeVersionSkew   = "the node manager version does not exactly match the controller"
-	nodeBuildSkew     = "the node build identity does not exactly match the controller"
-	nodeCatalogueSkew = "the node recipe catalogue does not exactly match the controller"
+	nodeVersionSkew   = "the manager version on this Spark does not exactly match the controller"
+	nodeBuildSkew     = "the manager build on this Spark does not exactly match the controller"
+	nodeCatalogueSkew = "the model catalogue on this Spark does not exactly match the controller"
 	nodeReleaseSkew   = "the target node does not exactly match the controller release and catalogue"
 )
 
@@ -52,17 +57,29 @@ func (failure nodeStatus) Error() string {
 // the Spark runs a different release of this manager, or the Spark gave a
 // reason of its own. Only the third keeps a detail, and it keeps all of it,
 // because a reason this code has no plainer word for is still the truth.
+//
+// The error chain stops here. Every sentence is built with %s and not %w,
+// because what leaves this function is copy for a person, and a caller that
+// asked it whether some inner error is still in there would get "no" for
+// every error there has ever been. Read the cause before this, not after.
 func nodeFailure(name string, err error) error {
 	if err == nil {
 		return nil
 	}
 	switch {
 	case nodeIsSilent(err):
-		return fmt.Errorf("%s is not answering.", name)
+		return fmt.Errorf("%s does not answer.", name)
 	case nodeIsBehind(err):
 		return fmt.Errorf("%s runs another manager version, so update the fleet first.", name)
 	}
-	return fmt.Errorf("%s could not do this: %s", name, failureDetail(err))
+	// The detail is another manager's sentence, written to Go's rule that an
+	// error carries no full stop. One is added here, and only where there is
+	// none, so the whole line ends as the two above it do.
+	detail := failureDetail(err)
+	if !strings.HasSuffix(detail, ".") {
+		detail += "."
+	}
+	return fmt.Errorf("%s could not do this: %s", name, detail)
 }
 
 // nodeIsSilent reports the case where nothing came back. A Spark that

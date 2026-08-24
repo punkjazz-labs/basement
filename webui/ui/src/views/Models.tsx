@@ -10,13 +10,13 @@ import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
-import { fleetSummary, MEMBERSHIP_POLL_MS } from '../fleetInvite'
+import { fleetSummary, MEMBERSHIP_POLL_MS, NO_ANSWER } from '../fleetInvite'
 import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
   initialPlacement, installRoute, mergePlacements, modelChips, placedTarget, placementBusy,
   placementOptions, placementSwitchFrom, placementTargets, placementVerb, placementWord,
   recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, workingPlacement,
-  ACTION_REFUSAL, ADOPT_PATH, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH, NOT_ANSWERING, NO_PLACEMENT_BACK,
+  ACTION_REFUSAL, ADOPT_PATH, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH, NO_PLACEMENT_BACK,
   NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
   type ActionTarget, type FleetDeploymentAction, type FleetRow, type PlacementTarget,
 } from '../fleetModels'
@@ -731,9 +731,9 @@ export default function Models({
     // controller read that Spark for it moments ago. Without one, the Spark's
     // own heartbeat is the only signal there is, and it is the same one the
     // route reads before it offers to adopt.
-    const notAnswering = placement ? placement.stale === true : host !== undefined && !host.answering
+    const noAnswer = placement ? placement.stale === true : host !== undefined && !host.answering
     const hostServing = Boolean(hostModel?.active && hostModel.status === 'ready')
-    const hostWord = notAnswering ? NOT_ANSWERING : hostModel ? modelStateWord(hostModel) : ''
+    const hostWord = noAnswer ? NO_ANSWER : hostModel ? modelStateWord(hostModel) : ''
     // What the paired Spark says about this same model. Its own word for its
     // own state, plus the one thing this console knows that it cannot see
     // yet: an install this session asked it to run.
@@ -750,15 +750,15 @@ export default function Models({
     const otherURL = host ? host.consoleURL : workingSpark?.consoleURL ?? peer?.base_url ?? ''
     const otherWord = host ? hostWord : working ? placementWord(working) : peerWord
     const otherServing = host
-      ? hostServing && !notAnswering
+      ? hostServing && !noAnswer
       : Boolean(peerModel?.active && peerModel.status === 'ready')
     const otherBusy = working !== undefined ||
       otherWord === 'Installing' || otherWord === 'Starting' || otherWord === 'Switching'
     // No button on another Spark's row while that Spark is already changing
-    // this model, and none at all while it is not answering for it. The
+    // this model, and none at all while it does not answer for it. The
     // placement locks the row from the moment the action is accepted; the
     // heartbeat word only follows a few seconds later.
-    const hostLocked = busy || otherBusy || notAnswering ||
+    const hostLocked = busy || otherBusy || noAnswer ||
       placementBusy(placement, placement && startedOnPlacement.get(placement.deployment_id))
     const localStatus = busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
     // Nothing of this recipe runs anywhere in the fleet and its version has
@@ -848,7 +848,7 @@ export default function Models({
           <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
             {/* This model lives on another Spark in the fleet, so the row acts
                 on that Spark. The fleet may hold no placement for it yet; the
-                first action records one. While that Spark is not answering,
+                first action records one. While that Spark does not answer,
                 its buttons stay in place and stay dead: the row says what it
                 last knew, and promises nothing. */}
             {host ? (

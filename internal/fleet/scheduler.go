@@ -63,7 +63,12 @@ func (m *Manager) PlanIndependent(ctx context.Context, recipeID string) (Placeme
 		}
 		switch {
 		case node.Status != "fresh":
-			candidate.Eligible, candidate.Reason = false, "the node is "+node.Status+" and cannot accept a placement"
+			// Every reason here is read in two places: under the name of this
+			// Spark in the install dialog, and after "<name> could not do
+			// this:" when an install is sent to it all the same. So each one
+			// names a part of the machine or the fleet, never the machine
+			// itself, and no line ends up with two subjects.
+			candidate.Eligible, candidate.Reason = false, "the fleet shows this Spark as "+node.Status+", so it cannot take a model now"
 		case node.ManagerVersion != m.version:
 			candidate.Eligible, candidate.Reason = false, nodeVersionSkew
 		case node.ManagerBuildIdentity != m.buildIdentity:
@@ -89,5 +94,5 @@ func (plan PlacementPlan) candidate(nodeID string) (PlacementCandidate, error) {
 		}
 		return candidate, nil
 	}
-	return PlacementCandidate{}, errors.New("the selected node is not in this fleet")
+	return PlacementCandidate{}, errors.New("the fleet does not hold a row for this Spark")
 }

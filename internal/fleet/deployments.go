@@ -542,7 +542,9 @@ func (m *Manager) placementNode(ctx context.Context, nodeID string) (store.Fleet
 			return node, false, nil
 		}
 	}
-	return store.FleetNode{}, false, errors.New("the selected node is not an active fleet member")
+	// Read after "<name> could not do this:" as well as on its own, so it
+	// names the fleet rather than naming the Spark a second time.
+	return store.FleetNode{}, false, errors.New("the fleet does not hold this Spark as an active member")
 }
 
 func (m *Manager) clientForNode(node store.FleetNode) (*http.Client, error) {

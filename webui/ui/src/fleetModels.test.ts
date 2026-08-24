@@ -423,8 +423,8 @@ describe('why a row action was refused', () => {
     }
   })
 
-  it('says a Spark is not answering in the words the row uses', () => {
-    expect(ACTION_REFUSAL['not-answering']).toContain('not answering')
+  it('says a Spark does not answer in the words the row uses', () => {
+    expect(ACTION_REFUSAL['not-answering']).toContain('does not answer')
   })
 
   it('has a line for an adoption that answered with no record', () => {
@@ -498,7 +498,7 @@ describe('what each candidate machine has free', () => {
     recommended_node_id: 'node-loft',
     candidates: [
       { node_id: 'node-lead', display_name: 'attic', eligible: true },
-      { node_id: 'node-loft', display_name: 'loft', eligible: false, reason: 'the node is stale and cannot accept a placement' },
+      { node_id: 'node-loft', display_name: 'loft', eligible: false, reason: 'the fleet shows this Spark as stale, so it cannot take a model now' },
     ],
   })
 
@@ -510,7 +510,7 @@ describe('what each candidate machine has free', () => {
       storageAvailableBytes: 1_100_000_000_000,
     })
     expect(joined[1].memoryAvailableBytes).toBe(26_000_000_000)
-    expect(joined[1].reason).toBe('the node is stale and cannot accept a placement')
+    expect(joined[1].reason).toBe('the fleet shows this Spark as stale, so it cannot take a model now')
   })
 
   it('leaves a machine that reported nothing absent', () => {
@@ -606,7 +606,7 @@ describe('the Run on list, resolved against the fleet table', () => {
   })
 
   it('keeps a refused Spark on the list, dead, in the plan’s own words', () => {
-    const reason = 'the node is stale and cannot accept a placement'
+    const reason = 'the fleet shows this Spark as stale, so it cannot take a model now'
     const options = placementOptions(targets({
       recommended_node_id: 'node-lead',
       candidates: [

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -981,9 +982,26 @@ func (s *Server) jobAction(w http.ResponseWriter, r *http.Request) {
 	methodNotAllowed(w)
 }
 
+// refuseManagedMemberMutation is the door between a mutation and a machine
+// that answers to another console. It fails closed: a fleet role this manager
+// cannot read is not evidence that the machine is free to change, and letting
+// the change through would put two authorities on one Spark exactly when the
+// store is in trouble. The one error that is evidence is an empty fleet
+// record, which every Spark has before it ever meets a fleet: a member always
+// has a row, because joining is what writes one.
 func (s *Server) refuseManagedMemberMutation(w http.ResponseWriter, r *http.Request) bool {
 	config, err := s.store.FleetConfig(r.Context())
-	if err != nil || config.Role != "member" {
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		// Not "this node is managed": that would name a controller nobody has
+		// read. This says only what is true, which is that the question could
+		// not be answered and so nothing was done.
+		writeError(w, http.StatusInternalServerError, errors.New("this node cannot read its own fleet role now, so it changed nothing"))
+		return true
+	}
+	if config.Role != "member" {
 		return false
 	}
 	message := "this node is managed by its fleet controller; use the fleet dashboard for model changes"
