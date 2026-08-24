@@ -3,6 +3,9 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { logoFor } from '../catalog'
 import {
+  answerMeter, composerHeight, pinnedToBottom, stoppedMeter, tokenMeter, waitMeter,
+} from '../chat'
+import {
   COUNCIL_STAGES, councilByline, councilHistory, councilOffered, runCouncil, seedFrom, stageState,
   type ChatRequest, type CouncilDelta, type CouncilModel, type CouncilRecord, type CouncilStage,
 } from '../council'
@@ -65,13 +68,87 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   const [councilWanted, setCouncilWanted] = useState(false)
   const [councilStage, setCouncilStage] = useState<CouncilStage | null>(null)
   const [openWork, setOpenWork] = useState<number[]>([])
+  // Enter during a stream has no effect. It says so, once, until the answer
+  // ends.
+  const [busyNote, setBusyNote] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const chatRef = useRef<HTMLDivElement>(null)
+  const draftRef = useRef<HTMLTextAreaElement>(null)
+  // Whether the transcript follows the answer. The ref decides that on every
+  // token, without a render; the state only drives the jump control, which
+  // changes when the reader scrolls, not when a token arrives.
+  const pinnedRef = useRef(true)
+  const [pinned, setPinned] = useState(true)
+  // A smooth jump takes a moment, and the answer grows while it travels.
+  // Scroll positions on the way there do not release the pin.
+  const jumpUntilRef = useRef(0)
+  // What the meter under the transcript counts while the answer is on its
+  // way: the wait before the first token, then the tokens themselves.
+  const meterRef = useRef({ started: 0, firstToken: 0, tokens: 0 })
+  const tickRef = useRef<number | null>(null)
 
+  // The playground stays mounted behind the other tabs, so every reach for
+  // the field or for the Escape key asks first whether it is on screen.
+  const onScreen = () => draftRef.current?.offsetParent != null
+  const focusDraft = () => { if (onScreen()) draftRef.current?.focus() }
+
+  const toLatest = (smooth: boolean) => {
+    const chat = chatRef.current
+    if (!chat) return
+    // 'auto' for a token: a smooth scroll on every token fights itself.
+    chat.scrollTo({ top: chat.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
+  }
+
+  const pinToLatest = () => {
+    pinnedRef.current = true
+    setPinned(true)
+  }
+
+  const onChatScroll = () => {
+    const chat = chatRef.current
+    if (!chat) return
+    const atEnd = pinnedToBottom(chat)
+    if (!atEnd && performance.now() < jumpUntilRef.current) return
+    jumpUntilRef.current = 0
+    pinnedRef.current = atEnd
+    setPinned(atEnd)
+  }
+
+  const jumpToLatest = () => {
+    pinToLatest()
+    jumpUntilRef.current = performance.now() + 900
+    toLatest(true)
+    focusDraft()
+  }
+
+  // The answer moves the transcript only while the reader is already at the
+  // end of it. Scroll up during a stream and the view stays where it was put.
   useEffect(() => {
-    chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight })
+    if (pinnedRef.current) toLatest(false)
   }, [messages])
-  useEffect(() => () => abortRef.current?.abort(), [])
+  // The box grows with the text it holds, so a long question is never written
+  // blind. An empty draft returns it to one line.
+  useEffect(() => {
+    const field = draftRef.current
+    if (!field) return
+    field.style.height = 'auto'
+    field.style.height = `${composerHeight(field.scrollHeight)}px`
+  }, [draft])
+  // Escape stops the answer wherever the caret is, for as long as one is
+  // arriving.
+  useEffect(() => {
+    if (!streaming) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && onScreen()) abortRef.current?.abort()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [streaming])
+  useEffect(() => { if (!streaming) setBusyNote(false) }, [streaming])
+  useEffect(() => () => {
+    abortRef.current?.abort()
+    if (tickRef.current !== null) window.clearInterval(tickRef.current)
+  }, [])
 
   const offered = councilOffered(chatModels)
   const council = offered && councilWanted
@@ -165,7 +242,13 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
           const thought: string = delta?.reasoning_content ?? delta?.reasoning ?? ''
           if (text || thought) {
             if (!firstToken) firstToken = performance.now()
-            if (text) chunks += 1
+            if (text) {
+              chunks += 1
+              // The live meter counts the answer, not the reasoning: while a
+              // model only thinks, the clock is the honest number.
+              if (!meterRef.current.firstToken) meterRef.current.firstToken = performance.now()
+              meterRef.current.tokens = chunks
+            }
             answer += text
             onDelta({ text, thinking: thought })
           }
@@ -175,12 +258,18 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       }
     }
     if (firstToken) {
-      const generation = (performance.now() - firstToken) / 1000
-      const total = completionTokens || chunks
-      const rate = generation > 0 ? (total / generation).toFixed(1) : 'n/a'
-      setStats(`${total} tokens · ${rate} tok/s · first token in ${Math.round(firstToken - started)} ms`)
+      setStats(answerMeter(completionTokens || chunks, performance.now() - firstToken, firstToken - started))
     }
     return visibleText(answer)
+  }
+
+  // Every 500ms while the answer is on its way: the wait in seconds until the
+  // first token, the count and the rate after it.
+  const tickMeter = () => {
+    const meter = meterRef.current
+    setStats(meter.firstToken
+      ? tokenMeter(meter.tokens, performance.now() - meter.firstToken)
+      : waitMeter(performance.now() - meter.started))
   }
 
   const send = async () => {
@@ -194,7 +283,15 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
     setMessages(previous => [...previous, { role: 'user', content }, { role: 'assistant', content: '' }])
     setDraft('')
     setStreaming(true)
-    setStats('')
+    setBusyNote(false)
+    // A question the owner just sent always comes into view, and the
+    // transcript follows the answer to it again.
+    pinToLatest()
+    // The click path leaves the caret on a button that is about to go away.
+    focusDraft()
+    meterRef.current = { started: performance.now(), firstToken: 0, tokens: 0 }
+    setStats(waitMeter(0))
+    tickRef.current = window.setInterval(tickMeter, 500)
     const controller = new AbortController()
     abortRef.current = controller
     try {
@@ -221,6 +318,9 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       }
     } catch (problem) {
       if (!controller.signal.aborted && (problem as Error).name !== 'AbortError') {
+        // The meter counts a wait that ended in nothing. Take it away rather
+        // than leave a clock under a failure.
+        setStats('')
         setMessages(previous => {
           const next = [...previous]
           next[next.length - 1] = {
@@ -231,9 +331,24 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
         })
       }
     } finally {
+      if (tickRef.current !== null) {
+        window.clearInterval(tickRef.current)
+        tickRef.current = null
+      }
+      // A stopped answer is short because the owner stopped it. Nothing else
+      // on the screen says so.
+      if (controller.signal.aborted) {
+        const meter = meterRef.current
+        setStats(stoppedMeter(
+          meter.firstToken ? tokenMeter(meter.tokens, performance.now() - meter.firstToken) : '',
+        ))
+      }
       setStreaming(false)
       setCouncilStage(null)
       abortRef.current = null
+      // The stop control and the send button trade places, so the caret has
+      // nowhere to be until the field takes it back.
+      focusDraft()
     }
   }
 
@@ -312,9 +427,18 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
           </label>
         )}
       </div>
-      <div className="chat card" ref={chatRef} aria-live="polite">
+      <div
+        className="chat card"
+        ref={chatRef}
+        tabIndex={0}
+        aria-label="Conversation"
+        aria-live="polite"
+        onScroll={onChatScroll}
+      >
         {messages.length === 0 && (
-          <p className="chat-hint">Send a message.</p>
+          <p className="chat-hint">
+            {council ? 'Send a message to the council.' : `Send a message to ${targetName ?? 'your model'}.`}
+          </p>
         )}
         {messages.map((message, index) => {
           const last = index === messages.length - 1
@@ -363,38 +487,66 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       </div>
       {messages.length > 0 && (
         <div className="chat-foot">
-          {stats && <p className="chat-meta">{stats}</p>}
+          {stats && <p className={streaming ? 'chat-meta live' : 'chat-meta'}>{stats}</p>}
           <span className="spacer" />
           {!streaming && (
-            <button className="quiet" onClick={() => { setMessages([]); setStats(''); setOpenWork([]) }}>
+            <button className="quiet" onClick={() => { setMessages([]); setStats(''); setOpenWork([]); pinToLatest() }}>
               Clear conversation
             </button>
           )}
         </div>
       )}
-      <div className="composer">
-        <textarea
-          value={draft}
-          rows={1}
-          placeholder={council ? 'Ask the council' : `Message ${targetName ?? 'your model'}`}
-          aria-label={council ? 'Ask the council' : `Message ${targetName ?? 'your model'}`}
-          onChange={event => setDraft(event.target.value)}
-          onKeyDown={event => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault()
-              send()
-            }
-          }}
-        />
-        {streaming ? (
-          <button className="send" aria-label="Stop generating" title="Stop generating" onClick={() => abortRef.current?.abort()}>
-            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="2.5" fill="currentColor" /></svg>
-          </button>
-        ) : (
-          <button className="send" aria-label="Send" title="Send" onClick={send} disabled={!draft.trim()}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+      <div className="composer-dock">
+        {/* Shown only while the reader is away from the end of the
+            transcript, which is the only time it has anything to do. */}
+        {!pinned && (
+          <button className="jump" onClick={jumpToLatest}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5v14M19 12l-7 7-7-7" /></svg>
+            Jump to latest
           </button>
         )}
+        <div className="composer">
+          <textarea
+            ref={draftRef}
+            value={draft}
+            rows={1}
+            placeholder={council ? 'Ask the council' : `Message ${targetName ?? 'your model'}`}
+            aria-label={council ? 'Ask the council' : `Message ${targetName ?? 'your model'}`}
+            onChange={event => {
+              setDraft(event.target.value)
+              const field = event.target
+              field.style.height = 'auto'
+              field.style.height = `${composerHeight(field.scrollHeight)}px`
+            }}
+            onKeyDown={event => {
+              if (event.key !== 'Enter' || event.shiftKey) return
+              // Enter confirms the candidate word in Japanese, Chinese and
+              // Korean input. Sending there sends half a sentence.
+              if (event.nativeEvent.isComposing) return
+              event.preventDefault()
+              if (streaming) {
+                setBusyNote(true)
+                return
+              }
+              send()
+            }}
+          />
+          {streaming ? (
+            /* Orange marks the one thing to do next, and stopping is never
+               that. Stop keeps its own shape, its own place and its name. */
+            <button className="stop" aria-label="Stop generating" title="Stop generating" onClick={() => abortRef.current?.abort()}>
+              <i aria-hidden="true" />Stop
+            </button>
+          ) : (
+            <button className="send" aria-label="Send" title="Send" onClick={send} disabled={!draft.trim()}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+            </button>
+          )}
+        </div>
+        {busyNote && <p className="composer-note">The model is answering. Press Stop first.</p>}
+        <p className="composer-hint">
+          <b>Enter</b> sends. <b>Shift</b> and <b>Enter</b> add a line. <b>Esc</b> stops the answer.
+        </p>
       </div>
     </div>
   )

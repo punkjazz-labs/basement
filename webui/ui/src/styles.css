@@ -673,7 +673,10 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .chat-foot .spacer { flex: 1; }
 .chat-hint { color: var(--faint); text-align: center; margin: 0; }
 .chat:has(.chat-hint) { align-content: center; justify-items: center; }
-.chat-meta { color: var(--faint); font-size: 11.5px; font-family: var(--mono); }
+/* Tabular figures: the meter counts while you read it, and digits of one
+   width keep the line still. */
+.chat-meta { color: var(--faint); font-size: 11.5px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.chat-meta.live { color: var(--muted); }
 /* The composer people already know: one rounded field, round send inside. */
 .composer {
   display: flex; gap: 10px; align-items: flex-end;
@@ -681,10 +684,12 @@ dialog.confirm-box h2 { font-size: 15.5px; }
   border-radius: 16px; padding: 8px 8px 8px 16px;
 }
 .composer:focus-within { border-color: var(--faint); }
+/* The box grows with the text, to eight lines, and scrolls from there. A
+   question written in a one-line box is a question written blind. */
 .composer textarea {
   flex: 1; resize: none; border: 0; background: none; outline: none;
-  min-height: 24px; max-height: 160px; padding: 5px 0;
-  font: inherit; font-size: 13.5px; color: var(--ink);
+  min-height: 24px; max-height: 176px; overflow-y: auto; padding: 5px 0;
+  font: inherit; font-size: 13.5px; line-height: 1.55; color: var(--ink);
 }
 .composer .send {
   width: 32px; height: 32px; flex: none; border-radius: 999px; border: 0;
@@ -692,6 +697,30 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 }
 .composer .send:hover { filter: brightness(1.05); }
 .composer .send:disabled { background: var(--surface-2); color: var(--faint); cursor: default; filter: none; }
+/* Orange marks the single thing to do next, and stopping the answer you
+   asked for is never that. Stop keeps its own shape and says its name. */
+.composer .stop {
+  height: 32px; flex: none; display: inline-flex; align-items: center; gap: 8px;
+  background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink);
+  border-radius: 999px; padding: 0 15px; font-size: 12.5px; font-weight: 550;
+}
+.composer .stop:hover { border-color: var(--faint); }
+.composer .stop i { width: 9px; height: 9px; border-radius: 2px; background: var(--ink); display: block; flex: none; }
+/* The dock holds the composer, the key hints under it, and the pill that
+   appears when the reader leaves the end of the transcript. */
+.composer-dock { position: relative; }
+.jump {
+  position: absolute; top: -42px; left: 50%; transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 7px; z-index: 5;
+  background: var(--surface-2); border: 1px solid var(--line-strong); color: var(--ink);
+  border-radius: 999px; padding: 4px 14px; font-size: 12px; font-weight: 500;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.5);
+}
+.jump:hover { border-color: var(--faint); }
+.composer-note { margin: 8px 0 0; text-align: center; color: var(--muted); font-size: 11.5px; }
+.composer-hint { margin: 8px 0 0; text-align: center; color: var(--faint); font-size: 11.5px; }
+.composer-note + .composer-hint { margin-top: 3px; }
+.composer-hint b { font-weight: 550; color: var(--muted); }
 
 /* ---- Council ------------------------------------------------------------- */
 /* One segmented control naming who answers, and the work behind a council
