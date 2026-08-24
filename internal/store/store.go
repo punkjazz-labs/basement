@@ -858,12 +858,11 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
 // manager restart would interrupt. The query is one database snapshot so the
 // API never reports an idle machine assembled from two different moments.
 //
-// This is the one time-ordered query that keeps created_at. It reads two
-// tables, and a rowid counts rows in its own table only, so rowid cannot rank
-// a job against a generation. The timestamp text can therefore still name the
-// wrong one of two activities that started in the same fraction of a second.
-// Both are real blockers, and whether anything blocks at all does not depend
-// on the order, so the cost is the name in one message.
+// The order key is created_at, not rowid: this query ranks a job against a
+// generation, and a rowid counts rows in its own table only, so no rowid can
+// compare the two. rtrim removes the trailing 'Z', which is the one byte that
+// breaks the text order, and what stays compares chronologically. See now()
+// for the rule.
 func (s *Store) ActiveUpdateBlocker(ctx context.Context) (UpdateBlocker, bool, error) {
 	var blocker UpdateBlocker
 	var recipeID string
@@ -877,7 +876,7 @@ func (s *Store) ActiveUpdateBlocker(ctx context.Context) (UpdateBlocker, bool, e
 			FROM generations
 			WHERE status IN ('queued','running')
 		)
-		ORDER BY created_at ASC
+		ORDER BY rtrim(created_at,'Z') ASC
 		LIMIT 1`).Scan(&blocker.Kind, &blocker.ID, &blocker.Activity, &recipeID, &blocker.State)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UpdateBlocker{}, false, nil
@@ -1095,8 +1094,12 @@ func scanModel(row interface{ Scan(...any) error }) (InstalledModel, error) {
 	return model, err
 }
 
+// Models lists what is installed, most recently changed first. The order key
+// is updated_at, not rowid: a rowid records when a model was first installed,
+// and this list must follow the last change instead. rtrim removes the
+// trailing 'Z' so the text compares chronologically. See now() for the rule.
 func (s *Store) Models(ctx context.Context) ([]InstalledModel, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+modelColumns+` FROM installed_models m LEFT JOIN model_metrics x ON x.recipe_id=m.recipe_id ORDER BY m.updated_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+modelColumns+` FROM installed_models m LEFT JOIN model_metrics x ON x.recipe_id=m.recipe_id ORDER BY rtrim(m.updated_at,'Z') DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1672,10 +1675,20 @@ func randomID(prefix string) (string, error) {
 }
 
 // now is the one clock every stored timestamp comes from. RFC3339Nano removes
-// trailing zeros, so one value can be a text prefix of another and the text
-// does not sort chronologically: the 'Z' byte is above every digit, which puts
-// "10:00:00.5Z" after the later "10:00:00.51Z". A time-ordered query must
-// therefore order by rowid, the insertion order, and never by a timestamp
-// column. Read a timestamp as a moment to show or to compare with a parsed
-// time, not as a sort key.
+// trailing zeros, so one value can be a text prefix of another and the raw
+// text does not sort chronologically: the 'Z' byte is above every digit, which
+// puts "10:00:00.5Z" after the later "10:00:00.51Z".
+//
+// A time-ordered query therefore uses one of two keys. Never order by a raw
+// timestamp column.
+//
+//   - rowid, when the query means the order in which the rows arrived. This is
+//     the usual case, and it is the correct key for a listing of records that
+//     get their timestamp once, at creation.
+//   - rtrim(<column>,'Z'), when a timestamp column really is the key. What
+//     stays after the 'Z' compares chronologically, because everything before
+//     the fraction is fixed width and a shorter fraction is a prefix of a
+//     longer one. Use this when the moment is not the insertion moment, as in
+//     Models with updated_at, or when rows from two tables must be ranked
+//     together, as in ActiveUpdateBlocker, where no rowid can compare them.
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
