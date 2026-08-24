@@ -15,7 +15,7 @@ import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
   initialPlacement, installRoute, mergePlacements, modelChips, placedTarget, placementBusy,
   placementOptions, placementSwitchFrom, placementTargets, placementVerb, placementWord,
-  recipeBusy, rowActionRoute, rowPlacement, workingPlacement,
+  recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, FLEET_DEPLOYMENTS_PATH, NOT_ANSWERING, NO_PLACEMENT_BACK,
   NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
   type ActionTarget, type FleetDeploymentAction, type FleetRow, type PlacementTarget,
@@ -74,6 +74,28 @@ function FleetStrip({ sparks }: { sparks: FleetRow[] }) {
   )
 }
 
+// The banner a member console shows above its table instead of the fleet
+// line: this Spark's models answer to another console, not this one.
+// shouldShowMemberBanner (fleetModels.ts) says when to render it; the button
+// only appears once the controller has told this Spark where its own console
+// answers, so a summary with no URL yet still gets the sentence alone.
+function MemberBanner({ controllerConsoleURL }: { controllerConsoleURL: string }) {
+  return (
+    <div className="fleet-strip" role="status">
+      <span>The fleet controller manages this Spark's models.</span>
+      {controllerConsoleURL !== '' && (
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => window.open(controllerConsoleURL, '_blank', 'noopener,noreferrer')}
+        >
+          Open the fleet controller
+        </button>
+      )}
+    </div>
+  )
+}
+
 // Where an install is about to run, on a console that leads no fleet. A
 // recipe that needs two Sparks always runs across both, so this choice only
 // exists for one-Spark recipes. A console that leads a fleet asks the
@@ -119,6 +141,11 @@ export default function Models({
   // means this console has no fleet to show: a standalone Spark, a member, or
   // a summary this console could not read.
   const [fleet, setFleet] = useState<FleetSummary | null>(null)
+  // The same read, kept whatever the role, only for the member banner. fleet
+  // above stays controller-only because every row and every poll beneath it
+  // already assumes that; the banner needs the member's own answer instead,
+  // so it is carried separately rather than by loosening what fleet means.
+  const [fleetRoleSummary, setFleetRoleSummary] = useState<FleetSummary | null>(null)
   // Which placement owns which model on which Spark. Row actions on another
   // Spark are sent through it, and its rows also say whether that Spark still
   // answers, so it is polled beside the summary rather than fetched at the
@@ -207,11 +234,15 @@ export default function Models({
       try {
         const summary = fleetSummary(await api<unknown>('/api/v1/fleet'))
         if (cancelled) return
+        setFleetRoleSummary(summary)
         const controller = summary !== null && summary.role === 'controller'
         setFleet(controller ? summary : null)
         if (controller && timer === undefined) timer = setInterval(read, MEMBERSHIP_POLL_MS)
       } catch {
-        if (!cancelled) setFleet(null)
+        if (!cancelled) {
+          setFleet(null)
+          setFleetRoleSummary(null)
+        }
       }
     }
     void read(true)
@@ -269,6 +300,7 @@ export default function Models({
   // the summary this reads is replaced on every poll.
   const sparks = useMemo(() => fleetRows(fleet, peers, window.location.origin, Date.now()), [fleet, peers])
   const showFleet = leadsFleet && sparks.length > 1
+  const showMemberBanner = shouldShowMemberBanner(fleetRoleSummary)
   // Which Sparks hold this model, and which one serves it now. The Spark this
   // console runs on is named only while another Spark is on screen beside it.
   const nodeChips = (recipe: Recipe) =>
@@ -1089,6 +1121,9 @@ export default function Models({
       )}
 
       {showFleet && <FleetStrip sparks={sparks} />}
+      {showMemberBanner && (
+        <MemberBanner controllerConsoleURL={fleetRoleSummary?.controller_console_url ?? ''} />
+      )}
 
       <div className="mtable">
         <div className="mthead" aria-hidden="true">

@@ -6,7 +6,7 @@ import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
   initialPlacement, installRoute, joinCandidatesWithInventory, machineNote, mergePlacements,
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
-  placementVerb, placementWord, recipeBusy, rowActionRoute, rowPlacement, workingPlacement,
+  placementVerb, placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME, CHOOSE_FOR_ME_NOTE,
   FLEET_DEPLOYMENT_ACTIONS, NO_FLEET_ROW, NO_PLACEMENT_BACK, PLACEMENT_REFUSED,
   type ActionTarget, type FleetRow, type PlacementTarget,
@@ -174,6 +174,24 @@ describe('one row per Spark', () => {
 
   it('says nothing without a fleet summary', () => {
     expect(fleetRows(null, [], 'http://attic.local:7070', NOW)).toEqual([])
+  })
+})
+
+describe('whether a member console shows the "ask the controller" banner', () => {
+  it('shows for a member', () => {
+    expect(shouldShowMemberBanner(summary({ role: 'member' }))).toBe(true)
+  })
+
+  it('stays off for the controller', () => {
+    expect(shouldShowMemberBanner(summary({ role: 'controller' }))).toBe(false)
+  })
+
+  it('stays off for a standalone Spark', () => {
+    expect(shouldShowMemberBanner(summary({ role: 'standalone' }))).toBe(false)
+  })
+
+  it('stays off without a summary', () => {
+    expect(shouldShowMemberBanner(null)).toBe(false)
   })
 })
 

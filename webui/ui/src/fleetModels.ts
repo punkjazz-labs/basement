@@ -139,6 +139,16 @@ function membershipRow(
   }
 }
 
+// ---- Whether a member's own console shows the "ask the controller" banner --
+
+// True only for a Spark that has joined another Spark's fleet as a member.
+// The controller sees the fleet-wide table instead, so it never shows this. A
+// standalone Spark, and a summary this console has not read yet, show nothing
+// either: both have to stay silent rather than guess at a role.
+export function shouldShowMemberBanner(summary: FleetSummary | null): boolean {
+  return summary !== null && summary.role === 'member'
+}
+
 // The key a row and a recipe meet on. One Spark runs one placement of one
 // model, so this pair is what an action has to name.
 export const deploymentKey = (nodeID: string, recipeID: string): string => `${nodeID}:${recipeID}`
