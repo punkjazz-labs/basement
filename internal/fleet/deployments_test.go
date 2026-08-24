@@ -23,6 +23,11 @@ type placementRuntime struct {
 	allocator *Allocator
 	mu        sync.Mutex
 	preflight []string
+	// keepJobsLive leaves an install job in the state a real one is in while
+	// it still runs. The fixture usually moves the job to "ready" before it
+	// answers, which is a record whose work has finished. A test that needs
+	// live work behind a record sets this instead.
+	keepJobsLive bool
 }
 
 func (runtime *placementRuntime) PreflightIndependent(_ context.Context, selected recipe.Recipe, _ string) (json.RawMessage, bool, error) {
@@ -66,6 +71,10 @@ func (runtime *placementRuntime) CreateIndependentJob(ctx context.Context, selec
 		}
 	} else if err := runtime.database.SetInstalled(ctx, store.InstalledModel{RecipeID: selected.ID, RecipeVersion: selected.Version, Status: "stopped"}); err != nil {
 		return store.Job{}, false, err
+	}
+	if runtime.keepJobsLive {
+		job, err = runtime.database.GetJob(ctx, job.ID)
+		return job, true, err
 	}
 	if err := runtime.database.UpdateJobState(ctx, job.ID, "ready", ""); err != nil {
 		return store.Job{}, false, err
@@ -1082,4 +1091,333 @@ func liveRecordsFor(t *testing.T, database *store.Store, nodeID, recipeID string
 		}
 	}
 	return live
+}
+
+// fleetCallGate holds the first fleet call to one path inside its network
+// window. That call reports where it arrived on entered, and then waits for
+// open. Every later call to the same path goes straight through. All of them
+// are counted, so a test can hold one flow inside its window while another
+// flow runs, and can then read how many times the Spark was asked to do the
+// work.
+type fleetCallGate struct {
+	inner   func(string) *http.Client
+	path    string
+	entered chan string
+	release chan struct{}
+	opened  sync.Once
+	mu      sync.Mutex
+	calls   int
+}
+
+func newFleetCallGate(inner func(string) *http.Client, path string) *fleetCallGate {
+	return &fleetCallGate{inner: inner, path: path, entered: make(chan string, 4), release: make(chan struct{})}
+}
+
+func (gate *fleetCallGate) clients() func(string) *http.Client {
+	return func(fingerprint string) *http.Client {
+		next := gate.inner(fingerprint).Transport
+		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if !strings.HasSuffix(request.URL.Path, gate.path) {
+				return next.RoundTrip(request)
+			}
+			gate.mu.Lock()
+			gate.calls++
+			first := gate.calls == 1
+			gate.mu.Unlock()
+			if first {
+				gate.entered <- request.URL.Path
+				<-gate.release
+			}
+			return next.RoundTrip(request)
+		})}
+	}
+}
+
+func (gate *fleetCallGate) count() int {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return gate.calls
+}
+
+func (gate *fleetCallGate) open() { gate.opened.Do(func() { close(gate.release) }) }
+
+// pairPlacementResult is what one placement flow gives back to the test that
+// started it in a goroutine.
+type pairPlacementResult struct {
+	deployment Deployment
+	created    bool
+	err        error
+}
+
+// The window the pair lock closes on the adopt side. While a rebuild of a
+// cleared record runs, that record reads "removed" for the whole node call,
+// and a create for the same pair steps over a removed record in its duplicate
+// check. The lock holds the create out until the rebuild is complete, so the
+// two flows read the pair one after the other and the pair keeps one live
+// record. Without the lock both flows complete and the pair holds two.
+//
+// The lock order is guarded here as well: while the rebuild holds the pair,
+// an action and a clearing against another record of that same pair must both
+// go through, because they take the id lock alone.
+func TestAnAdoptHoldsThePairWhileItRebuildsAClearedRecord(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	placed := independentRecipes(t, recipes, 1)[0]
+	controller, controllerStore := newPlacementManager(t, "controller", "192.168.99.120", recipes)
+	member, memberStore := newPlacementManager(t, "loft", "192.168.99.121", recipes)
+	member.SetIndependentRuntime(&placementRuntime{database: memberStore, allocator: member.Allocator()})
+	answering := inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	silent := func(string) *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("the Spark did not answer in time")
+		})}
+	}
+	controller.newClient = answering
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memberStore.SetInstalled(ctx, store.InstalledModel{RecipeID: placed.ID, RecipeVersion: placed.Version, Status: "ready", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	adopted, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, placed.ID, "adopt-once")
+	if err != nil || !created || adopted.OwnerJobID == "" {
+		t.Fatalf("the record to clear was not adopted: created=%v record=%+v err=%v", created, adopted, err)
+	}
+	controller.newClient = silent
+	if _, ended, err := controller.ReleaseDeployment(ctx, adopted.DeploymentID); err != nil || !ended {
+		t.Fatalf("the adopted record was not cleared: ended=%v err=%v", ended, err)
+	}
+
+	// The rebuild stops inside its call to the Spark, which is the whole of
+	// the window: the record reads "removed" for every moment of it.
+	gate := newFleetCallGate(answering, "/deployments/adopt")
+	controller.newClient = gate.clients()
+	rebuiltDone := make(chan pairPlacementResult, 1)
+	go func() {
+		deployment, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, placed.ID, "adopt-again")
+		rebuiltDone <- pairPlacementResult{deployment: deployment, created: created, err: err}
+	}()
+	<-gate.entered
+	pair := controller.placementPairLock(member.identity.NodeID, placed.ID)
+	if pair.TryLock() {
+		pair.Unlock()
+		gate.open()
+		t.Fatal("the rebuild does not hold the pair while it calls the Spark")
+	}
+
+	// The lock order, as a guard. ActionDeployment and ReleaseDeployment act on
+	// a record that exists already, so they take the id lock alone and never
+	// the pair lock. Both are aimed here at another record of the pair the
+	// rebuild holds. If either one ever takes the pair lock, it waits here for
+	// a flow that only this test can release, and this test stops rather than
+	// passes.
+	writeDeploymentRecord(t, controllerStore, store.FleetDeployment{
+		DeploymentID: "deployment_a_stale_tab_holds", RecipeID: placed.ID, RecipeVersion: placed.Version,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: member.identity.NodeID, State: "running",
+	}, store.Job{ID: "job_the_node_never_had", State: "running"})
+	if _, err := controller.ActionDeployment(ctx, "deployment_a_stale_tab_holds", "stop", "stop-while-the-pair-is-held", IndependentIntent{}); err == nil {
+		t.Fatal("an action against a job the Spark never had reported no error")
+	}
+	if _, ended, err := controller.ReleaseDeployment(ctx, "deployment_a_stale_tab_holds"); err != nil || !ended {
+		t.Fatalf("a record could not be cleared while the pair was held: ended=%v err=%v", ended, err)
+	}
+
+	// The create for the same pair starts now and must wait for the rebuild.
+	createDone := make(chan pairPlacementResult, 1)
+	go func() {
+		deployment, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{
+			RecipeID: placed.ID, NodeID: member.identity.NodeID, IdempotencyKey: "install-during-the-rebuild",
+			Intent: IndependentIntent{Confirmed: true, AcceptLicence: true, ConfirmTerritoryEligibility: true, Activate: true},
+		})
+		createDone <- pairPlacementResult{deployment: deployment, created: created, err: err}
+	}()
+	// The console goes on polling while the rebuild runs, and none of it
+	// changes the pair. The polls also give the create every chance to read the
+	// pair before the rebuild writes it, which is the failure this test is here
+	// to catch.
+	for range 3 {
+		if _, err := controller.Deployments(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gate.open()
+	rebuilt := <-rebuiltDone
+	if rebuilt.err != nil || rebuilt.deployment.DeploymentID != adopted.DeploymentID || rebuilt.deployment.OwnerJobID == "" {
+		t.Fatalf("the rebuild did not finish: record=%+v err=%v", rebuilt.deployment, rebuilt.err)
+	}
+	install := <-createDone
+	if install.err != nil || !install.created || install.deployment.OwnerJobID == "" {
+		t.Fatalf("the create did not finish after the rebuild: record=%+v err=%v", install.deployment, install.err)
+	}
+	// The create read the pair after the rebuild wrote it, which is the proof
+	// that the two flows did not run at the same time: the rebuilt record is
+	// what the create superseded. The rebuilt record holds a carrier job that
+	// is terminal from creation, so it holds nothing on that Spark and the
+	// create takes the pair from it. That is what these two calls do when they
+	// are made one after the other as well.
+	if live := liveRecordsFor(t, controllerStore, member.identity.NodeID, placed.ID); len(live) != 1 || live[0] != install.deployment.DeploymentID {
+		t.Fatalf("the pair holds %d live records: %v", len(live), live)
+	}
+	if superseded, err := controllerStore.FleetDeployment(ctx, adopted.DeploymentID); err != nil || superseded.State != "removed" {
+		t.Fatalf("the create did not read the rebuilt record: %+v err=%v", superseded, err)
+	}
+	// One model on one Spark, one live record, however many polls run over it.
+	for range 3 {
+		if _, err := controller.Deployments(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if live := liveRecordsFor(t, controllerStore, member.identity.NodeID, placed.ID); len(live) != 1 || live[0] != install.deployment.DeploymentID {
+		t.Fatalf("the pair holds %d live records after the polls: %v", len(live), live)
+	}
+}
+
+// The window the pair lock closes on the create side. Two creates for one pair
+// carry different idempotency keys, so they carry different record ids and
+// different id locks. Without the pair lock both of them install on the Spark
+// before one loses at the record write. With it, the second one waits, reads
+// the live record the first one left, and is refused by the sentence that
+// refusal already has.
+func TestTwoCreatesForOnePairInstallOnce(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	placed := independentRecipes(t, recipes, 1)[0]
+	controller, controllerStore := newPlacementManager(t, "controller", "192.168.99.130", recipes)
+	member, memberStore := newPlacementManager(t, "loft", "192.168.99.131", recipes)
+	// The install job stays live, as a real one does for as long as the
+	// install runs. A record with live work behind it holds its pair.
+	member.SetIndependentRuntime(&placementRuntime{database: memberStore, allocator: member.Allocator(), keepJobsLive: true})
+	answering := inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	gate := newFleetCallGate(answering, "/deployments/independent")
+	controller.newClient = gate.clients()
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	intent := IndependentIntent{Confirmed: true, AcceptLicence: true, ConfirmTerritoryEligibility: true, Activate: true}
+	place := func(key string) chan pairPlacementResult {
+		done := make(chan pairPlacementResult, 1)
+		go func() {
+			deployment, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{
+				RecipeID: placed.ID, NodeID: member.identity.NodeID, IdempotencyKey: key, Intent: intent,
+			})
+			done <- pairPlacementResult{deployment: deployment, created: created, err: err}
+		}()
+		return done
+	}
+
+	firstDone := place("install-first")
+	<-gate.entered
+	pair := controller.placementPairLock(member.identity.NodeID, placed.ID)
+	if pair.TryLock() {
+		pair.Unlock()
+		gate.open()
+		t.Fatal("the create does not hold the pair while it installs on the Spark")
+	}
+	secondDone := place("install-second")
+	gate.open()
+
+	first, second := <-firstDone, <-secondDone
+	if calls := gate.count(); calls != 1 {
+		t.Fatalf("the Spark was asked to install %d times for one pair", calls)
+	}
+	if first.err != nil || !first.created || first.deployment.OwnerJobID == "" {
+		t.Fatalf("the first install did not finish: record=%+v err=%v", first.deployment, first.err)
+	}
+	if second.err == nil || second.created || !strings.Contains(second.err.Error(), "already has a deployment record for that model") {
+		t.Fatalf("the second install for the pair was accepted: created=%v err=%v", second.created, second.err)
+	}
+	jobs, err := memberStore.ListJobs(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Kind != "install" {
+		t.Fatalf("two creates for one pair left %d jobs on the Spark: %+v", len(jobs), jobs)
+	}
+	if live := liveRecordsFor(t, controllerStore, member.identity.NodeID, placed.ID); len(live) != 1 || live[0] != first.deployment.DeploymentID {
+		t.Fatalf("the pair holds %d live records: %v", len(live), live)
+	}
+}
+
+// The lock is on the pair and not on the Spark. A rebuild that holds one model
+// on a Spark must not hold up work for another model on that same Spark.
+func TestAnotherModelOnTheSameSparkIsNotHeldUp(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := independentRecipes(t, recipes, 2)
+	adopting, installing := held[0], held[1]
+	controller, _ := newPlacementManager(t, "controller", "192.168.99.140", recipes)
+	member, memberStore := newPlacementManager(t, "loft", "192.168.99.141", recipes)
+	member.SetIndependentRuntime(&placementRuntime{database: memberStore, allocator: member.Allocator()})
+	answering := inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	gate := newFleetCallGate(answering, "/deployments/adopt")
+	controller.newClient = gate.clients()
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memberStore.SetInstalled(ctx, store.InstalledModel{RecipeID: adopting.ID, RecipeVersion: adopting.Version, Status: "ready", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	adoptDone := make(chan pairPlacementResult, 1)
+	go func() {
+		deployment, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, adopting.ID, "adopt-one-model")
+		adoptDone <- pairPlacementResult{deployment: deployment, created: created, err: err}
+	}()
+	<-gate.entered
+
+	// The other model goes on while the first pair is held. The result arrives
+	// before this test opens the gate, so the order is read from the channels
+	// and not from a clock.
+	createDone := make(chan pairPlacementResult, 1)
+	go func() {
+		deployment, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{
+			RecipeID: installing.ID, NodeID: member.identity.NodeID, IdempotencyKey: "install-the-other-model",
+			Intent: IndependentIntent{Confirmed: true, AcceptLicence: true, ConfirmTerritoryEligibility: true},
+		})
+		createDone <- pairPlacementResult{deployment: deployment, created: created, err: err}
+	}()
+	install := <-createDone
+	if install.err != nil || !install.created || install.deployment.OwnerJobID == "" {
+		t.Fatalf("another model on the same Spark was held up: record=%+v err=%v", install.deployment, install.err)
+	}
+
+	gate.open()
+	adopt := <-adoptDone
+	if adopt.err != nil || !adopt.created || adopt.deployment.OwnerJobID == "" {
+		t.Fatalf("the adoption did not finish: record=%+v err=%v", adopt.deployment, adopt.err)
+	}
+	if install.deployment.DeploymentID == adopt.deployment.DeploymentID {
+		t.Fatalf("both models share one record id: %s", adopt.deployment.DeploymentID)
+	}
 }

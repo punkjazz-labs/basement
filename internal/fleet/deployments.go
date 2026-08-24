@@ -206,6 +206,18 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 	// the first shipped console writes one, this derivation is frozen.
 	deploymentID := stablePlacementID("deployment_", authority, "key:"+request.IdempotencyKey)
 	reservationID := stablePlacementID("reservation_", request.NodeID, deploymentID)
+	// One model on one Spark is one live record, so one flow at a time works on
+	// that pair. The pair lock is held from before the duplicate check below to
+	// after the record write at the end, and across the node calls between
+	// them, exactly as the id lock is. Without it, two creates for one pair
+	// both do install work on the Spark before one of them loses at the record
+	// write.
+	//
+	// Lock order: the pair lock comes before the id lock. placementPairLock
+	// carries the walk of every path that takes the id lock.
+	pair := m.placementPairLock(request.NodeID, selected.ID)
+	pair.Lock()
+	defer pair.Unlock()
 	lock := m.placementLock(deploymentID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -349,6 +361,14 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	// The version is deliberately absent: one model on one node is one
 	// deployment, and updating it must not fork the record.
 	deploymentID := stablePlacementID("deployment_", authority, adoptPlacementKey(nodeID, recipeID))
+	// The same pair lock as the create path, for the same reason, and taken in
+	// the same order: before the id lock. A rebuild below leaves this record in
+	// state "removed" while it calls the Spark, and a create for the pair steps
+	// over a removed record in its duplicate check. Without this lock the two
+	// flows both complete and the pair holds two live records.
+	pair := m.placementPairLock(nodeID, selected.ID)
+	pair.Lock()
+	defer pair.Unlock()
 	lock := m.placementLock(deploymentID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -532,6 +552,39 @@ func (m *Manager) placementLock(deploymentID string) *sync.Mutex {
 	if lock == nil {
 		lock = &sync.Mutex{}
 		m.placementLocks[deploymentID] = lock
+	}
+	return lock
+}
+
+// placementPairLock guards one model on one Spark. That pair is the unit the
+// fleet keeps to one live record, and a deployment id is not: the create path
+// derives its id from an idempotency key and the adopt path derives its id
+// from the pair itself, so two ids can name one pair. The id lock alone
+// therefore lets two flows for one pair run at the same time.
+//
+// The lengths in the key keep a colon inside a node id or a recipe id from
+// building the key of some other pair, as adoptPlacementKey does. The map only
+// grows, exactly as placementLocks does. That is safe here: the key space is
+// the Sparks in a fleet multiplied by the models in the catalogue.
+//
+// Lock order: a flow takes this lock BEFORE placementLock, and never after it.
+// Only CreateIndependentDeployment and AdoptIndependentDeployment take both.
+// The two other holders of the id lock, ActionDeployment and
+// ReleaseDeployment, act on a record that exists already, so they take the id
+// lock alone and must not take this one. Nothing that runs inside the two
+// placement flows calls back into a path that takes this lock: the node-side
+// steps (prepareIndependent, commitIndependent, startIndependent,
+// adoptIndependent) take neither lock, and so do Deployment,
+// supersedeDuplicateDeployment, and every store write. The order therefore
+// cannot reverse, and the two locks cannot hold each other.
+func (m *Manager) placementPairLock(nodeID, recipeID string) *sync.Mutex {
+	key := fmt.Sprintf("%d:%s:%d:%s", len(nodeID), nodeID, len(recipeID), recipeID)
+	m.placementPairMu.Lock()
+	defer m.placementPairMu.Unlock()
+	lock := m.placementPairLocks[key]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.placementPairLocks[key] = lock
 	}
 	return lock
 }

@@ -77,10 +77,15 @@ type Manager struct {
 	runtime         IndependentRuntime
 	placementMu     sync.Mutex
 	placementLocks  map[string]*sync.Mutex
-	upgradeRuntime  UpgradeRuntime
-	upgradeMu       sync.Mutex
-	upgradeRunning  bool
-	upgradeRetry    time.Duration
+	// The pair locks sit one level above the id locks. See placementPairLock
+	// for what a pair is and for the order the two locks are taken in.
+	placementPairMu    sync.Mutex
+	placementPairLocks map[string]*sync.Mutex
+
+	upgradeRuntime UpgradeRuntime
+	upgradeMu      sync.Mutex
+	upgradeRunning bool
+	upgradeRetry   time.Duration
 	// These calls are seams for deterministic rolling-upgrade tests. Production
 	// assigns the mutual TLS and local-runtime implementations once in
 	// NewManager and never reassigns them.
@@ -119,12 +124,13 @@ func NewManager(ctx context.Context, options Options) (*Manager, error) {
 		identity: identity, database: options.Database, allocator: NewAllocator(options.Database, identity.NodeID), inventory: options.Inventory,
 		version: options.Version, buildIdentity: options.BuildIdentity, displayName: displayName,
 		consoleURL: consoleURL, nodeURL: nodeURL, now: time.Now, catalogueDigest: digest,
-		catalogue:      append([]recipe.Recipe(nil), options.Recipes...),
-		effective:      append([]recipe.Recipe(nil), options.EffectiveRecipes...),
-		placementLocks: make(map[string]*sync.Mutex),
-		upgradeRetry:   time.Second,
-		invitations:    make(map[string]*invitation),
-		attempts:       make(map[string]*inviteAttempt),
+		catalogue:          append([]recipe.Recipe(nil), options.Recipes...),
+		effective:          append([]recipe.Recipe(nil), options.EffectiveRecipes...),
+		placementLocks:     make(map[string]*sync.Mutex),
+		placementPairLocks: make(map[string]*sync.Mutex),
+		upgradeRetry:       time.Second,
+		invitations:        make(map[string]*invitation),
+		attempts:           make(map[string]*inviteAttempt),
 	}
 	if len(manager.effective) == 0 {
 		manager.effective = append([]recipe.Recipe(nil), options.Recipes...)
