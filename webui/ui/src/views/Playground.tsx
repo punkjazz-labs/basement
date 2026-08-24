@@ -6,8 +6,8 @@ import { logoFor } from '../catalog'
 import { confirmBox } from '../confirm'
 import {
   answerMeter, clearQuestion, composerHeight, hasDelta, jumpInFlight, mergeDelta, pinnedToBottom,
-  shouldReleasePin, splitStreamTail, stoppedMeter, tokenMeter, waitMeter, withCaret, NO_DELTA,
-  type PendingDelta,
+  retryQuestion, shouldReleasePin, splitStreamTail, stoppedMeter, tokenMeter, waitMeter, withCaret,
+  NO_DELTA, type PendingDelta,
 } from '../chat'
 import {
   COUNCIL_STAGES, councilByline, councilHistory, councilOffered, runCouncil, seedFrom, stageState,
@@ -51,11 +51,14 @@ const thinkingText = (message: Message) => {
 }
 
 // Every code block carries the Copy that Connect gives a snippet. The wrap
-// runs after the sanitize step, and marked escapes every angle bracket inside
-// a block, so no answer can write these tags itself.
+// runs after the sanitize step, which parses the answer and writes it out
+// again, so every closing tag here has an opening tag of its own. The opening
+// tag is matched with whatever attributes it carries: an answer can write a
+// `<pre class="...">` as raw HTML, and a wrap that only knew the bare tag
+// would close a div it never opened.
 const withCodeCopy = (html: string) =>
   html
-    .replaceAll('<pre>', '<div class="codeblock"><button class="copy" type="button">Copy</button><pre>')
+    .replace(/<pre(?=[\s>])/g, '<div class="codeblock"><button class="copy" type="button">Copy</button><pre')
     .replaceAll('</pre>', '</pre></div>')
 
 // Models speak markdown; render it, sanitized, so replies read like answers
@@ -80,25 +83,42 @@ const copyCodeBlock = (event: MouseEvent<HTMLDivElement>) => {
   window.setTimeout(() => { button.textContent = COPY_LABEL }, 1600)
 }
 
-// A finished answer parses once. React leaves an html string it has already
-// written alone, so the nodes hold still while a later turn streams under
-// them and a selection inside this one survives.
+// A finished answer. The memo holds the text it was given, so the turn does
+// not render again while a later turn streams under it, and its nodes are left
+// exactly as they are.
 const Answer = memo(function Answer({ text }: { text: string }) {
   const html = useMemo(() => renderMarkdown(text), [text])
   return <div className="md" onClick={copyCodeBlock} dangerouslySetInnerHTML={{ __html: html }} />
+})
+
+// The part of the answer a blank line has closed.
+//
+// The memo is what keeps these nodes still. React writes
+// dangerouslySetInnerHTML from a fresh object on every render and does not
+// compare the string inside it, so the same html would rewrite the whole
+// subtree sixty times a second. Equal props stop the render before that, and
+// the innerHTML is written again only when a new blank line closes more of the
+// answer.
+const Closed = memo(function Closed({ html }: { html: string }) {
+  return <div className="closed" dangerouslySetInnerHTML={{ __html: html }} />
 })
 
 // The answer that is arriving. Everything above the last blank line is closed
 // and parses only when a new blank line closes more of it; the tail after it
 // is the only part that parses again on the next token. The caret sits at the
 // end of that tail, where the next word appears.
+//
+// So a selection lives as long as the block it is in stays closed. Tokens do
+// not take it. The blank line that closes the next block rewrites the closed
+// node and takes it, and so does the end of the stream, where the turn is
+// rendered once more as a finished answer.
 const LiveAnswer = memo(function LiveAnswer({ text }: { text: string }) {
   const { closed, tail } = useMemo(() => splitStreamTail(text), [text])
   const closedHTML = useMemo(() => renderMarkdown(closed, false), [closed])
   const tailHTML = useMemo(() => withCaret(renderMarkdown(tail, false)), [tail])
   return (
     <div className="md">
-      {closed !== '' && <div className="closed" dangerouslySetInnerHTML={{ __html: closedHTML }} />}
+      {closed !== '' && <Closed html={closedHTML} />}
       <div className="tail" dangerouslySetInnerHTML={{ __html: tailHTML }} />
     </div>
   )
@@ -470,10 +490,12 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       const meter = meterRef.current
       const live = meter.firstToken ? tokenMeter(meter.tokens, performance.now() - meter.firstToken) : ''
       // A stopped answer is short because the owner stopped it. Nothing else
-      // on the screen says so.
+      // on the screen says so. An answer that broke keeps what it measured
+      // before it broke: the numbers belong to the turn that produced them,
+      // and a short answer with no numbers says nothing about what arrived.
       const receipt = controller.signal.aborted
         ? stoppedMeter(receiptRef.current || live)
-        : failed ? '' : receiptRef.current
+        : receiptRef.current || live
       if (receipt) {
         setMessages(previous => {
           const next = [...previous]
@@ -501,14 +523,23 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
     void ask(content, messages)
   }
 
-  // The same question again, in place of the answer it produced. The turns
-  // under that answer went with it, so the model reads the same history the
-  // first attempt read.
-  const retry = (index: number) => {
+  // The same question again, in place of the answer it produced. The model
+  // reads the history that answer read, so everything under the answer goes
+  // with it. On the last answer there is nothing under it and the retry is
+  // immediate; anywhere else the owner is asked first, because those turns are
+  // work and nothing brings them back.
+  const retry = async (index: number) => {
     if (streaming || !ready) return
     let at = index - 1
     while (at >= 0 && messages[at].role !== 'user') at -= 1
     if (at < 0) return
+    const under = messages.slice(index + 1).filter(message => message.role === 'user').length
+    if (under > 0) {
+      const { ok } = await confirmBox({
+        ...retryQuestion(under), confirmLabel: 'Ask again', danger: true,
+      })
+      if (!ok) return
+    }
     void ask(messages[at].content, messages.slice(0, at))
   }
 
@@ -701,7 +732,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
                           {copied === index ? 'Copied' : COPY_LABEL}
                         </button>
                       )}
-                      <button className="copy-btn" onClick={() => retry(index)} disabled={streaming}>Retry</button>
+                      <button className="copy-btn" onClick={() => void retry(index)} disabled={streaming}>Retry</button>
                       {message.meter && <span className="chat-meta">{message.meter}</span>}
                     </div>
                   ) : null}

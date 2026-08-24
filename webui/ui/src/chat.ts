@@ -83,12 +83,13 @@ export function stoppedMeter(meter: string): string {
 
 export interface StreamSplit {
   // Everything up to and including the last blank line. Markdown closes a
-  // block at a blank line, so this part cannot change again: it is parsed
-  // once and the browser keeps the nodes it built for it.
+  // block at a blank line, so the text of this part cannot change again. It
+  // parses once for each blank line that arrives, not once for each token,
+  // and the caller keeps its nodes between those points.
   closed: string
-  // What arrived after that line. Only this part parses again on the next
-  // token, so the finished text above it holds still and a selection in it
-  // survives.
+  // What arrived after that line. This part parses again on every token, so
+  // the tokens alone never touch the text above it. A selection in the closed
+  // part lives until the next blank line closes another block.
   tail: string
 }
 
@@ -167,5 +168,17 @@ export function clearQuestion(model: string, turns: number): { title: string; bo
   return {
     title: `Clear the conversation with ${model}?`,
     body: `This removes ${one ? '1 turn' : `${turns} turns`}. You cannot get ${one ? 'it' : 'them'} back.`,
+  }
+}
+
+// Asking a question again replaces the answer to it, and the turns under that
+// answer go with it. On the last answer there is nothing under it and the
+// question is not asked at all.
+export function retryQuestion(turns: number): { title: string; body: string } {
+  const one = turns === 1
+  return {
+    title: 'Ask this question again?',
+    body: `The new answer replaces this one, and ${one ? 'the turn' : `the ${turns} turns`} under it ${
+      one ? 'goes' : 'go'} as well. You cannot get ${one ? 'it' : 'them'} back.`,
   }
 }

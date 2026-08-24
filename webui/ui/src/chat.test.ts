@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   COMPOSER_MAX_HEIGHT, NO_DELTA, PIN_GAP, answerMeter, clearQuestion, composerHeight, hasDelta,
-  jumpInFlight, mergeDelta, pinnedToBottom, shouldReleasePin, splitStreamTail, stoppedMeter, tokenMeter,
-  waitMeter, withCaret,
+  jumpInFlight, mergeDelta, pinnedToBottom, retryQuestion, shouldReleasePin, splitStreamTail,
+  stoppedMeter, tokenMeter, waitMeter, withCaret,
 } from './chat'
 
 describe('pinnedToBottom', () => {
@@ -239,5 +239,19 @@ describe('jumpInFlight', () => {
   // No jump is travelling, so a token scroll is the instant one.
   it('is never travelling with no jump', () => {
     expect(jumpInFlight(1000, 0)).toBe(false)
+  })
+})
+
+describe('retryQuestion', () => {
+  it('counts the turns that go with the answer', () => {
+    expect(retryQuestion(3)).toEqual({
+      title: 'Ask this question again?',
+      body: 'The new answer replaces this one, and the 3 turns under it go as well. You cannot get them back.',
+    })
+  })
+
+  it('counts one turn as one turn', () => {
+    expect(retryQuestion(1).body)
+      .toBe('The new answer replaces this one, and the turn under it goes as well. You cannot get it back.')
   })
 })
