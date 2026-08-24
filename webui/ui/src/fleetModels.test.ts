@@ -7,7 +7,8 @@ import {
   heldSomewhere, heldTabLabel, initialPlacement, installRoute, joinCandidatesWithInventory,
   machineNote, mergePlacements,
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
-  placementVerb, placementWord, powerBusy, powerFanOut, powerRefusalLine, powerRow, recipeBusy,
+  placementVerb, placementWord, powerBusy, powerFanOut, powerFanOutBusy, powerRefusalLine,
+  powerRefusedTitle, powerRow, recipeBusy, retiredPowerSets,
   rowActionRoute, rowPlacement, shouldShowMemberBanner,
   splitModels, workingNodes, workingPlacement,
   clearRecordBody, clearRecordTitle, releasePath,
@@ -16,7 +17,8 @@ import {
   DISRUPTIVE_KINDS,
   FLEET_DEPLOYMENT_ACTIONS, FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL, MANY_SPARKS_TAB,
   NO_FLEET_ROW, NO_PLACEMENT_BACK, ONE_SPARK_GROUP,
-  ONE_SPARK_TAB, PLACEMENT_REFUSED, PLACEMENT_WORKING, POWER_MODE_NOTE, TWO_SPARK_GROUP,
+  ONE_SPARK_TAB, PLACEMENT_REFUSED, PLACEMENT_WORKING, POWER_MODE_NOTE, POWER_REFUSED_TITLE,
+  TWO_SPARK_GROUP,
   type ActionTarget, type FleetRow, type PlacementTarget,
 } from './fleetModels'
 
@@ -244,12 +246,50 @@ describe('the power mode a Spark reports', () => {
   it('keeps a mode this console just set until a read carries it', () => {
     // The controller stores the mode before it answers, and that Spark reports
     // it in a heartbeat seconds later.
-    expect(powerRow(rowFor({ power_mode: FULL_MODE }), { mode: COOL_MODE, failure: '' }, idle))
-      .toMatchObject({ mode: 'cool', tag: true })
-    // Once the read agrees, the read is the authority again, sentence and all.
-    const caught = rowFor({ power_mode: COOL_MODE, power_mode_failure: NO_TOOL })
-    expect(powerRow(caught, { mode: COOL_MODE, failure: '' }, idle))
+    const set = { mode: COOL_MODE, failure: '' }
+    const behind = rowFor({ power_mode: FULL_MODE })
+    expect(powerRow(behind, set, idle)).toMatchObject({ mode: 'cool', tag: true })
+    expect(retiredPowerSets([behind], new Map([[behind.nodeID, set]]), idle)).toEqual([])
+  })
+
+  it('retires the answer once the read carries it, and follows the read from then on', () => {
+    // The window this answer covers is over. Keeping it would pin the row to
+    // a mode that Spark stopped holding as soon as anything else changed it.
+    const set = { mode: COOL_MODE, failure: '' }
+    const caught = rowFor({ power_mode: COOL_MODE })
+    expect(retiredPowerSets([caught], new Map([[caught.nodeID, set]]), idle)).toEqual(['node-lead'])
+    // A change made from another console, after the answer was retired.
+    const elsewhere = rowFor({ power_mode: FULL_MODE })
+    expect(powerRow(elsewhere, undefined, idle)).toMatchObject({ mode: 'full', tag: false })
+  })
+
+  it('keeps the answer while the call to that Spark is still running', () => {
+    // The read it would be measured against is the one this call is about to
+    // replace.
+    const caught = rowFor({ power_mode: COOL_MODE })
+    const held = new Map([[caught.nodeID, { mode: COOL_MODE, failure: '' }]])
+    expect(retiredPowerSets([caught], held, new Set(['node-lead']))).toEqual([])
+  })
+
+  it('retires an answer for a Spark this console no longer has a row for', () => {
+    expect(retiredPowerSets([], new Map([['node-gone', { mode: COOL_MODE, failure: '' }]]), idle))
+      .toEqual(['node-gone'])
+  })
+
+  it('shows the answer\'s own sentence while the read carries an older one', () => {
+    // Re-applying the same mode after a driver was fixed: the mode never
+    // moves, so only the sentence says whether the machine took it. The
+    // answer is the fresh half for a poll or two, in both directions.
+    const cleared = { mode: COOL_MODE, failure: '' }
+    const stale = rowFor({ power_mode: COOL_MODE, power_mode_failure: NO_TOOL })
+    expect(powerRow(stale, cleared, idle)).toMatchObject({ mode: 'cool', failure: '' })
+    expect(retiredPowerSets([stale], new Map([[stale.nodeID, cleared]]), idle)).toEqual([])
+    const quiet = rowFor({ power_mode: COOL_MODE })
+    expect(powerRow(quiet, { mode: COOL_MODE, failure: NO_TOOL }, idle))
       .toMatchObject({ mode: 'cool', failure: NO_TOOL })
+    // Both halves agree, so there is nothing left to keep.
+    expect(retiredPowerSets([stale], new Map([[stale.nodeID, { mode: COOL_MODE, failure: NO_TOOL }]]), idle))
+      .toEqual(['node-lead'])
   })
 
   it('states the measured line as one string, and both modes in the approved words', () => {
@@ -295,6 +335,31 @@ describe('setting the mode for every Spark', () => {
   it('names the Spark in front of a refusal that names none', () => {
     expect(powerRefusalLine('loft', 'Cannot reach this Spark. It may be offline or restarting. Try again soon.'))
       .toBe('loft: Cannot reach this Spark. It may be offline or restarting. Try again soon.')
+  })
+
+  it('does not read a longer word as the Spark\'s name', () => {
+    // A Spark called "off" must not take the word "offline" for its own name
+    // and lose the only thing that says which machine the line is about.
+    expect(powerRefusalLine('off', 'offline for now, so nothing changed.'))
+      .toBe('off: offline for now, so nothing changed.')
+    expect(powerRefusalLine('off', 'off did not answer, so nothing changed there.'))
+      .toBe('off did not answer, so nothing changed there.')
+  })
+
+  it('holds the fleet-wide button while any Spark it names is mid-change', () => {
+    const rows = bothRows()
+    expect(powerFanOutBusy(rows, new Set())).toBe(false)
+    // The Spark being set is not the one whose card is open.
+    expect(powerFanOutBusy(rows, new Set(['node-loft']))).toBe(true)
+    // A Spark added by address is never named by the run, so work on it holds
+    // nothing back.
+    const withPeer = bothRows({}, [peer('shed', 'http://shed.local:7070')])
+    expect(powerFanOutBusy(withPeer, new Set(['shed']))).toBe(false)
+  })
+
+  it('names the one Spark in the title of a single refusal', () => {
+    expect(powerRefusedTitle('loft')).toBe('loft did not take the mode')
+    expect(POWER_REFUSED_TITLE).toBe('Not every Spark took the mode')
   })
 })
 

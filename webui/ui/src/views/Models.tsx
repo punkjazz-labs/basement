@@ -16,7 +16,8 @@ import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
   heldTabLabel, initialPlacement, installRoute, mergePlacements, modelChips, placedTarget,
   placementBusy, placementOptions, placementSwitchFrom, placementTargets, placementVerb,
-  placementWord, powerFanOut, powerRefusalLine, powerRow, recipeBusy, rowActionRoute, rowPlacement,
+  placementWord, powerFanOut, powerFanOutBusy, powerRefusalLine, powerRefusedTitle, powerRow,
+  recipeBusy, retiredPowerSets, rowActionRoute, rowPlacement,
   shouldShowMemberBanner, splitModels,
   clearRecordBody, clearRecordTitle, releasePath, workingNodes, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CLEAR_RECORD, CLEAR_RECORD_CONFIRM,
@@ -60,9 +61,10 @@ const NODE_CARD_ID = 'fleet-node-card'
 // The fleet in one line above the table: every Spark, whether it serves
 // something, and how much memory and disk it has free. Every number is one
 // that Spark reported about itself, and n/a means it has reported none yet.
-// Each chip opens that Spark's own card below the line. A Spark running
-// capped carries the small "cool" tag, and only a Spark that really reported
-// that mode carries it.
+// Each chip opens that Spark's own card below the line. A Spark in the cool
+// mode carries the small "cool" tag: the mode the row shows, which is what
+// that Spark reported, or what this console has just set on it while the read
+// catches up. A Spark that has reported no mode carries no tag.
 function FleetStrip({ sparks, power, open, onOpen }: {
   sparks: FleetRow[]
   power: Map<string, PowerRow>
@@ -107,9 +109,12 @@ const sizeLine = (free?: number, total?: number): string =>
 // row states what the mode does with the figures measured on this hardware.
 // A Spark that has reported no mode gets a dead control and no selection:
 // nothing here guesses that a silent Spark runs at full speed.
-function NodeCard({ spark, power, onSet, onSetEveryone }: {
+function NodeCard({ spark, power, everyBusy, onSet, onSetEveryone }: {
   spark: FleetRow
   power: PowerRow
+  // Whether a change is running on any Spark the fleet-wide button would
+  // name, which is not always this one.
+  everyBusy: boolean
   onSet: (mode: string) => void
   onSetEveryone: (mode: string) => void
 }) {
@@ -166,7 +171,7 @@ function NodeCard({ spark, power, onSet, onSetEveryone }: {
         <button
           type="button"
           className="ghost"
-          disabled={power.disabled}
+          disabled={power.disabled || everyBusy}
           onClick={() => onSetEveryone(power.mode)}
         >
           {EVERY_SPARK}
@@ -444,6 +449,21 @@ export default function Models({
   const openRow = sparks.find(spark => spark.nodeID === openSpark)
   const openPower = openRow && powerRows.get(openRow.nodeID)
   const showMemberBanner = shouldShowMemberBanner(fleetRoleSummary)
+
+  // A mode this console set is kept only until the fleet read carries it.
+  // This runs on every read, so the answer is retired the moment it has
+  // nothing left to add, and every later change is read from the fleet like
+  // any other fact about that Spark.
+  useEffect(() => {
+    const retired = retiredPowerSets(sparks, powerSet, powerSetting)
+    if (retired.length === 0) return
+    setPowerSet(previous => {
+      const next = new Map(previous)
+      for (const nodeID of retired) next.delete(nodeID)
+      return next
+    })
+  }, [sparks, powerSet, powerSetting])
+
   // Which Sparks hold this model, and which one serves it now. The Spark this
   // console runs on is named only while another Spark is on screen beside it.
   const nodeChips = (recipe: Recipe) =>
@@ -626,7 +646,14 @@ export default function Models({
         return next
       })
     }
-    if (refused.length > 0) noticeBox(POWER_REFUSED_TITLE, refused.join('\n'))
+    // A run over one Spark has one Spark to name; a fleet-wide run names none
+    // in the title and every refused one in the lines under it.
+    if (refused.length > 0) {
+      noticeBox(
+        targets.length === 1 ? powerRefusedTitle(targets[0].displayName) : POWER_REFUSED_TITLE,
+        refused.join('\n'),
+      )
+    }
   }
 
   // Which Sparks the controller would place this model on. A model that needs
@@ -1430,6 +1457,7 @@ export default function Models({
         <NodeCard
           spark={openRow}
           power={openPower}
+          everyBusy={powerFanOutBusy(sparks, powerSetting)}
           onSet={mode => setPowerMode([openRow], mode)}
           onSetEveryone={mode => setPowerMode(powerFanOut(sparks), mode)}
         />

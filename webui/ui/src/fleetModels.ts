@@ -181,8 +181,11 @@ export const POWER_MODE_BUSY = 'Setting the power mode.'
 // The ghost button that copies this Spark's mode to the whole fleet.
 export const EVERY_SPARK = 'Set for every Spark'
 
-// The title over the refusals one fleet-wide run left behind.
+// The title over the refusals one fleet-wide run left behind, and the one
+// over a refusal from a single Spark. A run over one machine has one machine
+// to name, so it names it.
 export const POWER_REFUSED_TITLE = 'Not every Spark took the mode'
+export const powerRefusedTitle = (displayName: string): string => `${displayName} did not take the mode`
 
 // Where the fleet sets one Spark's power mode. The controller's own node id
 // is accepted here too, so this one call serves every row of the dashboard
@@ -217,14 +220,49 @@ export interface PowerRow {
 }
 
 // The mode a row shows, once the fleet read and a mode this console set are
-// both in hand. The read is the authority, exactly as it is for placements:
-// but the controller stores a new mode before it answers, and the Spark only
-// reports it in a heartbeat seconds later, so the answer stands until a read
-// carries the same mode. Both the mode and the failure sentence then come
-// from that read, because both sides read one store.
+// both in hand. The read is the authority, exactly as it is for placements,
+// with one window: the controller stores a new mode before it answers, and
+// that Spark reports it in a heartbeat seconds later. Inside that window the
+// answer is what the machine really holds, so the answer stands whole, mode
+// and sentence together. A Spark that has just had its driver fixed reports
+// the same mode with an older sentence for a poll or two, which is why the
+// sentence is not read from a read that has only caught up with half of it.
+//
+// The answer is retired the moment the read carries all of it
+// (retiredPowerSets), and the read is the only authority from then on.
 export function shownPower(reported: PowerState, set?: PowerState): PowerState {
-  if (set === undefined || reported.mode === set.mode) return reported
+  if (set === undefined || powerSettled(reported, set)) return reported
   return set
+}
+
+// Whether the fleet read has caught up with an answer this console holds, so
+// the answer has nothing left to add.
+export const powerSettled = (reported: PowerState, set: PowerState): boolean =>
+  reported.mode === set.mode && reported.failure === set.failure
+
+// The answers a read has made redundant, by node id. A Spark being set right
+// now keeps its answer: the read it would be measured against is the one the
+// call is about to replace. A Spark this console no longer holds a row for
+// loses its answer, because nothing can show it any more.
+//
+// Retiring is what lets a later change reach this screen at all. An answer
+// kept past its window disagrees with every read after it, so a mode set from
+// another console, another tab, or by a Spark starting up would never be
+// shown: the row would hold the old mode, and the chip the old tag, until
+// this console was reloaded.
+export function retiredPowerSets(
+  sparks: readonly FleetRow[],
+  set: ReadonlyMap<string, PowerState>,
+  setting: ReadonlySet<string>,
+): string[] {
+  const rows = new Map(sparks.map(spark => [spark.nodeID, spark]))
+  const retired: string[] = []
+  for (const [nodeID, answer] of set) {
+    if (powerBusy(nodeID, setting)) continue
+    const row = rows.get(nodeID)
+    if (row === undefined || powerSettled(row.power, answer)) retired.push(nodeID)
+  }
+  return retired
 }
 
 // Whether a change is already running on that Spark, so a second click cannot
@@ -259,12 +297,22 @@ export function powerRow(row: FleetRow, set: PowerState | undefined, setting: Re
 export const powerFanOut = (sparks: readonly FleetRow[]): FleetRow[] =>
   sparks.filter(spark => spark.legacyPeerOnly !== true)
 
-// One line of the notice a fleet-wide run leaves behind. The manager's own
-// sentence already names the Spark it is about, so it is shown unchanged; a
-// refusal that never reached the manager (this console offline, the session
-// gone) names no machine, so the Spark is named in front of it.
+// Whether a fleet-wide change can be sent at all. A run is refused here while
+// any Spark it would name is already mid-change, so the button that starts it
+// has to be dead for exactly as long: a live button that does nothing is
+// worse than one that is plainly not ready.
+export const powerFanOutBusy = (sparks: readonly FleetRow[], setting: ReadonlySet<string>): boolean =>
+  powerFanOut(sparks).some(spark => powerBusy(spark.nodeID, setting))
+
+// One line of the notice a fleet-wide run leaves behind. The manager's fleet
+// door opens its refusal with the Spark's own display name, so such a
+// sentence is shown unchanged; a refusal that never reached the manager (this
+// console offline, the session gone) names no machine, so the Spark is named
+// in front of it. The test is the name at the head of the sentence and not
+// the name anywhere in it, or a Spark called "off" would read the word
+// "offline" as its own name.
 export const powerRefusalLine = (displayName: string, message: string): string =>
-  message.includes(displayName) ? message : `${displayName}: ${message}`
+  message.startsWith(`${displayName} `) ? message : `${displayName}: ${message}`
 
 // ---- Whether a member's own console shows the "ask the controller" banner --
 
