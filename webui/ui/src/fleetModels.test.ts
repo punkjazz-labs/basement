@@ -215,6 +215,35 @@ describe('which placement owns a model on a Spark', () => {
     expect(index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))?.deployment_id).toBe('deployment_new')
   })
 
+  // The manager revives an adopted record with an update, which keeps the
+  // first creation time. So a record the fleet still holds can be older than
+  // one it let go of, and the older live record is the one that owns the row.
+  it('keeps a live placement that is older than a removed one', () => {
+    const index = deploymentIndex([
+      deployment({ deployment_id: 'deployment_cleared', state: 'removed', created_at: '2026-08-23T11:00:00Z' }),
+      deployment({ deployment_id: 'deployment_revived', state: 'running', created_at: '2026-08-23T08:00:00Z' }),
+    ])
+    expect(index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))?.deployment_id)
+      .toBe('deployment_revived')
+  })
+
+  it('keeps the newest of two removed placements', () => {
+    const index = deploymentIndex([
+      deployment({ deployment_id: 'deployment_old', state: 'removed', created_at: '2026-08-23T08:00:00Z' }),
+      deployment({ deployment_id: 'deployment_new', state: 'removed', created_at: '2026-08-23T11:00:00Z' }),
+    ])
+    expect(index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))?.deployment_id).toBe('deployment_new')
+  })
+
+  // rowPlacement hides a removed record from the row, but the record has to
+  // reach the index first: the Clear tool reads it there.
+  it('keeps a removed placement when the pair has no other', () => {
+    const index = deploymentIndex([deployment({ deployment_id: 'deployment_cleared', state: 'removed' })])
+    const kept = index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))
+    expect(kept?.deployment_id).toBe('deployment_cleared')
+    expect(kept?.state).toBe('removed')
+  })
+
   it('keeps what the controller last saw of the placement, not only its id', () => {
     const index = deploymentIndex([deployment({ stale: true })])
     expect(index.get(deploymentKey('node-loft', 'qwen36-35b-a3b-nvfp4-1s'))?.stale).toBe(true)

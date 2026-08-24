@@ -154,21 +154,39 @@ export function shouldShowMemberBanner(summary: FleetSummary | null): boolean {
 export const deploymentKey = (nodeID: string, recipeID: string): string => `${nodeID}:${recipeID}`
 
 // Which placement owns each model on each Spark. A pair with more than one
-// placement keeps the newest, because that is the one the controller created
-// last and the only one a new action should act on. The whole placement is
-// kept, not only its id, because a row has to read what the controller last
-// saw of it as well as act on it.
+// placement keeps the record the fleet still holds, and only then the newest
+// of those. A removed record is one the fleet let go of, so a record that is
+// still live always wins over it. The creation time alone gives the wrong
+// answer here: the manager revives an adopted record with an update, which
+// keeps the first creation time, so a live record can be older than a removed
+// one. A pair with only a removed record keeps that record, because the row
+// still has to read it to offer the Clear tool.
+//
+// The whole placement is kept, not only its id, because a row has to read
+// what the controller last saw of it as well as act on it.
 export function deploymentIndex(deployments: FleetDeploymentView[]): Map<string, FleetDeploymentView> {
   const index = new Map<string, FleetDeploymentView>()
   for (const deployment of deployments) {
     for (const node of deployment.nodes ?? []) {
       const key = deploymentKey(node.node_id, deployment.recipe_id)
       const seen = index.get(key)
-      if (seen !== undefined && seen.created_at > deployment.created_at) continue
+      if (seen !== undefined && outranks(seen, deployment)) continue
       index.set(key, deployment)
     }
   }
   return index
+}
+
+// A record the fleet let go of. The manager never deletes a placement row, it
+// marks it removed.
+const released = (deployment: FleetDeploymentView): boolean => deployment.state === 'removed'
+
+// Whether the record already kept stays, against one more record for the same
+// Spark and model. A live record beats a removed one. Two records of the same
+// kind go by creation time, newest first.
+function outranks(seen: FleetDeploymentView, next: FleetDeploymentView): boolean {
+  if (released(seen) !== released(next)) return !released(seen)
+  return seen.created_at > next.created_at
 }
 
 // What the table holds after one read of the fleet's placements. The read is

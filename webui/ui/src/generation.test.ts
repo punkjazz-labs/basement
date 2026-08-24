@@ -447,6 +447,36 @@ describe('sortGenerationsNewestFirst', () => {
     sortGenerationsNewestFirst(input)
     expect(input).toEqual([oldest, newest])
   })
+
+  // The server trims the trailing zeros of the fractional seconds, so the
+  // text of the older run can be a prefix of the newer one. Compared as text,
+  // ".5Z" reads as newer than ".51Z", which is wrong.
+  it('puts the newer run first when its text is longer', () => {
+    const older = run('a', '2026-08-04T10:00:00.5Z')
+    const newer = run('b', '2026-08-04T10:00:00.51Z')
+    expect(sortGenerationsNewestFirst([older, newer]).map(item => item.id)).toEqual(['b', 'a'])
+    expect(sortGenerationsNewestFirst([newer, older]).map(item => item.id)).toEqual(['b', 'a'])
+  })
+
+  // Two runs of the same millisecond keep the order the server sent, which is
+  // already newest first.
+  it('keeps the order it was given for two runs that read as the same time', () => {
+    const first = run('a', '2026-08-04T10:00:00.1234561Z')
+    const second = run('b', '2026-08-04T10:00:00.1234559Z')
+    expect(sortGenerationsNewestFirst([first, second]).map(item => item.id)).toEqual(['a', 'b'])
+    expect(sortGenerationsNewestFirst([second, first]).map(item => item.id)).toEqual(['b', 'a'])
+  })
+
+  // The gallery sorts every snapshot the event stream sends. A new run at the
+  // head of that snapshot has to stay at the head.
+  it('leaves a new run at the head of an event snapshot', () => {
+    const snapshot = [
+      run('c', '2026-08-04T10:00:00.51Z'),
+      run('b', '2026-08-04T10:00:00.5Z'),
+      run('a', '2026-08-04T09:00:00Z'),
+    ]
+    expect(sortGenerationsNewestFirst(snapshot).map(item => item.id)).toEqual(['c', 'b', 'a'])
+  })
 })
 
 describe('playableVideoBlob', () => {

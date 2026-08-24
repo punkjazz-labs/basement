@@ -387,9 +387,15 @@ export function markUnseen(unseen: ReadonlySet<string>, ids: readonly string[]):
   return next
 }
 
-// The strip and the generations list both want every run newest first. The
-// server's created_at is RFC 3339 with a fixed-width fractional part, so
-// comparing it as a string already sorts it in time order.
+// The strip and the generations list both want every run newest first. Do not
+// compare created_at as text: the server trims the trailing zeros of the
+// fractional seconds, so one value can be a prefix of a later one, and the
+// text comparison then puts the older run first. Read each value as a time
+// and compare the times.
+//
+// Two runs that read as the same time keep the order they came in, because
+// Array.prototype.sort is stable and the server already lists the newest run
+// first.
 export function sortGenerationsNewestFirst(generations: Generation[]): Generation[] {
-  return [...generations].sort((left, right) => right.created_at.localeCompare(left.created_at))
+  return [...generations].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
 }
