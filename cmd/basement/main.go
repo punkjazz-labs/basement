@@ -129,6 +129,7 @@ func main() {
 	// this Spark's own, and the fleet dashboard of the controller that adopted
 	// it, so the setting has one owner however it is changed.
 	powerControl := power.NewController(db, power.Command)
+	powerControl.SetLogger(logger)
 	fleetManager.SetPowerRuntime(powerControl)
 
 	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, cachedEffective)
@@ -178,10 +179,11 @@ func main() {
 		logger.Error("reconcile active model", "error", err)
 		exit(1)
 	}
-	// The GPU clock cap does not survive a reboot, so the stored mode goes back
-	// on the GPU at every start. It runs beside the rest of the start and never
-	// inside it: a machine with no GPU, and one whose driver has stopped
-	// answering, must both start exactly as they always did.
+	// The GPU clock cap does not survive a reboot, so a mode the owner chose
+	// goes back on the GPU at every start. A setting nobody has ever chosen
+	// runs no command at all (see ApplyStored). It runs beside the rest of the
+	// start and never inside it: a machine with no GPU, and one whose driver
+	// has stopped answering, must both start exactly as they always did.
 	go func() {
 		state, err := powerControl.ApplyStored(context.Background())
 		if err != nil {

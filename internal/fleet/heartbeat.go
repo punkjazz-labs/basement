@@ -54,8 +54,16 @@ type HeartbeatPayload struct {
 	// machine did not take it. Carrying both in the heartbeat is what lets the
 	// fleet dashboard show every Spark's mode with no extra call: the
 	// controller already reads this envelope every ten seconds.
-	PowerMode        string `json:"power_mode"`
-	PowerModeFailure string `json:"power_mode_failure"`
+	//
+	// Both are omitempty, and that is a signature property rather than a taste
+	// in JSON. A heartbeat is verified by re-marshalling the decoded payload
+	// and checking the signature over those bytes, so a field this manager
+	// writes and an older one does not would make every heartbeat from that
+	// older node fail to verify here. Omitted when empty, an older node's
+	// payload re-marshals byte for byte as it was signed. Any field added to
+	// this struct after this one must do the same.
+	PowerMode        string `json:"power_mode,omitempty"`
+	PowerModeFailure string `json:"power_mode_failure,omitempty"`
 }
 
 type HeartbeatEnvelope struct {

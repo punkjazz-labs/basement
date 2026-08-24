@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -191,5 +192,57 @@ func TestHeartbeatCarriesThePowerMode(t *testing.T) {
 	}
 	if err := VerifyHeartbeat(envelope, node.identity.PublicKey, "fleet_test", node.identity.NodeID); err != nil {
 		t.Fatalf("the heartbeat with a power mode does not verify: %v", err)
+	}
+}
+
+// A heartbeat is verified by re-marshalling what was decoded, so a field this
+// manager writes and an older one does not would break every heartbeat from
+// that older node. The power fields are omitted when empty for exactly this
+// reason: a payload signed before they existed re-marshals byte for byte here.
+func TestAHeartbeatWithoutPowerFieldsStillVerifies(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, _ := newPlacementManager(t, "node-a", "192.168.99.70", recipes)
+
+	// Exactly what a manager from before this feature signs and sends.
+	legacy := testHeartbeatPayload("fleet_test", node.identity.NodeID, 1)
+	canonical, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(canonical), "power_mode") {
+		t.Fatalf("an empty power mode reached the wire: %s", canonical)
+	}
+	wire, err := json.Marshal(HeartbeatEnvelope{Payload: legacy, Signature: node.identity.Sign(canonical)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// What the controller does with it: strict decode, then verify, which
+	// re-marshals the payload it decoded.
+	var received HeartbeatEnvelope
+	if err := strictJSON(wire, &received); err != nil {
+		t.Fatalf("a heartbeat from an older node did not decode: %v", err)
+	}
+	if err := VerifyHeartbeat(received, node.identity.PublicKey, "fleet_test", node.identity.NodeID); err != nil {
+		t.Fatalf("a heartbeat from an older node did not verify: %v", err)
+	}
+	if received.Payload.PowerMode != "" || received.Payload.PowerModeFailure != "" {
+		t.Fatalf("an older node was read as reporting %q / %q", received.Payload.PowerMode, received.Payload.PowerModeFailure)
+	}
+
+	// The summary keeps both keys whatever they hold, so the console can tell
+	// an empty answer from an absent one and never draws "not reported" as
+	// full speed.
+	projected, err := json.Marshal(FleetNodeSummary{NodeID: node.identity.NodeID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"power_mode":`, `"power_mode_failure":`} {
+		if !strings.Contains(string(projected), key) {
+			t.Fatalf("the console summary dropped %s: %s", key, projected)
+		}
 	}
 }

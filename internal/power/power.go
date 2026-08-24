@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -34,10 +35,25 @@ import (
 // numbers is a support burden that buys the owner nothing.
 const CoolClockMHz = 2200
 
-// commandTimeout bounds the one command. nvidia-smi answers in well under a
-// second on a healthy machine, so a bound this generous only ever catches a
-// driver that has stopped answering at all.
-const commandTimeout = 10 * time.Second
+// commandTimeout bounds the one command, and pipeGrace bounds the wait for its
+// output after that. nvidia-smi answers in well under a second on a healthy
+// machine, so bounds this generous only ever catch a driver that has stopped
+// answering at all.
+//
+// Both are needed, and the second one is not obvious. Killing the process at
+// the deadline does not end the wait for its output: a child the driver left
+// behind keeps the pipes open, and reading them blocks until it exits. Measured
+// on this repository, that turned a ten second bound into sixty. The wait is
+// what holds the Controller lock, so an unbounded one wedges every later change
+// on this machine and reads to the fleet as a Spark that does not answer.
+// WaitDelay is what closes the pipes, so the true bound is these two added.
+//
+// They are variables only so that the test that proves the bound can shorten
+// them. Production never reassigns either.
+var (
+	commandTimeout = 10 * time.Second
+	pipeGrace      = 2 * time.Second
+)
 
 // The two failures that have a plainer word than "it failed". They are
 // sentinels so that Command can report a cause and failureSentence can name
@@ -79,7 +95,12 @@ func Arguments(mode string) ([]string, error) {
 func Command(ctx context.Context, args ...string) error {
 	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
-	output, err := exec.CommandContext(commandCtx, "nvidia-smi", args...).CombinedOutput()
+	command := exec.CommandContext(commandCtx, "nvidia-smi", args...)
+	// Without this the deadline above bounds the process and not the call: see
+	// pipeGrace. With it, a pipe still held after the process is gone ends the
+	// wait instead of outliving it.
+	command.WaitDelay = pipeGrace
+	output, err := command.CombinedOutput()
 	if err == nil {
 		return nil
 	}
@@ -88,8 +109,10 @@ func Command(ctx context.Context, args ...string) error {
 	}
 	// Checked on the context rather than on the error text: a killed process
 	// reports itself as a signal, and only the deadline knows it was a
-	// deadline.
-	if commandCtx.Err() != nil {
+	// deadline. A pipe that outlived its grace is the same answer in the same
+	// words: what did not arrive in time is the answer, whatever still holds
+	// the far end of it.
+	if commandCtx.Err() != nil || errors.Is(err, exec.ErrWaitDelay) {
 		return errTimeout
 	}
 	detail := firstLine(string(output))
@@ -126,6 +149,7 @@ func failureSentence(err error) string {
 type Controller struct {
 	database *store.Store
 	run      Runner
+	logger   *slog.Logger
 	// mu keeps one change at a time. Two owners moving the same switch at once
 	// must not leave the recorded failure of one attempt beside the mode of
 	// the other.
@@ -136,7 +160,20 @@ func NewController(database *store.Store, run Runner) *Controller {
 	if run == nil {
 		run = Command
 	}
-	return &Controller{database: database, run: run}
+	return &Controller{database: database, run: run, logger: slog.Default()}
+}
+
+// SetLogger gives this controller the manager's own logger, so the driver's
+// own words about a refusal land in the same place as everything else the
+// manager says. Called once at startup. Without it the standard logger is
+// used, which the service journal still captures.
+func (c *Controller) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		return
+	}
+	c.mu.Lock()
+	c.logger = logger
+	c.mu.Unlock()
 }
 
 // PowerMode reads the setting and changes nothing.
@@ -164,12 +201,21 @@ func (c *Controller) SetPowerMode(ctx context.Context, mode string) (store.Power
 // ApplyStored puts the stored mode back on the GPU. The driver forgets the cap
 // at every reboot, so this runs once at every manager start. It reports what
 // it found, and a caller that only wanted the side effect can ignore it.
+//
+// A setting nobody has ever chosen is left alone. Every Spark starts at full
+// speed already, so resetting the clock at boot would change nothing that
+// needed changing, and on a machine with no driver at all it would record a
+// failure against a mode that is in force. A machine that has never met this
+// feature must look exactly as it did before the feature existed.
 func (c *Controller) ApplyStored(ctx context.Context) (store.PowerMode, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	current, err := c.database.PowerMode(ctx)
 	if err != nil {
 		return store.PowerMode{}, err
+	}
+	if current.UpdatedAt == "" {
+		return current, nil
 	}
 	return c.apply(ctx, current)
 }
@@ -178,9 +224,23 @@ func (c *Controller) ApplyStored(ctx context.Context) (store.PowerMode, error) {
 // that cannot be written comes back as an error: the GPU refusing is a state
 // of this Spark, not a failure of the request that reached it.
 func (c *Controller) apply(ctx context.Context, current store.PowerMode) (store.PowerMode, error) {
-	arguments, err := Arguments(current.Mode)
-	if err != nil {
-		return store.PowerMode{}, err
+	arguments, argumentsErr := Arguments(current.Mode)
+	if argumentsErr != nil {
+		return store.PowerMode{}, argumentsErr
 	}
-	return c.database.RecordPowerModeFailure(ctx, failureSentence(c.run(ctx, arguments...)))
+	err := c.run(ctx, arguments...)
+	// A machine with no nvidia-smi is a machine at full speed, so full speed is
+	// in force on it and there is nothing to report. Saying otherwise would put
+	// a failure on every machine that has no driver, about the one mode such a
+	// machine is guaranteed to be in.
+	if current.Mode == store.PowerModeFull && errors.Is(err, errNoTool) {
+		err = nil
+	}
+	if err != nil {
+		// The driver's own words, once, here. They are what a person debugging
+		// a Spark needs and they are never stored: what the console shows is
+		// the constant sentence beside this line.
+		c.logger.Warn("GPU power mode was not applied", "mode", current.Mode, "error", err)
+	}
+	return c.database.RecordPowerModeFailure(ctx, failureSentence(err))
 }
