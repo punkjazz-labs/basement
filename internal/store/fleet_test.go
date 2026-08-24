@@ -61,7 +61,7 @@ func TestExistingSingleNodeDatabaseOpensUnchangedAfterFleetSchemaAddition(t *tes
 		t.Fatalf("existing job API stopped working after migration: created=%v err=%v", created, err)
 	}
 	var version int
-	if err := database.db.QueryRow(`SELECT version FROM schema_meta`).Scan(&version); err != nil || version != revocationSchemaVersion {
+	if err := database.db.QueryRow(`SELECT version FROM schema_meta`).Scan(&version); err != nil || version != currentSchemaVersion {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 }

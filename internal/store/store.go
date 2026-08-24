@@ -281,6 +281,9 @@ CREATE TABLE IF NOT EXISTS generations (
 	if err := s.migrateRecipeRevocations(); err != nil {
 		return err
 	}
+	if err := s.migrateNodePowerMode(); err != nil {
+		return err
+	}
 	return s.ensureFleetUpgradeResolveColumns()
 }
 
@@ -334,7 +337,13 @@ const (
 	reservationSchemaVersion     = 3
 	fleetSchemaVersion           = 4
 	revocationSchemaVersion      = 5
+	powerModeSchemaVersion       = 6
 	fleetMigrationStatementCount = 10
+	// currentSchemaVersion is the version an opened database reaches once
+	// every migration in this release has run. A test that means "this
+	// database is fully migrated" compares against this, so the next
+	// migration moves one line here instead of several in the tests.
+	currentSchemaVersion = powerModeSchemaVersion
 )
 
 // fleetMigrationStep is a failure-injection seam for the migration tests.
@@ -625,6 +634,50 @@ func (s *Store) migrateRecipeRevocations() error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit recipe revocation migration: %w", err)
+	}
+	return nil
+}
+
+// migrateNodePowerMode adds the permanent home for this Spark's GPU power
+// mode. It is one row, because one machine has one GPU power setting, and the
+// row exists from the moment the table does, so every read after this finds
+// the default rather than an absence it has to interpret.
+//
+// It is a new migration and not an edit to the one before it, for the reason
+// migrateRecipeRevocations gives: a database whose schema version is already
+// recorded skips an amended step entirely. It also adds only a new table, so
+// the immediately previous manager can still read and write every row it knew
+// about after a local updater rollback. That manager simply runs at full
+// speed, which is what it has always done.
+func (s *Store) migrateNodePowerMode() error {
+	var version int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_meta`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version >= powerModeSchemaVersion {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin node power mode migration: %w", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS node_power (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  mode TEXT NOT NULL DEFAULT 'full',
+  failure TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT ''
+)`,
+		`INSERT OR IGNORE INTO node_power(singleton,mode,failure,updated_at) VALUES(1,'full','','')`,
+		`UPDATE schema_meta SET version=6`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("migrate node power mode: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit node power mode migration: %w", err)
 	}
 	return nil
 }

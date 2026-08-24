@@ -107,6 +107,7 @@ func (m *Manager) Handler() http.Handler {
 	mux.HandleFunc("/internal/fleet/v1/deployments/independent", m.independentDeployment)
 	mux.HandleFunc("/internal/fleet/v1/deployments/adopt", m.independentDeploymentAdopt)
 	mux.HandleFunc("/internal/fleet/v1/jobs/", m.independentJob)
+	mux.HandleFunc("/internal/fleet/v1/power-mode", m.powerMode)
 	mux.HandleFunc("/internal/fleet/v1/upgrade/stage", m.upgradeStage)
 	mux.HandleFunc("/internal/fleet/v1/upgrade/apply", m.upgradeApply)
 	mux.HandleFunc("/internal/fleet/v1/upgrade/status", m.upgradeStatus)

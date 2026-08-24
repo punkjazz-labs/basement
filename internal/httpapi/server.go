@@ -28,6 +28,7 @@ import (
 	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/inventory"
 	"github.com/punkjazz-labs/basement/internal/operations"
+	"github.com/punkjazz-labs/basement/internal/power"
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/recipefeed"
 	"github.com/punkjazz-labs/basement/internal/redact"
@@ -144,6 +145,12 @@ type Server struct {
 	feedRefreshHealth  *recipefeed.Health
 	feedRefreshWorkers sync.WaitGroup
 
+	// power owns this Spark's GPU power mode: the durable setting and the one
+	// nvidia-smi call that puts it on the GPU (see power.go). nil in a manager
+	// that was never given one, which answers as a manager that cannot do this
+	// rather than as one that quietly did nothing.
+	power *power.Controller
+
 	// docredact holds every analyzed document from the console's document
 	// redactor (docs/plans/12-doc-redactor.md), in memory only. Restarting
 	// the manager loses every session, which is correct: export happens as
@@ -196,6 +203,11 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	// offering to place a model here, so all four accept API-key auth in
 	// addition to a console session (ADR-scale change: see withPeerReadAuth).
 	mux.HandleFunc("/api/v1/system", server.withPeerReadAuth(server.system))
+	// The GPU power mode of this Spark (task #22). Console session only, on
+	// both methods: what a bearer key reaches is inference, never the clock of
+	// the machine that serves it. The exact path wins over /api/v1/system
+	// above, which matches its own path and nothing under it.
+	mux.HandleFunc("/api/v1/system/power-mode", server.powerMode)
 	mux.HandleFunc("/api/v1/preflight", server.withPeerReadAuth(server.preflight))
 	mux.HandleFunc("/api/v1/recipes", server.withReadAuth(server.listRecipes))
 	// Checking the feed now rather than waiting for the next scheduled cycle.
@@ -265,6 +277,10 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/fleet/deployments/adopt", server.fleetDeploymentAdopt)
 	mux.HandleFunc("/api/v1/fleet/deployments/", server.fleetDeploymentAction)
 	mux.HandleFunc("/api/v1/fleet/upgrade", server.withReadAuth(server.fleetUpgradeAPI))
+	// One dashboard sets the power mode of any Spark in the fleet. Reading it
+	// needs no route: every node reports its own mode in the heartbeat, so
+	// /api/v1/fleet already carries it.
+	mux.HandleFunc("/api/v1/fleet/power-mode", server.fleetPowerMode)
 	// Two-Spark serving: the head node drives this node's own rank through
 	// these, authenticated by fleet API key only (see withNodeAuth).
 	mux.HandleFunc("/api/v1/internal/node/fabric", server.withNodeAuth(server.nodeFabric))
@@ -311,6 +327,14 @@ func (s *Server) SetFleetManager(manager *fleet.Manager) {
 		manager.SetIndependentRuntime(s)
 		manager.SetUpgradeRuntime(s)
 	}
+}
+
+// SetPowerController wires this Spark's GPU power boundary. Called once at
+// startup, before the listener starts. The same controller is given to the
+// fleet manager, so a change that arrives from the fleet dashboard and a
+// change made on this console are one code path and one setting.
+func (s *Server) SetPowerController(controller *power.Controller) {
+	s.power = controller
 }
 
 // SetRecipes replaces the catalog and its version history in one call — see

@@ -22,6 +22,7 @@ import (
 	"github.com/punkjazz-labs/basement/internal/httpapi"
 	"github.com/punkjazz-labs/basement/internal/inventory"
 	"github.com/punkjazz-labs/basement/internal/operations"
+	"github.com/punkjazz-labs/basement/internal/power"
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/recipefeed"
 	"github.com/punkjazz-labs/basement/internal/store"
@@ -124,8 +125,15 @@ func main() {
 	// the embedded recipes remain the permanent offline floor either way.
 	jobEngine.SetRecipes(cachedAll, cachedEffective)
 
+	// The GPU power mode of this machine. One controller serves both consoles:
+	// this Spark's own, and the fleet dashboard of the controller that adopted
+	// it, so the setting has one owner however it is changed.
+	powerControl := power.NewController(db, power.Command)
+	fleetManager.SetPowerRuntime(powerControl)
+
 	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, cachedEffective)
 	api.SetFleetManager(fleetManager)
+	api.SetPowerController(powerControl)
 	api.SetRecipes(cachedAll, cachedEffective)
 	// A Spark adopted from this console is installed to listen the same way
 	// this one does (ADR 0014), so the API needs to know how that is.
@@ -170,6 +178,18 @@ func main() {
 		logger.Error("reconcile active model", "error", err)
 		exit(1)
 	}
+	// The GPU clock cap does not survive a reboot, so the stored mode goes back
+	// on the GPU at every start. It runs beside the rest of the start and never
+	// inside it: a machine with no GPU, and one whose driver has stopped
+	// answering, must both start exactly as they always did.
+	go func() {
+		state, err := powerControl.ApplyStored(context.Background())
+		if err != nil {
+			logger.Error("apply stored GPU power mode", "error", err)
+			return
+		}
+		logger.Info("GPU power mode", "mode", state.Mode, "failure", state.Failure)
+	}()
 	// One server, one handler, one listener per configured address: the
 	// console answers the same way on every address it binds. Binding
 	// happens here, before anything starts serving, so an address that

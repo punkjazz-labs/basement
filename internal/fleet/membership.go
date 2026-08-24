@@ -75,6 +75,7 @@ type Manager struct {
 	catalogue       []recipe.Recipe
 	effective       []recipe.Recipe
 	runtime         IndependentRuntime
+	power           PowerRuntime
 	placementMu     sync.Mutex
 	placementLocks  map[string]*sync.Mutex
 	// The pair locks sit one level above the id locks. See placementPairLock
@@ -224,6 +225,21 @@ func (m *Manager) SetUpgradeRuntime(runtime UpgradeRuntime) {
 	m.catalogueMu.Lock()
 	m.upgradeRuntime = runtime
 	m.catalogueMu.Unlock()
+}
+
+// SetPowerRuntime wires this node's own GPU power boundary (see power.go). A
+// manager without one still reports every node's mode from the heartbeat; it
+// only cannot change its own.
+func (m *Manager) SetPowerRuntime(runtime PowerRuntime) {
+	m.catalogueMu.Lock()
+	m.power = runtime
+	m.catalogueMu.Unlock()
+}
+
+func (m *Manager) powerRuntime() PowerRuntime {
+	m.catalogueMu.RLock()
+	defer m.catalogueMu.RUnlock()
+	return m.power
 }
 
 func (m *Manager) upgradeRuntimeValue() UpgradeRuntime {
@@ -429,6 +445,12 @@ type FleetNodeSummary struct {
 	ClockSkew            bool              `json:"clock_skew"`
 	Inventory            *inventory.System `json:"inventory,omitempty"`
 	InstalledModels      []ModelSnapshot   `json:"installed_models"`
+	// The GPU power mode this node reported for itself. Both fields are always
+	// present, and both are empty for a node whose heartbeat has not arrived
+	// yet: an empty mode means "not reported", which is not the same as full
+	// speed and must not be drawn as if it were.
+	PowerMode        string `json:"power_mode"`
+	PowerModeFailure string `json:"power_mode_failure"`
 }
 
 type Summary struct {
@@ -460,7 +482,13 @@ func (m *Manager) Summary(ctx context.Context) (Summary, error) {
 		if inspectErr != nil {
 			return Summary{}, inspectErr
 		}
-		result.Nodes = []FleetNodeSummary{{NodeID: m.identity.NodeID, DisplayName: m.displayName, Role: "standalone", Status: "fresh", ConsoleURL: m.consoleURL, NodeURL: m.nodeURL, ManagerVersion: m.version, ManagerBuildIdentity: m.buildIdentity, CatalogueDigest: m.digest(), InstalledModels: snapshots, Inventory: &system}}
+		// A Spark that belongs to no fleet sends itself no heartbeat, so its
+		// own power mode is read straight from its own store.
+		power, powerErr := m.database.PowerMode(ctx)
+		if powerErr != nil {
+			return Summary{}, powerErr
+		}
+		result.Nodes = []FleetNodeSummary{{NodeID: m.identity.NodeID, DisplayName: m.displayName, Role: "standalone", Status: "fresh", ConsoleURL: m.consoleURL, NodeURL: m.nodeURL, ManagerVersion: m.version, ManagerBuildIdentity: m.buildIdentity, CatalogueDigest: m.digest(), InstalledModels: snapshots, Inventory: &system, PowerMode: power.Mode, PowerModeFailure: power.Failure}}
 		return result, nil
 	}
 	nodes, err := m.database.FleetNodes(ctx)
@@ -495,6 +523,8 @@ func (m *Manager) Summary(ctx context.Context) (Summary, error) {
 			if err := strictJSON(node.HeartbeatPayload, &payload); err == nil {
 				summary.Inventory = &payload.Inventory
 				summary.InstalledModels = payload.InstalledModels
+				summary.PowerMode = payload.PowerMode
+				summary.PowerModeFailure = payload.PowerModeFailure
 				if remoteTime, err := time.Parse(time.RFC3339Nano, payload.LocalTime); err == nil {
 					received, _ := time.Parse(time.RFC3339Nano, node.HeartbeatReceivedAt)
 					delta := received.Sub(remoteTime)

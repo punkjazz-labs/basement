@@ -50,6 +50,12 @@ type HeartbeatPayload struct {
 	InstalledModels      []ModelSnapshot      `json:"installed_models"`
 	Allocations          []AllocationSnapshot `json:"allocations"`
 	CatalogueDigest      string               `json:"catalogue_digest"`
+	// The GPU power mode this node is set to, and the sentence that says the
+	// machine did not take it. Carrying both in the heartbeat is what lets the
+	// fleet dashboard show every Spark's mode with no extra call: the
+	// controller already reads this envelope every ten seconds.
+	PowerMode        string `json:"power_mode"`
+	PowerModeFailure string `json:"power_mode_failure"`
 }
 
 type HeartbeatEnvelope struct {
@@ -145,10 +151,15 @@ func BuildHeartbeat(ctx context.Context, identity *Identity, database *store.Sto
 		}
 		allocations = append(allocations, AllocationSnapshot{DeploymentID: reservation.DeploymentID, State: reservation.State})
 	}
+	power, err := database.PowerMode(ctx)
+	if err != nil {
+		return HeartbeatEnvelope{}, fmt.Errorf("read power mode for heartbeat: %w", err)
+	}
 	return SignHeartbeat(identity, HeartbeatPayload{
 		Version: ProtocolVersion, FleetID: fleetID, NodeID: identity.NodeID,
 		ManagerVersion: managerVersion, ManagerBuildIdentity: buildIdentity,
 		Sequence: sequence, LocalTime: at.UTC().Format(time.RFC3339Nano), Inventory: system,
 		InstalledModels: snapshots, Allocations: allocations, CatalogueDigest: catalogueDigest,
+		PowerMode: power.Mode, PowerModeFailure: power.Failure,
 	})
 }

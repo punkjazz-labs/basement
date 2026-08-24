@@ -54,6 +54,7 @@ you are touching.
 | `internal/store/` | SQLite persistence (jobs, models, keys, peers) |
 | `internal/auth/` | pairing token, session signing key, console session auth (API keys live in the store) |
 | `internal/inventory/` | host facts (GPU, memory, disk, Docker) |
+| `internal/power/` | the GPU power mode: the durable "full" or "cool" setting and the one `nvidia-smi` call that applies it |
 | `internal/setup/`, `internal/setupweb/` | the installer's SSH flow and its loopback wizard page |
 | `internal/webui/` | `go:embed assets/*` — the committed console build |
 | `webui/ui/` | React 19 + TypeScript + Vite console source |

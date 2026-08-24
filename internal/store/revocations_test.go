@@ -150,8 +150,11 @@ func TestRevocationsTableIsCreatedByItsOwnMigration(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_meta`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != revocationSchemaVersion {
-		t.Fatalf("schema version = %d, want %d", version, revocationSchemaVersion)
+	// Later migrations move the head past this one. What this test means is
+	// that the revocation step itself ran, so it asks whether the database got
+	// at least that far.
+	if version < revocationSchemaVersion {
+		t.Fatalf("schema version = %d, want at least %d", version, revocationSchemaVersion)
 	}
 	var name string
 	if err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='recipe_revocations'`).Scan(&name); err != nil {
