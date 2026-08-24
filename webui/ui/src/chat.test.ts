@@ -222,7 +222,7 @@ describe('splitStreamTail', () => {
 
   it('a fence line with a trailing tab does not close, as the renderer reads it', () => {
     const text = 'Look:\n\n```go\nx := 1\n```\t\n\nstill inside'
-    expect(splitStreamTail(text)).toEqual({ closed: '', tail: text })
+    expect(splitStreamTail(text)).toEqual({ closed: 'Look:\n\n', tail: '```go\nx := 1\n```\t\n\nstill inside' })
   })
 
   // A longer fence takes a fence at least as long to close it, so the three
