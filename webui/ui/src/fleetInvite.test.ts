@@ -17,6 +17,8 @@ const node = (overrides: Partial<FleetNodeSummary> = {}): FleetNodeSummary => ({
   console_url: 'http://attic.local:7070',
   node_url: 'https://attic.local:7071',
   manager_version: 'v0.5.11',
+  power_mode: '',
+  power_mode_failure: '',
   ...overrides,
 })
 

@@ -584,6 +584,23 @@ export interface FleetNodeSummary {
   // memory free.
   inventory?: NodeInventory
   installed_models?: FleetModelSnapshot[]
+  // The power mode that Spark holds ("full" or "cool"), and the sentence its
+  // own machine gave when the GPU did not take it. The manager always sends
+  // both keys, and both are empty for a Spark whose heartbeat has not
+  // arrived yet. Empty is not full speed: it means that Spark has reported
+  // no mode at all, so nothing here may draw it as capped or as full.
+  power_mode: string
+  power_mode_failure: string
+}
+
+// What POST /api/v1/fleet/power-mode answers with: the Spark it acted on, the
+// mode that Spark now holds, and the sentence its GPU gave if it refused the
+// change. failure is empty while the mode is in force.
+export interface FleetPowerMode {
+  node_id: string
+  mode: string
+  failure: string
+  updated_at?: string
 }
 
 // A node's own reading of its machine, as it rides inside the membership

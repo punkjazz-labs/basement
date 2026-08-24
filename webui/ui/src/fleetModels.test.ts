@@ -7,13 +7,16 @@ import {
   heldSomewhere, heldTabLabel, initialPlacement, installRoute, joinCandidatesWithInventory,
   machineNote, mergePlacements,
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
-  placementVerb, placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner,
+  placementVerb, placementWord, powerBusy, powerFanOut, powerRefusalLine, powerRow, recipeBusy,
+  rowActionRoute, rowPlacement, shouldShowMemberBanner,
   splitModels, workingNodes, workingPlacement,
   clearRecordBody, clearRecordTitle, releasePath,
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME,
-  CHOOSE_FOR_ME_NOTE, CLEAR_RECORD, CLEAR_RECORD_CONFIRM, DISRUPTIVE_KINDS,
-  FLEET_DEPLOYMENT_ACTIONS, MANY_SPARKS_TAB, NO_FLEET_ROW, NO_PLACEMENT_BACK, ONE_SPARK_GROUP,
-  ONE_SPARK_TAB, PLACEMENT_REFUSED, PLACEMENT_WORKING, TWO_SPARK_GROUP,
+  CHOOSE_FOR_ME_NOTE, CLEAR_RECORD, CLEAR_RECORD_CONFIRM, COOL_MODE, COOL_MODE_LABEL, COOL_TAG,
+  DISRUPTIVE_KINDS,
+  FLEET_DEPLOYMENT_ACTIONS, FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL, MANY_SPARKS_TAB,
+  NO_FLEET_ROW, NO_PLACEMENT_BACK, ONE_SPARK_GROUP,
+  ONE_SPARK_TAB, PLACEMENT_REFUSED, PLACEMENT_WORKING, POWER_MODE_NOTE, TWO_SPARK_GROUP,
   type ActionTarget, type FleetRow, type PlacementTarget,
 } from './fleetModels'
 
@@ -44,6 +47,8 @@ const node = (overrides: Partial<FleetNodeSummary> = {}): FleetNodeSummary => ({
   last_heartbeat_at: RECENT,
   inventory: inventory(),
   installed_models: [],
+  power_mode: 'full',
+  power_mode_failure: '',
   ...overrides,
 })
 
@@ -182,6 +187,117 @@ describe('one row per Spark', () => {
   })
 })
 
+describe('the power mode a Spark reports', () => {
+  // One Spark's own row, built the way the screen builds it.
+  const rowFor = (overrides: Partial<FleetNodeSummary> = {}): FleetRow =>
+    fleetRows(summary({ nodes: [node(overrides)] }), [], 'http://attic.local:7070', NOW)[0]
+  const idle: ReadonlySet<string> = new Set()
+  // One of the three sentences the manager sends, word for word.
+  const NO_TOOL = 'This machine has no nvidia-smi command, so the GPU clock did not change.'
+
+  it('shows a capped Spark as capped, and tags its chip', () => {
+    expect(powerRow(rowFor({ power_mode: COOL_MODE }), undefined, idle))
+      .toEqual({ mode: 'cool', disabled: false, failure: '', tag: true, busy: false })
+  })
+
+  it('shows a Spark at full speed, with no tag', () => {
+    expect(powerRow(rowFor({ power_mode: FULL_MODE }), undefined, idle))
+      .toEqual({ mode: 'full', disabled: false, failure: '', tag: false, busy: false })
+  })
+
+  it('says nothing at all about a Spark that has reported no mode', () => {
+    // Empty is not full speed and not capped: that Spark has sent no
+    // heartbeat yet, so the control has nothing to select and nothing to set.
+    // A word this console does not know is read the same way.
+    for (const power_mode of ['', 'quiet']) {
+      expect(powerRow(rowFor({ power_mode }), undefined, idle))
+        .toEqual({ mode: '', disabled: true, failure: '', tag: false, busy: false })
+    }
+  })
+
+  it('gives a Spark added by address no mode either', () => {
+    const rows = fleetRows(summary(), [peer('shed', 'http://shed.local:7070')], 'http://attic.local:7070', NOW)
+    expect(powerRow(rows[1], undefined, idle)).toMatchObject({ mode: '', disabled: true, tag: false })
+  })
+
+  it('keeps the chosen mode selected beside the Spark\'s own sentence', () => {
+    // The setting is stored whatever the chip did with it, so the switch
+    // never jumps back: the mode the owner chose stands, and the machine's
+    // own words stand under it.
+    const power = powerRow(rowFor({ power_mode: COOL_MODE, power_mode_failure: NO_TOOL }), undefined, idle)
+    expect(power).toEqual({ mode: 'cool', disabled: false, failure: NO_TOOL, tag: true, busy: false })
+  })
+
+  it('locks the control while a change runs on that Spark', () => {
+    const running = new Set(['node-lead'])
+    expect(powerBusy('node-lead', running)).toBe(true)
+    const power = powerRow(rowFor({ power_mode: FULL_MODE }), { mode: COOL_MODE, failure: '' }, running)
+    expect(power).toEqual({ mode: 'cool', disabled: true, failure: '', tag: true, busy: true })
+  })
+
+  it('leaves a Spark alone while another one is being set', () => {
+    expect(powerBusy('node-lead', new Set(['node-loft']))).toBe(false)
+    expect(powerRow(rowFor({ power_mode: FULL_MODE }), undefined, new Set(['node-loft'])))
+      .toMatchObject({ disabled: false, busy: false })
+  })
+
+  it('keeps a mode this console just set until a read carries it', () => {
+    // The controller stores the mode before it answers, and that Spark reports
+    // it in a heartbeat seconds later.
+    expect(powerRow(rowFor({ power_mode: FULL_MODE }), { mode: COOL_MODE, failure: '' }, idle))
+      .toMatchObject({ mode: 'cool', tag: true })
+    // Once the read agrees, the read is the authority again, sentence and all.
+    const caught = rowFor({ power_mode: COOL_MODE, power_mode_failure: NO_TOOL })
+    expect(powerRow(caught, { mode: COOL_MODE, failure: '' }, idle))
+      .toMatchObject({ mode: 'cool', failure: NO_TOOL })
+  })
+
+  it('states the measured line as one string, and both modes in the approved words', () => {
+    expect(POWER_MODE_NOTE).toBe(
+      'Cool and quiet caps the chip at 2200 MHz. Measured on a GB10 Spark: about a third less ' +
+      'peak power, 6 degrees cooler, the same answer speed.',
+    )
+    expect([FULL_MODE_LABEL, COOL_MODE_LABEL, COOL_TAG]).toEqual(['Full speed', 'Cool and quiet', 'cool'])
+    expect(FLEET_POWER_MODE_PATH).toBe('/api/v1/fleet/power-mode')
+  })
+})
+
+describe('setting the mode for every Spark', () => {
+  const bothRows = (extra: Partial<FleetNodeSummary> = {}, peers: Peer[] = []): FleetRow[] =>
+    fleetRows(summary({ nodes: [node(), member(extra)] }), peers, 'http://attic.local:7070', NOW)
+
+  it('names every Spark in the fleet, this console\'s own first', () => {
+    expect(powerFanOut(bothRows()).map(row => row.nodeID)).toEqual(['node-lead', 'node-loft'])
+  })
+
+  it('keeps a Spark that has gone quiet, so its refusal is said out loud', () => {
+    // The controller answers for that Spark by name. Dropping it silently
+    // would leave the owner believing it took the mode.
+    const rows = bothRows({ status: 'unreachable' })
+    expect(rows[1].answering).toBe(false)
+    expect(powerFanOut(rows).map(row => row.nodeID)).toEqual(['node-lead', 'node-loft'])
+  })
+
+  it('leaves out a Spark added by address', () => {
+    // It never joined this fleet, so the controller holds no node of that
+    // name and the call could only be refused for a machine nobody asked
+    // about.
+    const rows = bothRows({}, [peer('shed', 'http://shed.local:7070')])
+    expect(rows.map(row => row.displayName)).toEqual(['attic', 'loft', 'shed'])
+    expect(powerFanOut(rows).map(row => row.displayName)).toEqual(['attic', 'loft'])
+  })
+
+  it('shows the manager\'s own sentence when it already names the Spark', () => {
+    const refusal = 'loft did not answer, so nothing changed there.'
+    expect(powerRefusalLine('loft', refusal)).toBe(refusal)
+  })
+
+  it('names the Spark in front of a refusal that names none', () => {
+    expect(powerRefusalLine('loft', 'Cannot reach this Spark. It may be offline or restarting. Try again soon.'))
+      .toBe('loft: Cannot reach this Spark. It may be offline or restarting. Try again soon.')
+  })
+})
+
 describe('whether a member console shows the "ask the controller" banner', () => {
   it('shows for a member', () => {
     expect(shouldShowMemberBanner(summary({ role: 'member' }))).toBe(true)
@@ -303,7 +419,9 @@ describe('where one row action goes', () => {
     nodeID: 'node-loft',
     displayName: 'loft',
     isSelf: false,
+    role: 'member',
     consoleURL: 'http://loft.local:7070',
+    power: { mode: 'full', failure: '' },
     installedModels: [{ recipe_id: 'qwen36-35b-a3b-nvfp4-1s', recipe_version: 3, status: 'ready', active: true }],
     status: { word: 'Serving', dot: 'on' },
     answering: true,
@@ -474,7 +592,9 @@ describe('the Sparks named on a model row', () => {
     nodeID: `node-${name}`,
     displayName: name,
     isSelf: false,
+    role: 'member',
     consoleURL: `http://${name}.local:7070`,
+    power: { mode: 'full', failure: '' },
     installedModels: held,
     serving: held.find(model => model.active),
     status: { word: 'Idle', dot: '' },
@@ -1042,9 +1162,10 @@ describe('clearing a record the fleet can no longer read', () => {
     // With no owner, the row asks the Spark itself again, which is what lets
     // adopt-on-demand rebuild the record.
     const host: FleetRow = {
-      nodeID: 'node-loft', displayName: 'loft', isSelf: false, consoleURL: 'http://loft.local:7070',
+      nodeID: 'node-loft', displayName: 'loft', isSelf: false, role: 'member',
+      consoleURL: 'http://loft.local:7070',
       installedModels: [{ recipe_id: 'qwen36-35b-a3b-nvfp4-1s', recipe_version: 3, status: 'ready', active: true }],
-      status: { word: 'Serving', dot: 'on' }, answering: true,
+      status: { word: 'Serving', dot: 'on' }, answering: true, power: { mode: 'full', failure: '' },
     }
     expect(rowActionRoute({ ...target, host }, cleared, 'stop'))
       .toEqual({ where: 'adopt', nodeID: 'node-loft', recipeID: 'qwen36-35b-a3b-nvfp4-1s' })
@@ -1111,7 +1232,9 @@ describe('which tab a model sits under', () => {
     nodeID: `node-${name}`,
     displayName: name,
     isSelf: false,
+    role: 'member',
     consoleURL: `http://${name}.local:7070`,
+    power: { mode: 'full', failure: '' },
     installedModels: holds,
     status: { word: 'Idle', dot: '' },
     answering: true,

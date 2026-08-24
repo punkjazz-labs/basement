@@ -24,6 +24,9 @@
   --chip-line: #2f5f47;
   --warn: #d9a12f;
   --fail: #e0644e;
+  --cool: #14303e;          /* icy blue: a Spark capped to cool and quiet */
+  --cool-line: #2c607a;
+  --cool-ink: #9fd6ee;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", Roboto, sans-serif;
   --radius: 8px;
@@ -334,6 +337,45 @@ input[type='text'], input[type='password'], textarea {
 .fleet-strip .fs-node b { font-weight: 500; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--faint); font-size: 11.5px; }
 .fleet-strip .fs-name { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
 .fleet-strip .fs-end { margin-left: auto; color: var(--faint); font-size: 11.5px; }
+/* Each chip opens that Spark's own card below the line. */
+.fleet-strip button.fs-node {
+  background: none; border: 0; color: inherit; font: inherit; text-align: left;
+  padding: 3px 7px; margin: -3px -1px; border-radius: 6px;
+}
+.fleet-strip button.fs-node:hover { background: var(--hover); }
+.fleet-strip button.fs-node[aria-expanded="true"] { background: var(--surface-2); }
+/* The one place --cool is used: a Spark running at the lower clock. */
+.fs-cool {
+  font-family: var(--mono); font-size: 11px; color: var(--cool-ink);
+  background: var(--cool); border: 1px solid var(--cool-line);
+  border-radius: 4px; padding: 0 5px;
+}
+
+/* The card one strip chip opens: what that Spark reported about itself, and
+   the power mode this console can set on it. */
+.node-card {
+  background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: var(--radius); box-shadow: var(--shadow); max-width: 560px;
+}
+.node-card header {
+  padding: 12px 16px; border-bottom: 1px solid var(--line);
+  display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+}
+.node-card header .role { color: var(--faint); font-size: 12px; }
+.node-card .rows { padding: 6px 0; }
+.node-card .row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 16px; }
+.node-card .row .k { color: var(--muted); }
+.node-card .row .v { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+.node-card .row.power { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 12px; align-items: flex-start; }
+.node-card .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; }
+.node-card .seg button { background: none; border: 0; color: var(--muted); padding: 5px 12px; font: inherit; font-size: 13px; }
+.node-card .seg button + button { border-left: 1px solid var(--line-strong); }
+.node-card .seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); font-weight: 550; }
+.node-card .seg button:disabled { color: var(--faint); cursor: default; }
+.node-card .powernote { color: var(--faint); font-size: 12px; margin: 6px 16px 10px; max-width: 52ch; }
+.node-card .powernote .busy { color: var(--warn); font-family: var(--mono); }
+.node-card .powerfail { color: var(--warn); font-size: 12px; margin: 2px 16px 0; max-width: 52ch; }
+.node-card .everyspark { margin: 0 16px 12px; }
 
 /* expanded detail — the "A depth" inside a row */
 .mdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }

@@ -20,6 +20,10 @@ export interface FleetRow {
   nodeID: string
   displayName: string
   isSelf: boolean
+  // What that Spark does in the fleet, in the manager's own word for it
+  // ("controller" or "member"). A Spark added by address is in no fleet, so
+  // it has no role and this is empty.
+  role: string
   // Where that Spark's own console answers. It is also the key the rows are
   // de-duplicated on, so every row here has one.
   consoleURL: string
@@ -35,6 +39,10 @@ export interface FleetRow {
   // as it being in the fleet: a member that has stopped sending heartbeats is
   // still a member, and an action sent to it would only fail.
   answering: boolean
+  // The power mode that Spark last reported, and its own sentence about a GPU
+  // that did not take it. Both come from the same heartbeat as everything
+  // else here, so both are empty until one has arrived.
+  power: PowerState
   // A Spark added by address that never joined the fleet. This console knows
   // its name and nothing else about it, so its row carries no machine facts
   // and no status word.
@@ -108,9 +116,13 @@ export function fleetRows(
       nodeID: peer.id,
       displayName: peer.name,
       isSelf: false,
+      role: '',
       consoleURL: peer.base_url,
       installedModels: [],
       status: LEGACY_PEER_STATUS,
+      // This Spark reports nothing to this console, so it reports no power
+      // mode either.
+      power: UNREPORTED_POWER,
       // The fleet holds no membership row for this Spark, so it reports
       // nothing to this console and nothing here can act on it.
       answering: false,
@@ -130,14 +142,129 @@ function membershipRow(
     nodeID: node.node_id,
     displayName: nodeName(node),
     isSelf: isLocalNode(summary, node, selfConsoleURL),
+    role: node.role,
     consoleURL: node.console_url,
     inventory: node.inventory,
     installedModels: node.installed_models ?? [],
     serving: nodeServing(node),
     status: nodeStatus(node),
     answering: nodeAnswering(node, nowMs),
+    power: { mode: node.power_mode ?? '', failure: node.power_mode_failure ?? '' },
   }
 }
+
+// ---- How hard each Spark runs its chip ---------------------------------------
+
+// The two modes the manager knows, in its own words (internal/store/power.go).
+// Nothing else is a mode: an answer with any other word is one this console
+// cannot draw, and it is read as no mode at all.
+export const FULL_MODE = 'full'
+export const COOL_MODE = 'cool'
+
+// What each mode is called on screen, and the small tag a capped Spark
+// carries on its strip chip.
+export const FULL_MODE_LABEL = 'Full speed'
+export const COOL_MODE_LABEL = 'Cool and quiet'
+export const COOL_TAG = 'cool'
+
+// The one line under the Power row. It is one string on purpose: every figure
+// in it was measured on a GB10 Spark (two qualification run pairs on
+// edgexpert-2051, 2026-08-24), so nothing here may be assembled from a
+// number this console happens to hold.
+export const POWER_MODE_NOTE =
+  'Cool and quiet caps the chip at 2200 MHz. Measured on a GB10 Spark: about a third less peak ' +
+  'power, 6 degrees cooler, the same answer speed.'
+
+// The quiet line while the call runs.
+export const POWER_MODE_BUSY = 'Setting the power mode.'
+
+// The ghost button that copies this Spark's mode to the whole fleet.
+export const EVERY_SPARK = 'Set for every Spark'
+
+// The title over the refusals one fleet-wide run left behind.
+export const POWER_REFUSED_TITLE = 'Not every Spark took the mode'
+
+// Where the fleet sets one Spark's power mode. The controller's own node id
+// is accepted here too, so this one call serves every row of the dashboard
+// and the console holds no second way to write the setting.
+export const FLEET_POWER_MODE_PATH = '/api/v1/fleet/power-mode'
+
+// One Spark's power mode as either its heartbeat or a set answer reports it.
+// mode is "full", "cool", or empty for a Spark that has reported none.
+export interface PowerState {
+  mode: string
+  failure: string
+}
+
+// A Spark that has said nothing about its chip. It is not full speed, and it
+// is not capped: it is nothing, and the row has to say nothing.
+const UNREPORTED_POWER: PowerState = { mode: '', failure: '' }
+
+// What the Power row shows for one Spark.
+export interface PowerRow {
+  // Which of the two buttons reads as chosen. Empty selects neither.
+  mode: string
+  // Both buttons dead: this Spark has reported no mode, or a change is
+  // already running on it.
+  disabled: boolean
+  // That Spark's own sentence about a GPU that did not take the mode, ready
+  // to render unchanged. Empty while the mode is in force.
+  failure: string
+  // Whether the strip chip carries the small "cool" tag.
+  tag: boolean
+  // Whether the quiet busy line stands under the row.
+  busy: boolean
+}
+
+// The mode a row shows, once the fleet read and a mode this console set are
+// both in hand. The read is the authority, exactly as it is for placements:
+// but the controller stores a new mode before it answers, and the Spark only
+// reports it in a heartbeat seconds later, so the answer stands until a read
+// carries the same mode. Both the mode and the failure sentence then come
+// from that read, because both sides read one store.
+export function shownPower(reported: PowerState, set?: PowerState): PowerState {
+  if (set === undefined || reported.mode === set.mode) return reported
+  return set
+}
+
+// Whether a change is already running on that Spark, so a second click cannot
+// send a second call. This is the placementBusy rule for a setting rather than
+// a job: setting names every Spark a run is working through, not only the one
+// being called this second, so a row cannot take a click the run is about to
+// overwrite.
+export const powerBusy = (nodeID: string, setting: ReadonlySet<string>): boolean => setting.has(nodeID)
+
+// One Spark's Power row, read from its own report, from what this console
+// last set on it, and from whether a change is running.
+export function powerRow(row: FleetRow, set: PowerState | undefined, setting: ReadonlySet<string>): PowerRow {
+  const shown = shownPower(row.power, set)
+  const known = shown.mode === FULL_MODE || shown.mode === COOL_MODE
+  const busy = powerBusy(row.nodeID, setting)
+  return {
+    mode: known ? shown.mode : '',
+    disabled: busy || !known,
+    failure: known ? shown.failure : '',
+    tag: known && shown.mode === COOL_MODE,
+    busy,
+  }
+}
+
+// Every Spark "Set for every Spark" sends the mode to, in strip order. A Spark
+// added by address is left out: it never joined this fleet, so the controller
+// holds no node of that name and the call could only be refused for a machine
+// nobody asked about. Every real member stays in, including one that has gone
+// quiet: the controller answers for it by name, and a Spark that silently
+// dropped out of a fleet-wide change would leave the owner believing it took
+// the mode.
+export const powerFanOut = (sparks: readonly FleetRow[]): FleetRow[] =>
+  sparks.filter(spark => spark.legacyPeerOnly !== true)
+
+// One line of the notice a fleet-wide run leaves behind. The manager's own
+// sentence already names the Spark it is about, so it is shown unchanged; a
+// refusal that never reached the manager (this console offline, the session
+// gone) names no machine, so the Spark is named in front of it.
+export const powerRefusalLine = (displayName: string, message: string): string =>
+  message.includes(displayName) ? message : `${displayName}: ${message}`
 
 // ---- Whether a member's own console shows the "ask the controller" banner --
 
