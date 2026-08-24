@@ -646,3 +646,83 @@ export const recipeBusy = (
   hasLocalModel: boolean,
   working: FleetDeploymentView | undefined,
 ): boolean => localBusy || (!hasLocalModel && working !== undefined)
+
+// ---- Which tab a model sits under --------------------------------------------
+
+// The two tabs over the models table. With many models, the owner asks two
+// different questions: what do I have, and what can I get. "mine" answers the
+// first, "catalog" answers the second. Nothing here is remembered between
+// visits: the tab is a state of the screen, not of the machine.
+export type ModelsTab = 'mine' | 'catalog'
+
+// The words the tabs and the catalog groups show. They live beside the split
+// that fills them, so the tests read the same strings the screen does.
+export const ONE_SPARK_TAB = 'On your Spark'
+export const MANY_SPARKS_TAB = 'On your Sparks'
+export const CATALOG_TAB = 'Catalog'
+export const ONE_SPARK_GROUP = 'Runs on one Spark'
+export const TWO_SPARK_GROUP = 'Needs two Sparks'
+
+// What the catalog says when it holds nothing. Every model is already on a
+// Spark, which is good news, so the line states it and stops there.
+export const CATALOG_EMPTY = 'Every model is installed.'
+
+// The first tab's label. It counts the Sparks this console knows, not the
+// models on them: a console that has met no other machine speaks of one
+// Spark, and a console that leads a fleet speaks of all of them. A console
+// with no fleet row at all still runs on its own Spark, so it reads as one.
+export const heldTabLabel = (knownSparks: number): string =>
+  knownSparks > 1 ? MANY_SPARKS_TAB : ONE_SPARK_TAB
+
+// The least a recipe has to say for the split to place it.
+export interface TabbedRecipe {
+  id: string
+  topology: { spark_count: number }
+}
+
+// Whether this model already lives on a machine this console speaks for. The
+// local model list answers for this Spark. Every other Spark answers through
+// the fleet rows, which carry what each machine last reported it holds, so a
+// model on another Spark and a model that spans two Sparks are both found the
+// same way. A Spark added by address only reports nothing, so it adds nothing
+// here.
+export function heldSomewhere(
+  recipeID: string,
+  localRecipeIDs: ReadonlySet<string>,
+  sparks: readonly FleetRow[],
+): boolean {
+  if (localRecipeIDs.has(recipeID)) return true
+  return sparks.some(spark => spark.installedModels.some(model => model.recipe_id === recipeID))
+}
+
+// The table, cut into the two tabs. The catalog keeps its groups, because it
+// is the list that grows.
+export interface ModelsSplit<T> {
+  // Every model on a Spark, in the order it was given in.
+  held: T[]
+  // The catalog, in the same order, split by how many Sparks a model needs.
+  oneSpark: T[]
+  twoSparks: T[]
+  // How many models the catalog holds in all, which is the count on its tab.
+  catalogCount: number
+}
+
+// Which tab owns each model. The order inside each list is the order the
+// recipes arrived in, so the curated catalog order is kept unchanged.
+export function splitModels<T extends TabbedRecipe>(
+  recipes: readonly T[],
+  localRecipeIDs: ReadonlySet<string>,
+  sparks: readonly FleetRow[],
+): ModelsSplit<T> {
+  const split: ModelsSplit<T> = { held: [], oneSpark: [], twoSparks: [], catalogCount: 0 }
+  for (const recipe of recipes) {
+    if (heldSomewhere(recipe.id, localRecipeIDs, sparks)) {
+      split.held.push(recipe)
+      continue
+    }
+    if (recipe.topology.spark_count > 1) split.twoSparks.push(recipe)
+    else split.oneSpark.push(recipe)
+    split.catalogCount += 1
+  }
+  return split
+}

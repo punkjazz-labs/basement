@@ -4,11 +4,15 @@ import type {
 } from './api'
 import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
-  initialPlacement, installRoute, joinCandidatesWithInventory, machineNote, mergePlacements,
+  heldSomewhere, heldTabLabel, initialPlacement, installRoute, joinCandidatesWithInventory,
+  machineNote, mergePlacements,
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
-  placementVerb, placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, workingPlacement,
-  ACTION_REFUSAL, ADOPT_PATH, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME, CHOOSE_FOR_ME_NOTE, DISRUPTIVE_KINDS,
-  FLEET_DEPLOYMENT_ACTIONS, NO_FLEET_ROW, NO_PLACEMENT_BACK, PLACEMENT_REFUSED,
+  placementVerb, placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner,
+  splitModels, workingPlacement,
+  ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME,
+  CHOOSE_FOR_ME_NOTE, DISRUPTIVE_KINDS,
+  FLEET_DEPLOYMENT_ACTIONS, MANY_SPARKS_TAB, NO_FLEET_ROW, NO_PLACEMENT_BACK, ONE_SPARK_GROUP,
+  ONE_SPARK_TAB, PLACEMENT_REFUSED, TWO_SPARK_GROUP,
   type ActionTarget, type FleetRow, type PlacementTarget,
 } from './fleetModels'
 
@@ -922,5 +926,106 @@ describe('what locks one row', () => {
   it('locks nothing when neither Spark is working', () => {
     expect(recipeBusy(false, false, undefined)).toBe(false)
     expect(recipeBusy(false, true, undefined)).toBe(false)
+  })
+})
+
+describe('which tab a model sits under', () => {
+  const snapshot = (recipeID: string): FleetModelSnapshot =>
+    ({ recipe_id: recipeID, recipe_version: 1, status: 'stopped', active: false })
+
+  const row = (name: string, holds: FleetModelSnapshot[] = []): FleetRow => ({
+    nodeID: `node-${name}`,
+    displayName: name,
+    isSelf: false,
+    consoleURL: `http://${name}.local:7070`,
+    installedModels: holds,
+    status: { word: 'Idle', dot: '' },
+    answering: true,
+  })
+
+  // A Spark added by address only reports nothing to this console, so its row
+  // carries no model list at all.
+  const byAddress = (name: string): FleetRow => ({ ...row(name), legacyPeerOnly: true })
+
+  const recipe = (id: string, sparkCount = 1) => ({ id, topology: { spark_count: sparkCount } })
+
+  const fast = recipe('qwen36-35b-a3b-nvfp4-1s')
+  const coder = recipe('qwen36-27b-nvfp4-1s')
+  const agent = recipe('laguna-s-2-1-nvfp4-dflash-1s')
+  const flagship = recipe('deepseek-v4-flash-0731-2s', 2)
+  const catalogue = [fast, coder, agent, flagship]
+
+  it('puts a model this Spark holds on the first tab', () => {
+    const split = splitModels(catalogue, new Set([fast.id]), [])
+    expect(split.held).toEqual([fast])
+    expect(split.oneSpark).toEqual([coder, agent])
+    expect(split.twoSparks).toEqual([flagship])
+    expect(split.catalogCount).toBe(3)
+  })
+
+  it('puts a model another Spark in the fleet holds on the first tab', () => {
+    const split = splitModels(catalogue, new Set(), [row('attic'), row('loft', [snapshot(coder.id)])])
+    expect(split.held).toEqual([coder])
+    expect(split.oneSpark).toEqual([fast, agent])
+  })
+
+  it('puts a model that spans two Sparks on the first tab', () => {
+    const sparks = [row('attic', [snapshot(flagship.id)]), row('loft', [snapshot(flagship.id)])]
+    const split = splitModels(catalogue, new Set(), sparks)
+    expect(split.held).toEqual([flagship])
+    expect(split.twoSparks).toEqual([])
+    expect(split.catalogCount).toBe(3)
+  })
+
+  it('names a model once, whichever Spark holds it', () => {
+    const sparks = [row('attic', [snapshot(fast.id)]), row('loft', [snapshot(fast.id)])]
+    const split = splitModels(catalogue, new Set([fast.id]), sparks)
+    expect(split.held).toEqual([fast])
+    expect(split.held.length + split.catalogCount).toBe(catalogue.length)
+  })
+
+  it('keeps the order it was given inside each group', () => {
+    const split = splitModels(catalogue, new Set(), [])
+    expect(split.held).toEqual([])
+    expect(split.oneSpark).toEqual([fast, coder, agent])
+    expect(split.twoSparks).toEqual([flagship])
+    expect(split.catalogCount).toBe(4)
+  })
+
+  // The first run: nothing is installed anywhere, so the first tab is empty
+  // and the view shows the hero and one plain list instead of tabs.
+  it('holds nothing on the first tab before anything is installed', () => {
+    expect(splitModels(catalogue, new Set(), [row('attic'), byAddress('shed')]).held).toEqual([])
+  })
+
+  it('leaves the catalog empty once every model is on a Spark', () => {
+    const split = splitModels(catalogue, new Set(catalogue.map(item => item.id)), [])
+    expect(split.held).toEqual(catalogue)
+    expect(split.catalogCount).toBe(0)
+    expect(split.oneSpark).toEqual([])
+    expect(split.twoSparks).toEqual([])
+  })
+
+  it('reads a Spark added by address as holding nothing', () => {
+    expect(heldSomewhere(fast.id, new Set(), [byAddress('shed')])).toBe(false)
+    expect(heldSomewhere(fast.id, new Set([fast.id]), [])).toBe(true)
+    expect(heldSomewhere(fast.id, new Set(), [row('loft', [snapshot(fast.id)])])).toBe(true)
+    expect(heldSomewhere(fast.id, new Set(), [row('loft', [snapshot(coder.id)])])).toBe(false)
+  })
+
+  it('says Spark for one machine and Sparks for more', () => {
+    expect(heldTabLabel(0)).toBe(ONE_SPARK_TAB)
+    expect(heldTabLabel(1)).toBe(ONE_SPARK_TAB)
+    expect(heldTabLabel(2)).toBe(MANY_SPARKS_TAB)
+    expect(heldTabLabel(3)).toBe(MANY_SPARKS_TAB)
+  })
+
+  it('says each label in the approved words', () => {
+    expect(ONE_SPARK_TAB).toBe('On your Spark')
+    expect(MANY_SPARKS_TAB).toBe('On your Sparks')
+    expect(CATALOG_TAB).toBe('Catalog')
+    expect(ONE_SPARK_GROUP).toBe('Runs on one Spark')
+    expect(TWO_SPARK_GROUP).toBe('Needs two Sparks')
+    expect(CATALOG_EMPTY).toBe('Every model is installed.')
   })
 })

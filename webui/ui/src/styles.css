@@ -1354,6 +1354,14 @@ button.chip:hover { color: var(--ink); }
 .jobs button { border: 0; background: none; color: var(--muted); border-radius: 999px; padding: 4px 14px; font-size: 12.5px; font-weight: 500; }
 .jobs button[aria-current='true'] { background: var(--surface-2); color: var(--ink); font-weight: 550; }
 
+/* The Models view reuses that same switch for its two tabs, unchanged. Only
+   the count beside each label is added, and it reads exactly as the count
+   beside a model in the Playground picker reads. Each tab holds its own rows,
+   so the pane, not the table, holds the last row that drops its rule. */
+.tabs-row { display: flex; align-items: center; gap: 12px; }
+.jobs .n { color: var(--faint); font-size: 11px; margin-left: 5px; }
+.mpane[hidden] { display: none; }
+
 /* Two panes: the reply on the left, what it really says on the right.
    Restored literals wear a quiet green tint, the one place the console's
    green appears off the serving light, so the eye can audit what came

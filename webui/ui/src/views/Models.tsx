@@ -13,12 +13,14 @@ import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../f
 import { fleetSummary, MEMBERSHIP_POLL_MS, NO_ANSWER } from '../fleetInvite'
 import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
-  initialPlacement, installRoute, mergePlacements, modelChips, placedTarget, placementBusy,
-  placementOptions, placementSwitchFrom, placementTargets, placementVerb, placementWord,
-  recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, workingPlacement,
-  ACTION_REFUSAL, ADOPT_PATH, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH, NO_PLACEMENT_BACK,
-  NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
-  type ActionTarget, type FleetDeploymentAction, type FleetRow, type PlacementTarget,
+  heldTabLabel, initialPlacement, installRoute, mergePlacements, modelChips, placedTarget,
+  placementBusy, placementOptions, placementSwitchFrom, placementTargets, placementVerb,
+  placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, splitModels,
+  workingPlacement,
+  ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH,
+  NO_PLACEMENT_BACK, NO_PLACEMENT_LEFT, ONE_SPARK_GROUP, PLACEMENT_PLAN_PATH, TWO_SPARK_GROUP,
+  type ActionTarget, type FleetDeploymentAction, type FleetRow, type ModelsTab,
+  type PlacementTarget,
 } from '../fleetModels'
 
 const USE: Record<string, string> = {
@@ -109,6 +111,10 @@ export default function Models({
   const [activate, setActivate] = useState(true)
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState('')
+  // Which of the two tabs over the table is in front. It opens on the models
+  // the owner already has, and it is state of this screen alone: nothing
+  // writes it down, so every visit starts on the same tab.
+  const [tab, setTab] = useState<ModelsTab>('mine')
   const [storage, setStorage] = useState<StorageInfo | null>(null)
   const [tokens, setTokens] = useState<TokenUsage | null>(null)
   const [placement, setPlacement] = useState<Placement>('local')
@@ -687,10 +693,14 @@ export default function Models({
   // is revoked and why, instead of being recommended and then refused.
   const featured = firstRun ? sorted.find(recipe => recipe.id === RECOMMENDED_ID && !recipe.revoked) : undefined
   const rows = featured ? sorted.filter(recipe => recipe.id !== featured.id) : sorted
-  // Installed models are the user's own shelf; they always sit above the
-  // remaining catalog, each group keeping the curated order.
-  const installedRows = rows.filter(recipe => installed.has(recipe.id))
-  const availableRows = rows.filter(recipe => !installed.has(recipe.id))
+  // The two tabs over the table: the models the owner already has, and the
+  // models the owner can still get. Both keep the curated order they arrive
+  // in, and every row below renders the same way whichever tab holds it.
+  const localRecipeIDs = useMemo(() => new Set(installed.keys()), [installed])
+  const split = splitModels(rows, localRecipeIDs, sparks)
+  // Nothing is installed anywhere, so there is only one list to show. The
+  // first run keeps the hero and the plain table it has always had.
+  const showTabs = split.held.length > 0
 
   const rowFor = (recipe: Recipe) => {
     const model = installed.get(recipe.id)
@@ -1119,16 +1129,63 @@ export default function Models({
         <MemberBanner controllerConsoleURL={fleetRoleSummary?.controller_console_url ?? ''} />
       )}
 
+      {/* The owner's split. Two tabs, not two groups on one page: with many
+          models, the models you have and the models you can get are two
+          different questions. The pill is the Redactor's own switch. */}
+      {showTabs && (
+        <div className="tabs-row">
+          <div className="jobs" role="tablist" aria-label="Which models">
+            <button
+              role="tab"
+              id="tab-held"
+              aria-controls="pane-held"
+              aria-current={tab === 'mine'}
+              onClick={() => setTab('mine')}
+            >
+              {heldTabLabel(sparks.length)}<span className="n">{split.held.length}</span>
+            </button>
+            <button
+              role="tab"
+              id="tab-catalog"
+              aria-controls="pane-catalog"
+              aria-current={tab === 'catalog'}
+              onClick={() => setTab('catalog')}
+            >
+              {CATALOG_TAB}<span className="n">{split.catalogCount}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="mtable">
         <div className="mthead" aria-hidden="true">
           <span>Model</span><span className="r">Speed</span><span className="r">Disk</span><span style={{ paddingLeft: 20 }}>Status</span><span />
         </div>
-        {installedRows.length > 0 && availableRows.length > 0 ? (
+        {showTabs ? (
           <>
-            <div className="mgroup">On this Spark</div>
-            {installedRows.map(rowFor)}
-            <div className="mgroup">Available to install</div>
-            {availableRows.map(rowFor)}
+            <div className="mpane" id="pane-held" role="tabpanel" aria-labelledby="tab-held" hidden={tab !== 'mine'}>
+              {split.held.map(rowFor)}
+            </div>
+            <div
+              className="mpane"
+              id="pane-catalog"
+              role="tabpanel"
+              aria-labelledby="tab-catalog"
+              hidden={tab !== 'catalog'}
+            >
+              {split.catalogCount === 0 ? (
+                <div className="empty">{CATALOG_EMPTY}</div>
+              ) : (
+                <>
+                  {/* Spark count is the axis the catalog already sorts on, so
+                      it is the axis the groups read on. */}
+                  {split.oneSpark.length > 0 && <div className="mgroup">{ONE_SPARK_GROUP}</div>}
+                  {split.oneSpark.map(rowFor)}
+                  {split.twoSparks.length > 0 && <div className="mgroup">{TWO_SPARK_GROUP}</div>}
+                  {split.twoSparks.map(rowFor)}
+                </>
+              )}
+            </div>
           </>
         ) : (
           rows.map(rowFor)
