@@ -8,11 +8,12 @@ import {
   machineNote, mergePlacements,
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
   placementVerb, placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner,
-  splitModels, workingPlacement,
+  splitModels, workingNodes, workingPlacement,
+  clearRecordBody, clearRecordTitle,
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME,
-  CHOOSE_FOR_ME_NOTE, DISRUPTIVE_KINDS,
+  CHOOSE_FOR_ME_NOTE, CLEAR_RECORD, CLEAR_RECORD_CONFIRM, DISRUPTIVE_KINDS,
   FLEET_DEPLOYMENT_ACTIONS, MANY_SPARKS_TAB, NO_FLEET_ROW, NO_PLACEMENT_BACK, ONE_SPARK_GROUP,
-  ONE_SPARK_TAB, PLACEMENT_REFUSED, TWO_SPARK_GROUP,
+  ONE_SPARK_TAB, PLACEMENT_REFUSED, PLACEMENT_WORKING, TWO_SPARK_GROUP,
   type ActionTarget, type FleetRow, type PlacementTarget,
 } from './fleetModels'
 
@@ -502,7 +503,7 @@ describe('what each candidate machine has free', () => {
     recommended_node_id: 'node-loft',
     candidates: [
       { node_id: 'node-lead', display_name: 'attic', eligible: true },
-      { node_id: 'node-loft', display_name: 'loft', eligible: false, reason: 'the fleet shows this Spark as stale, so it cannot take a model now' },
+      { node_id: 'node-loft', display_name: 'loft', eligible: false, reason: 'The fleet shows this Spark as not answering recently, so it cannot take a model now.' },
     ],
   })
 
@@ -514,7 +515,7 @@ describe('what each candidate machine has free', () => {
       storageAvailableBytes: 1_100_000_000_000,
     })
     expect(joined[1].memoryAvailableBytes).toBe(26_000_000_000)
-    expect(joined[1].reason).toBe('the fleet shows this Spark as stale, so it cannot take a model now')
+    expect(joined[1].reason).toBe('The fleet shows this Spark as not answering recently, so it cannot take a model now.')
   })
 
   it('leaves a machine that reported nothing absent', () => {
@@ -610,7 +611,7 @@ describe('the Run on list, resolved against the fleet table', () => {
   })
 
   it('keeps a refused Spark on the list, dead, in the plan’s own words', () => {
-    const reason = 'the fleet shows this Spark as stale, so it cannot take a model now'
+    const reason = 'The fleet shows this Spark as not answering recently, so it cannot take a model now.'
     const options = placementOptions(targets({
       recommended_node_id: 'node-lead',
       candidates: [
@@ -900,6 +901,119 @@ describe('a model the fleet is still working on', () => {
     expect(placementWord(deployment({ job: job('j', 'benchmark', 'running') }))).toBe('Working')
     expect(placementWord(deployment({ job: undefined }))).toBe('Working')
     expect(placementWord(undefined)).toBe('')
+  })
+
+  // The install dialog asks a different question of the same placements: not
+  // "is anything working on this model" but "which Sparks is it working on",
+  // so that the "Run on" list can refuse those and only those.
+  it('names every Spark the fleet is working on this model on', () => {
+    const elsewhere = deployment({
+      deployment_id: 'deployment_two', owner_node_id: 'node-lead',
+      job: job('job-install-two', 'install', 'running'),
+    })
+    const placements = new Map([
+      [deploymentKey(installing.owner_node_id, installing.recipe_id), installing],
+      [deploymentKey(elsewhere.owner_node_id, elsewhere.recipe_id), elsewhere],
+    ])
+    expect(workingNodes(placements, new Map(), installing.recipe_id, DISRUPTIVE))
+      .toEqual(new Set(['node-loft', 'node-lead']))
+  })
+
+  it('names no Spark for a model nothing is working on', () => {
+    const done = deployment({ job: job('job-install', 'install', 'ready') })
+    const started = new Map([[done.deployment_id, 'job-install']])
+    expect(workingNodes(placed(done), started, done.recipe_id, DISRUPTIVE)).toEqual(new Set())
+    expect(workingNodes(placed(installing), new Map(), 'qwen36-27b-nvfp4-1s', DISRUPTIVE))
+      .toEqual(new Set())
+  })
+
+  it('leaves a Spark alone for a measurement, exactly as the row lock does', () => {
+    const measuring = deployment({ job: job('job-bench', 'benchmark', 'running') })
+    expect(workingNodes(placed(measuring), new Map(), measuring.recipe_id, DISRUPTIVE))
+      .toEqual(new Set())
+  })
+})
+
+// The double-install hole: the plan reads heartbeats, and a Spark names a
+// model in a heartbeat only once its install has finished. Between the click
+// and the finish the plan still offers that machine, so a second install of
+// one model onto one Spark was one click away. The manager refuses a second
+// record now; the list refuses it first, and says why.
+describe('a Spark the fleet is already working on this model on', () => {
+  const RECIPE = 'qwen36-35b-a3b-nvfp4-1s'
+
+  const plan = (): PlacementPlan => ({
+    recipe_id: RECIPE,
+    recipe_version: 3,
+    recipe_fingerprint: 'fingerprint',
+    recommended_node_id: 'node-loft',
+    candidates: [
+      { node_id: 'node-lead', display_name: 'attic', eligible: true },
+      { node_id: 'node-loft', display_name: 'loft', eligible: true },
+    ],
+  })
+
+  const nodes = () => summary({ nodes: [node(), member()] })
+  const targets = (busy: Set<string>) =>
+    placementTargets(plan(), nodes(), fleetRows(nodes(), [], 'http://attic.local:7070', NOW), 'node-lead', busy)
+
+  it('marks that Spark dead in the Run on list, and says why', () => {
+    const list = targets(new Set(['node-loft']))
+    expect(list[0]).toMatchObject({ nodeID: 'node-lead', eligible: true, reason: '' })
+    expect(list[1]).toMatchObject({ nodeID: 'node-loft', eligible: false, reason: PLACEMENT_WORKING })
+    expect(placementOptions(list, 'node-loft')[1])
+      .toEqual({ key: 'node-loft', name: 'loft', note: PLACEMENT_WORKING, eligible: false })
+  })
+
+  it('refuses the install that names it, however it was picked', () => {
+    const list = targets(new Set(['node-loft']))
+    expect(installRoute('node-loft', list, 'node-loft')).toEqual({ where: 'none' })
+    // "Choose for me" resolves to the recommendation, so it must not offer a
+    // way around the refusal either, and it is not offered at all.
+    expect(installRoute(CHOOSE_FOR_ME, list, 'node-loft')).toEqual({ where: 'none' })
+    expect(placementOptions(list, 'node-loft').map(option => option.key))
+      .toEqual(['node-lead', 'node-loft'])
+    // The dialog opens on the Spark that can still take the model.
+    expect(initialPlacement(list, 'node-loft')).toBe('node-lead')
+  })
+
+  it('leaves every other Spark exactly as it was', () => {
+    expect(targets(new Set()).map(target => target.eligible)).toEqual([true, true])
+    expect(targets(new Set(['node-other'])).map(target => target.eligible)).toEqual([true, true])
+  })
+
+  // The controller knows more about that machine than this console does, so
+  // when both have something to say, the plan's own words are kept.
+  it('keeps the plan’s own reason for a Spark the plan itself refused', () => {
+    const refused = plan()
+    refused.candidates[1] = {
+      node_id: 'node-loft', display_name: 'loft', eligible: false, reason: PLACEMENT_REFUSED,
+    }
+    const list = placementTargets(
+      refused, nodes(), fleetRows(nodes(), [], 'http://attic.local:7070', NOW), 'node-lead',
+      new Set(['node-loft']),
+    )
+    expect(list[1].reason).toBe(PLACEMENT_REFUSED)
+  })
+})
+
+// A record the controller can no longer read pins its row to "No answer" and
+// kills every button on it. Ending the record is the way out, and the words
+// say what really happens: the model goes with it.
+describe('clearing a record the fleet can no longer read', () => {
+  it('says what it is and what it does', () => {
+    expect(CLEAR_RECORD).toBe('Clear')
+    expect(CLEAR_RECORD_CONFIRM).toBe('Clear record')
+    expect(clearRecordTitle('Qwen3.6 35B')).toBe('Clear the record for Qwen3.6 35B?')
+    expect(clearRecordBody('loft')).toBe(
+      'The fleet cannot read this model on loft. Basement asks loft to remove the model. ' +
+      'This ends the record, and the downloaded files stay.',
+    )
+  })
+
+  it('names the Spark rather than promising something about every Spark', () => {
+    expect(clearRecordBody('loft')).toContain('loft')
+    expect(clearRecordBody('shed')).not.toContain('loft')
   })
 })
 

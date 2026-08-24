@@ -150,12 +150,12 @@ func (m *Manager) independentJob(w http.ResponseWriter, r *http.Request) {
 	}
 	runtime := m.independentRuntime()
 	if runtime == nil {
-		writeFleetError(w, http.StatusServiceUnavailable, errors.New("the target manager is not ready to report placement jobs"))
+		writeFleetError(w, http.StatusServiceUnavailable, errors.New("the manager on this Spark is not ready to report placement jobs"))
 		return
 	}
 	owner, err := runtime.IndependentJob(r.Context(), parts[0])
 	if err != nil {
-		writeFleetError(w, http.StatusNotFound, errors.New("the deployment job was not found on its owner node"))
+		writeFleetError(w, http.StatusNotFound, errors.New("the deployment job was not found on this Spark"))
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodGet {

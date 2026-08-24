@@ -18,21 +18,27 @@ import (
 // plainer word for.
 
 // The words a release gap is reported with, wherever it is found. The planner
-// writes one of the first three into a candidate reason; the target node
-// writes the fourth into the answer it refuses a placement with. They are
-// constants so that the console sentence can recognise a release gap without
-// guessing at wording that could drift away from it.
+// writes one of these three into a candidate reason. They are constants so
+// that the console sentence can recognise a release gap without guessing at
+// wording that could drift away from it.
 //
-// The first three are read twice over: the install dialog shows one under the
-// name of the Spark it refused, and nodeFailure can put one after "<name>
-// could not do this:". Each one therefore speaks about a part of that Spark
-// and never about the Spark itself, so that no line has two subjects in it.
+// A plan reason is console copy, so it is written in the one register the
+// "Run on" list uses: a whole sentence, with a capital and a full stop. Each
+// reason is read twice over: the install dialog shows one under the name of
+// the Spark it refused, and nodeFailure can put one after "<name> could not
+// do this:". Each one therefore speaks about a part of that Spark and never
+// about the Spark itself, so that no line has two subjects in it.
 const (
-	nodeVersionSkew   = "the manager version on this Spark does not exactly match the controller"
-	nodeBuildSkew     = "the manager build on this Spark does not exactly match the controller"
-	nodeCatalogueSkew = "the model catalogue on this Spark does not exactly match the controller"
-	nodeReleaseSkew   = "the target node does not exactly match the controller release and catalogue"
+	nodeVersionSkew   = "The manager version on this Spark does not exactly match the controller."
+	nodeBuildSkew     = "The manager build on this Spark does not exactly match the controller."
+	nodeCatalogueSkew = "The model catalogue on this Spark does not exactly match the controller."
 )
+
+// The fourth release-gap sentence is not a plan reason. A target Spark refuses
+// a placement with it, so it stays a Go error: lower case and no full stop.
+// nodeIsBehind reads it before the lead-in ever does, so the console shows the
+// release sentence for it rather than this one.
+const nodeReleaseSkew = "the manager release and catalogue on this Spark do not exactly match the controller"
 
 // nodeUnreachable marks a call that got no answer at all: the address did not
 // answer, the connection stopped, or the deadline passed. The text stays the

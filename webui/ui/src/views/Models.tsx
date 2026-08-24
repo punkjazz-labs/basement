@@ -16,8 +16,9 @@ import {
   heldTabLabel, initialPlacement, installRoute, mergePlacements, modelChips, placedTarget,
   placementBusy, placementOptions, placementSwitchFrom, placementTargets, placementVerb,
   placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, splitModels,
-  workingPlacement,
-  ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH,
+  clearRecordBody, clearRecordTitle, workingNodes, workingPlacement,
+  ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CLEAR_RECORD, CLEAR_RECORD_CONFIRM,
+  DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH,
   NO_PLACEMENT_BACK, NO_PLACEMENT_LEFT, ONE_SPARK_GROUP, PLACEMENT_PLAN_PATH, TWO_SPARK_GROUP,
   type ActionTarget, type FleetDeploymentAction, type FleetRow, type ModelsTab,
   type PlacementTarget,
@@ -345,13 +346,21 @@ export default function Models({
   // name its own node could not tell a local install from a remote one.
   const canPlaceAcrossFleet =
     fleet !== null && fleet.nodes.length > 1 && fleet.controller_node_id !== ''
+  // The Sparks the fleet is already working on the planned model on. The plan
+  // reads heartbeats, and a Spark names a model in one only once its install
+  // has finished, so without this the list would offer a machine that is
+  // downloading this very model right now.
+  const placementBusyNodes = useMemo(
+    () => workingNodes(placements, startedOnPlacement, placementPlan?.recipe_id ?? '', DISRUPTIVE_KINDS),
+    [placements, startedOnPlacement, placementPlan],
+  )
   // The "Run on" list, resolved once against both the plan and the fleet
   // table. Everything the dialog shows about a Spark and everything it sends
   // for that Spark read this same list, so the screen and the request cannot
   // name two different machines.
   const placementList = useMemo(
-    () => placementTargets(placementPlan, fleet, sparks, fleet?.controller_node_id ?? ''),
-    [placementPlan, fleet, sparks],
+    () => placementTargets(placementPlan, fleet, sparks, fleet?.controller_node_id ?? '', placementBusyNodes),
+    [placementPlan, fleet, sparks, placementBusyNodes],
   )
   // The Spark the list points at now. "Choose for me" resolves here.
   const placementTarget = placedTarget(
@@ -468,7 +477,8 @@ export default function Models({
       const plan = await placementPlanFor(recipe)
       setPlacementPlan(plan)
       setPlacementChoice(initialPlacement(
-        placementTargets(plan, fleet, sparks, fleet?.controller_node_id ?? ''),
+        placementTargets(plan, fleet, sparks, fleet?.controller_node_id ?? '',
+          workingNodes(placements, startedOnPlacement, recipe.id, DISRUPTIVE_KINDS)),
         plan?.recommended_node_id))
       setConfirm({ recipe, preflight, switchFrom })
       setLicence(false)
@@ -702,6 +712,34 @@ export default function Models({
             expected_reclaim_bytes: checked ? recipe.artifact_bytes : 0,
           }),
         })))
+  }
+
+  // The one repair for a row the fleet can no longer read. A stale placement
+  // pins that row to "No answer" and kills every button on it, and adoption
+  // cannot write a fresh record while the stale one stands. Removing the
+  // placement ends it, and the row can then be rebuilt from what that Spark
+  // reports.
+  //
+  // This is deliberately not sendAction: rowActionRoute refuses a stale
+  // placement, which is exactly the state this tool exists for. It is offered
+  // only while the placement really is stale.
+  const clearRecord = async (recipe: Recipe, sparkName: string, placement: FleetDeploymentView) => {
+    const { ok } = await confirmBox({
+      title: clearRecordTitle(recipe.display_name),
+      body: clearRecordBody(sparkName),
+      confirmLabel: CLEAR_RECORD_CONFIRM,
+      danger: true,
+    })
+    if (!ok) return
+    run(recipe.id, async () => {
+      touchedPlacements.current.add(placement.deployment_id)
+      const result = await api<{ job: Job }>(
+        deploymentActionPath(placement.deployment_id, 'remove'),
+        { method: 'POST', headers: idempotency(), body: JSON.stringify({ remove_artifacts: false }) },
+      )
+      setStartedOnPlacement(previous => new Map(previous).set(placement.deployment_id, result.job.id))
+      openFleetDeployment(placement.deployment_id, result.job)
+    })
   }
 
   const preflightBlockers = (preflight: Preflight): string[] => {
@@ -1086,6 +1124,18 @@ export default function Models({
                       )}
                       <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(recipe, host, 'smoke-test')}>Check health</button>
                     </>
+                  )}
+                  {/* The fleet holds a record it can no longer read, so every
+                      button above is dead and stays dead. This is the one way
+                      out: it ends the record, and the model goes with it. */}
+                  {host && placement && placement.stale === true && (
+                    <button
+                      className="danger"
+                      disabled={pending.has(recipe.id)}
+                      onClick={() => clearRecord(recipe, host.displayName, placement)}
+                    >
+                      {CLEAR_RECORD}
+                    </button>
                   )}
                   <button className="danger" disabled={toolsLocked} onClick={() => remove(recipe, host)}>Uninstall</button>
                 </div>

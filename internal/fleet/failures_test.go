@@ -47,8 +47,8 @@ func TestNodeFailureSaysWhatIsWrongInPlainWords(t *testing.T) {
 			want: "loft runs another manager version, so update the fleet first."},
 		{name: "a member that refused the placement on its release", err: errors.New(nodeReleaseSkew),
 			want: "loft runs another manager version, so update the fleet first."},
-		{name: "a reason the member gave itself", err: errors.New("the model is not installed on that node"),
-			want: "loft could not do this: the model is not installed on that node."},
+		{name: "a reason the member gave itself", err: errors.New("the model is not installed on this Spark"),
+			want: "loft could not do this: the model is not installed on this Spark."},
 		{name: "a status with no reason in it", err: nodeStatus{status: http.StatusInternalServerError},
 			want: "loft could not do this: fleet manager returned status 500."},
 		{name: "a certificate this controller does not trust", err: pinFailure,
@@ -83,6 +83,30 @@ func TestNodeFailureKeepsAddressesOutOfTheConsole(t *testing.T) {
 	// mark was added to it.
 	if failure.Error() != `Post "https://192.168.99.31:7071/internal/fleet/v1/deployments/adopt": fleet server certificate is outside its validity period` {
 		t.Fatalf("the logged text changed: %q", failure.Error())
+	}
+}
+
+// The install dialog names a refused Spark and says why. The why comes from
+// the planner (internal/fleet/scheduler.go), which used to put the fleet's own
+// bookkeeping word straight into that sentence. "version-mismatch" is a word
+// for the fleet, not for the person who owns the machines.
+func TestPlanReasonsSayTheStatusInPlainWords(t *testing.T) {
+	for status, want := range map[string]string{
+		"version-mismatch": "on another manager version",
+		"stale":            "not answering recently",
+		"joining":          "still joining",
+		// A word this map does not hold is the truth as it arrived, and a
+		// guessed one would not be.
+		"unreachable": "unreachable",
+		"":            "",
+	} {
+		if plain := plainStatus(status); plain != want {
+			t.Fatalf("the status %q reads %q, want %q", status, plain, want)
+		}
+	}
+	sentence := "The fleet shows this Spark as " + plainStatus("version-mismatch") + ", so it cannot take a model now."
+	if strings.Contains(sentence, "version-mismatch") {
+		t.Fatalf("a refusal still carries the fleet's own word: %q", sentence)
 	}
 }
 

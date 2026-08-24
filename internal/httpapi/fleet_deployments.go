@@ -37,10 +37,10 @@ func (s *Server) CreateIndependentJob(ctx context.Context, selected recipe.Recip
 		return store.Job{}, false, errors.New("preflight failed without mutating runtime state")
 	}
 	if selected.Requirements.RequiredLicenceAccept && !intent.AcceptLicence {
-		return store.Job{}, false, errors.New("model licence acceptance is required on the target node")
+		return store.Job{}, false, errors.New("the model licence is not accepted on this Spark")
 	}
 	if selected.RequiresTerritoryConfirmation() && !intent.ConfirmTerritoryEligibility {
-		return store.Job{}, false, errors.New("territory eligibility confirmation is required on the target node")
+		return store.Job{}, false, errors.New("the territory eligibility is not confirmed on this Spark")
 	}
 	if intent.AcceptLicence {
 		if err := s.store.AcceptLicence(ctx, selected.ID, selected.Version); err != nil {
@@ -87,10 +87,10 @@ func (s *Server) AdoptIndependentJob(ctx context.Context, selected recipe.Recipe
 	}
 	model, err := s.store.Model(ctx, selected.ID)
 	if err != nil {
-		return store.Job{}, false, errors.New("the model is not installed on that node")
+		return store.Job{}, false, errors.New("the model is not installed on this Spark")
 	}
 	if model.RecipeVersion != selected.Version {
-		return store.Job{}, false, errors.New("the installed model is a different version, so update it before you adopt it")
+		return store.Job{}, false, errors.New("the installed model on this Spark is a different version, so update it before you adopt it")
 	}
 	job, created, err := s.store.CreateJob(ctx, "adopt", selected.ID, idempotencyKey, map[string]any{"deployment_id": deploymentID})
 	if err != nil {
@@ -135,10 +135,10 @@ func (s *Server) IndependentAction(ctx context.Context, owner store.Job, action,
 	}
 	selected, ok := s.pinnedOrEffective(owner.RecipeID, installedVersion(s.store, ctx, owner.RecipeID))
 	if !ok {
-		return store.Job{}, errors.New("the deployment recipe is no longer available on its owner node")
+		return store.Job{}, errors.New("the deployment recipe is no longer available on this Spark")
 	}
 	if _, err := s.store.Model(ctx, selected.ID); err != nil {
-		return store.Job{}, errors.New("the model is not installed on its owner node")
+		return store.Job{}, errors.New("the model is not installed on this Spark")
 	}
 	if strings.TrimSpace(idempotencyKey) == "" || len(idempotencyKey) > 128 {
 		return store.Job{}, errors.New("a valid idempotency key is required")

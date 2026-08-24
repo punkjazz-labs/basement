@@ -26,6 +26,27 @@ type PlacementPlan struct {
 	selected          recipe.Recipe
 }
 
+// The plain words for a membership status word. The fleet writes these words
+// for itself, and a word a machine keeps for its own bookkeeping is not a word
+// to put in front of the person who owns it: "version-mismatch" says nothing
+// to them. Only the words that need translating are here.
+//
+// A status this map does not hold is written exactly as it arrived. Some of
+// them already read plainly, and a raw word is still the truth, while a
+// guessed one would not be.
+var plainStatusWords = map[string]string{
+	"version-mismatch": "on another manager version",
+	"stale":            "not answering recently",
+	"joining":          "still joining",
+}
+
+func plainStatus(status string) string {
+	if plain, ok := plainStatusWords[status]; ok {
+		return plain
+	}
+	return status
+}
+
 func (m *Manager) PlanIndependent(ctx context.Context, recipeID string) (PlacementPlan, error) {
 	if err := m.requireFleetMutationAllowed(ctx); err != nil {
 		return PlacementPlan{}, err
@@ -67,8 +88,10 @@ func (m *Manager) PlanIndependent(ctx context.Context, recipeID string) (Placeme
 			// Spark in the install dialog, and after "<name> could not do
 			// this:" when an install is sent to it all the same. So each one
 			// names a part of the machine or the fleet, never the machine
-			// itself, and no line ends up with two subjects.
-			candidate.Eligible, candidate.Reason = false, "the fleet shows this Spark as "+node.Status+", so it cannot take a model now"
+			// itself, and no line ends up with two subjects. Every reason is
+			// also a whole sentence, with a capital and a full stop, because
+			// the "Run on" list has one register and this is it.
+			candidate.Eligible, candidate.Reason = false, "The fleet shows this Spark as "+plainStatus(node.Status)+", so it cannot take a model now."
 		case node.ManagerVersion != m.version:
 			candidate.Eligible, candidate.Reason = false, nodeVersionSkew
 		case node.ManagerBuildIdentity != m.buildIdentity:

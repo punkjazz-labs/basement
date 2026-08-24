@@ -81,10 +81,10 @@ func (runtime *placementRuntime) CreateIndependentJob(ctx context.Context, selec
 func (runtime *placementRuntime) AdoptIndependentJob(ctx context.Context, selected recipe.Recipe, deploymentID, key string) (store.Job, bool, error) {
 	model, err := runtime.database.Model(ctx, selected.ID)
 	if err != nil {
-		return store.Job{}, false, errors.New("the model is not installed on that node")
+		return store.Job{}, false, errors.New("the model is not installed on this Spark")
 	}
 	if model.RecipeVersion != selected.Version {
-		return store.Job{}, false, errors.New("the installed model is a different version, so update it before you adopt it")
+		return store.Job{}, false, errors.New("the installed model on this Spark is a different version, so update it before you adopt it")
 	}
 	job, created, err := runtime.database.CreateJob(ctx, "adopt", selected.ID, key, map[string]any{"deployment_id": deploymentID})
 	if err != nil {
@@ -126,7 +126,12 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, second := twoIndependentRecipes(t, recipes)
+	// A third model, so that the concurrent retry below can name a pair no
+	// record owns yet: one model on one Spark is one record, and a second
+	// placement of first on node A would now be refused before the race the
+	// retry is there to test could even start.
+	placeable := independentRecipes(t, recipes, 3)
+	first, second, third := placeable[0], placeable[1], placeable[2]
 	controller, controllerStore := newPlacementManager(t, "controller", "192.168.99.10", recipes)
 	memberA, memberAStore := newPlacementManager(t, "node-a", "192.168.99.20", recipes)
 	memberB, memberBStore := newPlacementManager(t, "node-b", "192.168.99.21", recipes)
@@ -190,7 +195,7 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			deployment, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "concurrent-retry", Intent: intent})
+			deployment, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: third.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "concurrent-retry", Intent: intent})
 			results <- placementResult{deployment: deployment, created: created, err: err}
 		}()
 	}
@@ -231,6 +236,25 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 	projected, err := controller.Deployment(ctx, deploymentB.DeploymentID)
 	if err != nil || projected.OwnerJobID != actionJob.ID || projected.Job == nil || projected.Job.ID != actionJob.ID {
 		t.Fatalf("latest lifecycle projection=%+v action=%+v err=%v", projected, actionJob, err)
+	}
+
+	// One model on one Spark is one record on this path too. A second install
+	// of a model node A already holds would otherwise write a second record
+	// under a second key, and the console would show two rows and two owner
+	// jobs for one serving model.
+	_, created, err = controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "duplicate-first", Intent: intent})
+	if err == nil || created || !strings.Contains(err.Error(), "already has a deployment record for that model") {
+		t.Fatalf("a second live record for one pair was accepted: created=%v err=%v", created, err)
+	}
+	// A removed record holds nothing any more, so the same pair can be placed
+	// again. Without this the first uninstall would wedge that model on that
+	// Spark for good.
+	if err := controllerStore.ObserveFleetDeployment(ctx, deploymentA.DeploymentID, "removed", "2026-08-24T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	replaced, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "replace-first", Intent: intent})
+	if err != nil || !created || replaced.DeploymentID == deploymentA.DeploymentID {
+		t.Fatalf("a removed record did not release its pair: created=%v deployment=%+v err=%v", created, replaced, err)
 	}
 }
 
@@ -338,7 +362,7 @@ func TestAdoptIndependentDeploymentRecordsAnInstalledModel(t *testing.T) {
 	}{
 		{name: "a two node recipe", nodeID: member.identity.NodeID, recipeID: grouped.ID, key: "adopt-grouped", want: "cannot use independent placement"},
 		{name: "a model the node does not report", nodeID: member.identity.NodeID, recipeID: absent.ID, key: "adopt-absent", want: "does not report that model as installed"},
-		{name: "a model the node moved to another version", nodeID: member.identity.NodeID, recipeID: stale.ID, key: "adopt-stale", want: "the installed model is a different version"},
+		{name: "a model the node moved to another version", nodeID: member.identity.NodeID, recipeID: stale.ID, key: "adopt-stale", want: "the installed model on this Spark is a different version"},
 		{name: "a node outside the fleet", nodeID: "node_missing", recipeID: serving.ID, key: "adopt-missing", want: "is not in this fleet"},
 		{name: "a model outside the catalogue", nodeID: member.identity.NodeID, recipeID: "no-such-model", key: "adopt-unknown", want: "not in this controller's current catalogue"},
 		{name: "no idempotency key", nodeID: member.identity.NodeID, recipeID: serving.ID, key: "", want: "a valid idempotency key is required"},
@@ -534,21 +558,6 @@ func newCatalogueManager(t *testing.T, name, address string, all, effective []re
 		t.Fatal(err)
 	}
 	return manager, database
-}
-
-func twoIndependentRecipes(t *testing.T, recipes []recipe.Recipe) (recipe.Recipe, recipe.Recipe) {
-	t.Helper()
-	var selected []recipe.Recipe
-	for _, item := range recipes {
-		if item.Topology.SparkCount == 1 {
-			selected = append(selected, item)
-		}
-		if len(selected) == 2 {
-			return selected[0], selected[1]
-		}
-	}
-	t.Fatal("two independent recipes are required")
-	return recipe.Recipe{}, recipe.Recipe{}
 }
 
 func assertServingRecipe(t *testing.T, database *store.Store, recipeID string) {

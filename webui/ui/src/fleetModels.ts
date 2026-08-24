@@ -254,6 +254,26 @@ export const ACTION_REFUSAL: Record<'no-placement' | 'not-answering' | 'unsuppor
 // action after it has nothing to act on, so it is never sent.
 export const NO_PLACEMENT_BACK = 'The controller gave no placement back.'
 
+// ---- A record the fleet can no longer read -----------------------------------
+
+// A placement the controller cannot read pins its row to "No answer" and
+// leaves every button on it dead. The record itself is what keeps the row
+// there: the fleet holds a placement for a model it can no longer follow, and
+// adoption cannot write a fresh one while that record stands. Ending the
+// record is the way out, and the fleet ends one by removing the placement.
+//
+// The row offers this as a tool, and only while the placement is really
+// stale. The words say what really happens, because the model goes with the
+// record.
+export const CLEAR_RECORD = 'Clear'
+export const CLEAR_RECORD_CONFIRM = 'Clear record'
+
+export const clearRecordTitle = (modelName: string): string => `Clear the record for ${modelName}?`
+
+export const clearRecordBody = (sparkName: string): string =>
+  `The fleet cannot read this model on ${sparkName}. Basement asks ${sparkName} to remove the model. ` +
+  'This ends the record, and the downloaded files stay.'
+
 // Whether a placement is already mid-change, so its row must not send it a
 // second action. A local row learns this from the job list it polls every few
 // seconds; a placement is two polls away from saying the same thing, so the
@@ -397,6 +417,14 @@ export const NO_PLACEMENT_LEFT = 'No Spark in this fleet can take this model now
 // cannot tell apart from another. It is named in the list and refused.
 export const NO_FLEET_ROW = 'This console cannot reach that Spark now.'
 
+// A Spark the fleet is already working on this same model on. The controller
+// plans against what each Spark last reported, and a Spark only names a model
+// in a heartbeat once its install has finished, so the plan can offer a
+// machine that is downloading that very model. Sending a second install there
+// would write a second record for one model on one Spark, which the manager
+// now refuses; the list refuses it first, and says why.
+export const PLACEMENT_WORKING = 'That Spark is already busy with this model.'
+
 // One Spark the "Run on" list offers, as both the screen and the request read
 // it. The plan says what the controller would do; the fleet table's row for
 // that same machine says what this console can reach. Both are resolved once,
@@ -420,11 +448,15 @@ export interface PlacementTarget {
   reason: string
 }
 
+// busyNodeIDs names the Sparks the fleet is already working on this same model
+// on (workingNodes). The plan cannot know them: it reads what each Spark last
+// reported, and a Spark names a model only once its install has finished.
 export function placementTargets(
   plan: PlacementPlan | null,
   summary: FleetSummary | null,
   sparks: FleetRow[],
   selfNodeID: string,
+  busyNodeIDs: ReadonlySet<string> = new Set(),
 ): PlacementTarget[] {
   const rows = new Map(sparks.map(spark => [spark.nodeID, spark]))
   const recipeID = plan?.recipe_id ?? ''
@@ -435,7 +467,8 @@ export function placementTargets(
     // console always reaches its own Spark, with or without a row for it.
     const isSelf = (selfNodeID !== '' && candidate.node_id === selfNodeID) || spark?.isSelf === true
     const reachable = isSelf || spark !== undefined
-    const eligible = candidate.eligible && reachable
+    const working = busyNodeIDs.has(candidate.node_id)
+    const eligible = candidate.eligible && reachable && !working
     return {
       nodeID: candidate.node_id,
       // The plan and the table read the same membership summary, so both
@@ -448,7 +481,14 @@ export function placementTargets(
       installedVersion: spark?.installedModels
         .find(model => model.recipe_id === recipeID)?.recipe_version,
       eligible,
-      reason: eligible ? '' : candidate.eligible ? NO_FLEET_ROW : candidate.reason || PLACEMENT_REFUSED,
+      // The plan's own refusal comes first, because the controller knows more
+      // about that machine than this console does. A Spark the plan would
+      // take is refused here for the two things only this console can see:
+      // no row to reach it by, and work already running on this model.
+      reason: eligible ? ''
+        : !candidate.eligible ? candidate.reason || PLACEMENT_REFUSED
+          : !reachable ? NO_FLEET_ROW
+            : PLACEMENT_WORKING,
     }
   })
 }
@@ -599,6 +639,35 @@ export function workingPlacement(
   recipeID: string,
   kinds: ReadonlySet<string>,
 ): FleetDeploymentView | undefined {
+  return workingPlacements(placements, startedJobs, recipeID, kinds)[0]
+}
+
+// Every Spark the fleet is working on this model on, by node id. The install
+// dialog reads this: the "Run on" list would otherwise offer a machine that is
+// already downloading this very model, because a Spark names a model in a
+// heartbeat only once its install has finished. The row lock above reads the
+// same placements, so a row and the dialog can never disagree about what the
+// fleet is doing.
+export function workingNodes(
+  placements: Map<string, FleetDeploymentView>,
+  startedJobs: ReadonlyMap<string, string>,
+  recipeID: string,
+  kinds: ReadonlySet<string>,
+): Set<string> {
+  return new Set(workingPlacements(placements, startedJobs, recipeID, kinds)
+    .map(placement => placement.owner_node_id))
+}
+
+// The placements still working on one model, whichever Spark holds each one.
+// One placement can be reached under more than one key, so the caller reading
+// node ids out of this must de-duplicate them.
+function workingPlacements(
+  placements: Map<string, FleetDeploymentView>,
+  startedJobs: ReadonlyMap<string, string>,
+  recipeID: string,
+  kinds: ReadonlySet<string>,
+): FleetDeploymentView[] {
+  const working: FleetDeploymentView[] = []
   for (const placement of placements.values()) {
     if (placement.recipe_id !== recipeID) continue
     // A placement this console has not read a job kind for is treated as work
@@ -606,9 +675,9 @@ export function workingPlacement(
     // second install is not.
     const kind = placement.job?.kind ?? ''
     if (kind !== '' && !kinds.has(kind)) continue
-    if (placementBusy(placement, startedJobs.get(placement.deployment_id))) return placement
+    if (placementBusy(placement, startedJobs.get(placement.deployment_id))) working.push(placement)
   }
-  return undefined
+  return working
 }
 
 // What that Spark is doing to the model, from the kind of job the placement

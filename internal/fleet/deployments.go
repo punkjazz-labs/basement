@@ -221,6 +221,15 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Deployment{}, false, err
 	}
+	// One model on one Spark is one record, on this path exactly as on the
+	// adoption path. Without this, a second install of a model a Spark already
+	// holds would write a second record under a second idempotency key, and
+	// the console would then hold two rows and two owner jobs for one serving
+	// model. The record this key already owns is not a duplicate of itself, so
+	// a retry still finishes here.
+	if err := m.refuseDuplicateDeployment(ctx, deploymentID, request.NodeID, selected.ID); err != nil {
+		return Deployment{}, false, err
+	}
 	claims := ClaimsForRecipe(selected, RecipeClaimOptions{
 		Kind: ClaimKindIndependent, ReserveDisk: true, Runtime: request.Intent.Activate,
 	})
@@ -403,10 +412,13 @@ func (m *Manager) runningModelVersion(ctx context.Context, nodeID, recipeID stri
 	return 0, fmt.Errorf("%s is not in this fleet", m.nodeName(ctx, nodeID))
 }
 
-// refuseDuplicateDeployment keeps one model on one node to one record. The
-// create path may already own this pair under an id derived from an
-// idempotency key, and a second record would give the console two rows and
-// two owner jobs for one serving model.
+// refuseDuplicateDeployment keeps one model on one node to one record. Both
+// placement paths call it, because either one can reach a pair the other
+// already owns: the create path derives its id from an idempotency key and the
+// adopt path from the pair itself, so two ids can name one model on one Spark.
+// A second record would give the console two rows and two owner jobs for one
+// serving model. A removed record holds nothing any more, so it releases the
+// pair and the model can be placed again.
 func (m *Manager) refuseDuplicateDeployment(ctx context.Context, deploymentID, nodeID, recipeID string) error {
 	stored, err := m.database.FleetDeployments(ctx)
 	if err != nil {
@@ -512,15 +524,15 @@ func (m *Manager) adoptIndependent(ctx context.Context, request adoptDeploymentR
 	// (see validateIndependentPrepare). A record aimed at another node must
 	// never be answered here.
 	if request.NodeID != m.identity.NodeID {
-		return store.Job{}, false, errors.New("the adoption request names another node")
+		return store.Job{}, false, errors.New("the adoption request names another Spark")
 	}
 	selected, ok := recipe.FindVersion(m.recipes(), request.RecipeID, request.RecipeVersion)
 	if !ok || selected.Topology.SparkCount != 1 {
-		return store.Job{}, false, errors.New("the target node does not hold that exact independent recipe")
+		return store.Job{}, false, errors.New("the model catalogue on this Spark does not hold that exact one-Spark recipe")
 	}
 	runtime := m.independentRuntime()
 	if runtime == nil {
-		return store.Job{}, false, errors.New("the target manager is not ready to adopt placements")
+		return store.Job{}, false, errors.New("the manager on this Spark is not ready to adopt placements")
 	}
 	return runtime.AdoptIndependentJob(ctx, selected, request.DeploymentID, request.IdempotencyKey)
 }
@@ -578,7 +590,7 @@ func (m *Manager) prepareIndependent(ctx context.Context, request reservationPre
 	runtime := m.independentRuntime()
 	if runtime == nil {
 		_ = m.allocator.Abort(ctx, request.ReservationID)
-		return reservationPrepareResponse{}, errors.New("the target manager is not ready to create placements")
+		return reservationPrepareResponse{}, errors.New("the manager on this Spark is not ready to create placements")
 	}
 	report, ready, err := runtime.PreflightIndependent(ctx, selected, request.ReservationID)
 	if err != nil || !ready {
@@ -586,7 +598,7 @@ func (m *Manager) prepareIndependent(ctx context.Context, request reservationPre
 		if err != nil {
 			return reservationPrepareResponse{}, err
 		}
-		return reservationPrepareResponse{}, errors.New("the target node's preflight did not pass")
+		return reservationPrepareResponse{}, errors.New("the preflight on this Spark did not pass")
 	}
 	return reservationPrepareResponse{PrepareToken: token, PreparedAt: reservation.CreatedAt, ExpiresAt: reservation.ExpiresAt, Preflight: report}, nil
 }
@@ -604,18 +616,18 @@ func (m *Manager) validateIndependentPrepare(ctx context.Context, request reserv
 		expectedController = m.identity.NodeID
 	}
 	if request.FleetID != config.FleetID || request.ControllerNodeID != expectedController {
-		return recipe.Recipe{}, errors.New("the placement grant authority does not match this node's fleet")
+		return recipe.Recipe{}, errors.New("the placement request names the wrong fleet authority")
 	}
 	if request.ManagerVersion != m.version || request.ManagerBuildIdentity != m.buildIdentity || request.CatalogueDigest != m.digest() {
 		return recipe.Recipe{}, errors.New(nodeReleaseSkew)
 	}
 	selected, ok := recipe.FindVersion(m.recipes(), request.RecipeID, request.RecipeVersion)
 	if !ok || selected.Topology.SparkCount != 1 {
-		return recipe.Recipe{}, errors.New("the target node does not hold that exact independent recipe")
+		return recipe.Recipe{}, errors.New("the model catalogue on this Spark does not hold that exact one-Spark recipe")
 	}
 	fingerprint, err := RecipeFingerprint(selected)
 	if err != nil || fingerprint != request.RecipeFingerprint {
-		return recipe.Recipe{}, errors.New("the target node's exact recipe fingerprint does not match the placement")
+		return recipe.Recipe{}, errors.New("the exact recipe fingerprint on this Spark does not match the placement")
 	}
 	expected := ClaimsForRecipe(selected, RecipeClaimOptions{
 		Kind: ClaimKindIndependent, ReserveDisk: true, Runtime: request.Claims.Runtime,
@@ -625,7 +637,7 @@ func (m *Manager) validateIndependentPrepare(ctx context.Context, request reserv
 	left, _ := json.Marshal(request.Claims)
 	right, _ := json.Marshal(expected)
 	if string(left) != string(right) {
-		return recipe.Recipe{}, errors.New("the target node's resource claims do not match its exact recipe")
+		return recipe.Recipe{}, errors.New("the resource claims in the placement do not match the exact recipe on this Spark")
 	}
 	return selected, nil
 }
@@ -663,11 +675,11 @@ func (m *Manager) verifyGrant(ctx context.Context, grant placementGrant) (recipe
 	}
 	selected, ok := recipe.FindVersion(m.recipes(), grant.RecipeID, grant.RecipeVersion)
 	if !ok || selected.Topology.SparkCount != 1 {
-		return recipe.Recipe{}, errors.New("the placement grant recipe is not available on this node")
+		return recipe.Recipe{}, errors.New("the placement grant recipe is not available on this Spark")
 	}
 	fingerprint, err := RecipeFingerprint(selected)
 	if err != nil || fingerprint != grant.RecipeFingerprint {
-		return recipe.Recipe{}, errors.New("the placement grant recipe fingerprint does not match this node")
+		return recipe.Recipe{}, errors.New("the placement grant recipe fingerprint does not match the recipe on this Spark")
 	}
 	return selected, nil
 }
@@ -695,7 +707,7 @@ func (m *Manager) startIndependent(ctx context.Context, grant placementGrant, in
 	}
 	runtime := m.independentRuntime()
 	if runtime == nil {
-		return store.Job{}, false, errors.New("the target manager is not ready to create placements")
+		return store.Job{}, false, errors.New("the manager on this Spark is not ready to create placements")
 	}
 	return runtime.CreateIndependentJob(ctx, selected, intent, grant.ReservationID, grant.DeploymentID, "fleet:"+grant.DeploymentID)
 }
