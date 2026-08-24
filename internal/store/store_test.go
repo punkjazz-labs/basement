@@ -687,3 +687,60 @@ func TestResetTokenCountersIsNoOpWithoutARow(t *testing.T) {
 		t.Fatalf("reset without a row created one: %+v", usage)
 	}
 }
+
+// "removed" is the end of a deployment record. The controller polls every
+// record it holds and writes back the state of the job each one names, and
+// that job outlives the record: a Spark that comes back still answers for it.
+// Without this guard one poll would put a cleared or superseded record back to
+// work, and one model on one Spark would have two live records.
+func TestARemovedDeploymentRecordStaysRemoved(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, _, err := s.CreateFleetDeployment(ctx, FleetDeployment{
+		DeploymentID: "deployment_one", RecipeID: "recipe-one", RecipeVersion: 1,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: "node-loft", State: "running",
+	}, FleetDeploymentNode{NodeID: "node-loft", ReservationID: "reservation_one"}); err != nil {
+		t.Fatal(err)
+	}
+	stateOf := func() string {
+		t.Helper()
+		stored, err := s.FleetDeployment(ctx, "deployment_one")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stored.State
+	}
+	if err := s.ObserveFleetDeployment(ctx, "deployment_one", "ready", "2026-08-24T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if state := stateOf(); state != "ready" {
+		t.Fatalf("an ordinary observation left the record in %q", state)
+	}
+	if err := s.ObserveFleetDeployment(ctx, "deployment_one", "removed", "2026-08-24T00:01:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	// The poll that follows a clearing carries the state of a job the Spark
+	// still answers for. It must change nothing, and it must not read as a
+	// failure either: the record is exactly as the caller would leave it.
+	if err := s.ObserveFleetDeployment(ctx, "deployment_one", "ready", "2026-08-24T00:02:00Z"); err != nil {
+		t.Fatalf("a poll over a removed record reported %v", err)
+	}
+	if state := stateOf(); state != "removed" {
+		t.Fatalf("a poll brought a removed record back as %q", state)
+	}
+	// Clearing one twice is not an error.
+	if err := s.ObserveFleetDeployment(ctx, "deployment_one", "removed", "2026-08-24T00:03:00Z"); err != nil {
+		t.Fatalf("clearing a removed record reported %v", err)
+	}
+	// A record that is not there is still not there.
+	if err := s.ObserveFleetDeployment(ctx, "deployment_missing", "ready", "2026-08-24T00:04:00Z"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("observing an absent record reported %v", err)
+	}
+	if err := s.ObserveFleetDeployment(ctx, "deployment_missing", "removed", "2026-08-24T00:05:00Z"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clearing an absent record reported %v", err)
+	}
+}

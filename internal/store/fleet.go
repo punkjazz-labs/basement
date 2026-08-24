@@ -739,13 +739,40 @@ func (s *Store) AdvanceFleetDeploymentJob(ctx context.Context, deploymentID, exp
 	return nil
 }
 
+// ObserveFleetDeployment writes what the controller last saw of a deployment.
+//
+// "removed" is final here, and this is the seam that makes it so. A record is
+// removed when the fleet has let it go: superseded by a newer placement for the
+// same model on the same Spark, or cleared because it could no longer be
+// reached. The job it once named can still be read for a long time afterwards,
+// on a Spark that comes back or that never really went away, so an observation
+// carrying that job's state would quietly put the record back to work. One poll
+// would then undo a clearing, and a superseded record would return beside the
+// record that replaced it, leaving one model on one Spark with two live records.
+//
+// The guard is in the store rather than in the caller because it is a fact
+// about the record's life and not about one read path. Only a placement writing
+// a new owner job gives a pair life again: SetFleetDeploymentJob and
+// AdvanceFleetDeploymentJob both name the job they expect, so neither can do it
+// by accident. Writing "removed" over "removed" stays allowed, so clearing one
+// twice is not an error.
 func (s *Store) ObserveFleetDeployment(ctx context.Context, deploymentID, state, observedAt string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET state=?,last_observed_at=?,updated_at=? WHERE deployment_id=?`, state, observedAt, now(), deploymentID)
+	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET state=?,last_observed_at=?,updated_at=? WHERE deployment_id=? AND (state!='removed' OR ?='removed')`,
+		state, observedAt, now(), deploymentID, state)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
-		return os.ErrNotExist
+		// Either there is no such record, or there is one and it is removed.
+		// The second is not a failure: the record is exactly as the caller
+		// would leave it.
+		var stored string
+		if err := s.db.QueryRowContext(ctx, `SELECT state FROM fleet_deployments WHERE deployment_id=?`, deploymentID).Scan(&stored); err != nil {
+			return os.ErrNotExist
+		}
+		if stored != "removed" {
+			return os.ErrNotExist
+		}
 	}
 	return nil
 }

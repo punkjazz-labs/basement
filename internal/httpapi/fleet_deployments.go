@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -350,6 +351,12 @@ func (s *Server) fleetDeploymentAction(w http.ResponseWriter, r *http.Request) {
 	if parts[1] == "release" {
 		deployment, released, err := s.fleetManager.ReleaseDeployment(r.Context(), parts[0])
 		if err != nil {
+			// A record that is not there answers as the read of that same
+			// record answers, so the console reads one word for one state.
+			if errors.Is(err, os.ErrNotExist) {
+				writeError(w, http.StatusNotFound, errors.New("fleet deployment not found"))
+				return
+			}
 			writeError(w, http.StatusConflict, err)
 			return
 		}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,8 +279,8 @@ func TestFleetDeploymentReleaseRouteClearsAStrandedRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie, csrf := pairMembershipConsole(t, server, authManager)
-	release := func(owner bool) *httptest.ResponseRecorder {
-		request := httptest.NewRequest(http.MethodPost, "http://console.test/api/v1/fleet/deployments/deployment_stranded/release", bytes.NewBufferString(`{}`))
+	releaseID := func(owner bool, deploymentID string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "http://console.test/api/v1/fleet/deployments/"+deploymentID+"/release", bytes.NewBufferString(`{}`))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Origin", "http://console.test")
 		if owner {
@@ -290,12 +291,24 @@ func TestFleetDeploymentReleaseRouteClearsAStrandedRecord(t *testing.T) {
 		server.Handler().ServeHTTP(response, request)
 		return response
 	}
+	release := func(owner bool) *httptest.ResponseRecorder { return releaseID(owner, "deployment_stranded") }
 	if refused := release(false); refused.Code != http.StatusForbidden {
 		t.Fatalf("a caller with no owner session cleared a record: status=%d body=%s", refused.Code, refused.Body.String())
+	}
+	// A record that is not there answers as the read of that same record
+	// answers, so the console reads one word for one state.
+	if missing := releaseID(true, "deployment_that_never_existed"); missing.Code != http.StatusNotFound {
+		t.Fatalf("clearing a record that is not there: status=%d body=%s", missing.Code, missing.Body.String())
 	}
 	cleared := release(true)
 	if cleared.Code != http.StatusOK {
 		t.Fatalf("clearing status=%d body=%s", cleared.Code, cleared.Body.String())
+	}
+	// Clearing one twice is not an error, and the second time reports no
+	// second clearing.
+	repeated := release(true)
+	if repeated.Code != http.StatusOK || !strings.Contains(repeated.Body.String(), `"released":false`) {
+		t.Fatalf("clearing twice: status=%d body=%s", repeated.Code, repeated.Body.String())
 	}
 	stored, err := database.FleetDeployment(ctx, "deployment_stranded")
 	if err != nil || stored.State != "removed" {

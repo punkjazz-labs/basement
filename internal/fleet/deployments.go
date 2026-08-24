@@ -770,6 +770,17 @@ func (m *Manager) Deployment(ctx context.Context, deploymentID string) (Deployme
 		return view, nil
 	}
 	view.Job = &job
+	// A removed record is over. Its job can still be read, on a Spark that
+	// came back or that never really went away, but reading that job's state
+	// back into the record would put it to work again: one poll would undo a
+	// clearing, and a superseded record would return beside the record that
+	// replaced it. The job is still carried here, because it is the truth
+	// about that Spark; only the record's own state is left alone. The store
+	// refuses the write as well (ObserveFleetDeployment), so no other reader
+	// can revive one either.
+	if stored.State == "removed" {
+		return view, nil
+	}
 	view.State, view.LastObservedAt = job.State, m.now().UTC().Format(time.RFC3339Nano)
 	_ = m.database.ObserveFleetDeployment(ctx, deploymentID, job.State, view.LastObservedAt)
 	return view, nil

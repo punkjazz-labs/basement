@@ -266,6 +266,15 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 	if superseded, err := controllerStore.FleetDeployment(ctx, deploymentA.DeploymentID); err != nil || superseded.State != "removed" {
 		t.Fatalf("the superseded record reads %+v err=%v", superseded, err)
 	}
+	// The poll the console runs must not undo it. The superseded record still
+	// names a job node A answers for, so reading that job back into the record
+	// would leave one model on one Spark with two live records.
+	if _, err := controller.Deployments(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if superseded, err := controllerStore.FleetDeployment(ctx, deploymentA.DeploymentID); err != nil || superseded.State != "removed" {
+		t.Fatalf("a poll brought the superseded record back: %+v err=%v", superseded, err)
+	}
 
 	// A create that died before it could name an owner job holds nothing
 	// either. Retrying it used to be refused for good, which wedged that model
@@ -716,5 +725,107 @@ func assertServingRecipe(t *testing.T, database *store.Store, recipeID string) {
 	}
 	if active != recipeID {
 		t.Fatalf("serving recipe=%s want=%s", active, recipeID)
+	}
+}
+
+// The whole sequence a slow Spark puts a row through: the fleet loses touch,
+// the owner clears the record it can no longer read, adoption rebuilds the row
+// from the heartbeat, and then the Spark comes back and answers for the job
+// the cleared record named. The cleared record must stay cleared through all
+// of it, or that one model on that one Spark ends up with two live records.
+func TestAClearedRecordStaysClearedWhenTheSparkComesBack(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	placed := independentRecipes(t, recipes, 1)[0]
+	controller, controllerStore := newPlacementManager(t, "controller", "192.168.99.90", recipes)
+	member, memberStore := newPlacementManager(t, "loft", "192.168.99.91", recipes)
+	member.SetIndependentRuntime(&placementRuntime{database: memberStore, allocator: member.Allocator()})
+	answering := inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	// The same Spark, during the moments it does not answer in time. Nothing
+	// about it has changed: it is still an active member, and the job it owns
+	// is still on its disk.
+	silent := func(string) *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("the Spark did not answer in time")
+		})}
+	}
+	controller.newClient = answering
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	installed, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{
+		RecipeID: placed.ID, NodeID: member.identity.NodeID, IdempotencyKey: "place-it",
+		Intent: IndependentIntent{Confirmed: true, AcceptLicence: true, ConfirmTerritoryEligibility: true, Activate: true},
+	})
+	if err != nil || !created || installed.OwnerJobID == "" {
+		t.Fatalf("the placement to clear was not made: created=%v deployment=%+v err=%v", created, installed, err)
+	}
+
+	// The Spark stops answering in time, so the record cannot be read and the
+	// row it owns goes dead. The owner clears it.
+	controller.newClient = silent
+	cleared, ended, err := controller.ReleaseDeployment(ctx, installed.DeploymentID)
+	if err != nil || !ended || cleared.State != "removed" {
+		t.Fatalf("the stranded record was not cleared: ended=%v record=%+v err=%v", ended, cleared, err)
+	}
+
+	// The Spark comes back. Its job is still there and still readable, which is
+	// exactly what would put the record back to work.
+	controller.newClient = answering
+	if _, err := controller.Deployments(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := controllerStore.FleetDeployment(ctx, installed.DeploymentID); err != nil || stored.State != "removed" {
+		t.Fatalf("a poll brought the cleared record back: %+v err=%v", stored, err)
+	}
+	// The console reads the same thing the store holds. The job is still
+	// carried, because it is the truth about that Spark, but the record is
+	// over.
+	view, err := controller.Deployment(ctx, installed.DeploymentID)
+	if err != nil || view.State != "removed" {
+		t.Fatalf("the console reads the cleared record as %+v err=%v", view, err)
+	}
+	if view.Job == nil || view.Stale {
+		t.Fatalf("the cleared record hides the job its Spark still answers for: %+v", view)
+	}
+
+	// Adopt-on-demand rebuilds the row from what that Spark reports, which is
+	// the whole point of clearing it.
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, placed.ID, "adopt-after-clearing")
+	if err != nil || !created || rebuilt.DeploymentID == installed.DeploymentID {
+		t.Fatalf("the cleared pair was not rebuilt: created=%v record=%+v err=%v", created, rebuilt, err)
+	}
+
+	// One model on one Spark, one live record, however many polls run over it.
+	for range 3 {
+		if _, err := controller.Deployments(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored, err := controllerStore.FleetDeployments(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := []string{}
+	for _, item := range stored {
+		if item.OwnerNodeID == member.identity.NodeID && item.RecipeID == placed.ID && item.State != "removed" {
+			live = append(live, item.DeploymentID)
+		}
+	}
+	if len(live) != 1 || live[0] != rebuilt.DeploymentID {
+		t.Fatalf("the pair holds %d live records: %v", len(live), live)
 	}
 }
