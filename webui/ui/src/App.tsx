@@ -394,7 +394,13 @@ export default function App() {
           </div>
           {DESC[tab] && <p className="desc">{DESC[tab]}</p>}
         </header>
-        <main id="main" className={tab === 'Generate' ? 'wide-generate' : undefined}>
+        {/* The Playground fills the window, so the transcript inside it can
+            own the scrollbar and the composer can stay at the bottom. Every
+            other tab keeps the page scroll. */}
+        <main
+          id="main"
+          className={tab === 'Generate' ? 'wide-generate' : tab === 'Playground' ? 'chat-tall' : undefined}
+        >
           {tab === 'Models' && <Models {...state} />}
           {tab === 'Roles' && <Roles {...state} />}
           {/* The playground stays mounted so switching tabs never wipes the

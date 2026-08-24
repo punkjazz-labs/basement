@@ -28,6 +28,10 @@
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", Roboto, sans-serif;
   --radius: 8px;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  /* The reading column. Prose is hard to read past about 75 characters a
+     line, and 64ch is the width the Redactor already gives a document, so an
+     answer and a document read at the same measure. */
+  --read: 64ch;
   color-scheme: dark;
 }
 
@@ -130,6 +134,13 @@ a { color: var(--ink); }
 
 main { flex: 1; width: 100%; max-width: 1032px; padding: 18px 36px 80px; }
 main.wide-generate { max-width: 1220px; }
+/* The chat is the one tab that fills the window: the transcript owns the
+   scrollbar, and the composer never leaves the bottom of the screen. Every
+   other tab keeps the page scroll it has. */
+.shell:has(main.chat-tall) { height: 100dvh; }
+.content:has(main.chat-tall) { min-height: 0; overflow: hidden; }
+main.chat-tall { display: flex; flex-direction: column; min-height: 0; padding-bottom: 0; }
+main.chat-tall .playground { flex: 1; min-height: 0; }
 
 /* ---- Shared -------------------------------------------------------------- */
 
@@ -142,6 +153,12 @@ main.wide-generate { max-width: 1220px; }
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
 .error-text { color: var(--fail); }
+/* For the screen reader only: a state word where the screen already shows the
+   state in another way. */
+.sr-live {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
 .error-note {
   border: 1px solid color-mix(in srgb, var(--fail) 28%, transparent);
   background: color-mix(in srgb, var(--fail) 6%, transparent);
@@ -628,16 +645,30 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 
 /* ---- Playground ----------------------------------------------------------- */
 
-.playground { display: grid; gap: 12px; }
-.chat {
-  min-height: 320px; max-height: 55dvh; overflow-y: auto; display: grid; gap: 12px;
-  align-content: start; padding: 16px 18px;
+/* No card and no 55dvh box: the transcript is the tall thing on the screen,
+   it owns the scrollbar, and the composer is docked under it. */
+.playground { display: flex; flex-direction: column; min-height: 0; }
+.chatpane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.chat-scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-gutter: stable; }
+.thread {
+  max-width: var(--read); margin: 0 auto;
+  padding: 14px 0 24px; display: grid; gap: 24px; align-content: start;
 }
-.msg { max-width: 85%; padding: 9px 13px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: break-word; font-size: 13.5px; }
-.msg.user { justify-self: end; background: var(--surface-2); border: 1px solid var(--line); }
-.msg.assistant { justify-self: start; background: none; border: 1px solid transparent; padding-left: 0; }
-.msg.assistant.streaming::after { content: '▍'; color: var(--accent-deep); animation: breathe 1s infinite; }
-.msg.assistant.waiting::after { content: none; }
+/* One turn: the message and, under an answer, the tools and the numbers it
+   produced. */
+.turn { display: grid; gap: 6px; }
+.turn.user { justify-items: end; }
+.msg { padding: 9px 13px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: break-word; font-size: 13.5px; }
+/* The question keeps the whitespace the owner typed and stays a bubble on the
+   right. The answer is markdown, so it keeps none and reads as plain text. */
+.msg.user { justify-self: end; max-width: 85%; background: var(--surface-2); border: 1px solid var(--line); }
+.msg.assistant {
+  justify-self: start; max-width: 100%; background: none; border: 1px solid transparent;
+  padding-left: 0; padding-right: 0; white-space: normal;
+}
+/* The caret sits inside the last line of the answer, where the next word
+   appears, and it goes when the answer is complete. */
+.caret { color: var(--accent-deep); animation: breathe 1s infinite; }
 .thinking {
   font-weight: 550;
   background: linear-gradient(90deg, var(--accent), var(--accent-ink) 50%, var(--accent));
@@ -653,9 +684,14 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .thinking { animation: none; background: none; color: var(--accent-deep); }
+  .caret { animation: none; }
 }
 /* Markdown replies: normal flow inside the bubble, quiet code and lists. */
 .msg .md { white-space: normal; display: grid; gap: 8px; }
+/* An answer that is still arriving is two nodes: the part a blank line has
+   closed, which never parses again, and the tail that does. Neither carries a
+   box of its own, so their blocks are the rows of the one answer grid. */
+.msg .md > :is(.closed, .tail) { display: contents; }
 .msg .md :is(p, ul, ol, h1, h2, h3, h4, pre, blockquote, table) { margin: 0; }
 .msg .md :is(h1, h2, h3, h4) { font-size: 13.5px; font-weight: 650; margin-top: 4px; }
 .msg .md :is(ul, ol) { padding-left: 20px; display: grid; gap: 4px; }
@@ -669,10 +705,31 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .msg .md blockquote { border-left: 3px solid var(--line-strong); padding-left: 10px; color: var(--muted); }
 .msg .md table { border-collapse: collapse; }
 .msg .md :is(td, th) { border: 1px solid var(--line); padding: 4px 8px; font-size: 12.5px; }
-.chat-foot { display: flex; align-items: center; gap: 10px; }
-.chat-foot .spacer { flex: 1; }
+/* Every code block carries the Copy that Connect gives a snippet, in the
+   same corner. The pre keeps room for it, so a long first line never runs
+   under the button. */
+.codeblock { position: relative; }
+.codeblock pre { padding-right: 58px; }
+.codeblock .copy {
+  position: absolute; top: 7px; right: 7px;
+  background: var(--surface); border: 1px solid var(--line-strong); color: var(--muted);
+  border-radius: 5px; padding: 1px 8px; font-size: 11px;
+}
+.codeblock .copy:hover { color: var(--ink); border-color: var(--faint); }
+/* A failed stream keeps what arrived. The reason it stopped reads under that
+   text, in the quiet voice a note takes. */
+.msg .chat-error { margin: 6px 0 0; font-size: 12.5px; }
+/* Each answer carries its own tools and its own numbers, so an earlier turn
+   keeps the receipt it earned. */
+.turn-foot { display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+.turn-foot .copy-btn { padding: 2px 7px; font-size: 11.5px; }
+.turn-foot .copy-btn:disabled { opacity: 0.4; cursor: default; }
+.turn-foot .copy-btn:disabled:hover { color: var(--faint); background: none; }
+.turn-foot .chat-meta { margin-left: auto; padding-right: 4px; }
 .chat-hint { color: var(--faint); text-align: center; margin: 0; }
-.chat:has(.chat-hint) { align-content: center; justify-items: center; }
+/* The first screen names the model and sits in the middle of the empty
+   transcript. */
+.thread:has(.chat-hint) { min-height: 100%; align-content: center; justify-items: center; }
 /* Tabular figures: the meter counts while you read it, and digits of one
    width keep the line still. */
 .chat-meta { color: var(--faint); font-size: 11.5px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -707,8 +764,10 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .composer .stop:hover { border-color: var(--faint); }
 .composer .stop i { width: 9px; height: 9px; border-radius: 2px; background: var(--ink); display: block; flex: none; }
 /* The dock holds the composer, the key hints under it, and the pill that
-   appears when the reader leaves the end of the transcript. */
-.composer-dock { position: relative; }
+   appears when the reader leaves the end of the transcript. It sits at the
+   bottom of the window, over the same reading column as the turns. */
+.composer-dock { flex: none; padding: 10px 0 18px; }
+.dock-inner { max-width: var(--read); margin: 0 auto; position: relative; }
 .jump {
   position: absolute; top: -42px; left: 50%; transform: translateX(-50%);
   display: inline-flex; align-items: center; gap: 7px; z-index: 5;
@@ -735,9 +794,8 @@ dialog.confirm-box h2 { font-size: 15.5px; }
 .modelsel button.on { background: var(--surface-2); color: var(--ink); font-weight: 550; }
 .modelsel .n { color: var(--faint); font-size: 11px; margin-left: 5px; }
 
-/* A council answer carries its own attribution, so it is given the full
-   width the panel below it needs. */
-.msg.assistant:has(.byline) { max-width: 100%; }
+/* A council answer carries its own attribution under it, and the panel behind
+   that line takes the full width of the reading column. */
 .byline {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   font-size: 11.5px; color: var(--faint); margin-top: 2px; white-space: normal;
@@ -1113,7 +1171,9 @@ button.chip:hover { color: var(--ink); }
 .storage-row img { width: 24px; height: 24px; border-radius: 6px; flex: none; }
 .storage-row .grow strong { font-weight: 600; }
 
-.play-head { align-items: center; gap: 12px; }
+/* The head over the transcript keeps its height while the transcript takes
+   the rest of the window. */
+.play-head { align-items: center; gap: 12px; flex: none; margin-bottom: 6px; }
 .think-toggle {
   margin-left: auto; display: flex; align-items: center; gap: 6px;
   color: var(--faint); font-size: 12px; cursor: pointer; user-select: none;

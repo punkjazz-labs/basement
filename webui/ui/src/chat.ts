@@ -38,6 +38,14 @@ export function shouldReleasePin(atEnd: boolean, now: number, jumpUntil: number)
   return now >= jumpUntil
 }
 
+// Whether a jump is still travelling. The answer grows under a jump in
+// flight, so the trip must be told the new end each time rather than raced:
+// an instant scroll under a running animation loses to it and lands short of
+// the last line.
+export function jumpInFlight(now: number, jumpUntil: number): boolean {
+  return now < jumpUntil
+}
+
 // The height the composer takes for the text it holds.
 export function composerHeight(contentHeight: number, max = COMPOSER_MAX_HEIGHT): number {
   return Math.min(contentHeight, max)
@@ -69,4 +77,95 @@ export function answerMeter(tokens: number, generationMs: number, firstTokenMs: 
 // had no more to say. The meter says which.
 export function stoppedMeter(meter: string): string {
   return meter ? `${meter} · Stopped` : 'Stopped'
+}
+
+// ---- The answer while it arrives ------------------------------------------
+
+export interface StreamSplit {
+  // Everything up to and including the last blank line. Markdown closes a
+  // block at a blank line, so this part cannot change again: it is parsed
+  // once and the browser keeps the nodes it built for it.
+  closed: string
+  // What arrived after that line. Only this part parses again on the next
+  // token, so the finished text above it holds still and a selection in it
+  // survives.
+  tail: string
+}
+
+// A fence that is still open makes the two halves of a cut parse as broken
+// markdown, so a cut is only allowed where the count of fence lines above it
+// is even.
+const balancedFences = (text: string) => (text.match(/^ {0,3}```/gm) ?? []).length % 2 === 0
+
+export function splitStreamTail(text: string): StreamSplit {
+  let from = text.length
+  for (;;) {
+    const blank = text.lastIndexOf('\n\n', from - 1)
+    // A blank line at the very start closes nothing worth keeping.
+    if (blank <= 0) return { closed: '', tail: text }
+    const cut = blank + 2
+    const closed = text.slice(0, cut)
+    if (balancedFences(closed)) return { closed, tail: text.slice(cut) }
+    from = blank
+  }
+}
+
+// The caret marks the place the next word appears, so it goes inside the last
+// block that holds text. Put after the answer it reads as a finished answer.
+export const CARET = '<span class="caret" aria-hidden="true">▍</span>'
+
+// The blocks that can hold text on their last line. The one that closes last
+// is the one the caret belongs to.
+const CARET_HOSTS = ['</p>', '</li>', '</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>',
+  '</blockquote>', '</td>', '</th>', '</code>']
+
+export function withCaret(html: string, caret = CARET): string {
+  let at = -1
+  for (const tag of CARET_HOSTS) at = Math.max(at, html.lastIndexOf(tag))
+  return at < 0 ? html + caret : html.slice(0, at) + caret + html.slice(at)
+}
+
+// ---- Batched deltas -------------------------------------------------------
+
+// What arrived since the last repaint. One chunk of the stream is far smaller
+// than one frame, so the chunks are added up here and applied together.
+export interface PendingDelta {
+  text: string
+  thinking: string
+  // The answer so far is wrong and the text here is the whole of it.
+  replace: boolean
+}
+
+export const NO_DELTA: PendingDelta = { text: '', thinking: '', replace: false }
+
+export function mergeDelta(
+  pending: PendingDelta,
+  delta: { text?: string; thinking?: string; replace?: boolean },
+): PendingDelta {
+  // A replacement cancels everything that waits, and what follows it in the
+  // same frame is added to the new text.
+  if (delta.replace) return { text: delta.text ?? '', thinking: delta.thinking ?? '', replace: true }
+  return {
+    text: pending.text + (delta.text ?? ''),
+    thinking: pending.thinking + (delta.thinking ?? ''),
+    replace: pending.replace,
+  }
+}
+
+// Whether there is anything to apply. A replacement with no text still is:
+// it empties the answer.
+export function hasDelta(pending: PendingDelta): boolean {
+  return pending.replace || pending.text !== '' || pending.thinking !== ''
+}
+
+// ---- Clearing the conversation --------------------------------------------
+
+// A long conversation is work, so the question names what goes away: which
+// model answered, and how many turns the owner loses.
+export function clearQuestion(model: string, turns: number): { title: string; body: string } {
+  const one = turns === 1
+  return {
+    title: `Clear the conversation with ${model}?`,
+    body: `This removes ${one ? '1 turn' : `${turns} turns`}. You cannot get ${one ? 'it' : 'them'} back.`,
+  }
 }

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  COMPOSER_MAX_HEIGHT, PIN_GAP, answerMeter, composerHeight, pinnedToBottom, shouldReleasePin, stoppedMeter,
-  tokenMeter, waitMeter,
+  COMPOSER_MAX_HEIGHT, NO_DELTA, PIN_GAP, answerMeter, clearQuestion, composerHeight, hasDelta,
+  jumpInFlight, mergeDelta, pinnedToBottom, shouldReleasePin, splitStreamTail, stoppedMeter, tokenMeter,
+  waitMeter, withCaret,
 } from './chat'
 
 describe('pinnedToBottom', () => {
@@ -121,5 +122,122 @@ describe('stoppedMeter', () => {
 
   it('says only that it stopped when no token arrived', () => {
     expect(stoppedMeter('')).toBe('Stopped')
+  })
+})
+
+describe('splitStreamTail', () => {
+  it('keeps everything as tail until a blank line closes something', () => {
+    expect(splitStreamTail('The answer starts here')).toEqual({ closed: '', tail: 'The answer starts here' })
+  })
+
+  it('closes the paragraphs above the last blank line', () => {
+    expect(splitStreamTail('One.\n\nTwo.\n\nThree so')).toEqual({
+      closed: 'One.\n\nTwo.\n\n',
+      tail: 'Three so',
+    })
+  })
+
+  // The closed part is the whole point: it is what parses once and then holds
+  // still while the tail moves.
+  it('closes a paragraph the moment the blank line arrives', () => {
+    expect(splitStreamTail('One.\n\n')).toEqual({ closed: 'One.\n\n', tail: '' })
+  })
+
+  it('never cuts inside an open code fence', () => {
+    const text = 'Try this:\n\n```go\nserver := &http.Server{\n\n    Handler: mux,'
+    expect(splitStreamTail(text)).toEqual({ closed: 'Try this:\n\n', tail: '```go\nserver := &http.Server{\n\n    Handler: mux,' })
+  })
+
+  it('closes a code block once its fence is closed', () => {
+    const text = 'Try this:\n\n```go\nx := 1\n```\n\nThen run'
+    expect(splitStreamTail(text)).toEqual({ closed: 'Try this:\n\n```go\nx := 1\n```\n\n', tail: 'Then run' })
+  })
+
+  it('keeps everything as tail when the only blank line opens the answer', () => {
+    expect(splitStreamTail('\n\nstill arriving')).toEqual({ closed: '', tail: '\n\nstill arriving' })
+  })
+})
+
+describe('withCaret', () => {
+  it('puts the caret inside the last paragraph', () => {
+    expect(withCaret('<p>arriving</p>\n', '#')).toBe('<p>arriving#</p>\n')
+  })
+
+  it('puts the caret inside the last item of a list', () => {
+    expect(withCaret('<ul>\n<li>one</li>\n<li>two</li>\n</ul>', '#'))
+      .toBe('<ul>\n<li>one</li>\n<li>two#</li>\n</ul>')
+  })
+
+  it('puts the caret after the last block when several close', () => {
+    expect(withCaret('<pre><code>x := 1</code></pre>\n<p>then</p>\n', '#'))
+      .toBe('<pre><code>x := 1</code></pre>\n<p>then#</p>\n')
+  })
+
+  it('follows the text into a code block that is still open', () => {
+    expect(withCaret('<pre><code>x := 1</code></pre>\n', '#')).toBe('<pre><code>x := 1#</code></pre>\n')
+  })
+
+  it('stands alone when no block has closed yet', () => {
+    expect(withCaret('', '#')).toBe('#')
+  })
+})
+
+describe('mergeDelta', () => {
+  it('adds up the chunks that arrive between two frames', () => {
+    const first = mergeDelta(NO_DELTA, { text: 'Start' })
+    expect(mergeDelta(first, { text: ' here' })).toEqual({ text: 'Start here', thinking: '', replace: false })
+  })
+
+  it('keeps the reasoning apart from the answer', () => {
+    const pending = mergeDelta(mergeDelta(NO_DELTA, { thinking: 'weigh' }), { text: 'so' })
+    expect(pending).toEqual({ text: 'so', thinking: 'weigh', replace: false })
+  })
+
+  it('drops everything waiting when a replacement arrives', () => {
+    const pending = mergeDelta(mergeDelta(NO_DELTA, { text: 'wrong' }), { text: 'right', replace: true })
+    expect(pending).toEqual({ text: 'right', thinking: '', replace: true })
+  })
+
+  it('adds what follows a replacement to the new text', () => {
+    const replaced = mergeDelta(NO_DELTA, { text: 'right', replace: true })
+    expect(mergeDelta(replaced, { text: ' again' })).toEqual({ text: 'right again', thinking: '', replace: true })
+  })
+
+  it('has nothing to apply until a chunk arrives', () => {
+    expect(hasDelta(NO_DELTA)).toBe(false)
+    expect(hasDelta(mergeDelta(NO_DELTA, { text: 'a' }))).toBe(true)
+  })
+
+  // A replacement with no text is still a change: it empties the answer.
+  it('applies a replacement that carries no text', () => {
+    expect(hasDelta(mergeDelta(NO_DELTA, { replace: true }))).toBe(true)
+  })
+})
+
+describe('clearQuestion', () => {
+  it('names the model and counts the turns', () => {
+    expect(clearQuestion('Laguna S 2.1', 6)).toEqual({
+      title: 'Clear the conversation with Laguna S 2.1?',
+      body: 'This removes 6 turns. You cannot get them back.',
+    })
+  })
+
+  it('counts one turn as one turn', () => {
+    expect(clearQuestion('Qwen 3.6 27B', 1).body).toBe('This removes 1 turn. You cannot get it back.')
+  })
+})
+
+describe('jumpInFlight', () => {
+  it('is travelling while the window is open', () => {
+    expect(jumpInFlight(1000, 1900)).toBe(true)
+  })
+
+  it('has landed when the window closes', () => {
+    expect(jumpInFlight(1900, 1900)).toBe(false)
+  })
+
+  // No jump is travelling, so a token scroll is the instant one.
+  it('is never travelling with no jump', () => {
+    expect(jumpInFlight(1000, 0)).toBe(false)
   })
 })
