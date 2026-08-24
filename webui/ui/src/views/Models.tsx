@@ -4,7 +4,7 @@ import {
   modelStateWord, peerModelList,
   updatePlan, installRequest, installConfirmationsComplete, licenceArtifacts, territoryEligibilityLabel, trustLine,
   type FleetDeploymentView, type FleetSummary, type InstalledModel, type Job, type Peer, type Preflight,
-  type PlacementPlan, type Recipe, type StorageInfo, type PeerSummary, type TokenUsage,
+  type PlacementPlan, type Recipe, type RecipeFeedCheck, type StorageInfo, type PeerSummary, type TokenUsage,
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
@@ -99,7 +99,7 @@ function MemberBanner({ controllerConsoleURL }: { controllerConsoleURL: string }
 type Placement = 'local' | 'peer'
 
 export default function Models({
-  system, recipes, models, jobs, peers, refreshModelsAndJobs, openDeployment, openFleetDeployment,
+  system, recipes, models, jobs, peers, refresh, refreshModelsAndJobs, openDeployment, openFleetDeployment,
   openPlayground, openGenerate, openFleet,
 }: AppState) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
@@ -117,6 +117,12 @@ export default function Models({
   const [tab, setTab] = useState<ModelsTab>('mine')
   const [storage, setStorage] = useState<StorageInfo | null>(null)
   const [tokens, setTokens] = useState<TokenUsage | null>(null)
+  // The feed check under the table. checkingFeed is the button's busy state;
+  // feedError only ever holds a problem with the request itself, because a
+  // feed this Spark could not reach comes back as feed health and is said by
+  // the line beside the button.
+  const [checkingFeed, setCheckingFeed] = useState(false)
+  const [feedError, setFeedError] = useState('')
   const [placement, setPlacement] = useState<Placement>('local')
   // What the controller answered when it planned this install across the
   // fleet: every Spark it would consider, and the one it recommends. null
@@ -401,6 +407,24 @@ export default function Models({
   const acceptJob = (result: { job: Job }) => {
     openDeployment(result.job.id)
     refreshModelsAndJobs()
+  }
+
+  // Ask the feed now instead of waiting for the next scheduled check. The
+  // manager answers with the feed health the check produced; this screen then
+  // reads the system and the catalog again, so a newer index moves the line
+  // under the table and the rows above it together.
+  const checkForRecipes = async () => {
+    if (checkingFeed) return
+    setCheckingFeed(true)
+    setFeedError('')
+    try {
+      await api<RecipeFeedCheck>('/api/v1/recipes/refresh', { method: 'POST' })
+      await refresh()
+    } catch (problem) {
+      setFeedError(problem instanceof Error ? problem.message : 'The check did not work.')
+    } finally {
+      setCheckingFeed(false)
+    }
   }
 
   const run = async (id: string, work: () => Promise<void>) => {
@@ -1203,10 +1227,19 @@ export default function Models({
         )}
       </div>
       {/* Where the recipes in that table came from, and how fresh they are.
-          A feed that has never been fetched says nothing at all. */}
-      {(() => {
-        const note = feedNote(system?.recipe_feed, Date.now())
-        return note ? <p className={`table-note ${note.warn ? 'warn' : ''}`}>{note.text}</p> : null
+          A feed that has never been fetched says nothing at all, and the
+          button beside it asks the feed now rather than at the next check. */}
+      {system?.recipe_feed && (() => {
+        const note = feedNote(system.recipe_feed, Date.now())
+        return (
+          <div className="feed-line">
+            {note && <p className={`table-note ${note.warn ? 'warn' : ''}`}>{note.text}</p>}
+            <button type="button" className="ghost" disabled={checkingFeed} onClick={checkForRecipes}>
+              {checkingFeed ? 'Checking' : 'Check for new recipes'}
+            </button>
+            {feedError && <p className="table-note warn">{feedError}</p>}
+          </div>
+        )
       })()}
       {/* Only shown once something has actually been counted. Basement
           counts a model's tokens while it serves it here, so an empty total

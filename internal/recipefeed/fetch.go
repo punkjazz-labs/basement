@@ -116,6 +116,14 @@ type Fetcher struct {
 	lastAccepted time.Time
 	fetchedAt    time.Time
 	lastFetchErr string
+
+	// onUpdate is how an accepted index reaches the rest of the manager (the
+	// engine, the API, the fleet digest). It is held on the fetcher rather
+	// than inside Run's frame because every fetch must publish the same way:
+	// a forced fetch that updated this registry alone would leave the catalog
+	// everything else reads unchanged until the next scheduled cycle.
+	updateMu sync.Mutex
+	onUpdate func(all, effective []recipe.Recipe)
 }
 
 // NewFetcher seeds the registry with the embedded recipes and whatever
@@ -269,18 +277,20 @@ func (f *Fetcher) refresh(ctx context.Context) error {
 	return f.accept(indexBytes, sigBytes, true)
 }
 
-// Run fetches immediately, then every interval, calling onUpdate after each
-// attempt (successful or not) with the resulting snapshot — which on
-// failure is simply unchanged from before. It returns when ctx is done.
-// Failures never reach the user: only the log line here states why.
-func (f *Fetcher) Run(ctx context.Context, interval time.Duration, onUpdate func(all, effective []recipe.Recipe)) {
-	attempt := func() {
-		if err := f.RefreshOnce(ctx); err != nil {
-			f.logger.Warn("recipe index: refresh failed; keeping the current recipe set", "error", err)
-		}
-		onUpdate(f.Snapshot())
-	}
-	attempt()
+// SetOnUpdate installs the one callback every accepted index publishes
+// through, whoever asked for the fetch. Call it before Run starts and before
+// any forced fetch can arrive; a fetcher with no callback still keeps its own
+// registry correct, it simply tells nobody.
+func (f *Fetcher) SetOnUpdate(onUpdate func(all, effective []recipe.Recipe)) {
+	f.updateMu.Lock()
+	defer f.updateMu.Unlock()
+	f.onUpdate = onUpdate
+}
+
+// Run fetches immediately, then every interval. It returns when ctx is done.
+// Failures never reach the user: only the log line in attempt states why.
+func (f *Fetcher) Run(ctx context.Context, interval time.Duration) {
+	f.attempt(ctx)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -288,9 +298,39 @@ func (f *Fetcher) Run(ctx context.Context, interval time.Duration, onUpdate func
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			attempt()
+			f.attempt(ctx)
 		}
 	}
+}
+
+// FetchNow runs one attempt right now and reports the feed health it
+// produced. It is the same attempt the ticker makes — the same fetch, the
+// same verification, the same downgrade rule, the same publication — so a
+// forced check can never accept an index on terms a scheduled one would
+// refuse. It adds a fetch; it does not move the next scheduled one.
+//
+// A failed attempt is not an error here. The health it returns says the feed
+// was unreachable, and that is the whole answer a person asking "is there
+// anything new" needs.
+func (f *Fetcher) FetchNow(ctx context.Context) Health {
+	f.attempt(ctx)
+	return f.Health()
+}
+
+// attempt is one fetch-verify-accept cycle followed by publication of the
+// resulting snapshot, successful or not — on failure the snapshot is simply
+// unchanged from before, so publishing it changes nothing.
+func (f *Fetcher) attempt(ctx context.Context) {
+	if err := f.RefreshOnce(ctx); err != nil {
+		f.logger.Warn("recipe index: refresh failed; keeping the current recipe set", "error", err)
+	}
+	f.updateMu.Lock()
+	onUpdate := f.onUpdate
+	f.updateMu.Unlock()
+	if onUpdate == nil {
+		return
+	}
+	onUpdate(f.Snapshot())
 }
 
 // accept runs the full trust chain (recipe.VerifyAndParseIndex), enforces

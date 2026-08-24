@@ -134,6 +134,17 @@ func main() {
 	// index that has not been refreshed in a month can say so rather than
 	// look like a healthy feed with nothing new in it.
 	api.SetRecipeFeedHealth(feed.Health)
+	// The same fetch the 6 hour cycle runs, on the owner's word. Wired here,
+	// before anything can listen, together with the publication hook below, so
+	// a forced fetch always reaches the engine and the API as well.
+	feed.SetOnUpdate(func(all, effective []recipe.Recipe) {
+		jobEngine.SetRecipes(all, effective)
+		api.SetRecipes(all, effective)
+		if err := fleetManager.SetRecipes(all, effective); err != nil {
+			logger.Error("refresh fleet catalogue digest", "error", err)
+		}
+	})
+	api.SetRecipeFeedRefresh(feed.FetchNow)
 	// Token counters die with the container that publishes them, so the
 	// engine reads them one last time before it stops one. Installed before
 	// ResumeInterrupted below runs a single step: a resumed stop job can
@@ -176,13 +187,7 @@ func main() {
 
 	feedCtx, stopFeed := context.WithCancel(context.Background())
 	defer stopFeed()
-	go feed.Run(feedCtx, recipefeed.RefreshInterval, func(all, effective []recipe.Recipe) {
-		jobEngine.SetRecipes(all, effective)
-		api.SetRecipes(all, effective)
-		if err := fleetManager.SetRecipes(all, effective); err != nil {
-			logger.Error("refresh fleet catalogue digest", "error", err)
-		}
-	})
+	go feed.Run(feedCtx, recipefeed.RefreshInterval)
 
 	fleetCtx, stopFleet := context.WithCancel(context.Background())
 	defer stopFleet()

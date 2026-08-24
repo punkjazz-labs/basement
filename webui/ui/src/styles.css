@@ -359,6 +359,13 @@ input[type='text'], input[type='password'], textarea {
 /* An index old enough that a revocation could be missing from it. */
 .table-note.warn { color: var(--warn); }
 
+/* The feed line under the table: what the feed said, and the control that
+   asks it again. The button stays small and quiet, because the line beside it
+   is already the answer in the ordinary case. */
+.feed-line { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+.feed-line .table-note { margin: 0 0 0 4px; }
+.feed-line button { padding: 3px 13px; font-size: 11.5px; }
+
 /* The publisher's own withdrawal notice, inside the expanded row. Tinted
    rather than loud: nothing here is broken and nothing stops on its own. */
 .revoke-line {

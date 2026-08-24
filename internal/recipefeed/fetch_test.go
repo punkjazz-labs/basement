@@ -537,3 +537,69 @@ func TestRefreshOnceNetworkFailureLeavesEmbeddedRecipesUntouched(t *testing.T) {
 		t.Fatalf("embedded recipe was not left in place after a network failure: %#v", afterEffective)
 	}
 }
+
+// --- A forced fetch: the same attempt, on the owner's word ---
+
+func TestFetchNowRunsTheSameAttemptAndPublishesIt(t *testing.T) {
+	pub, priv := testKeypair(t)
+	remote := testRecipe(t, "remote-forced", 3)
+	body := marshalIndex(t, time.Now(), remote)
+	server := newIndexServer(t, body, sign(priv, body))
+
+	f := newFetcher(nil, t.TempDir(), discardLogger(), pub, newTestRecorder())
+	f.indexURL = server.URL + "/index.json"
+
+	// The publication hook is the one the scheduled cycle uses. A forced
+	// fetch that updated this registry alone would leave the engine and the
+	// API on the old catalog until the next cycle, hours later.
+	published := 0
+	var lastEffective []recipe.Recipe
+	f.SetOnUpdate(func(_, effective []recipe.Recipe) {
+		published++
+		lastEffective = effective
+	})
+
+	health := f.FetchNow(context.Background())
+	if health.State != StateOK {
+		t.Fatalf("state=%q after a forced fetch, want %q", health.State, StateOK)
+	}
+	if health.AcceptedGeneratedAt == nil || health.FetchedAt == nil {
+		t.Fatalf("a forced fetch reported no timestamps: %#v", health)
+	}
+	if published != 1 {
+		t.Fatalf("the forced fetch published %d times, want 1", published)
+	}
+	if got, ok := recipe.Find(lastEffective, "remote-forced"); !ok || got.Version != 3 {
+		t.Fatalf("the forced fetch did not publish the fetched catalog: %#v", lastEffective)
+	}
+}
+
+func TestFetchNowOnAnUnreachableFeedReportsItRatherThanFailing(t *testing.T) {
+	pub, _ := testKeypair(t)
+	embedded := []recipe.Recipe{testRecipe(t, "recipe-a", 1)}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.json", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	f := newFetcher(embedded, t.TempDir(), discardLogger(), pub, newTestRecorder())
+	f.indexURL = server.URL + "/index.json"
+	published := 0
+	f.SetOnUpdate(func(_, _ []recipe.Recipe) { published++ })
+
+	// Nothing has ever been accepted here, so the honest word is that this
+	// machine has no index in force, not that a fetch failed.
+	health := f.FetchNow(context.Background())
+	if health.State != StateNeverFetched {
+		t.Fatalf("state=%q after a failed forced fetch, want %q", health.State, StateNeverFetched)
+	}
+	if published != 1 {
+		t.Fatalf("a failed forced fetch published %d times, want 1", published)
+	}
+	_, effective := f.Snapshot()
+	if got, ok := recipe.Find(effective, "recipe-a"); !ok || got.Version != 1 {
+		t.Fatalf("a failed forced fetch disturbed the embedded floor: %#v", effective)
+	}
+}

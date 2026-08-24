@@ -213,6 +213,13 @@ export interface RecipeFeedHealth {
   stale: boolean
 }
 
+// What a console feed check answers: the health that check produced, plus
+// refreshed_recently when the feed had already been checked moments before
+// and this call reports that check instead of running another.
+export interface RecipeFeedCheck extends RecipeFeedHealth {
+  refreshed_recently: boolean
+}
+
 export interface SystemInfo {
   hostname: string
   product_name: string

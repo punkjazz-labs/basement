@@ -132,6 +132,14 @@ type Server struct {
 	// Set once before the listener starts; nil means no feed is wired, which
 	// reads as never_fetched because that is exactly what it is.
 	feedHealth func() recipefeed.Health
+	// feedRefresh fetches the recipe index now instead of at the next
+	// scheduled cycle (see SetRecipeFeedRefresh). The three fields under it
+	// are the promise the endpoint makes around that fetch: one at a time,
+	// and at most one per forcedFeedRefreshWindow, however many consoles ask.
+	feedRefresh        func(context.Context) recipefeed.Health
+	feedRefreshMu      sync.Mutex
+	feedRefreshRunning chan struct{}
+	feedRefreshedAt    time.Time
 
 	// docredact holds every analyzed document from the console's document
 	// redactor (docs/plans/12-doc-redactor.md), in memory only. Restarting
@@ -187,6 +195,10 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/system", server.withPeerReadAuth(server.system))
 	mux.HandleFunc("/api/v1/preflight", server.withPeerReadAuth(server.preflight))
 	mux.HandleFunc("/api/v1/recipes", server.withReadAuth(server.listRecipes))
+	// Checking the feed now rather than waiting for the next scheduled cycle.
+	// Console session and CSRF only: it spends this machine's network on the
+	// owner's word, and a bearer key never reaches it.
+	mux.HandleFunc("/api/v1/recipes/refresh", server.refreshRecipeFeed)
 	mux.HandleFunc("/api/v1/models", server.withPeerReadAuth(server.listModels))
 	// The model routes are the one place an API key may cause a mutation,
 	// and only the install subaction; see withModelAuth.
@@ -313,6 +325,14 @@ func (s *Server) SetRecipeFeedHealth(provider func() recipefeed.Health) {
 	s.feedHealth = provider
 }
 
+// SetRecipeFeedRefresh wires the fetch behind the console's feed check. It is
+// the fetcher's own immediate fetch, so a forced check runs the same trust
+// chain and the same catalog swap a scheduled one runs. Called once at
+// startup, before the listener starts.
+func (s *Server) SetRecipeFeedRefresh(refresh func(context.Context) recipefeed.Health) {
+	s.feedRefresh = refresh
+}
+
 // recipeFeedHealth is what /api/v1/system reports about the feed. A manager
 // with no feed wired has never fetched one, and says so.
 func (s *Server) recipeFeedHealth() recipefeed.Health {
@@ -320,6 +340,92 @@ func (s *Server) recipeFeedHealth() recipefeed.Health {
 		return recipefeed.Health{State: recipefeed.StateNeverFetched}
 	}
 	return s.feedHealth()
+}
+
+const (
+	// forcedFeedRefreshWindow is the shortest time between two forced feed
+	// fetches. The console button is a person asking a question, and a second
+	// click a moment later is the same question, not a new one. The scheduled
+	// cycle is untouched by this and by the button.
+	forcedFeedRefreshWindow = 30 * time.Second
+	// forcedFeedRefreshTimeout bounds one forced fetch. It deliberately does
+	// not use the caller's request context: callers share one fetch, so the
+	// first browser tab to give up must not cancel the fetch the others wait
+	// on.
+	forcedFeedRefreshTimeout = 60 * time.Second
+)
+
+// feedRefreshResponse is the feed health plus the one thing the health cannot
+// say by itself: that this call did not fetch, because another one just did.
+// The health beside it is still the current health, so the console shows the
+// same answer either way.
+type feedRefreshResponse struct {
+	recipefeed.Health
+	RefreshedRecently bool `json:"refreshed_recently"`
+}
+
+// refreshRecipeFeed fetches the signed recipe index now instead of waiting for
+// the next scheduled cycle, and answers with the resulting feed health. It
+// takes no idempotency key: a fetch either finds a newer signed index or finds
+// the same one, so running it twice costs a request and changes nothing.
+//
+// A feed that cannot be reached is not an error here either. The fetch keeps
+// the last accepted index in force and the health says "unreachable", which is
+// the honest answer to the question the owner asked.
+func (s *Server) refreshRecipeFeed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if err := s.auth.AuthorizeMutation(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if s.feedRefresh == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("this manager has no recipe feed to check"))
+		return
+	}
+	health, recently := s.forceFeedRefresh(r.Context())
+	writeJSON(w, http.StatusOK, feedRefreshResponse{Health: health, RefreshedRecently: recently})
+}
+
+// forceFeedRefresh runs at most one forced fetch at a time and at most one per
+// forcedFeedRefreshWindow, and reports whether this call was inside that
+// window. A caller that arrives while a fetch is running waits for that fetch
+// and takes its result instead of starting a second one; a caller that arrives
+// just after one finished is told the feed was checked a moment ago and gets
+// the same current health, which answers the question it asked.
+func (s *Server) forceFeedRefresh(ctx context.Context) (recipefeed.Health, bool) {
+	s.feedRefreshMu.Lock()
+	if running := s.feedRefreshRunning; running != nil {
+		s.feedRefreshMu.Unlock()
+		select {
+		case <-running:
+		case <-ctx.Done():
+		case <-s.closing:
+		}
+		return s.recipeFeedHealth(), false
+	}
+	if !s.feedRefreshedAt.IsZero() && time.Since(s.feedRefreshedAt) < forcedFeedRefreshWindow {
+		s.feedRefreshMu.Unlock()
+		return s.recipeFeedHealth(), true
+	}
+	running := make(chan struct{})
+	s.feedRefreshRunning = running
+	s.feedRefreshMu.Unlock()
+
+	fetchCtx, cancel := context.WithTimeout(context.Background(), forcedFeedRefreshTimeout)
+	defer cancel()
+	health := s.feedRefresh(fetchCtx)
+
+	s.feedRefreshMu.Lock()
+	s.feedRefreshedAt = time.Now()
+	s.feedRefreshRunning = nil
+	s.feedRefreshMu.Unlock()
+	// Closed after the state is cleared, so a waiter released here can never
+	// find a finished fetch still marked as running.
+	close(running)
+	return health, false
 }
 
 // revocationsByVersion keys every accepted revocation by recipe id and
