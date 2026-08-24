@@ -275,6 +275,22 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 	if superseded, err := controllerStore.FleetDeployment(ctx, deploymentA.DeploymentID); err != nil || superseded.State != "removed" {
 		t.Fatalf("a poll brought the superseded record back: %+v err=%v", superseded, err)
 	}
+	// The key that made the superseded record cannot carry on with it either.
+	// Handing it back would read as an install that quietly did nothing, and
+	// the record is over.
+	_, created, err = controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "place-first", Intent: intent})
+	if err == nil || created || !strings.Contains(err.Error(), "send a new install request") {
+		t.Fatalf("a retry of the key that made a cleared record was accepted: created=%v err=%v", created, err)
+	}
+	if superseded, err := controllerStore.FleetDeployment(ctx, deploymentA.DeploymentID); err != nil || superseded.State != "removed" {
+		t.Fatalf("a refused retry changed the cleared record: %+v err=%v", superseded, err)
+	}
+	// A new request brings a new key, so it mints a new record id and a clean
+	// record. That is the way back, and it works.
+	fresh, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "place-first-again", Intent: intent})
+	if err != nil || !created || fresh.OwnerJobID == "" {
+		t.Fatalf("a new request over a cleared record was refused: created=%v deployment=%+v err=%v", created, fresh, err)
+	}
 
 	// A create that died before it could name an owner job holds nothing
 	// either. Retrying it used to be refused for good, which wedged that model
@@ -799,6 +815,19 @@ func TestAClearedRecordStaysClearedWhenTheSparkComesBack(t *testing.T) {
 		t.Fatalf("the cleared record hides the job its Spark still answers for: %+v", view)
 	}
 
+	// A console tab that has not caught up still holds the cleared id and can
+	// fire an action at it. The job it names is readable again, so the answer
+	// would put the record back to work. Every action is refused instead.
+	for _, action := range []string{"smoke-test", "benchmark", "start", "stop", "remove"} {
+		if _, err := controller.ActionDeployment(ctx, installed.DeploymentID, action, "stale-tab-"+action, IndependentIntent{}); err == nil ||
+			!strings.Contains(err.Error(), "nothing to act on") {
+			t.Fatalf("%s against a cleared record was accepted: %v", action, err)
+		}
+	}
+	if stored, err := controllerStore.FleetDeployment(ctx, installed.DeploymentID); err != nil || stored.State != "removed" {
+		t.Fatalf("an action brought the cleared record back: %+v err=%v", stored, err)
+	}
+
 	// Adopt-on-demand rebuilds the row from what that Spark reports, which is
 	// the whole point of clearing it.
 	if err := controller.PollOnce(ctx); err != nil {
@@ -828,4 +857,131 @@ func TestAClearedRecordStaysClearedWhenTheSparkComesBack(t *testing.T) {
 	if len(live) != 1 || live[0] != rebuilt.DeploymentID {
 		t.Fatalf("the pair holds %d live records: %v", len(live), live)
 	}
+}
+
+// Adoption is the one deliberate way back from a cleared record, and it has to
+// be: its id comes from the fleet, the node and the model, so a pair whose
+// adopted record was cleared can only ever come back under that same id. If
+// adoption handed the dead record back, that model would be wedged on that
+// Spark for good.
+func TestAdoptingAgainRebuildsAClearedRecordUnderItsOwnID(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := independentRecipes(t, recipes, 2)
+	adopted, guarded := held[0], held[1]
+	controller, controllerStore := newPlacementManager(t, "controller", "192.168.99.100", recipes)
+	member, memberStore := newPlacementManager(t, "loft", "192.168.99.101", recipes)
+	member.SetIndependentRuntime(&placementRuntime{database: memberStore, allocator: member.Allocator()})
+	answering := inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	silent := func(string) *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("the Spark did not answer in time")
+		})}
+	}
+	controller.newClient = answering
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range []store.InstalledModel{
+		{RecipeID: adopted.ID, RecipeVersion: adopted.Version, Status: "ready", Active: true},
+		{RecipeID: guarded.ID, RecipeVersion: guarded.Version, Status: "ready"},
+	} {
+		if err := memberStore.SetInstalled(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	first, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, adopted.ID, "adopt-once")
+	if err != nil || !created || first.OwnerJobID == "" {
+		t.Fatalf("the record to clear was not adopted: created=%v record=%+v err=%v", created, first, err)
+	}
+	controller.newClient = silent
+	if _, ended, err := controller.ReleaseDeployment(ctx, first.DeploymentID); err != nil || !ended {
+		t.Fatalf("the adopted record was not cleared: ended=%v err=%v", ended, err)
+	}
+	controller.newClient = answering
+
+	rebuilt, _, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, adopted.ID, "adopt-again")
+	if err != nil {
+		t.Fatalf("a cleared adopted record could not be rebuilt: %v", err)
+	}
+	// Same id, because that is the only id this pair can have, and a record
+	// that is alive again with a job of its own.
+	if rebuilt.DeploymentID != first.DeploymentID {
+		t.Fatalf("the rebuild made a second id: %s and %s", first.DeploymentID, rebuilt.DeploymentID)
+	}
+	if rebuilt.State == "removed" || rebuilt.OwnerJobID == "" || rebuilt.Job == nil {
+		t.Fatalf("the rebuilt record is not alive: %+v", rebuilt)
+	}
+	// It starts over rather than resuming: the job it names is not the one the
+	// cleared record named.
+	if rebuilt.OwnerJobID == first.OwnerJobID {
+		t.Fatalf("the rebuilt record kept the job of the record that was cleared: %s", rebuilt.OwnerJobID)
+	}
+	// Polling cannot undo any of it, and the pair holds one record throughout.
+	for range 3 {
+		if _, err := controller.Deployments(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if live := liveRecordsFor(t, controllerStore, member.identity.NodeID, adopted.ID); len(live) != 1 || live[0] != rebuilt.DeploymentID {
+		t.Fatalf("the pair holds %d live records: %v", len(live), live)
+	}
+	// Nothing was disturbed on the Spark: the model still serves exactly as it
+	// did before the record was cleared and rebuilt.
+	assertServingRecipe(t, memberStore, adopted.ID)
+
+	// A removed record with work still running behind it should not exist. If
+	// one ever does, the rebuild must not take that job away: the refusal is
+	// read before the revival, not after it.
+	config, err := controllerStore.FleetConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardedID := stablePlacementID("deployment_", config.FleetID, adoptPlacementKey(member.identity.NodeID, guarded.ID))
+	fingerprint, err := RecipeFingerprint(guarded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDeploymentRecord(t, controllerStore, store.FleetDeployment{
+		DeploymentID: guardedID, RecipeID: guarded.ID, RecipeVersion: guarded.Version,
+		RecipeFingerprint: fingerprint, TopologyCount: 1, OwnerNodeID: member.identity.NodeID, State: "running",
+	}, liveOwnerJob(t, memberStore, guarded.ID, guardedID))
+	if err := controllerStore.ObserveFleetDeployment(ctx, guardedID, "removed", "2026-08-24T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, guarded.ID, "adopt-guarded"); err == nil ||
+		!strings.Contains(err.Error(), "still has work running for that model") {
+		t.Fatalf("a removed record with live work behind it was rebuilt: %v", err)
+	}
+	if stored, err := controllerStore.FleetDeployment(ctx, guardedID); err != nil || stored.State != "removed" || stored.OwnerJobID == "" {
+		t.Fatalf("the refused rebuild changed the record: %+v err=%v", stored, err)
+	}
+}
+
+// liveRecordsFor names every record for one model on one Spark that the fleet
+// has not let go of. One is the most there may ever be.
+func liveRecordsFor(t *testing.T, database *store.Store, nodeID, recipeID string) []string {
+	t.Helper()
+	stored, err := database.FleetDeployments(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := []string{}
+	for _, item := range stored {
+		if item.OwnerNodeID == nodeID && item.RecipeID == recipeID && item.State != "removed" {
+			live = append(live, item.DeploymentID)
+		}
+	}
+	return live
 }

@@ -777,6 +777,40 @@ func (s *Store) ObserveFleetDeployment(ctx context.Context, deploymentID, state,
 	return nil
 }
 
+// ReviveFleetDeployment makes a record that was removed ready to be placed
+// again, under the id it already has.
+//
+// It is the one deliberate way back from removed, and it is deliberately not
+// an observation: ObserveFleetDeployment refuses that move on purpose, because
+// a poll carrying the state of a job the owner Spark still answers for would
+// otherwise put a cleared record back to work on its own. This is the opposite
+// case. The caller has decided to place the model again and holds the
+// placement lock for this record, so the record starts over: it gives up the
+// owner job it named, takes the exact recipe being placed now, and waits for a
+// new job the way a fresh record does.
+//
+// Only the adopt path calls it, and only because adoption derives its id from
+// the fleet, the node and the model. A pair whose adopted record was cleared
+// can come back under that one id and no other, so without this the model
+// would be wedged on that Spark for good.
+func (s *Store) ReviveFleetDeployment(ctx context.Context, deploymentID string, recipeVersion int, recipeFingerprint, state string) error {
+	if deploymentID == "" || recipeVersion <= 0 || state == "" || state == "removed" {
+		return errors.New("a revived deployment requires an id, an exact recipe, and a state to start in")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET owner_job_id='',recipe_version=?,recipe_fingerprint=?,state=?,last_observed_at='',updated_at=? WHERE deployment_id=? AND state='removed'`,
+		recipeVersion, recipeFingerprint, state, now(), deploymentID)
+	if err != nil {
+		return err
+	}
+	// Only a removed record can be revived, so nothing matching means the
+	// record is gone or is already in use. Either way the caller read it a
+	// moment ago and it has changed since.
+	if count, _ := result.RowsAffected(); count != 1 {
+		return errors.New("the deployment record changed before it could be placed again")
+	}
+	return nil
+}
+
 func (s *Store) FleetDeployment(ctx context.Context, deploymentID string) (FleetDeployment, error) {
 	var deployment FleetDeployment
 	if err := scanFleetDeployment(s.db.QueryRowContext(ctx, fleetDeploymentSelect+` WHERE deployment_id=?`, deploymentID), &deployment); err != nil {
