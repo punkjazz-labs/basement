@@ -19,6 +19,7 @@ import (
 
 	"github.com/punkjazz-labs/basement/internal/auth"
 	"github.com/punkjazz-labs/basement/internal/engine"
+	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/inventory"
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
@@ -885,6 +886,118 @@ func TestDelegatedInstallRefusesDistributedRecipe(t *testing.T) {
 	jobs.Body.Close()
 	if bytes.Contains(jobsBody, []byte(target)) {
 		t.Fatalf("a refused delegated install still created a job: %s", jobsBody)
+	}
+}
+
+// TestDelegatedInstallIsRefusedOnAFleetMember closes the last door a bearer
+// key could still open on a managed machine. A Spark that joined a fleet
+// answers to its controller for what it holds, so an API key minted before it
+// joined must not stay a second authority over the same machine. The console
+// path already refuses this; the delegated path must refuse it in the same
+// words. A standalone Spark is untouched: the key still installs there.
+func TestDelegatedInstallIsRefusedOnAFleetMember(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	database, err := store.Open(filepath.Join(directory, "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authManager, err := auth.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := singleSpark(recipes)
+	executor := &apiExecutor{done: map[string]bool{}}
+	server := New("test", directory, authManager, database, readyInventory{}, executor, engine.New(database, executor, recipes), recipes)
+	t.Cleanup(server.Close)
+	// A member has a fleet manager, and opening one is also what writes this
+	// machine's own fleet row, which the join below moves into a fleet.
+	manager, err := fleet.NewManager(ctx, fleet.Options{
+		DataDir: directory, Database: database, Inventory: readyInventory{}, Version: "test", BuildIdentity: "test-build",
+		DisplayName: "node-member", ConsoleURL: "http://192.168.99.20:7070", NodeURL: "https://192.168.99.20:7071",
+		Recipes: recipes, EffectiveRecipes: recipes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetFleetManager(manager)
+	_, key, err := database.CreateAPIKey(ctx, "head spark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	install := func(idempotencyKey string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "http://manager.test/api/v1/models/"+selected.ID+"/install",
+			bytes.NewBufferString(`{"confirmed":true,"accept_licence":true}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+key)
+		request.Header.Set("Idempotency-Key", idempotencyKey)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+
+	// While this Spark is its own, the key works exactly as it always has.
+	standalone := install("delegated-standalone")
+	if standalone.Code != http.StatusAccepted {
+		t.Fatalf("delegated install on a standalone Spark status=%d body=%s", standalone.Code, standalone.Body.String())
+	}
+
+	joinFleetAsMember(t, database, "http://192.168.99.10:7070")
+
+	refused := install("delegated-member")
+	if refused.Code != http.StatusConflict {
+		t.Fatalf("delegated install on a member status=%d body=%s, want 409", refused.Code, refused.Body.String())
+	}
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(refused.Body).Decode(&refusal); err != nil {
+		t.Fatal(err)
+	}
+	// The same sentence the console path says, controller address included, so
+	// the owner is sent to the one console that can do this.
+	if refusal.Error != "this node is managed by the fleet controller at http://192.168.99.10:7070; use that dashboard for model changes" {
+		t.Fatalf("the delegated refusal does not name the controller: %q", refusal.Error)
+	}
+	jobs, err := database.ListJobs(ctx, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("the refused delegated install left %d jobs behind: %+v", len(jobs), jobs)
+	}
+}
+
+// joinFleetAsMember puts a store into the state a Spark reaches when it joins
+// a fleet, without a controller to join. The join code hash and the prepare
+// token are opaque to the store, so any pair of strings drives the same two
+// transitions the real join makes.
+func joinFleetAsMember(t *testing.T, database *store.Store, controllerConsoleURL string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := database.CreateFleetJoinCode(ctx, "join-code-hash", time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	pending := store.PendingFleetJoin{
+		PrepareTokenHash: "prepare-token-hash", FleetID: "fleet_test", ControllerNodeID: "node_controller",
+		ControllerConsoleURL: controllerConsoleURL, ControllerNodeURL: "https://192.168.99.10:7071",
+		ControllerCertificate: []byte("controller-certificate"), ControllerCertificateFingerprint: "controller-fingerprint",
+		MembershipEpoch: 1, ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+	}
+	if err := database.PrepareMemberJoin(ctx, "join-code-hash", pending, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CommitMemberJoin(ctx, pending.PrepareTokenHash, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	config, err := database.FleetConfig(ctx)
+	if err != nil || config.Role != "member" {
+		t.Fatalf("the store did not become a fleet member: role=%q err=%v", config.Role, err)
 	}
 }
 

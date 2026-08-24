@@ -259,6 +259,17 @@ func inspectRawCertificate(certificate *x509.Certificate) (*x509.Certificate, ce
 	return certificate, details, err
 }
 
+// The three ways the other end of a fleet call can answer with an identity
+// this manager will not talk to. They are sentinels, with the words they
+// always had, so that a caller can tell such an answer from silence: the
+// machine did answer, and its owner has to hear that rather than be sent to
+// look for a broken cable.
+var (
+	errServerCertificateCount    = errors.New("fleet TLS requires one server certificate")
+	errServerCertificatePin      = errors.New("fleet server certificate does not match its pin")
+	errServerCertificateValidity = errors.New("fleet server certificate is outside its validity period")
+)
+
 func (m *Manager) clientForFingerprint(expectedFingerprint string) *http.Client {
 	transport := &http.Transport{TLSClientConfig: &tls.Config{
 		MinVersion:         tls.VersionTLS13,
@@ -266,7 +277,7 @@ func (m *Manager) clientForFingerprint(expectedFingerprint string) *http.Client 
 		InsecureSkipVerify: true,
 		VerifyConnection: func(state tls.ConnectionState) error {
 			if len(state.PeerCertificates) != 1 {
-				return errors.New("fleet TLS requires one server certificate")
+				return errServerCertificateCount
 			}
 			certificate := state.PeerCertificates[0]
 			details, err := inspectCertificate(certificate)
@@ -274,11 +285,11 @@ func (m *Manager) clientForFingerprint(expectedFingerprint string) *http.Client 
 				return err
 			}
 			if details.Fingerprint != expectedFingerprint {
-				return errors.New("fleet server certificate does not match its pin")
+				return errServerCertificatePin
 			}
 			now := m.now()
 			if now.Before(certificate.NotBefore) || now.After(certificate.NotAfter) {
-				return errors.New("fleet server certificate is outside its validity period")
+				return errServerCertificateValidity
 			}
 			return nil
 		},
@@ -387,7 +398,10 @@ func callFleetJSON(ctx context.Context, client *http.Client, method, endpoint st
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		// Marked, not reworded: the text still reads as it always did for the
+		// logs, and the mark is what lets a console sentence say plainly that
+		// a Spark is not answering (see failures.go).
+		return nodeUnreachable{err: err}
 	}
 	defer response.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxFleetBody+1))
@@ -404,7 +418,9 @@ func callFleetJSON(ctx context.Context, client *http.Client, method, endpoint st
 		if json.Unmarshal(payload, &failure) == nil && failure.Error != "" {
 			return errors.New(failure.Error)
 		}
-		return fmt.Errorf("fleet manager returned status %d", response.StatusCode)
+		// Same words as before, carried by a type, so that a missing endpoint
+		// can be read as the release gap it is (see failures.go).
+		return nodeStatus{status: response.StatusCode}
 	}
 	if responseBody == nil {
 		return nil

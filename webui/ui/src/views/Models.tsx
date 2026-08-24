@@ -16,7 +16,7 @@ import {
   initialPlacement, installRoute, mergePlacements, modelChips, placedTarget, placementBusy,
   placementOptions, placementSwitchFrom, placementTargets, placementVerb, placementWord,
   recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, workingPlacement,
-  ACTION_REFUSAL, ADOPT_PATH, FLEET_DEPLOYMENTS_PATH, NOT_ANSWERING, NO_PLACEMENT_BACK,
+  ACTION_REFUSAL, ADOPT_PATH, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH, NOT_ANSWERING, NO_PLACEMENT_BACK,
   NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
   type ActionTarget, type FleetDeploymentAction, type FleetRow, type PlacementTarget,
 } from '../fleetModels'
@@ -45,12 +45,6 @@ interface ConfirmState {
   preflight: Preflight
   switchFrom?: string
 }
-
-// The job kinds that change what a model is doing, and so the only ones that
-// lock a row. A benchmark and a smoke test run against a model that is
-// already serving, so Open must stay live through them. The table rows, the
-// first-run hero and the fleet's own placements all read this one set.
-const DISRUPTIVE_KINDS = new Set(['install', 'start', 'stop', 'remove'])
 
 // The fleet in one line above the table: every Spark, whether it serves
 // something, and how much memory and disk it has free. Every number is one

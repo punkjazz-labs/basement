@@ -9,6 +9,10 @@ const KIND: Record<string, string> = {
   remove: 'Uninstall',
   'smoke-test': 'Health check',
   benchmark: 'Speed measurement',
+  // The fleet writes one of these down when it takes charge of a model a
+  // Spark already runs. It starts nothing and stops nothing, so the line says
+  // what it is rather than leaving a bare word from the API on the screen.
+  adopt: 'Adopt',
 }
 const PAGE = 25
 

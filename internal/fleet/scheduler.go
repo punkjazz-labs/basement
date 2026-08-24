@@ -65,11 +65,11 @@ func (m *Manager) PlanIndependent(ctx context.Context, recipeID string) (Placeme
 		case node.Status != "fresh":
 			candidate.Eligible, candidate.Reason = false, "the node is "+node.Status+" and cannot accept a placement"
 		case node.ManagerVersion != m.version:
-			candidate.Eligible, candidate.Reason = false, "the node manager version does not exactly match the controller"
+			candidate.Eligible, candidate.Reason = false, nodeVersionSkew
 		case node.ManagerBuildIdentity != m.buildIdentity:
-			candidate.Eligible, candidate.Reason = false, "the node build identity does not exactly match the controller"
+			candidate.Eligible, candidate.Reason = false, nodeBuildSkew
 		case node.CatalogueDigest != m.digest():
-			candidate.Eligible, candidate.Reason = false, "the node recipe catalogue does not exactly match the controller"
+			candidate.Eligible, candidate.Reason = false, nodeCatalogueSkew
 		}
 		if candidate.Eligible && plan.RecommendedNodeID == "" {
 			plan.RecommendedNodeID = candidate.NodeID

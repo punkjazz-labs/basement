@@ -7,7 +7,7 @@ import {
   initialPlacement, installRoute, joinCandidatesWithInventory, machineNote, mergePlacements,
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
   placementVerb, placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, workingPlacement,
-  ACTION_REFUSAL, ADOPT_PATH, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME, CHOOSE_FOR_ME_NOTE,
+  ACTION_REFUSAL, ADOPT_PATH, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME, CHOOSE_FOR_ME_NOTE, DISRUPTIVE_KINDS,
   FLEET_DEPLOYMENT_ACTIONS, NO_FLEET_ROW, NO_PLACEMENT_BACK, PLACEMENT_REFUSED,
   type ActionTarget, type FleetRow, type PlacementTarget,
 } from './fleetModels'
@@ -819,8 +819,9 @@ describe('what the dialog says about the Spark it targets', () => {
 })
 
 describe('a model the fleet is still working on', () => {
-  // The kinds that change what runs, exactly as the row reads them.
-  const DISRUPTIVE = new Set(['install', 'start', 'stop', 'remove'])
+  // The one set the rows read, so this asserts about the rows themselves and
+  // not about a copy of them.
+  const DISRUPTIVE = DISRUPTIVE_KINDS
 
   const job = (id: string, kind: string, state: string): Job =>
     ({ id, kind, recipe_id: 'qwen36-35b-a3b-nvfp4-1s', state, created_at: '', updated_at: '', steps: [] })
@@ -867,6 +868,15 @@ describe('a model the fleet is still working on', () => {
     const measuring = deployment({ job: job('job-bench', 'benchmark', 'running') })
     expect(workingPlacement(placed(measuring), new Map(), measuring.recipe_id, DISRUPTIVE))
       .toBeUndefined()
+  })
+
+  // Adoption only writes down a model that Spark already runs. It starts
+  // nothing, so it must never take a row's buttons away, even in the moment
+  // between the record being written and the carrier job reading terminal.
+  it('leaves the row alone while the fleet records a model that already runs', () => {
+    expect(DISRUPTIVE.has('adopt')).toBe(false)
+    const adopting = deployment({ job: job('job-adopt', 'adopt', 'queued') })
+    expect(workingPlacement(placed(adopting), new Map(), adopting.recipe_id, DISRUPTIVE)).toBeUndefined()
   })
 
   it('locks the row for a placement it has read no job kind for', () => {

@@ -181,7 +181,7 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 		return Deployment{}, false, err
 	}
 	if _, err := plan.candidate(request.NodeID); err != nil {
-		return Deployment{}, false, fmt.Errorf("node %s: %w", request.NodeID, err)
+		return Deployment{}, false, m.nodeFailure(ctx, request.NodeID, err)
 	}
 	selected := plan.selected
 	if selected.ID != plan.RecipeID || selected.Version != plan.RecipeVersion {
@@ -233,7 +233,7 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 	}
 	prepared, target, local, err := m.prepareOnNode(ctx, prepareRequest)
 	if err != nil {
-		return Deployment{}, false, fmt.Errorf("node %s refused placement: %w", request.NodeID, err)
+		return Deployment{}, false, m.nodeFailure(ctx, request.NodeID, err)
 	}
 	createdDeployment, created, err := m.database.CreateFleetDeployment(ctx, store.FleetDeployment{
 		DeploymentID: deploymentID, RecipeID: selected.ID, RecipeVersion: selected.Version,
@@ -257,13 +257,13 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 	if err := m.commitOnNode(ctx, target, local, prepared.PrepareToken, grant); err != nil {
 		_ = m.abortOnNode(context.Background(), target, local, reservationID)
 		_ = m.database.ObserveFleetDeployment(context.Background(), deploymentID, "failed", m.now().UTC().Format(time.RFC3339Nano))
-		return Deployment{}, false, fmt.Errorf("node %s did not commit placement: %w", request.NodeID, err)
+		return Deployment{}, false, m.nodeFailure(ctx, request.NodeID, err)
 	}
 	job, jobCreated, err := m.startOnNode(ctx, target, local, grant, request.Intent)
 	if err != nil {
 		_ = m.abortOnNode(context.Background(), target, local, reservationID)
 		_ = m.database.ObserveFleetDeployment(context.Background(), deploymentID, "failed", m.now().UTC().Format(time.RFC3339Nano))
-		return Deployment{}, false, fmt.Errorf("node %s did not create its deployment job: %w", request.NodeID, err)
+		return Deployment{}, false, m.nodeFailure(ctx, request.NodeID, err)
 	}
 	observedAt := m.now().UTC().Format(time.RFC3339Nano)
 	if err := m.database.SetFleetDeploymentJob(ctx, deploymentID, job.ID, job.State, observedAt); err != nil {
@@ -311,7 +311,7 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	}
 	selected, ok := recipe.FindVersion(m.recipes(), recipeID, running)
 	if !ok {
-		return Deployment{}, false, fmt.Errorf("node %s runs version %d of that model, which is not in this controller's catalogue history", nodeID, running)
+		return Deployment{}, false, fmt.Errorf("%s runs version %d of that model, which is not in this controller's catalogue history", m.nodeName(ctx, nodeID), running)
 	}
 	if selected.Topology.SparkCount != 1 {
 		return Deployment{}, false, fmt.Errorf("%s requires %d nodes and cannot use independent placement", selected.DisplayName, selected.Topology.SparkCount)
@@ -350,14 +350,14 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	}
 	target, local, err := m.placementNode(ctx, nodeID)
 	if err != nil {
-		return Deployment{}, false, fmt.Errorf("node %s: %w", nodeID, err)
+		return Deployment{}, false, m.nodeFailure(ctx, nodeID, err)
 	}
 	job, jobCreated, err := m.adoptOnNode(ctx, target, local, adoptDeploymentRequest{
 		NodeID: nodeID, RecipeID: selected.ID, RecipeVersion: selected.Version,
 		DeploymentID: deploymentID, IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
-		return Deployment{}, false, fmt.Errorf("node %s cannot adopt %s: %w", nodeID, selected.DisplayName, err)
+		return Deployment{}, false, m.nodeFailure(ctx, nodeID, err)
 	}
 	adopted, created, err := m.database.CreateFleetDeployment(ctx, store.FleetDeployment{
 		DeploymentID: deploymentID, RecipeID: selected.ID, RecipeVersion: selected.Version,
@@ -398,9 +398,9 @@ func (m *Manager) runningModelVersion(ctx context.Context, nodeID, recipeID stri
 				return model.RecipeVersion, nil
 			}
 		}
-		return 0, fmt.Errorf("node %s does not report that model as installed", nodeID)
+		return 0, fmt.Errorf("%s does not report that model as installed", m.nodeName(ctx, nodeID))
 	}
-	return 0, fmt.Errorf("node %s is not in this fleet", nodeID)
+	return 0, fmt.Errorf("%s is not in this fleet", m.nodeName(ctx, nodeID))
 }
 
 // refuseDuplicateDeployment keeps one model on one node to one record. The
@@ -417,7 +417,7 @@ func (m *Manager) refuseDuplicateDeployment(ctx context.Context, deploymentID, n
 			continue
 		}
 		if item.OwnerNodeID == nodeID && item.RecipeID == recipeID {
-			return fmt.Errorf("node %s already has a deployment record for that model", nodeID)
+			return fmt.Errorf("%s already has a deployment record for that model", m.nodeName(ctx, nodeID))
 		}
 	}
 	return nil
@@ -605,7 +605,7 @@ func (m *Manager) validateIndependentPrepare(ctx context.Context, request reserv
 		return recipe.Recipe{}, errors.New("the placement grant authority does not match this node's fleet")
 	}
 	if request.ManagerVersion != m.version || request.ManagerBuildIdentity != m.buildIdentity || request.CatalogueDigest != m.digest() {
-		return recipe.Recipe{}, errors.New("the target node does not exactly match the controller release and catalogue")
+		return recipe.Recipe{}, errors.New(nodeReleaseSkew)
 	}
 	selected, ok := recipe.FindVersion(m.recipes(), request.RecipeID, request.RecipeVersion)
 	if !ok || selected.Topology.SparkCount != 1 {
@@ -799,13 +799,13 @@ func (m *Manager) ActionDeployment(ctx context.Context, deploymentID, action, id
 	}
 	client, err := m.clientForNode(target)
 	if err != nil {
-		return store.Job{}, err
+		return store.Job{}, m.nodeFailure(ctx, stored.OwnerNodeID, err)
 	}
 	var job store.Job
 	err = callFleetJSON(ctx, client, http.MethodPost, target.NodeURL+"/internal/fleet/v1/jobs/"+stored.OwnerJobID+"/"+action,
 		remoteJobActionRequest{Action: action, IdempotencyKey: idempotencyKey, Intent: intent}, &job)
 	if err != nil {
-		return store.Job{}, err
+		return store.Job{}, m.nodeFailure(ctx, stored.OwnerNodeID, err)
 	}
 	return job, m.advanceDeploymentJob(ctx, stored, job)
 }

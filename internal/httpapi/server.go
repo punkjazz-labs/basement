@@ -761,6 +761,14 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, errors.New("a two-Spark model cannot be placed from another Spark, so install it from this Spark's own console"))
 			return
 		}
+		// A node that joined a fleet answers to its controller for what it
+		// holds, and a key issued before it joined must not become a second
+		// authority over the same machine. The console path below refuses the
+		// same thing in the same words, so an old peer and a local browser get
+		// one answer, not two (ADR 0013).
+		if s.refuseManagedMemberMutation(w, r) {
+			return
+		}
 	} else if err := s.auth.AuthorizeMutation(r); err != nil {
 		writeError(w, http.StatusForbidden, err)
 		return

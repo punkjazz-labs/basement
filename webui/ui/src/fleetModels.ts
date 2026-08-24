@@ -577,6 +577,14 @@ export const placementSwitchFrom = (target: PlacementTarget | undefined): string
 
 // ---- A model the fleet is still working on -----------------------------------
 
+// The job kinds that change what a model is doing, and so the only ones that
+// lock a row. A benchmark and a smoke test run against a model that is
+// already serving, so Open must stay live through them. An adopt job is not
+// here either: it only writes down a model a Spark already runs, and it is
+// finished the moment it exists. The table rows, the first-run hero and the
+// fleet's own placements all read this one set.
+export const DISRUPTIVE_KINDS: ReadonlySet<string> = new Set(['install', 'start', 'stop', 'remove'])
+
 // The placement that is still working on this model, on whichever Spark runs
 // it. A remote install is recorded as a placement the moment the controller
 // accepts it, but the Spark running it only names the model in a heartbeat
