@@ -1540,12 +1540,16 @@ func (s *Store) Generation(ctx context.Context, id string) (Generation, error) {
 }
 
 // Generations lists results newest first, which is the order the gallery
-// reads them in.
+// reads them in. The order key is rowid, the insertion order, not
+// created_at: the timestamp text trims trailing zeros (RFC3339Nano), so
+// one value can be a prefix of another and the text comparison puts it
+// on the wrong side. Rows are inserted once, at creation, so the
+// insertion order is the creation order.
 func (s *Store) Generations(ctx context.Context, limit int) ([]Generation, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+generationColumns+` FROM generations ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+generationColumns+` FROM generations ORDER BY rowid DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
