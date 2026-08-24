@@ -706,16 +706,28 @@ func (s *Store) CreateFleetDeployment(ctx context.Context, deployment FleetDeplo
 	return stored, count == 1, nil
 }
 
+// SetFleetDeploymentJob gives a record its first owner job, or re-asserts the
+// job it already names. It refuses a removed record: the owner_job_id=''
+// branch checks no job id, so without the state guard it would match a removed
+// job-less record and put it back to work. That record can really be handed to
+// a caller: two placements of one model onto one Spark under different
+// idempotency keys hold different locks, so one can supersede the other's
+// fresh record to "removed" in the moment before the loser writes its job
+// here. The guard turns that silent revival into a refusal the loser reports.
 func (s *Store) SetFleetDeploymentJob(ctx context.Context, deploymentID, ownerJobID, state, observedAt string) error {
 	if ownerJobID == "" {
 		return errors.New("the deployment owner job id is required")
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET owner_job_id=CASE WHEN owner_job_id='' THEN ? ELSE owner_job_id END,state=?,last_observed_at=?,updated_at=? WHERE deployment_id=? AND (owner_job_id='' OR owner_job_id=?)`,
+	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET owner_job_id=CASE WHEN owner_job_id='' THEN ? ELSE owner_job_id END,state=?,last_observed_at=?,updated_at=? WHERE deployment_id=? AND (owner_job_id='' OR owner_job_id=?) AND state!='removed'`,
 		ownerJobID, state, observedAt, now(), deploymentID, ownerJobID)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
+		var stored string
+		if err := s.db.QueryRowContext(ctx, `SELECT state FROM fleet_deployments WHERE deployment_id=?`, deploymentID).Scan(&stored); err == nil && stored == "removed" {
+			return errors.New("the deployment record was removed before its job could be recorded")
+		}
 		return errors.New("the deployment already points to a different owner job")
 	}
 	return nil
@@ -751,11 +763,14 @@ func (s *Store) AdvanceFleetDeploymentJob(ctx context.Context, deploymentID, exp
 // record that replaced it, leaving one model on one Spark with two live records.
 //
 // The guard is in the store rather than in the caller because it is a fact
-// about the record's life and not about one read path. Only a placement writing
-// a new owner job gives a pair life again: SetFleetDeploymentJob and
-// AdvanceFleetDeploymentJob both name the job they expect, so neither can do it
-// by accident. Writing "removed" over "removed" stays allowed, so clearing one
-// twice is not an error.
+// about the record's life and not about one read path. The two job writes sit
+// beside it and are held back in different ways. AdvanceFleetDeploymentJob
+// names the exact job it replaces, so it can only reach a removed record that
+// kept its job id, and its one caller (ActionDeployment) refuses a removed
+// record before it acts. SetFleetDeploymentJob's owner_job_id='' branch names
+// no job at all, so it carries its own state guard; before that guard, only
+// its callers kept it off a removed job-less record. Writing "removed" over
+// "removed" stays allowed, so clearing one twice is not an error.
 func (s *Store) ObserveFleetDeployment(ctx context.Context, deploymentID, state, observedAt string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET state=?,last_observed_at=?,updated_at=? WHERE deployment_id=? AND (state!='removed' OR ?='removed')`,
 		state, observedAt, now(), deploymentID, state)

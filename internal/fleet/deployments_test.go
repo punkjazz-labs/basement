@@ -277,7 +277,7 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 	}
 	// The key that made the superseded record cannot carry on with it either.
 	// Handing it back would read as an install that quietly did nothing, and
-	// the record is over.
+	// the record is finished.
 	_, created, err = controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "place-first", Intent: intent})
 	if err == nil || created || !strings.Contains(err.Error(), "send a new install request") {
 		t.Fatalf("a retry of the key that made a cleared record was accepted: created=%v err=%v", created, err)
@@ -806,7 +806,7 @@ func TestAClearedRecordStaysClearedWhenTheSparkComesBack(t *testing.T) {
 	}
 	// The console reads the same thing the store holds. The job is still
 	// carried, because it is the truth about that Spark, but the record is
-	// over.
+	// finished.
 	view, err := controller.Deployment(ctx, installed.DeploymentID)
 	if err != nil || view.State != "removed" {
 		t.Fatalf("the console reads the cleared record as %+v err=%v", view, err)
@@ -818,9 +818,9 @@ func TestAClearedRecordStaysClearedWhenTheSparkComesBack(t *testing.T) {
 	// A console tab that has not caught up still holds the cleared id and can
 	// fire an action at it. The job it names is readable again, so the answer
 	// would put the record back to work. Every action is refused instead.
-	for _, action := range []string{"smoke-test", "benchmark", "start", "stop", "remove"} {
+	for _, action := range []string{"smoke-test", "benchmark", "start", "stop", "remove", "cancel"} {
 		if _, err := controller.ActionDeployment(ctx, installed.DeploymentID, action, "stale-tab-"+action, IndependentIntent{}); err == nil ||
-			!strings.Contains(err.Error(), "nothing to act on") {
+			!strings.Contains(err.Error(), "the fleet cannot use it") {
 			t.Fatalf("%s against a cleared record was accepted: %v", action, err)
 		}
 	}
@@ -966,6 +966,87 @@ func TestAdoptingAgainRebuildsAClearedRecordUnderItsOwnID(t *testing.T) {
 	}
 	if stored, err := controllerStore.FleetDeployment(ctx, guardedID); err != nil || stored.State != "removed" || stored.OwnerJobID == "" {
 		t.Fatalf("the refused rebuild changed the record: %+v err=%v", stored, err)
+	}
+}
+
+// A rebuild that is refused must change nothing. The revival is the last step
+// of the adopt path that anything can refuse, so every refusal on the way (a
+// live duplicate here, but equally a node the fleet does not hold or an adopt
+// call the node turns down) leaves the cleared record in state "removed". If
+// the revival ran first, the refusal would strand a job-less record in state
+// "adopting": no poll heals that shape, the console row pins on it, and the
+// pair holds two non-removed records.
+func TestARefusedRebuildLeavesTheClearedRecordRemoved(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	placed := independentRecipes(t, recipes, 1)[0]
+	controller, controllerStore := newPlacementManager(t, "controller", "192.168.99.110", recipes)
+	member, memberStore := newPlacementManager(t, "loft", "192.168.99.111", recipes)
+	member.SetIndependentRuntime(&placementRuntime{database: memberStore, allocator: member.Allocator()})
+	answering := inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	silent := func(string) *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("the Spark did not answer in time")
+		})}
+	}
+	controller.newClient = answering
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memberStore.SetInstalled(ctx, store.InstalledModel{RecipeID: placed.ID, RecipeVersion: placed.Version, Status: "ready", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	adopted, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, placed.ID, "adopt-once")
+	if err != nil || !created || adopted.OwnerJobID == "" {
+		t.Fatalf("the record to clear was not adopted: created=%v record=%+v err=%v", created, adopted, err)
+	}
+	controller.newClient = silent
+	if _, ended, err := controller.ReleaseDeployment(ctx, adopted.DeploymentID); err != nil || !ended {
+		t.Fatalf("the adopted record was not cleared: ended=%v err=%v", ended, err)
+	}
+	controller.newClient = answering
+
+	// Another record takes the pair while the cleared one stands, under an id
+	// only a create-path key could mint, with real work running behind it.
+	writeDeploymentRecord(t, controllerStore, store.FleetDeployment{
+		DeploymentID: "deployment_planted_by_create", RecipeID: placed.ID, RecipeVersion: placed.Version,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: member.identity.NodeID, State: "running",
+	}, liveOwnerJob(t, memberStore, placed.ID, "deployment_planted_by_create"))
+
+	// The rebuild is refused, because the pair is taken by live work.
+	if _, _, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, placed.ID, "adopt-again"); err == nil ||
+		!strings.Contains(err.Error(), "already has a deployment record for that model") {
+		t.Fatalf("adopting over a live record for the pair was accepted: %v", err)
+	}
+	// The refusal changed nothing: the cleared record is still removed, and the
+	// pair holds exactly one non-removed record, the live one.
+	if stored, err := controllerStore.FleetDeployment(ctx, adopted.DeploymentID); err != nil || stored.State != "removed" {
+		t.Fatalf("the refused rebuild left the cleared record as %+v err=%v", stored, err)
+	}
+	if live := liveRecordsFor(t, controllerStore, member.identity.NodeID, placed.ID); len(live) != 1 || live[0] != "deployment_planted_by_create" {
+		t.Fatalf("the pair holds %d live records after the refusal: %v", len(live), live)
+	}
+	// Polls change nothing either, with both jobs readable on the Spark.
+	for range 3 {
+		if _, err := controller.Deployments(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stored, err := controllerStore.FleetDeployment(ctx, adopted.DeploymentID); err != nil || stored.State != "removed" {
+		t.Fatalf("a poll after the refusal changed the cleared record: %+v err=%v", stored, err)
+	}
+	if live := liveRecordsFor(t, controllerStore, member.identity.NodeID, placed.ID); len(live) != 1 || live[0] != "deployment_planted_by_create" {
+		t.Fatalf("the pair holds %d live records after the polls: %v", len(live), live)
 	}
 }
 

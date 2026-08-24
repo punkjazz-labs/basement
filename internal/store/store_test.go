@@ -744,3 +744,106 @@ func TestARemovedDeploymentRecordStaysRemoved(t *testing.T) {
 		t.Fatalf("clearing an absent record reported %v", err)
 	}
 }
+
+// ReviveFleetDeployment is the one deliberate way back from "removed", so it
+// must do exactly what it claims and nothing beside it: refuse any record that
+// is not removed, and start a removed one over with no job, the exact recipe
+// being placed now, and no observation carried across from its first life.
+func TestReviveFleetDeploymentStartsARemovedRecordOver(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, _, err := s.CreateFleetDeployment(ctx, FleetDeployment{
+		DeploymentID: "deployment_one", RecipeID: "recipe-one", RecipeVersion: 1,
+		RecipeFingerprint: "fingerprint-one", TopologyCount: 1, OwnerNodeID: "node-loft", State: "running",
+	}, FleetDeploymentNode{NodeID: "node-loft", ReservationID: "reservation_one"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFleetDeploymentJob(ctx, "deployment_one", "job_one", "ready", "2026-08-24T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	// A record that is not removed is refused, and the refusal changes nothing.
+	if err := s.ReviveFleetDeployment(ctx, "deployment_one", 2, "fingerprint-two", "adopting"); err == nil ||
+		!strings.Contains(err.Error(), "changed before it could be placed again") {
+		t.Fatalf("reviving a live record reported %v", err)
+	}
+	stored, err := s.FleetDeployment(ctx, "deployment_one")
+	if err != nil || stored.State != "ready" || stored.OwnerJobID != "job_one" || stored.RecipeVersion != 1 {
+		t.Fatalf("a refused revival changed the record: %+v err=%v", stored, err)
+	}
+	// A removed record starts over: no job, the recipe placed now, a clean
+	// observation, and the state the caller names.
+	if err := s.ObserveFleetDeployment(ctx, "deployment_one", "removed", "2026-08-24T00:01:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReviveFleetDeployment(ctx, "deployment_one", 2, "fingerprint-two", "adopting"); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = s.FleetDeployment(ctx, "deployment_one")
+	if err != nil || stored.State != "adopting" || stored.OwnerJobID != "" ||
+		stored.RecipeVersion != 2 || stored.RecipeFingerprint != "fingerprint-two" || stored.LastObservedAt != "" {
+		t.Fatalf("the revived record reads %+v err=%v", stored, err)
+	}
+	// "removed" is not a state to start over in, and an absent record cannot
+	// be revived at all.
+	if err := s.ReviveFleetDeployment(ctx, "deployment_one", 2, "fingerprint-two", "removed"); err == nil ||
+		!strings.Contains(err.Error(), "requires an id, an exact recipe, and a state") {
+		t.Fatalf("reviving into removed reported %v", err)
+	}
+	if err := s.ReviveFleetDeployment(ctx, "deployment_missing", 1, "fingerprint", "adopting"); err == nil {
+		t.Fatal("reviving an absent record reported no error")
+	}
+}
+
+// SetFleetDeploymentJob's first-job branch names no job it expects, so it
+// carries its own guard against a removed record. Two placements of one model
+// onto one Spark under different keys hold different locks, and one can
+// supersede the other's fresh record in the moment before the loser records
+// its job; without the guard that write would put the removed record back to
+// work and the pair would hold two live records.
+func TestSetFleetDeploymentJobRefusesARemovedRecord(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, _, err := s.CreateFleetDeployment(ctx, FleetDeployment{
+		DeploymentID: "deployment_one", RecipeID: "recipe-one", RecipeVersion: 1,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: "node-loft", State: "committing",
+	}, FleetDeploymentNode{NodeID: "node-loft", ReservationID: "reservation_one"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ObserveFleetDeployment(ctx, "deployment_one", "removed", "2026-08-24T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFleetDeploymentJob(ctx, "deployment_one", "job_late", "running", "2026-08-24T00:01:00Z"); err == nil ||
+		!strings.Contains(err.Error(), "removed before its job could be recorded") {
+		t.Fatalf("a job write onto a removed record reported %v", err)
+	}
+	stored, err := s.FleetDeployment(ctx, "deployment_one")
+	if err != nil || stored.State != "removed" || stored.OwnerJobID != "" {
+		t.Fatalf("the refused job write changed the record: %+v err=%v", stored, err)
+	}
+	// A live record still takes its first job, re-asserts the same job, and
+	// refuses a different one with the sentence that names that case.
+	if _, _, err := s.CreateFleetDeployment(ctx, FleetDeployment{
+		DeploymentID: "deployment_two", RecipeID: "recipe-two", RecipeVersion: 1,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: "node-loft", State: "committing",
+	}, FleetDeploymentNode{NodeID: "node-loft", ReservationID: "reservation_two"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFleetDeploymentJob(ctx, "deployment_two", "job_two", "running", "2026-08-24T00:02:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFleetDeploymentJob(ctx, "deployment_two", "job_two", "ready", "2026-08-24T00:03:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFleetDeploymentJob(ctx, "deployment_two", "job_other", "running", "2026-08-24T00:04:00Z"); err == nil ||
+		!strings.Contains(err.Error(), "already points to a different owner job") {
+		t.Fatalf("a job write naming another job reported %v", err)
+	}
+}

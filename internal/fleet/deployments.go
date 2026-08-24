@@ -219,7 +219,7 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 		// read as an install that quietly did nothing. A new request brings a
 		// new idempotency key, which mints a new record id and a clean record.
 		if existing.State == "removed" {
-			return Deployment{}, false, errors.New("this placement is over, so send a new install request")
+			return Deployment{}, false, errors.New("this placement is finished, so send a new install request")
 		}
 		if existing.OwnerJobID != "" || existing.State == "failed" {
 			view, viewErr := m.Deployment(ctx, deploymentID)
@@ -352,15 +352,18 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	lock := m.placementLock(deploymentID)
 	lock.Lock()
 	defer lock.Unlock()
+	revive := false
 	if existing, err := m.database.FleetDeployment(ctx, deploymentID); err == nil {
 		switch {
-		// Adoption is the rebuild lever, and this is where it pulls. A record
-		// the fleet has let go of is brought back on purpose, because this id
-		// is the only one this pair can ever have: it comes from the fleet,
-		// the node and the model, never from a caller's key. Refusing here, or
-		// handing the dead record back, would wedge this model on this node
-		// for good. The record starts over rather than resuming: it gives up
-		// its old job and takes the recipe that runs there now.
+		// Adoption is the rebuild lever, and this is where it decides to pull.
+		// A record the fleet has let go of is brought back on purpose, because
+		// this id is the only one this pair can ever have: it comes from the
+		// fleet, the node and the model, never from a caller's key. Refusing
+		// here, or handing the dead record back, would wedge this model on
+		// this node for good. The record starts over rather than resuming: it
+		// gives up its old job and takes the recipe that runs there now. Only
+		// the decision is made here; the revival itself waits below, until
+		// every step that can refuse has passed.
 		case existing.State == "removed":
 			// Work that is somehow still running outranks the rebuild. A
 			// removed record should never have live work behind it, and if one
@@ -368,9 +371,7 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 			if m.deploymentWorkIsLive(ctx, existing) {
 				return Deployment{}, false, fmt.Errorf("%s still has work running for that model, so its record cannot be rebuilt yet", m.nodeName(ctx, nodeID))
 			}
-			if err := m.database.ReviveFleetDeployment(ctx, deploymentID, selected.Version, fingerprint, "adopting"); err != nil {
-				return Deployment{}, false, err
-			}
+			revive = true
 		// A record that already owns a job is what the caller wants, even if
 		// the catalogue moved on since. Hand it back. A record without one is
 		// a half-written earlier attempt: fall through and finish it, because
@@ -395,6 +396,32 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	})
 	if err != nil {
 		return Deployment{}, false, m.nodeFailure(ctx, nodeID, err)
+	}
+	// The revival is deliberately the last step that anything can refuse.
+	// Every refusal above returns with the removed record untouched: live work
+	// behind it, a live duplicate for the pair (supersedeDuplicateDeployment),
+	// a node the fleet does not hold (placementNode), and an adopt call the
+	// node did not accept (adoptOnNode) all leave the record in state
+	// "removed", where the next adopt can still rebuild it. Reviving before
+	// those steps would leave a job-less record in state "adopting" when one
+	// of them refused, and no poll heals that shape: Deployment returns early
+	// for a record with no owner job, so the row would pin on the console with
+	// the pair holding two non-removed records.
+	//
+	// From here on nothing refuses; only a store write can fail:
+	//   - ReviveFleetDeployment fails: the carrier job already exists on the
+	//     node, but the record is still "removed". Accepted residual: the
+	//     carrier job is terminal from creation and does no work, and the next
+	//     adopt re-runs this path idempotently under the same deployment id.
+	//   - CreateFleetDeployment or SetFleetDeploymentJob fails after the
+	//     revival: the record is "adopting" with no owner job, the same shape
+	//     as a half-written first adoption, and the next adopt falls through
+	//     the switch above and finishes it. The pair still holds at most one
+	//     non-removed record, because the duplicate check already ran.
+	if revive {
+		if err := m.database.ReviveFleetDeployment(ctx, deploymentID, selected.Version, fingerprint, "adopting"); err != nil {
+			return Deployment{}, false, err
+		}
 	}
 	adopted, created, err := m.database.CreateFleetDeployment(ctx, store.FleetDeployment{
 		DeploymentID: deploymentID, RecipeID: selected.ID, RecipeVersion: selected.Version,
@@ -795,7 +822,7 @@ func (m *Manager) Deployment(ctx context.Context, deploymentID string) (Deployme
 		return view, nil
 	}
 	view.Job = &job
-	// A removed record is over. Its job can still be read, on a Spark that
+	// A removed record is finished. Its job can still be read, on a Spark that
 	// came back or that never really went away, but reading that job's state
 	// back into the record would put it to work again: one poll would undo a
 	// clearing, and a superseded record would return beside the record that
@@ -873,7 +900,7 @@ func (m *Manager) ActionDeployment(ctx context.Context, deploymentID, action, id
 	// placement is not caught by this: that record is still live when its
 	// remove starts.
 	if stored.State == "removed" {
-		return store.Job{}, errors.New("this placement is over, so there is nothing to act on")
+		return store.Job{}, errors.New("this placement is finished, so the fleet cannot use it")
 	}
 	target, local, err := m.placementNode(ctx, stored.OwnerNodeID)
 	if err != nil {
