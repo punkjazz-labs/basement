@@ -231,6 +231,26 @@ func TestASecondCheckInsideTheWindowSaysSoInsteadOfFetching(t *testing.T) {
 	}
 }
 
+func TestAShuttingDownManagerStartsNoFetch(t *testing.T) {
+	h := newRevocationHarness(t)
+	feed := wireFakeFeed(h)
+
+	// Close is what the HTTP server runs at the start of a shutdown. It waits
+	// for any fetch already running, and nothing may start a new one after it:
+	// the fetch would be abandoned at exit or hold the shutdown open.
+	h.api.Close()
+	answer, err := checkFeed(h, h.cookies, h.csrf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer.status != http.StatusServiceUnavailable {
+		t.Fatalf("a check during shutdown status=%d, want 503", answer.status)
+	}
+	if feed.fetchCount() != 0 {
+		t.Fatalf("a check during shutdown started %d fetches, want 0", feed.fetchCount())
+	}
+}
+
 func TestCheckingTheFeedNeedsAConsoleSession(t *testing.T) {
 	h := newRevocationHarness(t)
 	feed := wireFakeFeed(h)

@@ -133,13 +133,16 @@ type Server struct {
 	// reads as never_fetched because that is exactly what it is.
 	feedHealth func() recipefeed.Health
 	// feedRefresh fetches the recipe index now instead of at the next
-	// scheduled cycle (see SetRecipeFeedRefresh). The three fields under it
-	// are the promise the endpoint makes around that fetch: one at a time,
-	// and at most one per forcedFeedRefreshWindow, however many consoles ask.
+	// scheduled cycle (see SetRecipeFeedRefresh). The fields under it are the
+	// promise the endpoint makes around that fetch: one at a time, at most one
+	// per forcedFeedRefreshWindow however many consoles ask, and one result
+	// (nil until the running fetch produces it) that every caller shares.
 	feedRefresh        func(context.Context) recipefeed.Health
 	feedRefreshMu      sync.Mutex
 	feedRefreshRunning chan struct{}
 	feedRefreshedAt    time.Time
+	feedRefreshHealth  *recipefeed.Health
+	feedRefreshWorkers sync.WaitGroup
 
 	// docredact holds every analyzed document from the console's document
 	// redactor (docs/plans/12-doc-redactor.md), in memory only. Restarting
@@ -357,8 +360,8 @@ const (
 
 // feedRefreshResponse is the feed health plus the one thing the health cannot
 // say by itself: that this call did not fetch, because another one just did.
-// The health beside it is still the current health, so the console shows the
-// same answer either way.
+// The health beside it is current either way, so the console has an answer to
+// show whichever happened.
 type feedRefreshResponse struct {
 	recipefeed.Health
 	RefreshedRecently bool `json:"refreshed_recently"`
@@ -385,7 +388,11 @@ func (s *Server) refreshRecipeFeed(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("this manager has no recipe feed to check"))
 		return
 	}
-	health, recently := s.forceFeedRefresh(r.Context())
+	health, recently, err := s.forceFeedRefresh(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, feedRefreshResponse{Health: health, RefreshedRecently: recently})
 }
 
@@ -394,38 +401,79 @@ func (s *Server) refreshRecipeFeed(w http.ResponseWriter, r *http.Request) {
 // window. A caller that arrives while a fetch is running waits for that fetch
 // and takes its result instead of starting a second one; a caller that arrives
 // just after one finished is told the feed was checked a moment ago and gets
-// the same current health, which answers the question it asked.
-func (s *Server) forceFeedRefresh(ctx context.Context) (recipefeed.Health, bool) {
+// the current health, which answers the question it asked.
+//
+// The fetch itself always runs in runFeedRefresh, never in the caller's own
+// goroutine, so every caller waits the same way: for the fetch, for its own
+// request to be abandoned, or for this manager to start shutting down.
+func (s *Server) forceFeedRefresh(ctx context.Context) (recipefeed.Health, bool, error) {
 	s.feedRefreshMu.Lock()
-	if running := s.feedRefreshRunning; running != nil {
-		s.feedRefreshMu.Unlock()
-		select {
-		case <-running:
-		case <-ctx.Done():
-		case <-s.closing:
+	running := s.feedRefreshRunning
+	if running == nil {
+		if !s.feedRefreshedAt.IsZero() && time.Since(s.feedRefreshedAt) < forcedFeedRefreshWindow {
+			s.feedRefreshMu.Unlock()
+			return s.recipeFeedHealth(), true, nil
 		}
-		return s.recipeFeedHealth(), false
+		select {
+		case <-s.closing:
+			// Close waits for exactly these fetches. One started now would
+			// either be abandoned or hold the shutdown open, and neither is
+			// worth doing for a check the owner can repeat after the restart.
+			s.feedRefreshMu.Unlock()
+			return recipefeed.Health{}, false, errors.New("the manager is shutting down")
+		default:
+		}
+		running = make(chan struct{})
+		s.feedRefreshRunning = running
+		s.feedRefreshHealth = nil
+		// Registered under the same lock Close takes before it waits, so a
+		// fetch can never begin after shutdown decided there was none left.
+		s.feedRefreshWorkers.Add(1)
+		go s.runFeedRefresh(running)
 	}
-	if !s.feedRefreshedAt.IsZero() && time.Since(s.feedRefreshedAt) < forcedFeedRefreshWindow {
-		s.feedRefreshMu.Unlock()
-		return s.recipeFeedHealth(), true
-	}
-	running := make(chan struct{})
-	s.feedRefreshRunning = running
 	s.feedRefreshMu.Unlock()
 
-	fetchCtx, cancel := context.WithTimeout(context.Background(), forcedFeedRefreshTimeout)
-	defer cancel()
-	health := s.feedRefresh(fetchCtx)
-
+	select {
+	case <-running:
+	case <-ctx.Done():
+	case <-s.closing:
+	}
 	s.feedRefreshMu.Lock()
-	s.feedRefreshedAt = time.Now()
-	s.feedRefreshRunning = nil
+	health := s.feedRefreshHealth
 	s.feedRefreshMu.Unlock()
-	// Closed after the state is cleared, so a waiter released here can never
-	// find a finished fetch still marked as running.
-	close(running)
-	return health, false
+	if health == nil {
+		// Released with no finished fetch to speak from: this request was
+		// abandoned, or the manager is shutting down. The feed's own live
+		// health is then the only thing that is certainly true.
+		return s.recipeFeedHealth(), false, nil
+	}
+	return *health, false, nil
+}
+
+// runFeedRefresh is the one fetch every caller in the window shares. It runs on
+// a context of its own rather than any caller's, because the first browser tab
+// to give up must not cancel the fetch the others are waiting on, and it is
+// tracked in feedRefreshWorkers so Close waits for it instead of leaving it
+// half-done at exit.
+func (s *Server) runFeedRefresh(running chan struct{}) {
+	defer s.feedRefreshWorkers.Done()
+	// Clearing the state and releasing the waiters happens whatever the fetch
+	// does, panic included: a fetch that left itself marked as running would
+	// make every later check wait on nothing and then answer from a stale
+	// reading forever. A panic carries on after this cleanup.
+	defer func() {
+		s.feedRefreshMu.Lock()
+		s.feedRefreshedAt = time.Now()
+		s.feedRefreshRunning = nil
+		s.feedRefreshMu.Unlock()
+		close(running)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), forcedFeedRefreshTimeout)
+	defer cancel()
+	health := s.feedRefresh(ctx)
+	s.feedRefreshMu.Lock()
+	s.feedRefreshHealth = &health
+	s.feedRefreshMu.Unlock()
 }
 
 // revocationsByVersion keys every accepted revocation by recipe id and
@@ -1168,6 +1216,13 @@ func (s *Server) Close() {
 		s.updateAdmissionMu.Lock()
 		s.updateAdmissionMu.Unlock()
 		s.updateWorkers.Wait()
+		// The same shape for a forced feed check: forceFeedRefresh registers
+		// its fetch under this lock and refuses to start one once closing is
+		// closed, so taking the lock here means the Wait below sees every
+		// fetch there will ever be.
+		s.feedRefreshMu.Lock()
+		s.feedRefreshMu.Unlock()
+		s.feedRefreshWorkers.Wait()
 	})
 }
 

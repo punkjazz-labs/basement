@@ -1,6 +1,6 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   canvasSizes, canvasTiers, defaultCanvasTier, durationArithmetic, durationOptions, finishedTransitions,
   fitArithmetic, fitCanvasToImage, generationElapsedSeconds, generationRequest, generationState,
@@ -323,6 +323,18 @@ describe('generation state formatting', () => {
 })
 
 describe('generation progress rendering', () => {
+  // The elapsed line reads the wall clock, and one assertion below says the
+  // runtime's node id ("14") appears nowhere in the markup. Against the real
+  // clock that line holds an arbitrary number, so the test failed whenever the
+  // elapsed time happened to contain 14. A fixed now makes the whole markup
+  // the same on every run: 10:01:00 to 10:03:30 is "2:30".
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-08-04T10:03:30Z'))
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   const running = (progress: Partial<Generation> = {}): Generation => ({
     id: 'gen-1', model_id: 'media', mode: 'text_to_video', prompt: 'fog', blocks: 1,
     short_edge: 768, width: 1152, height: 768, frames: 22, seed: 1, status: 'running',
@@ -338,6 +350,9 @@ describe('generation progress rendering', () => {
     expect(markup).toContain('aria-valuenow="7"')
     expect(markup).toContain('aria-valuemax="20"')
     expect(markup).toContain('width:35%')
+    // The elapsed line is the only part of this markup that could hold a
+    // number nobody chose, so it is pinned here as well as frozen above.
+    expect(markup).toContain('Elapsed 2:30')
     // The runtime's node id is recorded but deliberately not shown: it means
     // nothing to the person reading this screen.
     expect(markup).not.toContain('14')
