@@ -164,6 +164,34 @@ func TestTheShippedGrantNamesTheTwoCommandsAndNoOther(t *testing.T) {
 	}
 }
 
+// The grant is only half of the privilege path, and the other half lives in the
+// unit. Hardware proved both halves: with NoNewPrivileges=yes the kernel
+// ignores the setuid bit on sudo and the Spark answered "The no new privileges
+// flag is set, which prevents sudo from running as root"; with these two lines
+// the same two commands ran and the clock moved.
+//
+// This is pinned here, next to the grant, because a later pass that hardens the
+// unit would otherwise turn the power switch off on every Spark and nothing
+// would say so until a person moved the switch on hardware.
+func TestTheManagerUnitAllowsTheOneWayThisPackageReachesRoot(t *testing.T) {
+	unit, err := os.ReadFile("../../packaging/systemd/basement.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(unit)
+	for _, required := range []string{
+		"NoNewPrivileges=no",
+		"CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SYS_ADMIN CAP_AUDIT_WRITE",
+		// The manager process itself must still gain nothing of its own. Only
+		// the child sudo starts may hold anything in the set above.
+		"AmbientCapabilities=\n",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("the manager unit no longer carries %q, so the power switch cannot reach root", required)
+		}
+	}
+}
+
 // The bound is a bound on the call, not on the process. A driver that exits
 // and leaves a child holding its output used to make the ten second deadline
 // last sixty, and that wait holds the lock every later change queues on. This

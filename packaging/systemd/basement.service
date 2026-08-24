@@ -19,8 +19,14 @@ UMask=0027
 # Docker-group membership is privileged; keep every other host capability narrow.
 # PrivateDevices must stay off: inventory shells out to nvidia-smi, which needs
 # the real /dev/nvidia* nodes to report GPU visibility.
-NoNewPrivileges=yes
-CapabilityBoundingSet=
+#
+# The power switch runs the two nvidia-smi commands that
+# /etc/sudoers.d/basement-power allows through sudo, because the GPU clock
+# belongs to root, and sudo needs the setuid transition NoNewPrivileges forbids.
+# The bounding set is the limit on that transition: it lists every capability
+# the root child can hold, and the manager itself still holds none.
+NoNewPrivileges=no
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SYS_ADMIN CAP_AUDIT_WRITE
 AmbientCapabilities=
 PrivateTmp=yes
 ProtectSystem=strict
@@ -35,8 +41,9 @@ RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=no
 # AF_NETLINK is how Linux enumerates network interfaces; without it the fleet
-# sweep cannot see the LAN at all. The empty capability set above keeps that
-# netlink socket read-only: changing links or routes needs CAP_NET_ADMIN.
+# sweep cannot see the LAN at all. The bounding set above leaves out
+# CAP_NET_ADMIN, which keeps that netlink socket read-only: changing links or
+# routes needs it.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadWritePaths=/var/lib/basement
 
