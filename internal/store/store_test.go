@@ -821,7 +821,7 @@ func TestSetFleetDeploymentJobRefusesARemovedRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.SetFleetDeploymentJob(ctx, "deployment_one", "job_late", "running", "2026-08-24T00:01:00Z"); err == nil ||
-		!strings.Contains(err.Error(), "removed before its job could be recorded") {
+		!strings.Contains(err.Error(), "cannot take a new job") {
 		t.Fatalf("a job write onto a removed record reported %v", err)
 	}
 	stored, err := s.FleetDeployment(ctx, "deployment_one")
@@ -845,5 +845,65 @@ func TestSetFleetDeploymentJobRefusesARemovedRecord(t *testing.T) {
 	if err := s.SetFleetDeploymentJob(ctx, "deployment_two", "job_other", "running", "2026-08-24T00:04:00Z"); err == nil ||
 		!strings.Contains(err.Error(), "already points to a different owner job") {
 		t.Fatalf("a job write naming another job reported %v", err)
+	}
+}
+
+// AdvanceFleetDeploymentJob names the exact job it replaces, and that is not
+// protection enough on its own: a removed record keeps the job id it last
+// named, so an action answer can be aimed straight at it. ActionDeployment
+// checks for a removed record under its own id lock, but a concurrent
+// placement's supersede sweep runs under a different lock and can remove the
+// record between that check and this write, so the store refuses it here as
+// well.
+func TestAdvanceFleetDeploymentJobRefusesARemovedRecord(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, _, err := s.CreateFleetDeployment(ctx, FleetDeployment{
+		DeploymentID: "deployment_one", RecipeID: "recipe-one", RecipeVersion: 1,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: "node-loft", State: "running",
+	}, FleetDeploymentNode{NodeID: "node-loft", ReservationID: "reservation_one"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFleetDeploymentJob(ctx, "deployment_one", "job_one", "running", "2026-08-24T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ObserveFleetDeployment(ctx, "deployment_one", "removed", "2026-08-24T00:01:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	// The caller names the exact job the removed record kept, and is refused
+	// anyway, with nothing changed.
+	if err := s.AdvanceFleetDeploymentJob(ctx, "deployment_one", "job_one", "job_two", "queued", "2026-08-24T00:02:00Z"); err == nil ||
+		!strings.Contains(err.Error(), "cannot record this action") {
+		t.Fatalf("an advance over a removed record reported %v", err)
+	}
+	stored, err := s.FleetDeployment(ctx, "deployment_one")
+	if err != nil || stored.State != "removed" || stored.OwnerJobID != "job_one" {
+		t.Fatalf("the refused advance changed the record: %+v err=%v", stored, err)
+	}
+	// A live record still advances from the job it names, and still refuses a
+	// caller naming a job it does not hold.
+	if _, _, err := s.CreateFleetDeployment(ctx, FleetDeployment{
+		DeploymentID: "deployment_two", RecipeID: "recipe-two", RecipeVersion: 1,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: "node-loft", State: "running",
+	}, FleetDeploymentNode{NodeID: "node-loft", ReservationID: "reservation_two"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFleetDeploymentJob(ctx, "deployment_two", "job_a", "running", "2026-08-24T00:03:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AdvanceFleetDeploymentJob(ctx, "deployment_two", "job_a", "job_b", "queued", "2026-08-24T00:04:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = s.FleetDeployment(ctx, "deployment_two")
+	if err != nil || stored.OwnerJobID != "job_b" || stored.State != "queued" {
+		t.Fatalf("a live record did not advance: %+v err=%v", stored, err)
+	}
+	if err := s.AdvanceFleetDeploymentJob(ctx, "deployment_two", "job_wrong", "job_c", "queued", "2026-08-24T00:05:00Z"); err == nil ||
+		!strings.Contains(err.Error(), "target job changed before this action was recorded") {
+		t.Fatalf("an advance naming the wrong job reported %v", err)
 	}
 }

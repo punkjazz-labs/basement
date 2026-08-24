@@ -219,7 +219,7 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 		// read as an install that quietly did nothing. A new request brings a
 		// new idempotency key, which mints a new record id and a clean record.
 		if existing.State == "removed" {
-			return Deployment{}, false, errors.New("this placement is finished, so send a new install request")
+			return Deployment{}, false, errors.New("this placement is complete, so send a new install request")
 		}
 		if existing.OwnerJobID != "" || existing.State == "failed" {
 			view, viewErr := m.Deployment(ctx, deploymentID)
@@ -822,7 +822,7 @@ func (m *Manager) Deployment(ctx context.Context, deploymentID string) (Deployme
 		return view, nil
 	}
 	view.Job = &job
-	// A removed record is finished. Its job can still be read, on a Spark that
+	// A removed record is complete. Its job can still be read, on a Spark that
 	// came back or that never really went away, but reading that job's state
 	// back into the record would put it to work again: one poll would undo a
 	// clearing, and a superseded record would return beside the record that
@@ -900,7 +900,7 @@ func (m *Manager) ActionDeployment(ctx context.Context, deploymentID, action, id
 	// placement is not caught by this: that record is still live when its
 	// remove starts.
 	if stored.State == "removed" {
-		return store.Job{}, errors.New("this placement is finished, so the fleet cannot use it")
+		return store.Job{}, errors.New("this placement is complete, so the fleet cannot use it")
 	}
 	target, local, err := m.placementNode(ctx, stored.OwnerNodeID)
 	if err != nil {

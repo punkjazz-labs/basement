@@ -726,7 +726,7 @@ func (s *Store) SetFleetDeploymentJob(ctx context.Context, deploymentID, ownerJo
 	if count, _ := result.RowsAffected(); count != 1 {
 		var stored string
 		if err := s.db.QueryRowContext(ctx, `SELECT state FROM fleet_deployments WHERE deployment_id=?`, deploymentID).Scan(&stored); err == nil && stored == "removed" {
-			return errors.New("the deployment record was removed before its job could be recorded")
+			return errors.New("the fleet removed this deployment record, so it cannot take a new job")
 		}
 		return errors.New("the deployment already points to a different owner job")
 	}
@@ -736,16 +736,27 @@ func (s *Store) SetFleetDeploymentJob(ctx context.Context, deploymentID, ownerJo
 // AdvanceFleetDeploymentJob moves the controller projection from one
 // target-owned lifecycle job to its next one. The expected id keeps two
 // browser actions from silently overwriting each other's remote progress.
+// It also refuses a removed record, even when the caller names the exact job
+// that record kept. Naming the job is not protection enough on its own: a
+// removed record keeps the job id it last named, ActionDeployment checks for
+// a removed record under its own id lock, and a concurrent placement of the
+// same model holds a different lock, so its supersede sweep can move the
+// record to "removed" between that check and this write. The answer an action
+// brings back must not put a removed record back to work.
 func (s *Store) AdvanceFleetDeploymentJob(ctx context.Context, deploymentID, expectedJobID, ownerJobID, state, observedAt string) error {
 	if deploymentID == "" || expectedJobID == "" || ownerJobID == "" {
 		return errors.New("deployment and expected target job ids are required")
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET owner_job_id=?,state=?,last_observed_at=?,updated_at=? WHERE deployment_id=? AND owner_job_id=?`,
+	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET owner_job_id=?,state=?,last_observed_at=?,updated_at=? WHERE deployment_id=? AND owner_job_id=? AND state!='removed'`,
 		ownerJobID, state, observedAt, now(), deploymentID, expectedJobID)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
+		var stored string
+		if err := s.db.QueryRowContext(ctx, `SELECT state FROM fleet_deployments WHERE deployment_id=?`, deploymentID).Scan(&stored); err == nil && stored == "removed" {
+			return errors.New("the fleet removed this deployment record, so it cannot record this action")
+		}
 		return errors.New("the deployment target job changed before this action was recorded")
 	}
 	return nil
@@ -763,13 +774,12 @@ func (s *Store) AdvanceFleetDeploymentJob(ctx context.Context, deploymentID, exp
 // record that replaced it, leaving one model on one Spark with two live records.
 //
 // The guard is in the store rather than in the caller because it is a fact
-// about the record's life and not about one read path. The two job writes sit
-// beside it and are held back in different ways. AdvanceFleetDeploymentJob
-// names the exact job it replaces, so it can only reach a removed record that
-// kept its job id, and its one caller (ActionDeployment) refuses a removed
-// record before it acts. SetFleetDeploymentJob's owner_job_id='' branch names
-// no job at all, so it carries its own state guard; before that guard, only
-// its callers kept it off a removed job-less record. Writing "removed" over
+// about the record's life and not about one read path. The two job writes
+// beside it carry their own state guards for the same reason: a removed
+// record keeps the job id it last named, so AdvanceFleetDeploymentJob can be
+// aimed at one by naming that exact job, and SetFleetDeploymentJob's
+// owner_job_id='' branch names no job at all. Each refuses a removed record
+// itself, so no caller ordering has to be trusted. Writing "removed" over
 // "removed" stays allowed, so clearing one twice is not an error.
 func (s *Store) ObserveFleetDeployment(ctx context.Context, deploymentID, state, observedAt string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE fleet_deployments SET state=?,last_observed_at=?,updated_at=? WHERE deployment_id=? AND (state!='removed' OR ?='removed')`,

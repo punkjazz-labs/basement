@@ -277,7 +277,7 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 	}
 	// The key that made the superseded record cannot carry on with it either.
 	// Handing it back would read as an install that quietly did nothing, and
-	// the record is finished.
+	// the record is complete.
 	_, created, err = controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "place-first", Intent: intent})
 	if err == nil || created || !strings.Contains(err.Error(), "send a new install request") {
 		t.Fatalf("a retry of the key that made a cleared record was accepted: created=%v err=%v", created, err)
@@ -806,7 +806,7 @@ func TestAClearedRecordStaysClearedWhenTheSparkComesBack(t *testing.T) {
 	}
 	// The console reads the same thing the store holds. The job is still
 	// carried, because it is the truth about that Spark, but the record is
-	// finished.
+	// complete.
 	view, err := controller.Deployment(ctx, installed.DeploymentID)
 	if err != nil || view.State != "removed" {
 		t.Fatalf("the console reads the cleared record as %+v err=%v", view, err)
@@ -970,12 +970,14 @@ func TestAdoptingAgainRebuildsAClearedRecordUnderItsOwnID(t *testing.T) {
 }
 
 // A rebuild that is refused must change nothing. The revival is the last step
-// of the adopt path that anything can refuse, so every refusal on the way (a
-// live duplicate here, but equally a node the fleet does not hold or an adopt
-// call the node turns down) leaves the cleared record in state "removed". If
-// the revival ran first, the refusal would strand a job-less record in state
-// "adopting": no poll heals that shape, the console row pins on it, and the
-// pair holds two non-removed records.
+// of the adopt path that anything can refuse, so every refusal on the way
+// leaves the cleared record in state "removed". Two refusals are exercised
+// here, one from each side of the network: the node turning the adopt call
+// down, which is the last refusable step and so pins the revival to the very
+// end of the path, and a live duplicate holding the pair, which is the first.
+// If the revival ran before either, the refusal would strand a job-less
+// record in state "adopting": no poll heals that shape, the console row pins
+// on it, and the pair holds two non-removed records.
 func TestARefusedRebuildLeavesTheClearedRecordRemoved(t *testing.T) {
 	ctx := context.Background()
 	recipes, err := recipe.Builtin()
@@ -1013,6 +1015,21 @@ func TestARefusedRebuildLeavesTheClearedRecordRemoved(t *testing.T) {
 	controller.newClient = silent
 	if _, ended, err := controller.ReleaseDeployment(ctx, adopted.DeploymentID); err != nil || !ended {
 		t.Fatalf("the adopted record was not cleared: ended=%v err=%v", ended, err)
+	}
+
+	// The node refuses the rebuild: the Spark does not answer when the adopt
+	// call asks it for the carrier job. This is the last step that can refuse,
+	// so it is the case that holds the revival at the very end of the path. A
+	// revival made any earlier, even after the duplicate check, would already
+	// have stranded a job-less record in state "adopting" here.
+	if _, _, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, placed.ID, "adopt-while-silent"); err == nil {
+		t.Fatal("a rebuild whose node did not answer reported no error")
+	}
+	if stored, err := controllerStore.FleetDeployment(ctx, adopted.DeploymentID); err != nil || stored.State != "removed" {
+		t.Fatalf("a node refusal during the rebuild left the cleared record as %+v err=%v", stored, err)
+	}
+	if live := liveRecordsFor(t, controllerStore, member.identity.NodeID, placed.ID); len(live) != 0 {
+		t.Fatalf("a refused rebuild left %d live records: %v", len(live), live)
 	}
 	controller.newClient = answering
 
