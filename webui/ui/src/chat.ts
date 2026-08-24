@@ -24,6 +24,20 @@ export function pinnedToBottom(position: ScrollPosition, gap = PIN_GAP): boolean
   return position.scrollHeight - position.scrollTop - position.clientHeight <= gap
 }
 
+// Whether a scroll position releases the pin.
+//
+// A position away from the end normally releases it: the reader has gone to
+// read something. The one exception is a jump that is still on its way to the
+// end, because a smooth scroll reports every position it passes through and
+// none of those positions are the reader's. `jumpUntil` is when that trip
+// gives up its claim. It is zero while no jump is travelling, and the caller
+// zeroes it the moment the reader touches the wheel or the screen, so a real
+// scroll always wins over a jump in flight.
+export function shouldReleasePin(atEnd: boolean, now: number, jumpUntil: number): boolean {
+  if (atEnd) return false
+  return now >= jumpUntil
+}
+
 // The height the composer takes for the text it holds.
 export function composerHeight(contentHeight: number, max = COMPOSER_MAX_HEIGHT): number {
   return Math.min(contentHeight, max)

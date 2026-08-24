@@ -3,7 +3,7 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { logoFor } from '../catalog'
 import {
-  answerMeter, composerHeight, pinnedToBottom, stoppedMeter, tokenMeter, waitMeter,
+  answerMeter, composerHeight, pinnedToBottom, shouldReleasePin, stoppedMeter, tokenMeter, waitMeter,
 } from '../chat'
 import {
   COUNCIL_STAGES, councilByline, councilHistory, councilOffered, runCouncil, seedFrom, stageState,
@@ -90,13 +90,22 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   // The playground stays mounted behind the other tabs, so every reach for
   // the field or for the Escape key asks first whether it is on screen.
   const onScreen = () => draftRef.current?.offsetParent != null
-  const focusDraft = () => { if (onScreen()) draftRef.current?.focus() }
+  // preventScroll where the caret returns on its own, at the end of an
+  // answer: taking the field must not move the page the owner is reading.
+  const focusDraft = (preventScroll = false) => {
+    if (onScreen()) draftRef.current?.focus({ preventScroll })
+  }
+
+  // The console honours the reduced-motion setting everywhere else, so a jump
+  // under that setting arrives at once instead of gliding.
+  const reducedMotion = () =>
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
 
   const toLatest = (smooth: boolean) => {
     const chat = chatRef.current
     if (!chat) return
     // 'auto' for a token: a smooth scroll on every token fights itself.
-    chat.scrollTo({ top: chat.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
+    chat.scrollTo({ top: chat.scrollHeight, behavior: smooth && !reducedMotion() ? 'smooth' : 'auto' })
   }
 
   const pinToLatest = () => {
@@ -108,17 +117,33 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
     const chat = chatRef.current
     if (!chat) return
     const atEnd = pinnedToBottom(chat)
-    if (!atEnd && performance.now() < jumpUntilRef.current) return
+    // A jump still on its way reports the positions it passes through. They
+    // are the jump's, not the reader's, so they change nothing.
+    if (!atEnd && !shouldReleasePin(atEnd, performance.now(), jumpUntilRef.current)) return
     jumpUntilRef.current = 0
     pinnedRef.current = atEnd
     setPinned(atEnd)
   }
 
+  // The wheel, a finger and the keys are the reader, and the reader outranks
+  // a jump in flight. The trip loses its claim the moment one of them
+  // arrives, so the next position is read as the reader's own.
+  const endJump = () => { jumpUntilRef.current = 0 }
+
   const jumpToLatest = () => {
     pinToLatest()
-    jumpUntilRef.current = performance.now() + 900
+    jumpUntilRef.current = reducedMotion() ? 0 : performance.now() + 900
     toLatest(true)
     focusDraft()
+  }
+
+  // The box grows with the text it holds, so a long question is never written
+  // blind. An empty draft returns it to one line.
+  const resizeDraft = () => {
+    const field = draftRef.current
+    if (!field) return
+    field.style.height = 'auto'
+    field.style.height = `${composerHeight(field.scrollHeight)}px`
   }
 
   // The answer moves the transcript only while the reader is already at the
@@ -126,14 +151,8 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   useEffect(() => {
     if (pinnedRef.current) toLatest(false)
   }, [messages])
-  // The box grows with the text it holds, so a long question is never written
-  // blind. An empty draft returns it to one line.
-  useEffect(() => {
-    const field = draftRef.current
-    if (!field) return
-    field.style.height = 'auto'
-    field.style.height = `${composerHeight(field.scrollHeight)}px`
-  }, [draft])
+  // A draft that changes without a keystroke, a send that empties the box.
+  useEffect(resizeDraft, [draft])
   // Escape stops the answer wherever the caret is, for as long as one is
   // arriving.
   useEffect(() => {
@@ -348,7 +367,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
       abortRef.current = null
       // The stop control and the send button trade places, so the caret has
       // nowhere to be until the field takes it back.
-      focusDraft()
+      focusDraft(true)
     }
   }
 
@@ -434,6 +453,9 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
         aria-label="Conversation"
         aria-live="polite"
         onScroll={onChatScroll}
+        onWheel={endJump}
+        onTouchStart={endJump}
+        onKeyDown={endJump}
       >
         {messages.length === 0 && (
           <p className="chat-hint">
@@ -514,9 +536,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
             aria-label={council ? 'Ask the council' : `Message ${targetName ?? 'your model'}`}
             onChange={event => {
               setDraft(event.target.value)
-              const field = event.target
-              field.style.height = 'auto'
-              field.style.height = `${composerHeight(field.scrollHeight)}px`
+              resizeDraft()
             }}
             onKeyDown={event => {
               if (event.key !== 'Enter' || event.shiftKey) return
