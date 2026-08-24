@@ -344,6 +344,18 @@ func (s *Server) fleetDeploymentAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
+	// "release" is not an action on a model. It ends a record this fleet can no
+	// longer act on, and it asks no Spark for anything, so it never reaches
+	// ActionDeployment and carries no intent.
+	if parts[1] == "release" {
+		deployment, released, err := s.fleetManager.ReleaseDeployment(r.Context(), parts[0])
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"deployment": deployment, "released": released})
+		return
+	}
 	var intent fleet.IndependentIntent
 	if err := decodeBody(r, &intent); err != nil {
 		writeError(w, http.StatusBadRequest, err)

@@ -221,13 +221,16 @@ func (m *Manager) CreateIndependentDeployment(ctx context.Context, request Creat
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Deployment{}, false, err
 	}
-	// One model on one Spark is one record, on this path exactly as on the
+	// One model on one Spark is one live record, on this path exactly as on the
 	// adoption path. Without this, a second install of a model a Spark already
-	// holds would write a second record under a second idempotency key, and
+	// serves would write a second record under a second idempotency key, and
 	// the console would then hold two rows and two owner jobs for one serving
-	// model. The record this key already owns is not a duplicate of itself, so
-	// a retry still finishes here.
-	if err := m.refuseDuplicateDeployment(ctx, deploymentID, request.NodeID, selected.ID); err != nil {
+	// model. A record whose work has finished holds nothing, so it is
+	// superseded rather than refused: an install that failed, and a model this
+	// fleet placed and now updates, both have to be able to place it again. The
+	// record this key already owns is not a duplicate of itself, so a retry
+	// still finishes here.
+	if err := m.supersedeDuplicateDeployment(ctx, deploymentID, request.NodeID, selected.ID); err != nil {
 		return Deployment{}, false, err
 	}
 	claims := ClaimsForRecipe(selected, RecipeClaimOptions{
@@ -354,7 +357,7 @@ func (m *Manager) AdoptIndependentDeployment(ctx context.Context, nodeID, recipe
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Deployment{}, false, err
 	}
-	if err := m.refuseDuplicateDeployment(ctx, deploymentID, nodeID, recipeID); err != nil {
+	if err := m.supersedeDuplicateDeployment(ctx, deploymentID, nodeID, recipeID); err != nil {
 		return Deployment{}, false, err
 	}
 	target, local, err := m.placementNode(ctx, nodeID)
@@ -412,14 +415,27 @@ func (m *Manager) runningModelVersion(ctx context.Context, nodeID, recipeID stri
 	return 0, fmt.Errorf("%s is not in this fleet", m.nodeName(ctx, nodeID))
 }
 
-// refuseDuplicateDeployment keeps one model on one node to one record. Both
-// placement paths call it, because either one can reach a pair the other
+// supersedeDuplicateDeployment keeps one model on one node to one live record.
+// Both placement paths call it, because either one can reach a pair the other
 // already owns: the create path derives its id from an idempotency key and the
 // adopt path from the pair itself, so two ids can name one model on one Spark.
-// A second record would give the console two rows and two owner jobs for one
-// serving model. A removed record holds nothing any more, so it releases the
-// pair and the model can be placed again.
-func (m *Manager) refuseDuplicateDeployment(ctx context.Context, deploymentID, nodeID, recipeID string) error {
+// Two live records would give the console two rows and two owner jobs for one
+// serving model.
+//
+// Only work that is still running holds the pair. A record whose owner job has
+// finished, and a record that never got an owner job at all, hold nothing on
+// that Spark: the record is this controller's bookkeeping, while the Spark's
+// own heartbeat is what says which model really runs there. Such a record is
+// therefore marked removed and the new one takes the pair. Refusing instead
+// would wedge the model on that Spark after a failed install, with no way out
+// of it from the console.
+//
+// The caller holds the placement lock for the new deployment id, not for the
+// one being superseded. Two placements of one model onto one Spark, started at
+// the same moment under different idempotency keys, can therefore still both
+// go through. That window is what it was before this check existed; every
+// other route into it is closed.
+func (m *Manager) supersedeDuplicateDeployment(ctx context.Context, deploymentID, nodeID, recipeID string) error {
 	stored, err := m.database.FleetDeployments(ctx)
 	if err != nil {
 		return err
@@ -428,11 +444,33 @@ func (m *Manager) refuseDuplicateDeployment(ctx context.Context, deploymentID, n
 		if item.DeploymentID == deploymentID || item.State == "removed" {
 			continue
 		}
-		if item.OwnerNodeID == nodeID && item.RecipeID == recipeID {
+		if item.OwnerNodeID != nodeID || item.RecipeID != recipeID {
+			continue
+		}
+		if m.deploymentWorkIsLive(ctx, item) {
 			return fmt.Errorf("%s already has a deployment record for that model", m.nodeName(ctx, nodeID))
+		}
+		if err := m.database.ObserveFleetDeployment(ctx, item.DeploymentID, "removed", m.now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// deploymentWorkIsLive reports whether a record still has work running on its
+// Spark. A record with no owner job never reached one, so nothing runs for it.
+// Otherwise the owner Spark's own job is the authority, and it is read now
+// rather than trusted from the last projection. A Spark that cannot be read
+// leaves the last state this controller saw as the best evidence there is.
+func (m *Manager) deploymentWorkIsLive(ctx context.Context, stored store.FleetDeployment) bool {
+	if stored.OwnerJobID == "" {
+		return false
+	}
+	state := stored.State
+	if view, err := m.Deployment(ctx, stored.DeploymentID); err == nil && !view.Stale && view.Job != nil {
+		state = view.Job.State
+	}
+	return !reservationJobTerminal(state)
 }
 
 func (m *Manager) placementLock(deploymentID string) *sync.Mutex {
@@ -822,6 +860,59 @@ func (m *Manager) ActionDeployment(ctx context.Context, deploymentID, action, id
 		return store.Job{}, m.nodeFailure(ctx, stored.OwnerNodeID, err)
 	}
 	return job, m.advanceDeploymentJob(ctx, stored, job)
+}
+
+// ReleaseDeployment ends a record this fleet can no longer act on. It is the
+// fallback behind the console's Clear tool, and it is the only operation here
+// that touches nothing but this controller's own bookkeeping: no Spark is
+// asked to do anything, and no model is stopped or removed anywhere.
+//
+// It exists because a record can outlive the job it names. The owner Spark can
+// lose the job row, leave the fleet, or never have been given a job at all
+// after a half-finished create. The record then pins its console row to "No
+// answer" with every button on it dead, and adoption cannot write a fresh
+// record while it stands. Ending it lets adopt-on-demand rebuild the row from
+// what that Spark reports, which is the authority anyway.
+//
+// A record whose job this controller can still read is refused. That one is
+// not stranded, so the owner is told to remove the model rather than throw
+// away a record the fleet still uses.
+func (m *Manager) ReleaseDeployment(ctx context.Context, deploymentID string) (Deployment, bool, error) {
+	if err := m.requireFleetMutationAllowed(ctx); err != nil {
+		return Deployment{}, false, err
+	}
+	config, err := m.database.FleetConfig(ctx)
+	if err != nil {
+		return Deployment{}, false, err
+	}
+	if config.Role == "member" {
+		return Deployment{}, false, errors.New("a fleet member cannot clear a deployment record")
+	}
+	lock := m.placementLock(deploymentID)
+	lock.Lock()
+	defer lock.Unlock()
+	// Deployment reads the owner job from the Spark that holds it, so this one
+	// call answers both questions: whether the record is still reachable, and
+	// what to hand back.
+	view, err := m.Deployment(ctx, deploymentID)
+	if err != nil {
+		return Deployment{}, false, err
+	}
+	if view.State == "removed" {
+		return view, false, nil
+	}
+	if view.Job != nil && !view.Stale {
+		return Deployment{}, false, fmt.Errorf("%s answers for this model, so remove the model rather than clear the record", m.nodeName(ctx, view.OwnerNodeID))
+	}
+	observedAt := m.now().UTC().Format(time.RFC3339Nano)
+	if err := m.database.ObserveFleetDeployment(ctx, deploymentID, "removed", observedAt); err != nil {
+		return Deployment{}, false, err
+	}
+	stored, err := m.database.FleetDeployment(ctx, deploymentID)
+	if err != nil {
+		return Deployment{}, false, err
+	}
+	return Deployment{FleetDeployment: stored}, true, nil
 }
 
 func (m *Manager) advanceDeploymentJob(ctx context.Context, deployment store.FleetDeployment, job store.Job) error {

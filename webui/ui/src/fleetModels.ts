@@ -268,6 +268,15 @@ export const NO_PLACEMENT_BACK = 'The controller gave no placement back.'
 export const CLEAR_RECORD = 'Clear'
 export const CLEAR_RECORD_CONFIRM = 'Clear record'
 
+// Where the fleet ends a record it can no longer act on. The Clear tool asks
+// the owner Spark to remove the model first, because that is the honest thing
+// to do while it still answers. This is the fallback for when that call cannot
+// be addressed at all: the record names no job, or the Spark no longer knows
+// the job, or the Spark has left the fleet. The manager refuses it for a
+// record it can still read, so trying it after a refused remove is safe.
+export const releasePath = (deploymentID: string): string =>
+  `/api/v1/fleet/deployments/${encodeURIComponent(deploymentID)}/release`
+
 export const clearRecordTitle = (modelName: string): string => `Clear the record for ${modelName}?`
 
 export const clearRecordBody = (sparkName: string): string =>
@@ -293,12 +302,19 @@ export function placementBusy(
 
 // The placement that owns this model on this Spark. The Spark this console
 // runs on never has one here: its own API is the authority for it.
+//
+// A removed record owns nothing. The manager never deletes a placement row, it
+// marks it removed, so the read keeps reporting one long after the fleet let
+// it go. Reading it as an owner would pin the row to whatever that record last
+// said, and would keep adopt-on-demand from writing a fresh one. This is what
+// lets a cleared record give its row back.
 export function rowPlacement(
   target: ActionTarget,
   placements: Map<string, FleetDeploymentView>,
 ): FleetDeploymentView | undefined {
   if (target.isSelf) return undefined
-  return placements.get(deploymentKey(target.nodeID, target.recipeID))
+  const placement = placements.get(deploymentKey(target.nodeID, target.recipeID))
+  return placement?.state === 'removed' ? undefined : placement
 }
 
 // The one decision every row action makes. This Spark keeps the local call it

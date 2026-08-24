@@ -16,7 +16,7 @@ import {
   heldTabLabel, initialPlacement, installRoute, mergePlacements, modelChips, placedTarget,
   placementBusy, placementOptions, placementSwitchFrom, placementTargets, placementVerb,
   placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner, splitModels,
-  clearRecordBody, clearRecordTitle, workingNodes, workingPlacement,
+  clearRecordBody, clearRecordTitle, releasePath, workingNodes, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CLEAR_RECORD, CLEAR_RECORD_CONFIRM,
   DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH,
   NO_PLACEMENT_BACK, NO_PLACEMENT_LEFT, ONE_SPARK_GROUP, PLACEMENT_PLAN_PATH, TWO_SPARK_GROUP,
@@ -723,22 +723,50 @@ export default function Models({
   // This is deliberately not sendAction: rowActionRoute refuses a stale
   // placement, which is exactly the state this tool exists for. It is offered
   // only while the placement really is stale.
-  const clearRecord = async (recipe: Recipe, sparkName: string, placement: FleetDeploymentView) => {
+  //
+  // The remove goes first, because while that Spark still answers, removing
+  // the model is the honest thing to ask for. When the call cannot be
+  // addressed at all, the record is ended on the controller instead. The
+  // manager refuses that for a record it can still read, so a remove that
+  // failed for a reason of its own keeps its own words rather than being
+  // quietly turned into a cleared record.
+  const clearRecord = async (
+    recipe: Recipe, host: FleetRow, placement: FleetDeploymentView,
+  ) => {
     const { ok } = await confirmBox({
       title: clearRecordTitle(recipe.display_name),
-      body: clearRecordBody(sparkName),
+      body: clearRecordBody(host.displayName),
       confirmLabel: CLEAR_RECORD_CONFIRM,
       danger: true,
     })
     if (!ok) return
     run(recipe.id, async () => {
       touchedPlacements.current.add(placement.deployment_id)
-      const result = await api<{ job: Job }>(
-        deploymentActionPath(placement.deployment_id, 'remove'),
-        { method: 'POST', headers: idempotency(), body: JSON.stringify({ remove_artifacts: false }) },
-      )
-      setStartedOnPlacement(previous => new Map(previous).set(placement.deployment_id, result.job.id))
-      openFleetDeployment(placement.deployment_id, result.job)
+      try {
+        const result = await api<{ job: Job }>(
+          deploymentActionPath(placement.deployment_id, 'remove'),
+          { method: 'POST', headers: idempotency(), body: JSON.stringify({ remove_artifacts: false }) },
+        )
+        setStartedOnPlacement(previous => new Map(previous).set(placement.deployment_id, result.job.id))
+        openFleetDeployment(placement.deployment_id, result.job)
+      } catch (unreachable) {
+        let released: FleetDeploymentView | undefined
+        try {
+          const answer = await api<{ deployment?: FleetDeploymentView }>(
+            releasePath(placement.deployment_id), { method: 'POST', headers: idempotency(), body: '{}' })
+          released = answer.deployment
+        } catch {
+          throw unreachable
+        }
+        // The record is over. The row reads the released record at once, so it
+        // lets go without waiting for the next placement poll, and the Spark's
+        // own heartbeat speaks for the model again.
+        if (released) {
+          setPlacements(previous =>
+            new Map(previous).set(deploymentKey(host.nodeID, recipe.id), released))
+        }
+        refreshModelsAndJobs()
+      }
     })
   }
 
@@ -1132,7 +1160,7 @@ export default function Models({
                     <button
                       className="danger"
                       disabled={pending.has(recipe.id)}
-                      onClick={() => clearRecord(recipe, host.displayName, placement)}
+                      onClick={() => clearRecord(recipe, host, placement)}
                     >
                       {CLEAR_RECORD}
                     </button>

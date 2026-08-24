@@ -9,7 +9,7 @@ import {
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
   placementVerb, placementWord, recipeBusy, rowActionRoute, rowPlacement, shouldShowMemberBanner,
   splitModels, workingNodes, workingPlacement,
-  clearRecordBody, clearRecordTitle,
+  clearRecordBody, clearRecordTitle, releasePath,
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME,
   CHOOSE_FOR_ME_NOTE, CLEAR_RECORD, CLEAR_RECORD_CONFIRM, DISRUPTIVE_KINDS,
   FLEET_DEPLOYMENT_ACTIONS, MANY_SPARKS_TAB, NO_FLEET_ROW, NO_PLACEMENT_BACK, ONE_SPARK_GROUP,
@@ -1001,6 +1001,37 @@ describe('a Spark the fleet is already working on this model on', () => {
 // kills every button on it. Ending the record is the way out, and the words
 // say what really happens: the model goes with it.
 describe('clearing a record the fleet can no longer read', () => {
+  // The manager never deletes a placement row, it marks it removed, so the
+  // read keeps reporting a record the fleet has let go of. Reading it as an
+  // owner would leave the row pinned to whatever that record last said and
+  // would keep adopt-on-demand from writing a fresh one. This is what gives a
+  // cleared row back.
+  it('gives the row back once the record reads removed', () => {
+    const target: ActionTarget = { nodeID: 'node-loft', recipeID: 'qwen36-35b-a3b-nvfp4-1s', isSelf: false }
+    const cleared = deploymentIndex([deployment({ state: 'removed', stale: true })])
+    expect(rowPlacement(target, cleared)).toBeUndefined()
+    // With no owner, the row asks the Spark itself again, which is what lets
+    // adopt-on-demand rebuild the record.
+    const host: FleetRow = {
+      nodeID: 'node-loft', displayName: 'loft', isSelf: false, consoleURL: 'http://loft.local:7070',
+      installedModels: [{ recipe_id: 'qwen36-35b-a3b-nvfp4-1s', recipe_version: 3, status: 'ready', active: true }],
+      status: { word: 'Serving', dot: 'on' }, answering: true,
+    }
+    expect(rowActionRoute({ ...target, host }, cleared, 'stop'))
+      .toEqual({ where: 'adopt', nodeID: 'node-loft', recipeID: 'qwen36-35b-a3b-nvfp4-1s' })
+  })
+
+  it('still reads a record the fleet has not let go of', () => {
+    const target: ActionTarget = { nodeID: 'node-loft', recipeID: 'qwen36-35b-a3b-nvfp4-1s', isSelf: false }
+    expect(rowPlacement(target, deploymentIndex([deployment({ state: 'running' })]))?.deployment_id)
+      .toBe('deployment_one')
+  })
+
+  it('names where the fleet ends a record it cannot act on', () => {
+    expect(releasePath('deployment_one')).toBe('/api/v1/fleet/deployments/deployment_one/release')
+    expect(releasePath('a/b')).toBe('/api/v1/fleet/deployments/a%2Fb/release')
+  })
+
   it('says what it is and what it does', () => {
     expect(CLEAR_RECORD).toBe('Clear')
     expect(CLEAR_RECORD_CONFIRM).toBe('Clear record')

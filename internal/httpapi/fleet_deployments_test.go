@@ -226,3 +226,86 @@ func TestPublicAPIKeyCannotPlanOrCreateFleetDeployment(t *testing.T) {
 		}
 	}
 }
+
+// The route behind the console's Clear tool. It ends a record this fleet can
+// no longer act on, and it is a console mutation like every other one: an API
+// key cannot reach it, only the owner's session can.
+func TestFleetDeploymentReleaseRouteClearsAStrandedRecord(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	database, err := store.Open(filepath.Join(directory, "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authManager, err := auth.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected recipe.Recipe
+	for _, item := range recipes {
+		if item.Topology.SparkCount == 1 {
+			selected = item
+			break
+		}
+	}
+	executor := &apiExecutor{done: map[string]bool{}}
+	runner := engine.New(database, executor, recipes)
+	server := New("test", directory, authManager, database, readyInventory{}, executor, runner, recipes)
+	manager, err := fleet.NewManager(ctx, fleet.Options{
+		DataDir: directory, Database: database, Inventory: readyInventory{}, Version: "test", BuildIdentity: "test-build",
+		DisplayName: "node-local", ConsoleURL: "http://192.168.99.10:7070", NodeURL: "https://192.168.99.10:7071",
+		Recipes: recipes, EffectiveRecipes: recipes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetFleetManager(manager)
+	summary, err := manager.Summary(ctx)
+	if err != nil || len(summary.Nodes) != 1 {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+	// A record an earlier placement left behind without an owner job. Nothing
+	// runs for it anywhere, and no action can be addressed to it.
+	if _, _, err := database.CreateFleetDeployment(ctx, store.FleetDeployment{
+		DeploymentID: "deployment_stranded", RecipeID: selected.ID, RecipeVersion: selected.Version,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: summary.Nodes[0].NodeID, State: "committing",
+	}, store.FleetDeploymentNode{NodeID: summary.Nodes[0].NodeID, ReservationID: "reservation_stranded"}); err != nil {
+		t.Fatal(err)
+	}
+	cookie, csrf := pairMembershipConsole(t, server, authManager)
+	release := func(owner bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "http://console.test/api/v1/fleet/deployments/deployment_stranded/release", bytes.NewBufferString(`{}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", "http://console.test")
+		if owner {
+			request.Header.Set("X-CSRF-Token", csrf)
+			request.AddCookie(cookie)
+		}
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+	if refused := release(false); refused.Code != http.StatusForbidden {
+		t.Fatalf("a caller with no owner session cleared a record: status=%d body=%s", refused.Code, refused.Body.String())
+	}
+	cleared := release(true)
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clearing status=%d body=%s", cleared.Code, cleared.Body.String())
+	}
+	stored, err := database.FleetDeployment(ctx, "deployment_stranded")
+	if err != nil || stored.State != "removed" {
+		t.Fatalf("the record reads %+v err=%v", stored, err)
+	}
+	// Clearing is bookkeeping. No operation ran on this machine for it.
+	executor.mu.Lock()
+	operations := len(executor.done)
+	executor.mu.Unlock()
+	if operations != 0 {
+		t.Fatalf("clearing a record executed %d operations", operations)
+	}
+}

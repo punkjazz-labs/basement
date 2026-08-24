@@ -238,23 +238,163 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 		t.Fatalf("latest lifecycle projection=%+v action=%+v err=%v", projected, actionJob, err)
 	}
 
-	// One model on one Spark is one record on this path too. A second install
-	// of a model node A already holds would otherwise write a second record
-	// under a second key, and the console would show two rows and two owner
-	// jobs for one serving model.
-	_, created, err = controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "duplicate-first", Intent: intent})
+	// One model on one Spark is one LIVE record. Work that is still running
+	// holds the pair, because a second install beside it would give the console
+	// two rows and two owner jobs for one model.
+	liveJob := liveOwnerJob(t, memberBStore, first.ID, "deployment_live_on_node_b")
+	writeDeploymentRecord(t, controllerStore, store.FleetDeployment{
+		DeploymentID: "deployment_live_on_node_b", RecipeID: first.ID, RecipeVersion: first.Version,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: memberB.identity.NodeID, State: "running",
+	}, liveJob)
+	_, created, err = controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberB.identity.NodeID, IdempotencyKey: "duplicate-live", Intent: intent})
 	if err == nil || created || !strings.Contains(err.Error(), "already has a deployment record for that model") {
 		t.Fatalf("a second live record for one pair was accepted: created=%v err=%v", created, err)
 	}
-	// A removed record holds nothing any more, so the same pair can be placed
-	// again. Without this the first uninstall would wedge that model on that
-	// Spark for good.
-	if err := controllerStore.ObserveFleetDeployment(ctx, deploymentA.DeploymentID, "removed", "2026-08-24T00:00:00Z"); err != nil {
+
+	// A record whose work has finished holds nothing. This is the model node A
+	// already serves under a record this fleet made, updated from the install
+	// dialog: the new placement takes the pair and the settled record reads
+	// removed. Refusing here would mean the fleet could never update a model it
+	// had placed itself.
+	if settled, err := controller.Deployment(ctx, deploymentA.DeploymentID); err != nil || settled.Job == nil || settled.Job.State != "ready" {
+		t.Fatalf("the record to supersede is not settled: %+v err=%v", settled, err)
+	}
+	updated, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "update-first", Intent: intent})
+	if err != nil || !created || updated.DeploymentID == deploymentA.DeploymentID {
+		t.Fatalf("a settled record did not give up its pair: created=%v deployment=%+v err=%v", created, updated, err)
+	}
+	if superseded, err := controllerStore.FleetDeployment(ctx, deploymentA.DeploymentID); err != nil || superseded.State != "removed" {
+		t.Fatalf("the superseded record reads %+v err=%v", superseded, err)
+	}
+
+	// A create that died before it could name an owner job holds nothing
+	// either. Retrying it used to be refused for good, which wedged that model
+	// on that Spark with no way out of it from the console.
+	writeDeploymentRecord(t, controllerStore, store.FleetDeployment{
+		DeploymentID: "deployment_that_failed", RecipeID: third.ID, RecipeVersion: third.Version,
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: memberB.identity.NodeID, State: "failed",
+	}, store.Job{})
+	afterFailure, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: third.ID, NodeID: memberB.identity.NodeID, IdempotencyKey: "retry-after-failure", Intent: intent})
+	if err != nil || !created || afterFailure.OwnerJobID == "" {
+		t.Fatalf("a retry after a failed create was refused: created=%v deployment=%+v err=%v", created, afterFailure, err)
+	}
+	if failed, err := controllerStore.FleetDeployment(ctx, "deployment_that_failed"); err != nil || failed.State != "removed" {
+		t.Fatalf("the failed record reads %+v err=%v", failed, err)
+	}
+}
+
+// A record the fleet can no longer act on: the owner Spark lost the job row,
+// left the fleet, or never got a job at all. Such a record pins its console row
+// to "No answer" with every button dead, and adoption cannot write a fresh one
+// while it stands. Clearing it touches this controller's bookkeeping and
+// nothing else.
+func TestReleaseDeploymentEndsARecordTheFleetCannotReach(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
 		t.Fatal(err)
 	}
-	replaced, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "replace-first", Intent: intent})
-	if err != nil || !created || replaced.DeploymentID == deploymentA.DeploymentID {
-		t.Fatalf("a removed record did not release its pair: created=%v deployment=%+v err=%v", created, replaced, err)
+	held := independentRecipes(t, recipes, 4)
+	controller, controllerStore := newPlacementManager(t, "controller", "192.168.99.80", recipes)
+	member, memberStore := newPlacementManager(t, "loft", "192.168.99.81", recipes)
+	member.SetIndependentRuntime(&placementRuntime{database: memberStore, allocator: member.Allocator()})
+	controller.newClient = inMemoryFleetClients(t, controller, map[string]*Manager{member.identity.CertificateFingerprint: member})
+	code, err := member.CreateJoinCode(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Adopt(ctx, AdoptRequest{DisplayName: member.displayName, ConsoleURL: member.consoleURL, NodeURL: member.nodeURL, JoinCode: code.Code}); err != nil {
+		t.Fatal(err)
+	}
+
+	record := func(id string, selected recipe.Recipe, nodeID string, job store.Job) {
+		writeDeploymentRecord(t, controllerStore, store.FleetDeployment{
+			DeploymentID: id, RecipeID: selected.ID, RecipeVersion: selected.Version,
+			RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: nodeID, State: "running",
+		}, job)
+	}
+	// Four records, one for each way a placement can end up stranded, and one
+	// that is not stranded at all.
+	record("deployment_without_a_job", held[0], member.identity.NodeID, store.Job{})
+	record("deployment_with_an_unknown_job", held[1], member.identity.NodeID, store.Job{ID: "job_the_node_never_had", State: "running"})
+	record("deployment_off_the_fleet", held[2], "node_that_left", store.Job{ID: "job_somewhere_else", State: "running"})
+	record("deployment_the_node_answers_for", held[3], member.identity.NodeID,
+		liveOwnerJob(t, memberStore, held[3].ID, "deployment_the_node_answers_for"))
+
+	for _, id := range []string{"deployment_without_a_job", "deployment_with_an_unknown_job", "deployment_off_the_fleet"} {
+		released, ended, err := controller.ReleaseDeployment(ctx, id)
+		if err != nil || !ended || released.State != "removed" {
+			t.Fatalf("%s was not cleared: ended=%v record=%+v err=%v", id, ended, released, err)
+		}
+		// Clearing one twice is not an error and does not report a second
+		// clearing, so two clicks read the same as one.
+		if _, again, err := controller.ReleaseDeployment(ctx, id); err != nil || again {
+			t.Fatalf("%s reported a second clearing: again=%v err=%v", id, again, err)
+		}
+	}
+	// The Spark still answers for this one, so the record is not stranded and
+	// the owner is told to remove the model instead of throwing the record away.
+	_, ended, err := controller.ReleaseDeployment(ctx, "deployment_the_node_answers_for")
+	if err == nil || ended || !strings.Contains(err.Error(), "loft answers for this model") {
+		t.Fatalf("a record the fleet can still read was cleared: ended=%v err=%v", ended, err)
+	}
+	if kept, err := controllerStore.FleetDeployment(ctx, "deployment_the_node_answers_for"); err != nil || kept.State == "removed" {
+		t.Fatalf("a refused clearing still changed the record: %+v err=%v", kept, err)
+	}
+	// Nothing was asked of the member: clearing is bookkeeping, and the model
+	// it named is left exactly as it was.
+	jobs, err := memberStore.ListJobs(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("clearing records left %d jobs on the member: %+v", len(jobs), jobs)
+	}
+	// A cleared pair can be placed again, which is the whole point of clearing
+	// it: adopt-on-demand rebuilds the row from what that Spark reports.
+	if err := memberStore.SetInstalled(ctx, store.InstalledModel{RecipeID: held[0].ID, RecipeVersion: held[0].Version, Status: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, created, err := controller.AdoptIndependentDeployment(ctx, member.identity.NodeID, held[0].ID, "adopt-after-clearing")
+	if err != nil || !created || rebuilt.OwnerJobID == "" {
+		t.Fatalf("a cleared pair could not be adopted again: created=%v record=%+v err=%v", created, rebuilt, err)
+	}
+}
+
+// liveOwnerJob puts a job on the Spark that owns a record, in the state a job
+// is in while it still runs. The controller reads it through the fleet, so the
+// record it belongs to reads as live work.
+func liveOwnerJob(t *testing.T, database *store.Store, recipeID, deploymentID string) store.Job {
+	t.Helper()
+	job, _, err := database.CreateJob(context.Background(), "install", recipeID, "live:"+deploymentID,
+		map[string]any{"deployment_id": deploymentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != "queued" {
+		t.Fatalf("a new job is in state %q, which this fixture reads as live work", job.State)
+	}
+	return job
+}
+
+// writeDeploymentRecord puts a record straight into the controller's store, the
+// way an earlier placement would have left it. An empty job means the record
+// never got one.
+func writeDeploymentRecord(t *testing.T, database *store.Store, record store.FleetDeployment, job store.Job) {
+	t.Helper()
+	ctx := context.Background()
+	if _, _, err := database.CreateFleetDeployment(ctx, record,
+		store.FleetDeploymentNode{NodeID: record.OwnerNodeID, ReservationID: "reservation_" + record.DeploymentID}); err != nil {
+		t.Fatal(err)
+	}
+	if job.ID == "" {
+		return
+	}
+	if err := database.SetFleetDeploymentJob(ctx, record.DeploymentID, job.ID, job.State, "2026-08-24T00:00:00Z"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -344,14 +484,13 @@ func TestAdoptIndependentDeploymentRecordsAnInstalledModel(t *testing.T) {
 	// as it did before the record appeared.
 	assertServingRecipe(t, memberStore, serving.ID)
 
-	// The create path already owns this pair under an id of its own. One
-	// model on one node must stay one record, whatever id it carries.
-	if _, _, err := controllerStore.CreateFleetDeployment(ctx, store.FleetDeployment{
+	// The create path already owns this pair under an id of its own, and its
+	// install is still running there. One model on one node must stay one live
+	// record, whatever id that record carries.
+	writeDeploymentRecord(t, controllerStore, store.FleetDeployment{
 		DeploymentID: "deployment_from_the_create_path", RecipeID: duplicated.ID, RecipeVersion: duplicated.Version,
-		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: member.identity.NodeID, State: "committing",
-	}, store.FleetDeploymentNode{NodeID: member.identity.NodeID, ReservationID: "reservation_from_the_create_path"}); err != nil {
-		t.Fatal(err)
-	}
+		RecipeFingerprint: "fingerprint", TopologyCount: 1, OwnerNodeID: member.identity.NodeID, State: "running",
+	}, liveOwnerJob(t, memberStore, duplicated.ID, "deployment_from_the_create_path"))
 
 	for _, test := range []struct {
 		name     string
