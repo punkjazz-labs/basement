@@ -77,7 +77,9 @@ func (s *Store) CreateFleetUpgradeRun(ctx context.Context, run FleetUpgradeRun, 
 	}
 	defer tx.Rollback()
 	var activeID string
-	err = tx.QueryRowContext(ctx, `SELECT run_id FROM fleet_upgrade_runs WHERE state NOT IN ('succeeded','resolved') ORDER BY created_at DESC LIMIT 1`).Scan(&activeID)
+	// Newest first by rowid, the insertion order: see now() for why the
+	// timestamp text does not sort chronologically.
+	err = tx.QueryRowContext(ctx, `SELECT run_id FROM fleet_upgrade_runs WHERE state NOT IN ('succeeded','resolved') ORDER BY rowid DESC LIMIT 1`).Scan(&activeID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return FleetUpgradeRun{}, false, err
 	}
@@ -137,9 +139,13 @@ func (s *Store) FleetUpgradeRun(ctx context.Context, runID string) (FleetUpgrade
 	return run, nil
 }
 
+// LatestFleetUpgradeRun answers the run the fleet started last. The order key
+// is rowid, the insertion order: see now() for why the timestamp text does not
+// sort chronologically. A run row is updated in place through its whole life,
+// so its rowid still marks the moment the rollout began.
 func (s *Store) LatestFleetUpgradeRun(ctx context.Context) (FleetUpgradeRun, error) {
 	var run FleetUpgradeRun
-	if err := scanFleetUpgradeRun(s.db.QueryRowContext(ctx, fleetUpgradeRunSelect+` ORDER BY created_at DESC,run_id DESC LIMIT 1`), &run); err != nil {
+	if err := scanFleetUpgradeRun(s.db.QueryRowContext(ctx, fleetUpgradeRunSelect+` ORDER BY rowid DESC LIMIT 1`), &run); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return FleetUpgradeRun{}, os.ErrNotExist
 		}
@@ -153,9 +159,12 @@ func (s *Store) LatestFleetUpgradeRun(ctx context.Context) (FleetUpgradeRun, err
 	return run, nil
 }
 
+// ActiveFleetUpgradeRun answers the newest run that still needs attention. The
+// order key is rowid, the insertion order, for the same reason as
+// LatestFleetUpgradeRun.
 func (s *Store) ActiveFleetUpgradeRun(ctx context.Context) (FleetUpgradeRun, error) {
 	var run FleetUpgradeRun
-	if err := scanFleetUpgradeRun(s.db.QueryRowContext(ctx, fleetUpgradeRunSelect+` WHERE state NOT IN ('succeeded','failed','resolved') ORDER BY created_at DESC,run_id DESC LIMIT 1`), &run); err != nil {
+	if err := scanFleetUpgradeRun(s.db.QueryRowContext(ctx, fleetUpgradeRunSelect+` WHERE state NOT IN ('succeeded','failed','resolved') ORDER BY rowid DESC LIMIT 1`), &run); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return FleetUpgradeRun{}, os.ErrNotExist
 		}

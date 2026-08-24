@@ -819,11 +819,15 @@ func (s *Store) UpdateJobPayload(ctx context.Context, id string, payload any) er
 	return nil
 }
 
+// ListJobs answers newest first. The order key is rowid, the insertion order,
+// not created_at: see now() for why the timestamp text does not sort
+// chronologically. A job row is inserted once, at creation, so the insertion
+// order is the creation order.
 func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM jobs ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM jobs ORDER BY rowid DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -853,6 +857,13 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
 // ActiveUpdateBlocker names the first engine or generation activity that a
 // manager restart would interrupt. The query is one database snapshot so the
 // API never reports an idle machine assembled from two different moments.
+//
+// This is the one time-ordered query that keeps created_at. It reads two
+// tables, and a rowid counts rows in its own table only, so rowid cannot rank
+// a job against a generation. The timestamp text can therefore still name the
+// wrong one of two activities that started in the same fraction of a second.
+// Both are real blockers, and whether anything blocks at all does not depend
+// on the order, so the cost is the name in one message.
 func (s *Store) ActiveUpdateBlocker(ctx context.Context) (UpdateBlocker, bool, error) {
 	var blocker UpdateBlocker
 	var recipeID string
@@ -1216,8 +1227,11 @@ func (s *Store) CreateAPIKey(ctx context.Context, name string) (APIKey, string, 
 	return key, secret, nil
 }
 
+// APIKeys lists the live keys oldest first. The order key is rowid, the
+// insertion order: see now() for why the timestamp text does not sort
+// chronologically.
 func (s *Store) APIKeys(ctx context.Context) ([]APIKey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,created_at,last_used_at FROM api_keys WHERE revoked_at='' ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,created_at,last_used_at FROM api_keys WHERE revoked_at='' ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -1309,9 +1323,11 @@ func (s *Store) CreatePeer(ctx context.Context, name, baseURL, apiKey string) (P
 }
 
 // Peers never includes the api_key column, so a handler cannot leak a
-// credential just by forwarding this result.
+// credential just by forwarding this result. The order key is rowid, the
+// insertion order: see now() for why the timestamp text does not sort
+// chronologically.
 func (s *Store) Peers(ctx context.Context) ([]Peer, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,base_url,created_at FROM peers ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,base_url,created_at FROM peers ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -1408,9 +1424,12 @@ func (s *Store) Role(ctx context.Context, name string) (Role, error) {
 }
 
 // Roles lists every assigned role, oldest first, so the console shows custom
-// roles in the order they were added.
+// roles in the order they were added. The order key is rowid, the insertion
+// order: see now() for why the timestamp text does not sort chronologically.
+// Reassigning a role updates its row in place and keeps its rowid, so a role
+// holds its position for its whole life.
 func (s *Store) Roles(ctx context.Context) ([]Role, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name,recipe_id,created_at,updated_at FROM roles ORDER BY created_at, name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT name,recipe_id,created_at,updated_at FROM roles ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -1651,4 +1670,12 @@ func randomID(prefix string) (string, error) {
 	}
 	return prefix + hex.EncodeToString(b[:]), nil
 }
+
+// now is the one clock every stored timestamp comes from. RFC3339Nano removes
+// trailing zeros, so one value can be a text prefix of another and the text
+// does not sort chronologically: the 'Z' byte is above every digit, which puts
+// "10:00:00.5Z" after the later "10:00:00.51Z". A time-ordered query must
+// therefore order by rowid, the insertion order, and never by a timestamp
+// column. Read a timestamp as a moment to show or to compare with a parsed
+// time, not as a sort key.
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }

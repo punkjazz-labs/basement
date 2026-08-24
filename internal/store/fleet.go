@@ -193,7 +193,9 @@ func (s *Store) InitializeFleetMigration(ctx context.Context, self FleetNode, ca
 		}
 		return tx.Commit()
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,name,base_url,created_at FROM peers ORDER BY created_at`)
+	// Ordered by rowid, the insertion order: see now() for why the timestamp
+	// text does not sort chronologically.
+	rows, err := tx.QueryContext(ctx, `SELECT id,name,base_url,created_at FROM peers ORDER BY rowid`)
 	if err != nil {
 		return fmt.Errorf("read legacy peers: %w", err)
 	}
@@ -295,8 +297,12 @@ func insertFleetNode(ctx context.Context, tx *sql.Tx, node FleetNode) error {
 	return err
 }
 
+// FleetNodes lists the members in the order they joined. The order key is
+// rowid, the insertion order: see now() for why the timestamp text does not
+// sort chronologically. A member row is updated in place by heartbeats and
+// keeps its rowid, so a node holds its position until it leaves the fleet.
 func (s *Store) FleetNodes(ctx context.Context) ([]FleetNode, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT fleet_id,node_id,display_name,console_url,node_url,certificate,manager_version,manager_build_identity,catalogue_digest,membership_state,heartbeat_sequence,heartbeat_received_at,heartbeat_payload,heartbeat_signature,legacy_peer_id,created_at,updated_at FROM fleet_nodes ORDER BY created_at,node_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT fleet_id,node_id,display_name,console_url,node_url,certificate,manager_version,manager_build_identity,catalogue_digest,membership_state,heartbeat_sequence,heartbeat_received_at,heartbeat_payload,heartbeat_signature,legacy_peer_id,created_at,updated_at FROM fleet_nodes ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -852,8 +858,13 @@ func (s *Store) FleetDeployment(ctx context.Context, deploymentID string) (Fleet
 	return deployment, nil
 }
 
+// FleetDeployments lists the placement records newest first. The order key is
+// rowid, the insertion order: see now() for why the timestamp text does not
+// sort chronologically. A record is updated in place for its whole life, and
+// reviving a removed record keeps its rowid, so its position stays where the
+// placement started.
 func (s *Store) FleetDeployments(ctx context.Context) ([]FleetDeployment, error) {
-	rows, err := s.db.QueryContext(ctx, fleetDeploymentSelect+` ORDER BY created_at DESC,deployment_id`)
+	rows, err := s.db.QueryContext(ctx, fleetDeploymentSelect+` ORDER BY rowid DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -964,8 +975,11 @@ func (s *Store) NodeReservation(ctx context.Context, reservationID string) (Node
 	return reservation, err
 }
 
+// NodeReservations lists the claims oldest first. The order key is rowid, the
+// insertion order: see now() for why the timestamp text does not sort
+// chronologically.
 func (s *Store) NodeReservations(ctx context.Context) ([]NodeReservation, error) {
-	rows, err := s.db.QueryContext(ctx, nodeReservationSelect+` ORDER BY created_at,reservation_id`)
+	rows, err := s.db.QueryContext(ctx, nodeReservationSelect+` ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
