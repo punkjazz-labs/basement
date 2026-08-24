@@ -1098,8 +1098,9 @@ func scanModel(row interface{ Scan(...any) error }) (InstalledModel, error) {
 // is updated_at, not rowid: a rowid records when a model was first installed,
 // and this list must follow the last change instead. rtrim removes the
 // trailing 'Z' so the text compares chronologically. See now() for the rule.
+// Activation stamps many rows with one value, so ties fall to rowid.
 func (s *Store) Models(ctx context.Context) ([]InstalledModel, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+modelColumns+` FROM installed_models m LEFT JOIN model_metrics x ON x.recipe_id=m.recipe_id ORDER BY rtrim(m.updated_at,'Z') DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+modelColumns+` FROM installed_models m LEFT JOIN model_metrics x ON x.recipe_id=m.recipe_id ORDER BY rtrim(m.updated_at,'Z') DESC, m.rowid DESC`)
 	if err != nil {
 		return nil, err
 	}
