@@ -1564,6 +1564,14 @@ func (s *Server) peerAction(w http.ResponseWriter, r *http.Request) {
 		s.peerSummary(w, r, id)
 		return
 	}
+	// The live meters of one peer, on their own. The Monitor tab reads this
+	// every few seconds for every Spark it draws, and asking for the whole
+	// summary would ask each machine for its system and its models at that
+	// pace as well.
+	if len(parts) == 2 && parts[1] == "telemetry" && r.Method == http.MethodGet {
+		s.peerTelemetry(w, r, id)
+		return
+	}
 	// Delegated placement (ADR 0013): the head is a remote control here. Both
 	// of these forward to the peer's own public API and relay its answer.
 	if len(parts) == 2 && parts[1] == "preflight" && r.Method == http.MethodGet {
@@ -1740,6 +1748,25 @@ func (s *Server) peerSummary(w http.ResponseWriter, r *http.Request, id string) 
 	if modelsErr == nil {
 		response["models"] = models
 	}
+	if telemetryErr == nil {
+		response["telemetry"] = telemetry
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// peerTelemetry proxies the one read-only endpoint the live meters need
+// (telemetry) and answers in the same shape peerSummary answers in, with the
+// one key it carries. A peer that cannot be reached, times out, or fails auth
+// is reported as reachable: false rather than as an error, so one down
+// machine leaves the meters of every other Spark on the screen.
+func (s *Server) peerTelemetry(w http.ResponseWriter, r *http.Request, id string) {
+	peer, apiKey, err := s.store.PeerCredentials(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("that Spark is not in the fleet"))
+		return
+	}
+	telemetry, telemetryErr := s.fetchPeerJSON(r.Context(), peer.BaseURL, apiKey, "/api/v1/telemetry")
+	response := map[string]any{"reachable": telemetryErr == nil}
 	if telemetryErr == nil {
 		response["telemetry"] = telemetry
 	}

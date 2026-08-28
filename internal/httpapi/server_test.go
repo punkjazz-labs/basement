@@ -505,6 +505,86 @@ func TestPeerLifecycleOverAPI(t *testing.T) {
 	}
 }
 
+// TestPeerTelemetryProxy covers the read the Monitor tab makes for every
+// paired Spark: the peer's own meters, relayed by this manager, in the shape
+// the summary uses. A machine that stopped answering is reported as
+// unreachable rather than as an error, so one down Spark never takes the
+// meters of the others off the screen.
+func TestPeerTelemetryProxy(t *testing.T) {
+	server, cookies, csrf := newPairedTestServer(t)
+	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf}
+	peer := fakePeer(t, "rosk_realkey")
+
+	created := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers",
+		`{"name":"edgexpert-beta","base_url":"`+peer.URL+`","api_key":"rosk_realkey"}`, cookies, headers)
+	var createdPeer struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(created.Body).Decode(&createdPeer); err != nil {
+		t.Fatal(err)
+	}
+	created.Body.Close()
+	if createdPeer.ID == "" {
+		t.Fatal("peer was created without an id")
+	}
+	telemetryURL := server.URL + "/api/v1/peers/" + createdPeer.ID + "/telemetry"
+
+	// A console session is required, exactly as it is for the summary.
+	anonymous := doRequest(t, http.MethodGet, telemetryURL, "", nil, nil)
+	anonymous.Body.Close()
+	if anonymous.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous telemetry status=%d, want 401", anonymous.StatusCode)
+	}
+
+	live := doRequest(t, http.MethodGet, telemetryURL, "", cookies, nil)
+	var liveBody struct {
+		Reachable bool           `json:"reachable"`
+		Telemetry map[string]any `json:"telemetry"`
+	}
+	if err := json.NewDecoder(live.Body).Decode(&liveBody); err != nil {
+		t.Fatal(err)
+	}
+	live.Body.Close()
+	if live.StatusCode != http.StatusOK {
+		t.Fatalf("telemetry status=%d, want 200", live.StatusCode)
+	}
+	// The peer's own body, relayed unchanged.
+	if !liveBody.Reachable || liveBody.Telemetry["memory_available"] != float64(42_000_000_000) {
+		t.Fatalf("unexpected telemetry answer: %#v", liveBody)
+	}
+
+	// A Spark this console does not hold is a 404, in the words the other
+	// peer routes use.
+	missing := doRequest(t, http.MethodGet, server.URL+"/api/v1/peers/nosuchspark/telemetry", "", cookies, nil)
+	var missingBody struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(missing.Body).Decode(&missingBody); err != nil {
+		t.Fatal(err)
+	}
+	missing.Body.Close()
+	if missing.StatusCode != http.StatusNotFound || missingBody.Error != "that Spark is not in the fleet" {
+		t.Fatalf("unknown peer status=%d error=%q", missing.StatusCode, missingBody.Error)
+	}
+
+	peer.Close()
+	down := doRequest(t, http.MethodGet, telemetryURL, "", cookies, nil)
+	var downBody struct {
+		Reachable bool           `json:"reachable"`
+		Telemetry map[string]any `json:"telemetry"`
+	}
+	if down.StatusCode != http.StatusOK {
+		t.Fatalf("down peer telemetry status=%d, want 200", down.StatusCode)
+	}
+	if err := json.NewDecoder(down.Body).Decode(&downBody); err != nil {
+		t.Fatal(err)
+	}
+	down.Body.Close()
+	if downBody.Reachable || downBody.Telemetry != nil {
+		t.Fatalf("a closed peer was reported as reachable: %#v", downBody)
+	}
+}
+
 // newAPIKey pairs a fresh manager and mints one API key on it, returning the
 // server, a console session and the key secret a peer manager would hold.
 func newAPIKey(t *testing.T) (server *httptest.Server, cookies []*http.Cookie, csrf, secret string) {
