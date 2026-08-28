@@ -264,6 +264,27 @@ func (a *Allocator) Release(ctx context.Context, reservationID string) error {
 	return a.database.ReleaseNodeReservation(ctx, reservationID)
 }
 
+// ClearSettled removes a released or expired reservation so its deterministic
+// identity can be prepared again. A settled row holds no claim; left in place
+// it makes Prepare return it unchanged and Activate refuse it, which the
+// caller reads as a fatal admission conflict. That is the 2026-08-12 recovery
+// crash-loop, relearned on 2026-08-28 by the legacy-rank worker path when a
+// reclaimed rank wedged its own job's identity. A row in any other state is
+// left alone: the caller's Prepare and Activate judge a live claim.
+func (a *Allocator) ClearSettled(ctx context.Context, reservationID string) error {
+	existing, err := a.Reservation(ctx, reservationID)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if existing.State != "released" && existing.State != "expired" {
+		return nil
+	}
+	return a.database.DeleteSettledNodeReservation(ctx, reservationID)
+}
+
 func (a *Allocator) ReleaseRecipe(ctx context.Context, recipeID, exceptReservationID string) error {
 	return a.database.ReleaseActiveRecipeReservations(ctx, recipeID, exceptReservationID)
 }
@@ -382,11 +403,7 @@ func (a *Allocator) Reconcile(ctx context.Context, recipes []recipe.Recipe) erro
 		// recovery reservation turned its next restart into a crash loop,
 		// with the console dead and nothing to click. A settled row holds no
 		// claim, so the identity is cleared for reuse instead.
-		if existing, err := a.Reservation(ctx, reservationID); err == nil && (existing.State == "released" || existing.State == "expired") {
-			if err := a.database.DeleteSettledNodeReservation(ctx, reservationID); err != nil {
-				return err
-			}
-		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := a.ClearSettled(ctx, reservationID); err != nil {
 			return err
 		}
 		prepared, _, err := a.Prepare(ctx, ReservationRequest{

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
 	"github.com/punkjazz-labs/basement/internal/store"
@@ -396,6 +397,124 @@ func TestActiveTwoSparkInstallRenewsItsWorkerDriverLease(t *testing.T) {
 	renewals := fake.recordedRenewals()
 	if len(renewals) != 1 || renewals[0] != job.ID+"@"+r.ID {
 		t.Fatalf("worker lease renewals=%v", renewals)
+	}
+}
+
+// The worker's rank goes active at its own preflight, before the head stages
+// a byte, and its lease is only nine heartbeats. Pulling a 20 GB image and
+// downloading the weights takes far longer than that, while the head's own
+// reservation stays committed until it claims the runtime slot just before
+// the container starts. A renewal that waited for the active state therefore
+// let the worker reclaim the rank in the middle of the install, and the first
+// step the head sent was refused (hardware, 2026-08-28).
+func TestWorkerLeaseIsRenewedWhileTheHeadIsStillStaging(t *testing.T) {
+	ctx := context.Background()
+	fake := newGatedFleetExecutor("staging-lease-model")
+	t.Cleanup(fake.unblock)
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	r := twoSparkRecipe(t)
+	r.ID = "staging-lease-model"
+	runner := New(s, fake, []recipe.Recipe{r})
+
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "renew-while-staging", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	select {
+	case <-fake.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the install never reached the download gate")
+	}
+
+	held, err := runner.Reservations().Reservation(ctx, fleet.ReservationID(fleet.ClaimKindLocalJob, job.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.State != "committed" {
+		t.Fatalf("the head reservation is %q during staging, so this test no longer covers the staging window", held.State)
+	}
+	if err := runner.RenewDistributedReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if renewals := fake.recordedRenewals(); len(renewals) != 1 || renewals[0] != job.ID+"@"+r.ID {
+		t.Fatalf("the worker lease was not renewed while the head staged: renewals=%v", renewals)
+	}
+
+	fake.unblock()
+	waitJob(t, s, job.ID, "ready")
+}
+
+// Renewal follows this manager's own deployments and nothing else: a settled
+// reservation, a claim that names no job, another node's rank, and a
+// single-Spark model all have no worker lease to keep alive.
+func TestDistributedLeaseRenewalCoversStagingAndSkipsEverythingElse(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name        string
+		state       string
+		kind        string
+		jobID       string
+		single      bool
+		wantRenewed bool
+	}{
+		{name: "committed deployment in staging", state: "committed", kind: fleet.ClaimKindLocalJob, jobID: "job-staging", wantRenewed: true},
+		{name: "active deployment serving", state: "active", kind: fleet.ClaimKindLocalJob, jobID: "job-serving", wantRenewed: true},
+		{name: "released deployment", state: "released", kind: fleet.ClaimKindLocalJob, jobID: "job-over"},
+		{name: "claim naming no job", state: "committed", kind: fleet.ClaimKindLocalJob, jobID: ""},
+		{name: "another driver's rank on this node", state: "active", kind: fleet.ClaimKindLegacyRank, jobID: "job-remote"},
+		{name: "single-Spark deployment", state: "committed", kind: fleet.ClaimKindLocalJob, jobID: "job-single", single: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFleetExecutor()
+			runner, _, distributed, single := mixedFleet(t, fake)
+			selected := distributed
+			if test.single {
+				selected = single
+			}
+			fingerprint, err := fleet.RecipeFingerprint(selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const reservationID = "reservation-under-test"
+			allocator := runner.Reservations()
+			if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
+				ReservationID: reservationID, DeploymentID: "job:" + reservationID, DriverNodeID: allocator.NodeID(),
+				RecipeID: selected.ID, RecipeVersion: selected.Version, RecipeFingerprint: fingerprint,
+				Claims: fleet.ClaimsForRecipe(selected, fleet.RecipeClaimOptions{Kind: test.kind, JobID: test.jobID, Runtime: true}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := allocator.Commit(ctx, reservationID, fleet.LocalPrepareToken(reservationID), []byte(`{"kind":"local-engine"}`)); err != nil {
+				t.Fatal(err)
+			}
+			switch test.state {
+			case "active":
+				if err := allocator.Activate(ctx, reservationID, ""); err != nil {
+					t.Fatal(err)
+				}
+			case "released":
+				if err := allocator.Release(ctx, reservationID); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := runner.RenewDistributedReservations(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var want []string
+			if test.wantRenewed {
+				want = []string{test.jobID + "@" + selected.ID}
+			}
+			if renewals := fake.recordedRenewals(); strings.Join(renewals, ",") != strings.Join(want, ",") {
+				t.Fatalf("worker lease renewals=%v, want %v", renewals, want)
+			}
+		})
 	}
 }
 

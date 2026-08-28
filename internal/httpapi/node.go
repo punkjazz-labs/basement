@@ -34,10 +34,12 @@ var workerOperations = map[string]bool{
 var releasingOperations = map[string]bool{"stop_container": true, "remove_container": true, "remove_artifact_if_unshared": true}
 
 // The preparation window covers long preflight and download staging before a
-// rank is active. Once active, the head renews every fleet heartbeat interval
-// and the worker allows nine missed renewals before reclaiming the rank. That
-// is three times HeartbeatFreshness, so one stale heartbeat or a brief network
-// interruption cannot tear down a model that is still serving.
+// rank is active. Once active, the head renews every fleet heartbeat interval,
+// from the moment its own deployment reservation is committed and through
+// staging and serving alike, and the worker allows nine missed renewals before
+// reclaiming the rank. That is three times HeartbeatFreshness, so one stale
+// heartbeat or a brief network interruption cannot tear down a model that is
+// still serving.
 const (
 	legacyRankPrepareTTL       = 45 * time.Minute
 	legacyDriverLeaseTTL       = 9 * fleet.HeartbeatInterval
@@ -143,6 +145,14 @@ func (s *Server) prepareLegacyRankReservation(ctx context.Context, jobID string,
 	reservationID := fleet.ExactRecipeReservationID(
 		fleet.ClaimKindLegacyRank, s.engine.Reservations().NodeID(), jobID, selected.ID, selected.Version,
 	)
+	// This identity is deterministic, so one job's own reclaimed rank is left
+	// here as a settled row: Prepare would return it unchanged and Activate
+	// would refuse it, and every later step of that same deployment would be
+	// told this Spark belongs to another one. A settled row holds no claim, so
+	// the identity is cleared for reuse before it is prepared again.
+	if err := s.engine.Reservations().ClearSettled(ctx, reservationID); err != nil {
+		return "", err
+	}
 	prepared, _, err := s.engine.Reservations().Prepare(ctx, fleet.ReservationRequest{
 		ReservationID: reservationID, DeploymentID: "legacy-rank:" + jobID,
 		DriverNodeID: "legacy-head", RecipeID: selected.ID, RecipeVersion: selected.Version,

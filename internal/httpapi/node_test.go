@@ -459,6 +459,58 @@ func TestWorkerReservationExpiresSoADeadHeadCannotWedgeThisSpark(t *testing.T) {
 	}
 }
 
+// The live two-Spark failure of 2026-08-28: the head activated this worker's
+// rank at preflight, then staged an image and weights for longer than the
+// nine-heartbeat lease, so the sweep reclaimed the rank and settled the row.
+// The rank's identity is deterministic for one job and recipe, so the head's
+// next step found that dead row, Prepare returned it unchanged, and Activate
+// refused it — "this node's runtime is already reserved by another
+// deployment" — for the deployment that owned it. A settled row holds no
+// claim, so the same job must be able to take its own Spark back.
+func TestReclaimedWorkerRankDoesNotWedgeItsOwnJob(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-staging"}); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("worker preflight status=%d body=%#v", status, body)
+	}
+	allocator := fixture.api.engine.Reservations()
+	reservationID := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-staging", fixture.distributed.ID, fixture.distributed.Version)
+
+	// The head stages for longer than the lease and never renews it.
+	if err := allocator.Renew(ctx, reservationID, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.api.ReclaimExpiredDriverReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := allocator.Reservation(ctx, reservationID)
+	if err != nil || settled.State != "expired" {
+		t.Fatalf("reclaimed rank=%+v err=%v, want expired", settled, err)
+	}
+
+	// The head comes back with the first staging step of that same job.
+	status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("pull_image", "job-staging", fixture.distributed))
+	if status != http.StatusOK {
+		t.Fatalf("the deployment was locked out of the Spark it owns: status=%d body=%#v", status, body)
+	}
+	if body["error"] != nil {
+		t.Fatalf("worker step reported %v", body["error"])
+	}
+	if !fixture.localExec.executed("pull_image") {
+		t.Fatal("the worker never pulled the image for the job that owns it")
+	}
+	claimed, err := allocator.Reservation(ctx, reservationID)
+	if err != nil || claimed.State != "active" {
+		t.Fatalf("the rank was not claimed fresh: %+v err=%v", claimed, err)
+	}
+
+	// Clearing a dead row is not an amnesty: another head is still refused
+	// while this one holds the Spark.
+	if status, _ := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("pull_image", "job-other", fixture.distributed)); status != http.StatusConflict {
+		t.Fatalf("a second head was admitted while this job holds the Spark, status=%d", status)
+	}
+}
+
 func TestWorkerReservationRenewalKeepsAHealthyHeadActive(t *testing.T) {
 	ctx := context.Background()
 	fixture := newNodeFixture(t)

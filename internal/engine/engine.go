@@ -349,9 +349,22 @@ func (e *Engine) ReconcileReservations(ctx context.Context) error {
 }
 
 // RenewDistributedReservations proves that this manager still owns every
-// worker rank supporting one of its active local jobs. The job id and exact
-// recipe come from the durable local reservation, so restart does not depend
-// on an in-memory lease or whichever recipe is currently effective.
+// worker rank supporting one of its local jobs. The job id and exact recipe
+// come from the durable local reservation, so restart does not depend on an
+// in-memory lease or whichever recipe is currently effective.
+//
+// A committed local-job reservation renews as well as an active one, because
+// a committed reservation for a distributed recipe is a deployment in
+// staging. The worker's rank goes active at its own preflight, before any
+// byte is staged, and its lease is only nine heartbeats; the image pull and
+// the weight download that follow run for minutes to hours. Renewing only
+// from the head's own runtime claim left that lease unrenewed for the whole
+// staging phase, so the worker reclaimed its rank and refused the first step
+// the head sent it (hardware, 2026-08-28). The head therefore renews from
+// commit onward, through staging and serving alike. Engine.run releases the
+// local reservation in a defer on every job end that does not keep it, so a
+// released row fails this gate, renewals stop, and the worker reclaims on
+// its ordinary deadline.
 func (e *Engine) RenewDistributedReservations(ctx context.Context) error {
 	renewer, ok := e.executor.(operations.DriverLeaseRenewer)
 	if !ok {
@@ -363,7 +376,7 @@ func (e *Engine) RenewDistributedReservations(ctx context.Context) error {
 	}
 	var joined error
 	for _, reservation := range reservations {
-		if reservation.State != "active" || reservation.Claims.Kind != fleet.ClaimKindLocalJob || reservation.Claims.JobID == "" {
+		if (reservation.State != "committed" && reservation.State != "active") || reservation.Claims.Kind != fleet.ClaimKindLocalJob || reservation.Claims.JobID == "" {
 			continue
 		}
 		selected, ok := recipe.FindVersion(e.allRecipes(), reservation.RecipeID, reservation.RecipeVersion)
