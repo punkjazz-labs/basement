@@ -954,6 +954,8 @@ func TestVLLMPolicyBoundsTheGB10RuntimeSettings(t *testing.T) {
 		{"DSpark pointed at a second model", func(v *VLLMConfig) { v.SpeculativeModelRole = "primary" }, "must not reference a separate speculative model"},
 		{"quantization outside the evidence", func(v *VLLMConfig) { v.Quantization = "marlin" }, "outside the recipe policy"},
 		{"a GLM parser name the launcher does not run", func(v *VLLMConfig) { v.ReasoningParser = "glm5" }, "outside the recipe policy"},
+		{"video limit past the image ceiling", func(v *VLLMConfig) { v.MultimodalVideoLimit = 9 }, "multimodal_video_limit must be between 0 and 8"},
+		{"negative video limit", func(v *VLLMConfig) { v.MultimodalVideoLimit = -1 }, "multimodal_video_limit must be between 0 and 8"},
 		{"the tool parser name used as a reasoning parser", func(v *VLLMConfig) { v.ReasoningParser = "glm47" }, "outside the recipe policy"},
 		{"the reasoning parser name used as a tool parser", func(v *VLLMConfig) { v.ToolCallParser = "glm45" }, "outside the recipe policy"},
 		{"unbounded decode batch", func(v *VLLMConfig) { v.MaxNumSeqs = maxVLLMNumSeqs + 1 }, "max_num_seqs must be no more than"},
@@ -1040,6 +1042,11 @@ func exl3MTPVLLM(v *VLLMConfig) {
 	v.SpeculativeDraftSampleMethod = ""
 	v.ChatTemplateFile = ""
 	v.ChatTemplateImagePath = "/opt/glm53/chat_template.jinja"
+	// Image and video in, and the profiling pass the launcher calls required
+	// on this hardware turned off.
+	v.MultimodalImageLimit = 4
+	v.MultimodalVideoLimit = 1
+	v.SkipMultimodalProfiling = true
 }
 
 // TestValidateAcceptsVLLMEXL3MTPFields is the admit side of every rule this
@@ -1167,15 +1174,65 @@ func TestVLLMEXL3MTPFieldsSurviveARoundTrip(t *testing.T) {
 // to match the flag it stands for.
 func TestVLLMEXL3MTPKeysAreTheDocumentedNames(t *testing.T) {
 	fragment := "quantization: exl3\n" +
-		"chat_template_image_path: /opt/glm53/chat_template.jinja\n"
+		"chat_template_image_path: /opt/glm53/chat_template.jinja\n" +
+		"multimodal_video_limit: 1\n" +
+		"skip_mm_profiling: true\n"
 	decoder := yaml.NewDecoder(strings.NewReader(fragment))
 	decoder.KnownFields(true)
 	var block VLLMConfig
 	if err := decoder.Decode(&block); err != nil {
 		t.Fatalf("decode vllm fragment=%v", err)
 	}
-	if block.Quantization != "exl3" || block.ChatTemplateImagePath != "/opt/glm53/chat_template.jinja" {
+	if block.Quantization != "exl3" || block.ChatTemplateImagePath != "/opt/glm53/chat_template.jinja" ||
+		block.MultimodalVideoLimit != 1 || !block.SkipMultimodalProfiling {
 		t.Fatalf("decoded block=%#v", block)
+	}
+}
+
+// TestGLMOverlayEnvironmentAdmitsOnlyThePatchesOwnForms holds the two GLM
+// toggles to the forms the image's own patches read. Both are opt-in overlay
+// switches rather than tuning knobs, so a value neither patch understands must
+// be refused here rather than ignored at run time, where it would read as the
+// default and the recipe would silently serve something it did not ask for.
+func TestGLMOverlayEnvironmentAdmitsOnlyThePatchesOwnForms(t *testing.T) {
+	base := vllmCandidate(t)
+	clone := func() Recipe {
+		candidate := base
+		candidate.Runtime.Environment = make(map[string]string, len(base.Runtime.Environment)+1)
+		for name, value := range base.Runtime.Environment {
+			candidate.Runtime.Environment[name] = value
+		}
+		return candidate
+	}
+	// Admit: every form the two patches document for themselves.
+	for name, values := range map[string][]string{
+		"GLM53_SUPPRESS_STOPS_IN_REASONING": {"0", "1"},
+		"GLM53_MIXED_PREFILL_CHUNK":         {"skip", "-1", "0", "off"},
+	} {
+		for _, value := range values {
+			candidate := clone()
+			candidate.Runtime.Environment[name] = value
+			if err := Validate(candidate); err != nil {
+				t.Fatalf("%s=%s Validate()=%v, want nil", name, value, err)
+			}
+		}
+	}
+	// Refuse: forms no launcher runs. "128" is the numeric cap the scheduler
+	// patch would accept and whose own note says it still stalls decode, and
+	// "SKIP" is a case the patch would lowercase into skip; the allowlist
+	// matches exactly, so a recipe writes the form the evidence shows.
+	for name, values := range map[string][]string{
+		"GLM53_SUPPRESS_STOPS_IN_REASONING": {"2", "true", "on", ""},
+		"GLM53_MIXED_PREFILL_CHUNK":         {"128", "SKIP", "no", "yes"},
+	} {
+		for _, value := range values {
+			candidate := clone()
+			candidate.Runtime.Environment[name] = value
+			err := Validate(candidate)
+			if err == nil || !strings.Contains(err.Error(), "outside the allowlist") {
+				t.Fatalf("%s=%q Validate()=%v, want an allowlist rejection", name, value, err)
+			}
+		}
 	}
 }
 

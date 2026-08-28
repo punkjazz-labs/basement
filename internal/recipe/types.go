@@ -404,6 +404,23 @@ type VLLMConfig struct {
 	// A recipe sets one or the other and never both, because vLLM reads one
 	// template. Absent means the recipe pins no image-resident template.
 	ChatTemplateImagePath string `yaml:"chat_template_image_path,omitempty" json:"chat_template_image_path,omitempty"`
+	// MultimodalVideoLimit is the video half of --limit-mm-per-prompt, beside
+	// MultimodalImageLimit. A natively multimodal model that takes video in
+	// needs both halves: the GLM-5.3-Flash launcher serves
+	// --limit-mm-per-prompt {"image":4,"video":1}, and a schema that carried
+	// only the image count could not state the video one at all. The two
+	// limits stay separate integers rather than one map, because the map's
+	// keys are a closed set this schema names rather than text a recipe
+	// writes. 0 leaves the video key out of the document entirely.
+	MultimodalVideoLimit int `yaml:"multimodal_video_limit,omitempty" json:"multimodal_video_limit,omitempty"`
+	// SkipMultimodalProfiling turns on --skip-mm-profiling, which stops vLLM
+	// building a dummy multimodal request at startup to measure the memory a
+	// worst-case prompt needs. The GLM-5.3-Flash launcher calls the flag
+	// required on a GB10: profiling a max-size image and video together runs
+	// the one unified memory pool out before the server ever serves. Absent,
+	// which is every recipe before this field, means vLLM profiles as it
+	// always did.
+	SkipMultimodalProfiling bool `yaml:"skip_mm_profiling,omitempty" json:"skip_mm_profiling,omitempty"`
 }
 
 // SGLangConfig mirrors the subset of sglang.launch_server arguments a recipe

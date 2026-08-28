@@ -144,6 +144,25 @@ func Validate(r Recipe) error {
 		"TORCH_CUDA_ARCH_LIST":      {"12.1a": true},
 		"FLASHINFER_CUDA_ARCH_LIST": {"12.1a": true},
 		"VLLM_USE_B12X_MOE":         {"1": true},
+		// The two GLM-5.3 overlay toggles. Each one is read by a patch baked
+		// into the first-party image, so the admitted forms are the forms that
+		// patch reads and nothing else.
+		//
+		// patch_suppress_stops_in_reasoning.py documents "Opt-out:
+		// GLM53_SUPPRESS_STOPS_IN_REASONING=0" and implements it as
+		// "os.environ.get(key) != \"0\"", so "0" turns the guard off and any
+		// other value leaves it on. Only the two meaningful forms are admitted:
+		// "0" to opt out and "1" to state the default on purpose.
+		"GLM53_SUPPRESS_STOPS_IN_REASONING": {"0": true, "1": true},
+		// patch_scheduler_decode_floor.py documents its own value list:
+		// "skip / -1 (do not mix prefill with decode, default)", "N>0 (cap
+		// mixed prefill chunks to N tokens)" and "0 / off (disable)". The
+		// launcher runs skip, which is the fix that closed the publisher's
+		// issue #6 (GLM53_MIXED_PREFILL_CHUNK=skip). The numeric cap form is
+		// not admitted: no launcher runs one, and the patch's own note says a
+		// 128-token cap still stalls decode at about 10 tok/s, so it is a knob
+		// with no qualified value rather than a setting a recipe should carry.
+		"GLM53_MIXED_PREFILL_CHUNK": {"skip": true, "-1": true, "0": true, "off": true},
 	}
 	// TMPDIR may only point at a surface the recipe itself declares writable:
 	// runtimes whose JIT caches load compiled objects need an exec-friendly
@@ -615,6 +634,13 @@ func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 	// Tensor parallelism spans the whole topology: one rank per Spark.
 	if v.TensorParallelSize != sparkCount || v.MaxModelLen <= 0 || v.MaxNumSeqs <= 0 || v.MaxBatchedTokens < 0 || v.MultimodalImageLimit < 0 || v.MultimodalImageLimit > 8 {
 		return errors.New("vllm numeric settings are invalid")
+	}
+	// The video limit is held to the same ceiling as the image limit beside
+	// it. A video is the more expensive input of the two on this hardware, so
+	// the bound is never loosened past its neighbour; the launcher this field
+	// comes from serves one video per prompt.
+	if v.MultimodalVideoLimit < 0 || v.MultimodalVideoLimit > 8 {
+		return errors.New("vllm multimodal_video_limit must be between 0 and 8")
 	}
 	// Every value here is one a maintainer has seen a runtime image accept for
 	// a recipe in this pack. nvfp4_ds_mla, flashinfer_b12x as a MoE backend,

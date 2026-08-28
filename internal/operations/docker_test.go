@@ -436,6 +436,9 @@ func exl3Recipe(t *testing.T) recipe.Recipe {
 	block.AutoToolChoice = true
 	block.ChatTemplateFile = ""
 	block.ChatTemplateImagePath = "/opt/glm53/chat_template.jinja"
+	block.MultimodalImageLimit = 4
+	block.MultimodalVideoLimit = 1
+	block.SkipMultimodalProfiling = true
 	base.Service.VLLM = &block
 	return base
 }
@@ -458,13 +461,15 @@ func TestEXL3LaunchEmitsTheLauncherFlags(t *testing.T) {
 		"--reasoning-parser":             "glm45",
 		"--tool-call-parser":             "glm47",
 		"--distributed-executor-backend": "mp",
+		// Both modalities in one document, in the launcher's own key order.
+		"--limit-mm-per-prompt": `{"image":4,"video":1}`,
 	} {
 		got, present := argumentValue(args, flag)
 		if !present || got != want {
 			t.Fatalf("%s=%q present=%v, want %q", flag, got, present, want)
 		}
 	}
-	for _, flag := range []string{"--enable-prefix-caching", "--enable-auto-tool-choice"} {
+	for _, flag := range []string{"--enable-prefix-caching", "--enable-auto-tool-choice", "--skip-mm-profiling"} {
 		if !hasArgument(args, flag) {
 			t.Fatalf("%s missing from: %s", flag, strings.Join(args, " "))
 		}
@@ -528,6 +533,61 @@ func TestChatTemplateIsSentOnceFromWhicheverFieldCarriesIt(t *testing.T) {
 	none.Service.VLLM.ChatTemplateImagePath = ""
 	if got := countTemplates(vllmArgs(none, Placement{})); got != 0 {
 		t.Fatalf("a recipe pinning no template produced %d --chat-template flags, want 0", got)
+	}
+}
+
+// TestMultimodalLimitsCarryOnlyTheModalitiesARecipeStates covers the pair of
+// per-modality limits. A modality a recipe leaves at 0 must be absent from the
+// document rather than sent as 0: to vLLM a 0 states the model accepts none of
+// that modality, which is a different instruction from stating no limit.
+func TestMultimodalLimitsCarryOnlyTheModalitiesARecipeStates(t *testing.T) {
+	both := exl3Recipe(t)
+	if got, _ := argumentValue(vllmArgs(both, Placement{}), "--limit-mm-per-prompt"); got != `{"image":4,"video":1}` {
+		t.Fatalf("--limit-mm-per-prompt=%q, want both modalities", got)
+	}
+
+	imageOnly := exl3Recipe(t)
+	imageOnly.Service.VLLM.MultimodalVideoLimit = 0
+	if got, _ := argumentValue(vllmArgs(imageOnly, Placement{}), "--limit-mm-per-prompt"); got != `{"image":4}` {
+		t.Fatalf("--limit-mm-per-prompt=%q, want the image key alone", got)
+	}
+
+	videoOnly := exl3Recipe(t)
+	videoOnly.Service.VLLM.MultimodalImageLimit = 0
+	if got, _ := argumentValue(vllmArgs(videoOnly, Placement{}), "--limit-mm-per-prompt"); got != `{"video":1}` {
+		t.Fatalf("--limit-mm-per-prompt=%q, want the video key alone", got)
+	}
+
+	// A text model states neither and must send no flag at all, exactly as it
+	// did before the video limit existed.
+	none := exl3Recipe(t)
+	none.Service.VLLM.MultimodalImageLimit = 0
+	none.Service.VLLM.MultimodalVideoLimit = 0
+	if hasArgument(vllmArgs(none, Placement{}), "--limit-mm-per-prompt") {
+		t.Fatal("a recipe stating no multimodal limits still sent --limit-mm-per-prompt")
+	}
+}
+
+// TestSkipMultimodalProfilingStaysOptIn holds the flag to the rule every other
+// GB10 knob follows: a recipe that never asks for it must launch exactly as it
+// did before the field existed.
+func TestSkipMultimodalProfilingStaysOptIn(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, r := range recipes {
+		if r.Service.VLLM == nil || r.Service.VLLM.SkipMultimodalProfiling {
+			continue
+		}
+		seen++
+		if hasArgument(vllmArgs(r, Placement{}), "--skip-mm-profiling") {
+			t.Fatalf("%s gained --skip-mm-profiling it never asked for", r.ID)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("every vLLM recipe skipped profiling, so this test proved nothing")
 	}
 }
 

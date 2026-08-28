@@ -740,9 +740,17 @@ func vllmArgs(r recipe.Recipe, placement Placement) []string {
 	if v.MaxCUDAGraphCaptureSize > 0 {
 		args = append(args, "--max-cudagraph-capture-size", fmt.Sprint(v.MaxCUDAGraphCaptureSize))
 	}
-	if v.MultimodalImageLimit > 0 {
-		limit, _ := json.Marshal(map[string]int{"image": v.MultimodalImageLimit})
+	// --limit-mm-per-prompt carries one key per modality the recipe bounds. A
+	// modality left at 0 is left out of the document rather than sent as 0,
+	// because 0 means "this model accepts none of these" to vLLM and the
+	// recipe means "I state no limit". Marshalling a map sorts the keys, which
+	// is how the document comes out in the launcher's own key order.
+	if limits := multimodalLimits(v); len(limits) > 0 {
+		limit, _ := json.Marshal(limits)
 		args = append(args, "--limit-mm-per-prompt", string(limit))
+	}
+	if v.SkipMultimodalProfiling {
+		args = append(args, "--skip-mm-profiling")
 	}
 	// The two chat template fields name files with different guarantees, and a
 	// recipe carries one or the other; the validator refuses both at once, so
@@ -787,6 +795,23 @@ func vllmArgs(r recipe.Recipe, placement Placement) []string {
 		args = append(args, "--compilation-config", disabledQuantFusionsConfig)
 	}
 	return append(args, vllmDistributedArgs(placement)...)
+}
+
+// multimodalLimits collects the per-modality prompt limits a recipe states.
+// It returns nil when the recipe states none, which keeps --limit-mm-per-prompt
+// off the command line exactly as it was before the video limit existed.
+func multimodalLimits(v recipe.VLLMConfig) map[string]int {
+	limits := map[string]int{}
+	if v.MultimodalImageLimit > 0 {
+		limits["image"] = v.MultimodalImageLimit
+	}
+	if v.MultimodalVideoLimit > 0 {
+		limits["video"] = v.MultimodalVideoLimit
+	}
+	if len(limits) == 0 {
+		return nil
+	}
+	return limits
 }
 
 // disabledQuantFusionsConfig is the whole compilation configuration a recipe
