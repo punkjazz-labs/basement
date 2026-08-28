@@ -141,7 +141,7 @@ id: glm53-flash-exl3-2s
 # - This is the first two-node vLLM deployment basement ships. The two-Spark
 #   DeepSeek recipe is the precedent for the launch flags, and it is a
 #   precedent for the shape rather than evidence for this model.
-version: 1
+version: 2
 display_name: GLM 5.3 Flash
 publisher: MiaAI Lab + Mia-AiLab
 model_by: Z.ai
@@ -296,7 +296,15 @@ requirements:
   docker: true
   nvidia_container_runtime: true
   per_node_minimum_memory_bytes: 120000000000
-  per_node_memory_reserve_bytes: 12000000000
+  # v2 (2026-08-29): 10 GB, down from the 12 GB the other recipes use. The
+  # live check demands budget plus reserve available at once, and the budget
+  # here is the pack's largest: ceil(gpu total x 0.87) is about 114 GB, so a
+  # 12 GB reserve asks a GB10 for 126 GB while a measured idle EdgeXpert with
+  # the stock desktop offers 125.4 GB (5.0 GB in system use; the first
+  # qualification run failed on exactly this margin). The launcher project
+  # runs this same 0.87 package on the same hardware with no reserve policy
+  # at all. 10 GB still doubles the measured system footprint.
+  per_node_memory_reserve_bytes: 10000000000
   safety_margin_bytes: 20000000000
   # The checkpoint is readable without a token: every file this recipe pins was
   # fetched anonymously while it was authored.
