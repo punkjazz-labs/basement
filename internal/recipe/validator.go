@@ -633,10 +633,16 @@ func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 		"moe": {"": true, "auto": true, "marlin": true, "flashinfer_b12x": true}, "linear": {"": true, "flashinfer_b12x": true},
 		"spec_method": {"": true, "mtp": true, "dflash": true, "dspark": true}, "spec_moe": {"": true, "triton": true},
 		"spec_draft_sample": {"": true, "probabilistic": true},
-		"reasoning":         {"qwen3": true, "poolside_v1": true, "deepseek_v4": true},
-		"tool":              {"qwen3_xml": true, "qwen3_coder": true, "poolside_v1": true, "deepseek_v4": true},
-		"load":              {"": true, "fastsafetensors": true},
-		"tokenizer":         {"": true, "auto": true, "deepseek_v4": true},
+		// glm45 and glm47 are the parser names the GLM-5.3-Flash EXL3 launcher
+		// runs: "--tool-call-parser glm47 --enable-auto-tool-choice
+		// --reasoning-parser glm45". They are resolved by the runtime against
+		// its own parser registry, so a name this image does not carry fails
+		// at start. The two names are added exactly as the launcher writes
+		// them, and the reasoning name and the tool name differ on purpose.
+		"reasoning": {"qwen3": true, "poolside_v1": true, "deepseek_v4": true, "glm45": true},
+		"tool":      {"qwen3_xml": true, "qwen3_coder": true, "poolside_v1": true, "deepseek_v4": true, "glm47": true},
+		"load":      {"": true, "fastsafetensors": true},
+		"tokenizer": {"": true, "auto": true, "deepseek_v4": true},
 		// vLLM detects the weight format from the checkpoint, so every recipe
 		// that shipped before this key passes no --quantization flag at all
 		// and stays valid with the empty value. exl3 is the one format a

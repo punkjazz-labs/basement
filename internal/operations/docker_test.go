@@ -403,6 +403,158 @@ func TestRecipesWithoutTheGB10KnobsSendNoneOfTheirFlags(t *testing.T) {
 	}
 }
 
+// exl3Recipe is the shape a GLM-5.3-Flash EXL3 recipe will have: no such
+// recipe ships yet (a later task pins the image digest), so the command
+// builder is pinned against the two-Spark vLLM recipe re-pointed at the EXL3
+// launcher's own settings.
+func exl3Recipe(t *testing.T) recipe.Recipe {
+	t.Helper()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := recipe.Find(recipes, "deepseek-v4-flash-0731-2s")
+	if !ok {
+		t.Fatal("DeepSeek V4 Flash two-Spark recipe missing")
+	}
+	block := *base.Service.VLLM
+	block.Quantization = "exl3"
+	block.KVCacheDType = "fp8"
+	block.MaxNumSeqs = 4
+	block.MaxBatchedTokens = 1024
+	block.MaxModelLen = 900000
+	block.BlockSize = 0
+	block.MaxCUDAGraphCaptureSize = 32
+	block.SpeculativeMethod = "mtp"
+	block.SpeculativeTokens = 2
+	block.SpeculativeMoE = ""
+	block.SpeculativeModelRole = ""
+	block.SpeculativeDraftSampleMethod = ""
+	block.ReasoningParser = "glm45"
+	block.ToolCallParser = "glm47"
+	block.PrefixCaching = true
+	block.AutoToolChoice = true
+	block.ChatTemplateFile = ""
+	block.ChatTemplateImagePath = "/opt/glm53/chat_template.jinja"
+	base.Service.VLLM = &block
+	return base
+}
+
+// TestEXL3LaunchEmitsTheLauncherFlags pins the command builder against the
+// GLM-5.3-Flash EXL3 launcher's own vLLM flags. The recipe is not written
+// yet, so this test is what proves the schema fields reach the command line
+// at all: a field that validates and is never emitted serves silently without
+// it.
+func TestEXL3LaunchEmitsTheLauncherFlags(t *testing.T) {
+	head := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29521}
+	args := vllmArgs(exl3Recipe(t), head)
+	for flag, want := range map[string]string{
+		"--quantization":                 "exl3",
+		"--kv-cache-dtype":               "fp8",
+		"--chat-template":                "/opt/glm53/chat_template.jinja",
+		"--max-num-seqs":                 "4",
+		"--max-num-batched-tokens":       "1024",
+		"--max-model-len":                "900000",
+		"--reasoning-parser":             "glm45",
+		"--tool-call-parser":             "glm47",
+		"--distributed-executor-backend": "mp",
+	} {
+		got, present := argumentValue(args, flag)
+		if !present || got != want {
+			t.Fatalf("%s=%q present=%v, want %q", flag, got, present, want)
+		}
+	}
+	for _, flag := range []string{"--enable-prefix-caching", "--enable-auto-tool-choice"} {
+		if !hasArgument(args, flag) {
+			t.Fatalf("%s missing from: %s", flag, strings.Join(args, " "))
+		}
+	}
+	// MTP drafts from the served checkpoint, so the document names the method
+	// and the token count and never a second model. This is the exact document
+	// the launcher's MTP branch emits.
+	spec, ok := argumentValue(args, "--speculative-config")
+	if !ok {
+		t.Fatalf("no --speculative-config: %s", strings.Join(args, " "))
+	}
+	if want := `{"method":"mtp","num_speculative_tokens":2}`; spec != want {
+		t.Fatalf("--speculative-config %s, want %s", spec, want)
+	}
+	// The EXL3 launcher pins no KV cache block size, so the flag must be gone
+	// rather than carried over from the recipe this fixture is built on.
+	if hasArgument(args, "--block-size") {
+		t.Fatalf("--block-size survived a recipe that pins none: %s", strings.Join(args, " "))
+	}
+}
+
+// TestChatTemplateIsSentOnceFromWhicheverFieldCarriesIt covers the pair of
+// template fields. vLLM reads one --chat-template, so exactly one may reach
+// the command: a checkpoint template resolves under the artifact mount, and
+// an image template is sent as the absolute path the image carries.
+func TestChatTemplateIsSentOnceFromWhicheverFieldCarriesIt(t *testing.T) {
+	countTemplates := func(args []string) int {
+		count := 0
+		for _, arg := range args {
+			if arg == "--chat-template" {
+				count++
+			}
+		}
+		return count
+	}
+
+	image := exl3Recipe(t)
+	args := vllmArgs(image, Placement{})
+	if got := countTemplates(args); got != 1 {
+		t.Fatalf("an image template produced %d --chat-template flags, want 1", got)
+	}
+	if got, _ := argumentValue(args, "--chat-template"); got != "/opt/glm53/chat_template.jinja" {
+		t.Fatalf("--chat-template=%q, want the image path unchanged", got)
+	}
+
+	// A checkpoint template keeps resolving under the artifact mount, which is
+	// what every recipe that shipped before the image field relies on.
+	checkpoint := exl3Recipe(t)
+	checkpoint.Service.VLLM.ChatTemplateImagePath = ""
+	checkpoint.Service.VLLM.ChatTemplateFile = "chat_template.jinja"
+	args = vllmArgs(checkpoint, Placement{})
+	if got := countTemplates(args); got != 1 {
+		t.Fatalf("a checkpoint template produced %d --chat-template flags, want 1", got)
+	}
+	if got, _ := argumentValue(args, "--chat-template"); got != "/model/chat_template.jinja" {
+		t.Fatalf("--chat-template=%q, want it resolved under the primary mount", got)
+	}
+
+	// Neither field set sends no template at all.
+	none := exl3Recipe(t)
+	none.Service.VLLM.ChatTemplateImagePath = ""
+	if got := countTemplates(vllmArgs(none, Placement{})); got != 0 {
+		t.Fatalf("a recipe pinning no template produced %d --chat-template flags, want 0", got)
+	}
+}
+
+// TestQuantizationStaysOptOut holds --quantization to the rule every other
+// GB10 knob follows. vLLM detects the weight format from the checkpoint, and
+// every recipe in the pack relies on that, so a recipe naming no quantization
+// must launch exactly as it did before the field existed.
+func TestQuantizationStaysOptOut(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, r := range recipes {
+		if r.Service.VLLM == nil || r.Service.VLLM.Quantization != "" {
+			continue
+		}
+		seen++
+		if hasArgument(vllmArgs(r, Placement{}), "--quantization") {
+			t.Fatalf("%s gained a --quantization flag it never asked for", r.ID)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("every vLLM recipe pinned a quantization, so this test proved nothing")
+	}
+}
+
 // sglangRecipe is the shape an SGLang recipe will have once one is
 // qualified: no such recipe ships yet, so the command builder is pinned
 // against a hand-built recipe rather than the catalog.

@@ -953,6 +953,9 @@ func TestVLLMPolicyBoundsTheGB10RuntimeSettings(t *testing.T) {
 		}, "require a speculative method"},
 		{"DSpark pointed at a second model", func(v *VLLMConfig) { v.SpeculativeModelRole = "primary" }, "must not reference a separate speculative model"},
 		{"quantization outside the evidence", func(v *VLLMConfig) { v.Quantization = "marlin" }, "outside the recipe policy"},
+		{"a GLM parser name the launcher does not run", func(v *VLLMConfig) { v.ReasoningParser = "glm5" }, "outside the recipe policy"},
+		{"the tool parser name used as a reasoning parser", func(v *VLLMConfig) { v.ReasoningParser = "glm47" }, "outside the recipe policy"},
+		{"the reasoning parser name used as a tool parser", func(v *VLLMConfig) { v.ToolCallParser = "glm45" }, "outside the recipe policy"},
 		{"unbounded decode batch", func(v *VLLMConfig) { v.MaxNumSeqs = maxVLLMNumSeqs + 1 }, "max_num_seqs must be no more than"},
 		{"unbounded scheduler token budget", func(v *VLLMConfig) {
 			v.MaxBatchedTokens = maxVLLMBatchedTokens + 1
@@ -1014,15 +1017,14 @@ func vllmCandidate(t *testing.T) Recipe {
 // exl3MTPVLLM is the launch configuration of an EXL3 checkpoint served on the
 // MTP speculative path: the exl3 kernel named explicitly, an fp8 KV cache,
 // prefix caching on, a small decode batch beside a short scheduler budget, two
-// drafted tokens from the checkpoint's own MTP layer, and a chat template the
-// runtime image carries rather than the checkpoint.
-//
-// The parsers stay the base recipe's. The launcher's own parser names are not
-// in the vLLM allowlist yet, and this task widens the fields rather than the
-// parser sets.
+// drafted tokens from the checkpoint's own MTP layer, the launcher's own GLM
+// parser names, and a chat template the runtime image carries rather than the
+// checkpoint.
 func exl3MTPVLLM(v *VLLMConfig) {
 	v.Quantization = "exl3"
 	v.KVCacheDType = "fp8"
+	v.ReasoningParser = "glm45"
+	v.ToolCallParser = "glm47"
 	v.PrefixCaching = true
 	v.MaxNumSeqs = 4
 	v.MaxBatchedTokens = 1024

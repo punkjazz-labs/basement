@@ -721,6 +721,10 @@ func vllmArgs(r recipe.Recipe, placement Placement) []string {
 		spec, _ := json.Marshal(specConfig)
 		args = append(args, "--speculative-config", string(spec))
 	}
+	// --quantization names the kernel that loads the weights. vLLM reads the
+	// format from the checkpoint when the flag is absent, which is what every
+	// recipe before this field relies on, so an empty value sends nothing.
+	args = appendOptional(args, "--quantization", v.Quantization)
 	args = appendOptional(args, "--kv-cache-dtype", v.KVCacheDType)
 	args = appendOptional(args, "--attention-backend", v.AttentionBackend)
 	args = appendOptional(args, "--moe-backend", v.MoEBackend)
@@ -740,8 +744,18 @@ func vllmArgs(r recipe.Recipe, placement Placement) []string {
 		limit, _ := json.Marshal(map[string]int{"image": v.MultimodalImageLimit})
 		args = append(args, "--limit-mm-per-prompt", string(limit))
 	}
+	// The two chat template fields name files with different guarantees, and a
+	// recipe carries one or the other; the validator refuses both at once, so
+	// only one of these branches can ever run and --chat-template is sent once.
+	// A checkpoint template is resolved under the artifact mount, because the
+	// recipe writes it relative to the weights it is downloaded with. An image
+	// template is already the absolute path the pinned image carries, so it is
+	// sent as written and never joined to a mount.
 	if v.ChatTemplateFile != "" {
 		args = append(args, "--chat-template", artifactMountPath("primary")+"/"+v.ChatTemplateFile)
+	}
+	if v.ChatTemplateImagePath != "" {
+		args = append(args, "--chat-template", v.ChatTemplateImagePath)
 	}
 	// Always sent, explicit values included when both are false: a recipe's
 	// "false" is a decision, and the model's own template default must not
