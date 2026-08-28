@@ -1,4 +1,6 @@
-import type { Telemetry } from './api'
+import type { Peer, Telemetry } from './api'
+import { consoleKey } from './fleetInvite'
+import type { FleetRow } from './fleetModels'
 
 // The live meters, kept for as long as the console is open. App polls this
 // Spark and every paired Spark; this file holds what they answered; Monitor
@@ -145,6 +147,41 @@ export function forgetMachines(keep: readonly string[]): void {
     dropped = true
   }
   if (dropped) announce()
+}
+
+// ---- Which Sparks the meters are drawn for ------------------------------
+
+// One Spark, as the Monitor tab draws it.
+export interface MonitorMachine {
+  // The key its samples are kept under: this Spark, or the id of a paired
+  // Spark. Empty for a Spark whose meters this console cannot read at all,
+  // which is a machine with a section and no chart rather than no section.
+  key: string
+  name: string
+}
+
+// Every Spark this console knows, in the order the meters draw them: this
+// machine first, then the fleet in the order the fleet reports it. The rows
+// are the ones the Sparks page renders, so a machine with a row and a power
+// switch there is never missing here.
+//
+// A Spark is readable only where this console holds its own way in: itself,
+// and a Spark it has an API key for. The peers table holds one machine at
+// most (ADR 0005), so a third Spark that joined the fleet by invitation has
+// no key here and is listed without one.
+export function monitorMachines(
+  sparks: readonly FleetRow[],
+  peers: readonly Peer[],
+  localName: string,
+): MonitorMachine[] {
+  const keyed = new Map(peers.map(peer => [consoleKey(peer.base_url), peer.id]))
+  const own = sparks.find(spark => spark.isSelf)
+  const machines: MonitorMachine[] = [{ key: LOCAL_MACHINE, name: own?.displayName || localName }]
+  for (const spark of sparks) {
+    if (spark.isSelf) continue
+    machines.push({ key: keyed.get(consoleKey(spark.consoleURL)) ?? '', name: spark.displayName })
+  }
+  return machines
 }
 
 export function subscribeTelemetry(listener: () => void): () => void {

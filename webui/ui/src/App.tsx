@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   api, idempotency, setCSRF, terminal, formatBytes, OfflineError,
-  type FleetDeploymentView, type PeerSummary, type SystemInfo, type Recipe, type InstalledModel,
-  type Job, type Peer, type Telemetry, type UpdateInfo,
+  type FleetDeploymentView, type FleetSummary, type PeerSummary, type SystemInfo, type Recipe,
+  type InstalledModel, type Job, type Peer, type Telemetry, type UpdateInfo,
 } from './api'
 import Pairing from './views/Pairing'
 import Models from './views/Models'
@@ -21,7 +21,9 @@ import { ConfirmHost } from './confirm'
 import { initialManagerUpdateDialogState, managerUpdateDialogReducer } from './managerUpdate'
 import { servingChatModels } from './council'
 import { TABS, railGroups, tabLabel, type Tab } from './rail'
-import { LOCAL_MACHINE, forgetMachines, recordSilence, recordTelemetry } from './telemetry'
+import { fleetSummary, MEMBERSHIP_POLL_MS } from './fleetInvite'
+import { fleetRows } from './fleetModels'
+import { LOCAL_MACHINE, forgetMachines, monitorMachines, recordSilence, recordTelemetry } from './telemetry'
 
 // How often a paired Spark's meters are read. It is the pace every other peer
 // read in the console keeps, which is slower than this Spark's own five
@@ -66,6 +68,11 @@ export default function App() {
   const [models, setModels] = useState<InstalledModel[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
   const [peers, setPeers] = useState<Peer[]>([])
+  // Every Spark in this fleet, as the Spark that answers here reports them.
+  // Only the live meters read it from up here, and only to know which
+  // machines they have to draw. null is a console that leads no fleet, and a
+  // summary this console could not read.
+  const [fleet, setFleet] = useState<FleetSummary | null>(null)
   const [connected, setConnected] = useState(true)
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [updateDialog, dispatchUpdateDialog] = useReducer(
@@ -299,6 +306,29 @@ export default function App() {
     }
   }, [authed])
 
+  // Which Sparks this console knows about. It is the same membership read the
+  // Sparks page makes, and it is made here so the meters know every machine
+  // they have to draw before that tab is ever opened.
+  useEffect(() => {
+    if (!authed) return
+    let cancelled = false
+    const read = async (first = false) => {
+      if (!first && document.hidden) return
+      try {
+        const summary = fleetSummary(await api<unknown>('/api/v1/fleet'))
+        if (!cancelled) setFleet(summary)
+      } catch {
+        if (!cancelled) setFleet(null)
+      }
+    }
+    void read(true)
+    const timer = setInterval(read, MEMBERSHIP_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [authed])
+
   // The same meters from every paired Spark, read one by one through this
   // manager. A Spark that does not answer keeps the samples it already sent;
   // a Spark this console no longer holds loses them, because nothing can show
@@ -350,18 +380,16 @@ export default function App() {
     })),
     [models, recipes],
   )
-  // Every Spark the live meters are drawn for: this one first, then each
-  // paired Spark by the name this console knows it by. A member console and a
-  // standalone Spark hold no peers, so both draw one machine, as they always
-  // have.
-  const monitorMachines = useMemo(
-    () => [
-      { key: LOCAL_MACHINE, name: system?.hostname || 'This Spark' },
-      ...[...peers]
-        .sort((left, right) => left.name.localeCompare(right.name))
-        .map(peer => ({ key: peer.id, name: peer.name })),
-    ],
-    [system, peers],
+  // Every Spark the live meters are drawn for: this one first, then every
+  // other machine the fleet reports, whether or not this console can read its
+  // meters. A Spark with a row on the Sparks page has a section here.
+  const machines = useMemo(
+    () => monitorMachines(
+      fleetRows(fleet, peers, window.location.origin, Date.now()),
+      peers,
+      system?.hostname || 'This Spark',
+    ),
+    [fleet, peers, system],
   )
   const visibleTabs = TABS.filter(name =>
     name === 'Generate' ? activeMedia : name === 'Playground' ? !activeMedia : true,
@@ -418,7 +446,10 @@ export default function App() {
             <div
               key={group.label}
               className="side-group"
-              role="group"
+              // The group that leads the rail has no label, so it takes no
+              // role either: a group with no name is a level in the
+              // accessibility tree that says nothing.
+              role={group.label ? 'group' : undefined}
               aria-labelledby={group.label ? `rail-${group.label.toLowerCase()}` : undefined}
             >
               {group.label && (
@@ -486,7 +517,7 @@ export default function App() {
             <Redactor />
           </div>
           {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
-          {tab === 'Monitor' && <Monitor machines={monitorMachines} recipes={recipes} />}
+          {tab === 'Monitor' && <Monitor machines={machines} recipes={recipes} />}
           {tab === 'Fleet' && <Fleet {...state} liveTPS={liveTPS} />}
           {tab === 'Storage' && <Storage {...state} />}
           {tab === 'Activity' && <Activity {...state} />}

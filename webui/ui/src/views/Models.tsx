@@ -116,7 +116,7 @@ function FleetStrip({ sparks, power, open, onOpen }: {
 }) {
   return (
     <div className="fleet-strip" role="status">
-      <span className="fs-label">Fleet</span>
+      <span className="fs-label">Sparks</span>
       {sparks.map(spark => (
         <button
           type="button"

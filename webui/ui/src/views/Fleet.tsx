@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   adoptedName, api, bareHost, copyText, formatBytes, idempotency, rankCandidates,
   type AdoptStatus, type FleetCandidate, type FleetInvitation, type FleetInviteProgress,
@@ -57,11 +57,10 @@ const STEP_WORD: Record<string, string> = { done: 'Done', running: 'Working', fa
 // that row carries. The mode holds across restarts, so this is a setting and
 // not an action. A Spark that has reported no mode gets a dead switch and no
 // selection: nothing here guesses that a silent Spark runs at full speed.
-export function PowerSwitch({ name, power, onSet, children }: {
+export function PowerSwitch({ name, power, onSet }: {
   name: string
   power: PowerRow
   onSet: (mode: string) => void
-  children?: ReactNode
 }) {
   return (
     <div className="prow">
@@ -84,13 +83,32 @@ export function PowerSwitch({ name, power, onSet, children }: {
           {COOL_MODE_LABEL}
         </button>
       </span>
-      {children}
       {power.busy && <span className="busy">{POWER_MODE_BUSY}</span>}
       {/* That Spark's own words about a GPU that did not take the mode. The
           mode the owner chose stays chosen while this stands: the setting is
           stored, and it goes back on the chip at the next start. A refusal is
           not tooltip material, so it stays on the screen. */}
       {power.failure !== '' && <p className="powerfail">{power.failure}</p>}
+    </div>
+  )
+}
+
+// The one fleet-wide change: each button sends that mode to every Spark in
+// the fleet. It names no machine to copy the mode from on purpose. The Spark
+// the console runs on used to be that source, and a controller whose own GPU
+// reports no mode then had no way at all to set the fleet, which is a real
+// state on a machine with no nvidia-smi command. The only thing that holds
+// this control now is a run already under way (powerFanOutBusy).
+export function PowerFanOut({ busy, onSet }: { busy: boolean; onSet: (mode: string) => void }) {
+  return (
+    <div className="prow every">
+      <span className="nm">{EVERY_SPARK}</span>
+      <button type="button" className="ghost" disabled={busy} onClick={() => onSet(FULL_MODE)}>
+        {FULL_MODE_LABEL}
+      </button>
+      <button type="button" className="ghost" disabled={busy} onClick={() => onSet(COOL_MODE)}>
+        {COOL_MODE_LABEL}
+      </button>
     </div>
   )
 }
@@ -921,22 +939,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                   name={spark.displayName}
                   power={power}
                   onSet={mode => setPowerMode([spark], mode)}
-                >
-                  {/* One fan-out for the fleet, on the machine the console
-                      runs on: it copies this Spark's mode to every other one.
-                      It is dead for as long as any Spark it would name is
-                      already mid-change. */}
-                  {spark.isSelf && sparks.length > 1 && (
-                    <button
-                      type="button"
-                      className="ghost"
-                      disabled={power.disabled || powerFanOutBusy(sparks, powerSetting)}
-                      onClick={() => setPowerMode(powerFanOut(sparks), power.mode)}
-                    >
-                      {EVERY_SPARK}
-                    </button>
-                  )}
-                </PowerSwitch>
+                />
               )
             })
           ) : (
@@ -944,6 +947,15 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
               name={THIS_SPARK}
               power={localPowerRow(localPower, localPowerBusy)}
               onSet={setLocalPowerMode}
+            />
+          )}
+          {/* Only where there is more than one Spark to send it to. A Spark
+              added by address never joined this fleet, so powerFanOut leaves
+              it out and it is not counted here either. */}
+          {leadsFleet && powerFanOut(sparks).length > 1 && (
+            <PowerFanOut
+              busy={powerFanOutBusy(sparks, powerSetting)}
+              onSet={mode => setPowerMode(powerFanOut(sparks), mode)}
             />
           )}
         </section>

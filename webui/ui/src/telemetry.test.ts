@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { Telemetry } from './api'
+import type { FleetRow } from './fleetModels'
 import {
-  EMPTY_MACHINE, WINDOW, foldSample, forgetMachines, machineSeries, recordSilence, recordTelemetry,
-  resetTelemetry, subscribeTelemetry, telemetryRevision,
+  EMPTY_MACHINE, LOCAL_MACHINE, WINDOW, foldSample, forgetMachines, machineSeries, monitorMachines,
+  recordSilence, recordTelemetry, resetTelemetry, subscribeTelemetry, telemetryRevision,
 } from './telemetry'
 
 // One sample, with only the fields a test cares about set. Everything else is
@@ -126,5 +127,69 @@ describe('the telemetry store', () => {
     forgetMachines(['local'])
     expect(machineSeries('peer-1')).toBe(EMPTY_MACHINE)
     expect(machineSeries('local').series.gpuFree).toHaveLength(1)
+  })
+})
+
+// One row of the fleet table, with only the fields this list reads set.
+const row = (nodeID: string, displayName: string, consoleURL: string, isSelf = false): FleetRow => ({
+  nodeID,
+  displayName,
+  isSelf,
+  role: isSelf ? 'controller' : 'member',
+  consoleURL,
+  installedModels: [],
+  status: { word: 'ready', dot: 'on' },
+  answering: true,
+  power: { mode: 'full', failure: '' },
+})
+
+describe('which Sparks the meters are drawn for', () => {
+  // The fleet in the CLAUDE.md lab: three machines, and only one of them is a
+  // peer this console holds a key for. All three get a section; the third one
+  // gets no key, which is what its section then says.
+  const three: FleetRow[] = [
+    row('node-lead', 'spark-f1cc', 'http://spark-f1cc.local:7070', true),
+    row('node-loft', 'spark-a393', 'http://spark-a393.local:7070'),
+    row('node-msi', 'edgexpert-2051', 'http://edgexpert-2051.local:7070'),
+  ]
+  const peer = { id: 'peer-1', name: 'spark-a393', base_url: 'http://spark-a393.local:7070' }
+
+  it('lists every Spark in the fleet, this one first', () => {
+    expect(monitorMachines(three, [peer], 'attic')).toEqual([
+      { key: LOCAL_MACHINE, name: 'spark-f1cc' },
+      { key: 'peer-1', name: 'spark-a393' },
+      { key: '', name: 'edgexpert-2051' },
+    ])
+  })
+
+  // The order the fleet reports is not the order the meters draw: this
+  // machine leads, wherever the summary put it.
+  it('puts this machine first whatever the fleet order is', () => {
+    const reversed = [three[2], three[1], three[0]]
+    expect(monitorMachines(reversed, [peer], 'attic').map(machine => machine.name))
+      .toEqual(['spark-f1cc', 'edgexpert-2051', 'spark-a393'])
+  })
+
+  // A Spark that leads no fleet has no row of its own, so the list is made
+  // from the name this console knows for itself.
+  it('draws this machine alone when there is no fleet', () => {
+    expect(monitorMachines([], [], 'attic')).toEqual([{ key: LOCAL_MACHINE, name: 'attic' }])
+  })
+
+  // A Spark added by address has a row and a key, so its meters are readable
+  // even though it never joined the fleet.
+  it('reads a Spark added by address through its own key', () => {
+    const added = row('peer-1', 'spark-a393', 'http://spark-a393.local:7070')
+    expect(monitorMachines([added], [peer], 'attic')).toEqual([
+      { key: LOCAL_MACHINE, name: 'attic' },
+      { key: 'peer-1', name: 'spark-a393' },
+    ])
+  })
+
+  // The console URL is the key both sides meet on, so a trailing slash or a
+  // different case must not lose the key.
+  it('matches a peer to its row however the URL was written', () => {
+    const loud = { ...peer, base_url: 'http://SPARK-A393.local:7070/' }
+    expect(monitorMachines(three, [loud], 'attic')[1]).toEqual({ key: 'peer-1', name: 'spark-a393' })
   })
 })

@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { PowerSwitch } from './views/Fleet'
+import { PowerFanOut, PowerSwitch } from './views/Fleet'
 import { COOL_MODE, COOL_MODE_LABEL, FULL_MODE, FULL_MODE_LABEL, localPowerRow } from './fleetModels'
 import modelsSource from './views/Models.tsx?raw'
 import fleetSource from './views/Fleet.tsx?raw'
@@ -38,9 +38,39 @@ describe('the power switch', () => {
   })
 })
 
+// The one change that reaches every Spark. It takes no Spark's row, so a
+// controller whose own GPU reports no mode can still set the fleet: that is a
+// real state on a machine with no nvidia-smi command, and it used to leave
+// the fleet with no path at all.
+describe('the fleet-wide change', () => {
+  it('offers both modes whatever any one Spark reports', () => {
+    const markup = renderToStaticMarkup(<PowerFanOut busy={false} onSet={() => {}} />)
+    expect(markup).toContain('Set for every Spark')
+    expect(markup).toContain(FULL_MODE_LABEL)
+    expect(markup).toContain(COOL_MODE_LABEL)
+    expect(markup).not.toContain('disabled')
+  })
+
+  // The one thing that holds it: a run already under way.
+  it('is dead while a run is under way', () => {
+    const markup = renderToStaticMarkup(<PowerFanOut busy onSet={() => {}} />)
+    expect(markup.match(/disabled/g)).toHaveLength(2)
+  })
+
+  // A dead local switch must not reach it. The control takes only a busy
+  // flag, so there is no row for it to inherit anything from.
+  it('takes no Spark row at all', () => {
+    const dead = localPowerRow(null, false)
+    expect(dead.disabled).toBe(true)
+    const markup = renderToStaticMarkup(<PowerFanOut busy={false} onSet={() => {}} />)
+    expect(markup).not.toContain('disabled')
+  })
+})
+
 // Where the switch lives. There is no browser in this suite, so the two
-// screens are read as source: the Sparks page owns the control and the write,
-// and the Models page keeps only the read its "cool" tag needs.
+// screens are read as source. This is a rename-fragile guard: it proves
+// nothing the day one of these constants is called something else, so a
+// rename has to bring these lines with it.
 describe('where the power mode is set', () => {
   const models = modelsSource
   const fleet = fleetSource

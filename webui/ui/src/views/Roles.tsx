@@ -18,8 +18,8 @@ const ROLE_NOTE =
   'The endpoint and the model name stay the same while you change the model behind them. ' +
   'One model runs at a time, so the first request after a switch waits for it to load.'
 const UNASSIGNED_NOTE =
-  `Apps asking for a role with no model get an error naming this page. role/${DEFAULT_ROLE} is the ` +
-  'one exception: it answers from whatever is serving.'
+  'Apps that ask for a role with no model get an error. The error names this page. ' +
+  `role/${DEFAULT_ROLE} is the one exception: it answers from whatever is serving.`
 
 export default function Roles({ system, recipes, models }: AppState) {
   const [roles, setRoles] = useState<Role[]>([])
@@ -420,7 +420,7 @@ export default function Roles({ system, recipes, models }: AppState) {
       </div>
 
       <p className="table-note">
-        Click a role to change its model. <Tip text={UNASSIGNED_NOTE}>An unassigned role errors.</Tip>
+        Click a role to change its model. <Tip text={UNASSIGNED_NOTE}>A role with no model gives an error.</Tip>
       </p>
     </div>
   )
