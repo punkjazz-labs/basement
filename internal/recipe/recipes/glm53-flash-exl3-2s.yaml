@@ -1,0 +1,405 @@
+schema_version: 1
+id: glm53-flash-exl3-2s
+# GLM-5.3-Flash on two Sparks, served by vLLM at TP=2 from an EXL3 4bpw
+# checkpoint. The model is Z.ai's first natively multimodal GLM. Every
+# architecture fact below was read live from the base checkpoint's own
+# config.json at the pinned sha on 2026-08-28: architecture
+# Glm5NextForConditionalGeneration, text tower glm5_next_text, 45 layers,
+# hidden size 4096, 288 routed experts with 8 experts per token plus 1 shared
+# expert, and a vision tower, so it takes text, images and video in and answers
+# in text. The card states 320B total parameters with 18B active, and the
+# launcher's own health message agrees ("a 320B MoE").
+#
+# The attention is hybrid: 34 KDA linear-attention layers and 11 full-attention
+# layers, at layer indices 3, 7, 11, 15, 19, 23, 27, 31, 35, 39 and 43. The
+# full-attention layers run NoPE multi-head latent attention, which the config
+# states rather than implies (mla_use_nope true, qk_rope_head_dim 0,
+# kv_lora_rank 512, q_lora_rank 1536, v_head_dim 256). That geometry is the
+# reason this model needs its own runtime image, see below.
+#
+# Why two Sparks: the EXL3 4bpw checkpoint is 175.7 GB, which does not fit one
+# 128 GB Spark. TP=2 shards it across two machines cabled back to back with
+# ConnectX-7.
+#
+# The quantization, format only, read from the checkpoint's own
+# quantization_config: quant_method exl3, 4 bits, codebook mcg, head bits 16,
+# scope glm53_routed_experts_only, exllamav3 version 0.0.43. That same block
+# carries "serving_reader_qualified": false. The publisher does not say what it
+# means by that, and this recipe does not guess. It is recorded here because a
+# checkpoint that declares itself unqualified for serving readers is a fact an
+# owner should see before an install.
+#
+# Why the image is basement's own build. basement replaces the container
+# entrypoint and runs vllm serve directly, so a launcher's inner script never
+# runs here. This launcher bind-mounts three patch files and runs all three
+# immediately before it serves, so a basement container started on the
+# launcher's published image would serve without any of them. One of the three
+# is not optional: patch_glm_video_placeholders.py also disables GB10
+# persistent_topk in sparse_attn_indexer_kpool.py, which is a text-path decode
+# fix and not only a video fix. So packaging/glm53-flash-image bakes all three
+# at build, the same way packaging/qwen38-flash-next-image did in Round 6.
+#
+# The published launcher image is also about ten hours older than the launcher
+# commit pinned below, and two of the three patch files are absent from it
+# altogether. See packaging/glm53-flash-image/README.md and the dated
+# correction to Round 7 in docs/MODEL-CANDIDATES-2026-08.md for the evidence.
+#
+# Speculative decoding uses MTP and needs nothing extra to download. The base
+# config carries num_nextn_predict_layers 1, so the draft layer ships inside
+# the checkpoint. The launcher's default path is different: it drafts with
+# incoai/GLM-5.3-Flash-DFlash2, a separate 2.18 GiB repository under
+# CC BY-NC-ND 4.0. That licence is non-commercial and no-derivatives, so the
+# drafter is not part of this recipe, this recipe does not download it, and
+# the schema admits none of the members its speculative document needs.
+#
+# What MTP costs, in the launcher's own numbers: MTP k=2 measures about 24.6
+# tok/s against DFlash2 at about 61.7 on structured work and about 26.9 on
+# prose. So MTP gives up most of the gain on structured and code work, and
+# very little on prose. One source, its hardware, its configuration. Nothing
+# here is a basement measurement, and the console shows measured speed only
+# after a benchmark runs on this fleet.
+#
+# Deliberate differences from the observed launcher command, each with its
+# reason. The launcher command is start.sh at commit bd7f55ed, read live.
+# - Containers run with isolated IPC (ADR 0006). The launcher runs --ipc=host.
+#   Two-Spark ranks reach each other over the cabled fabric and the RDMA
+#   devices, so the container keeps its own IPC namespace, with /dev/shm sized
+#   to shm_bytes below. memory_lock and ipc_lock carry the launcher's memlock
+#   ulimit and its IPC_LOCK capability. Whether isolated IPC is sufficient for
+#   this model is a qualification question.
+# - No bind mounts for the three patch files, and none for the chat template.
+#   The image bakes all four, so mounting them would replace pinned image bytes
+#   with unpinned host files. The template inside the image was verified
+#   byte-identical to the launcher's own files/chat_template.jinja at bd7f55ed:
+#   10,970 bytes, sha256 96ed83160b243de213e95eb2fa19bde4ac13b676661cfec477d18
+#   e45e9fcca3a.
+# - Host NCCL is excluded, and this follows the launcher rather than departing
+#   from it. Its USE_HOST_NCCL defaults to 0, under its own comment that
+#   preloading the host 2.30.7 library makes DeepEP assert a duplicate NCCL.
+#   The image's own NCCL is the validated path.
+# - The Triton and TileLang JIT caches get a private tmpfs each, not a host
+#   directory. The launcher keeps both on the host and states why: losing them
+#   caused a "TP=2 JIT stall -> 600s NCCL watchdog". basement cannot redirect
+#   them, because their cache variables are not names the runtime environment
+#   allowlist admits, so this deployment compiles cold on every container
+#   start. That is what makes VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS below
+#   load-bearing rather than decorative, and it is the first thing to measure
+#   on hardware.
+# - The launcher's ladder --cudagraph-capture-sizes "1 2 3 4 6 8 12" cannot be
+#   written here. basement expresses a ceiling instead, so this recipe pins
+#   max_cudagraph_capture_size 12, the top of that ladder. The ladder is the
+#   MTP one. The launcher's DFlash2 path uses a different ladder that ends at
+#   32, and 32 is the wrong number for this recipe.
+# - --no-enable-flashinfer-autotune is not sent. basement emits the positive
+#   form only, so this recipe leaves enable_flashinfer_autotune unset and the
+#   runtime's own default stands. Whether the launcher's negative flag is
+#   load-bearing is open question 6 in Round 7 and it is not settled here.
+# - Six of the launcher's NCCL environment names are not expressible: NCCL_NET,
+#   NCCL_NET_PLUGIN, NCCL_NVLS_ENABLE, NCCL_CUMEM_ENABLE,
+#   NCCL_IB_ROCE_VERSION_NUM and NCCL_IB_MERGE_NICS. The topology block admits
+#   a closed list of fabric controls, and widening it is a schema change that
+#   qualification drives, not a recipe. The two-Spark DeepSeek V4 Flash recipe
+#   declares the same interconnect shape with the same GID index 3, which
+#   selects RoCEv2 in practice, and it served on these two Sparks in the
+#   hardware qualification of 2026-08-04.
+# - TP_SOCKET_IFNAME is set here and the launcher does not set it. It is the
+#   shape both shipped two-Spark recipes already use, and each rank overrides
+#   the interface at deploy time anyway. This is the pack's addition, not the
+#   launcher's setting.
+# - Eleven of the launcher's other container variables are not expressible and
+#   are not sent: HF_HUB_OFFLINE, TRANSFORMERS_OFFLINE, HF_HOME,
+#   VLLM_CACHE_ROOT, TRITON_CACHE_DIR, TILELANG_CACHE_DIR,
+#   FLASHINFER_DISABLE_VERSION_CHECK, VLLM_ENGINE_READY_TIMEOUT_S,
+#   VLLM_NO_USAGE_STATS, DO_NOT_TRACK and the two GLM53_BOOT_SHAPE_WARMUP
+#   warmup controls. The launcher's engine-ready guard is 3600 seconds;
+#   basement's nearest equivalent is start_timeout_minutes below, which bounds
+#   the health wait rather than the engine.
+# - The launcher's --ulimit stack=67108864 is not carried. basement sets the
+#   memlock ulimit only.
+# - The launcher serves on port 8888 and names the model GLM-5.3-Flash-EXL3.
+#   Every runtime in this pack serves on its kind's own internal port, 8000 for
+#   vLLM, and the schema requires served_model_id to equal the primary
+#   artifact's repository. The console maps the host port.
+#
+# memory_model is omitted, for the reason the other two-Spark recipes omit it:
+# TP=2 shards the weights across nodes, and the schema's flat single-node
+# formula would be wrong by construction.
+#
+# Candidate, and not hardware-qualified. Nothing in this pack has run this
+# model on a Spark. Watch items for the qualification run, in order:
+# - The publisher's issue #10 is open: tool calls are sometimes emitted with
+#   blank or missing required arguments under concurrent load, and replaying
+#   the same request alone does not reproduce it.
+# - The publisher's issue #7 is open: prefix-cache hits collapse on
+#   long-running agentic workloads.
+# - Issue #6, a concurrency cliff, was closed by the mixed-prefill scheduler
+#   fix that this image bakes and that GLM53_MIXED_PREFILL_CHUNK below selects.
+#   A third party still measured an active lane falling to about 5 tok/s when a
+#   cold 100K prefill was admitted beside a decoding 100K request, so the
+#   behaviour is not settled.
+# - This is the first two-node vLLM deployment basement ships. The two-Spark
+#   DeepSeek recipe is the precedent for the launch flags, and it is a
+#   precedent for the shape rather than evidence for this model.
+version: 1
+display_name: GLM 5.3 Flash
+publisher: MiaAI Lab + Mia-AiLab
+model_by: Z.ai
+recipe_by: MiaAI Lab
+model_released: August 2026
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
+  revision: bd7f55edff9e37b41e1d32e2cf37054fe66d1e58
+topology:
+  spark_count: 2
+  interconnect:
+    kind: connectx7
+    # The launcher's own rendezvous port (MASTER_PORT).
+    master_port: 29521
+    # Interface and HCA names are the fallback, not the source of truth. Each
+    # rank detects the port its own cable is in at deploy time and pins its
+    # transports to that. It matters here because the launcher's cluster wires
+    # head f1 to worker f0, so the launcher itself has no single answer.
+    shared_environment:
+      NCCL_IB_DISABLE: "0"
+      NCCL_IB_HCA: rocep1s0f0
+      NCCL_IB_GID_INDEX: "3"
+      NCCL_SOCKET_IFNAME: enp1s0f0np0
+      GLOO_SOCKET_IFNAME: enp1s0f0np0
+      TP_SOCKET_IFNAME: enp1s0f0np0
+      NCCL_CROSS_NIC: "0"
+      NCCL_IGNORE_CPU_AFFINITY: "1"
+      NCCL_DEBUG: WARN
+    head_environment: {}
+    worker_environment: {}
+runtime:
+  kind: vllm
+  # basement's own CI-published image, not a third-party one. See
+  # packaging/glm53-flash-image/README.md for the whole provenance story.
+  # Read back from the registry at this digest on 2026-08-28: a single
+  # linux/arm64 manifest of 60 layers, created 2026-08-28T20:01:04Z, whose
+  # labels name the base image
+  # ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks@sha256:9bb1557a..., the patch
+  # source MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks at bd7f55ed under MIT,
+  # and the sha256 of each of the three baked patches. image_bytes is that
+  # manifest's compressed layer sum, the same measure every other recipe in the
+  # pack states.
+  image: ghcr.io/punkjazz-labs/basement-vllm-glm53-flash-exl3
+  digest: sha256:5c7a0f538f7aa05647ae0c97bc5333330c6441043f7e00defa14fc2cff6ee343
+  image_bytes: 9789175176
+  # Measured rather than modelled: the CI runner's own docker image inspect
+  # .Size for the image it had just pushed (workflow run 33206079321). It is an
+  # arm64 Linux measurement from a GitHub runner, not from a GB10, so
+  # qualification on hardware still corrects it.
+  image_disk_bytes: 20859301069
+  environment:
+    # The image already carries both arch lists at 12.1a, inherited from its
+    # base. The launcher passes them anyway, and so does this recipe, so the
+    # compile target is pinned by the recipe rather than left to an image
+    # default that a rebuild could change.
+    TORCH_CUDA_ARCH_LIST: "12.1a"
+    FLASHINFER_CUDA_ARCH_LIST: "12.1a"
+    # The fused exl3_moe decode kernel. The alternative is the unique-expert
+    # LinearEXL3 loop, which nobody here has qualified.
+    EXL3_FUSED_MOE: "1"
+    # Lets the caching allocator grow a segment instead of fragmenting the one
+    # unified pool the weights, the KV cache and the CUDA graphs share.
+    PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+    # The stock EngineCore step timeout is 300 seconds. The launcher raises it
+    # to 1800 because Triton and TileLang JIT at TP=2 can exceed 300 seconds
+    # without the engine being hung, and it records the stock value ending in a
+    # watchdog kill. basement needs this more than the launcher does: the two
+    # JIT caches below are private tmpfs, so every start compiles cold.
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
+    # Keeps client stop strings dormant until </think>, so a request whose
+    # reasoning restates a harness stop does not finish with empty content.
+    # Read by patch_suppress_stops_in_reasoning.py, baked into the image.
+    GLM53_SUPPRESS_STOPS_IN_REASONING: "1"
+    # Stops a decode lane sharing an engine step with a long sparse-MLA
+    # prefill. This is the fix that closed the publisher's issue #6, and skip
+    # is the value the launcher runs. Read by patch_scheduler_decode_floor.py,
+    # baked into the image.
+    GLM53_MIXED_PREFILL_CHUNK: skip
+    # tilelang exports each compiled kernel into a tempfile directory and then
+    # loads the shared object from there, so the process temp dir must allow
+    # exec. /tmp stays noexec, so TMPDIR moves to its own writable mount. This
+    # is the same trap the two-Spark DeepSeek recipe hit on this hardware.
+    TMPDIR: /root/tmp
+  # This stack compiles Triton and TileLang kernels at import and at serve
+  # time, and writes both caches under /root. On the read-only root filesystem
+  # every container gets, those writes fail and the rank dies. Neither cache
+  # can live on the scratch tmpfs either, because the compiler loads the shared
+  # objects it writes and /tmp is noexec.
+  writable_paths:
+    - /root/.tilelang
+    - /root/.triton
+    - /root/tmp
+  # 32 GiB, the launcher's own --shm-size. The container gets an isolated IPC
+  # namespace with /dev/shm sized to exactly this value.
+  shm_bytes: 34359738368
+  memory_lock: true
+  ipc_lock: true
+  # 120 minutes, derived rather than copied. The launcher's own engine-ready
+  # guard is 3600 seconds, and it reaches that with its Triton and TileLang
+  # caches warm on the host. This deployment cannot: both caches are private
+  # tmpfs here, so every start pays the full cold JIT on two nodes. The load
+  # itself is larger than the 135 GB two-Spark case that needed 90 minutes,
+  # because this checkpoint is 175.7 GB, and CUDA graph capture over the MTP
+  # ladder runs after it. The product's 20-minute default would call a healthy
+  # start a failure.
+  start_timeout_minutes: 120
+artifacts:
+  - role: primary
+    repository: Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+    # The revision start.sh fetches (MODEL_REVISION at bd7f55ed), not the
+    # mirror's main. Three identifiers name this artifact and they differ: the
+    # launcher pins 25a44fdb, the mirror's main had already moved to 024db9f7
+    # about an hour later the same day, and the launcher's README describes the
+    # upstream snapshot 5ab363a8. This recipe pins what the launcher runs.
+    revision: 25a44fdbf16862a46b7cc9921142c6c81350af2f
+    # Computed live on 2026-08-28 from the same Hugging Face endpoint basement
+    # itself reads at install (/api/models/.../revision/<sha>?blobs=true): 144
+    # files, of which 120 are weight shards worth 175,642,157,752 bytes.
+    # Round 7 recorded 175,715,854,761 for the same revision, which is 7 bytes
+    # above what the revision holds. A pinned revision cannot change, and this
+    # total is checked for exact equality before a byte is fetched, so the
+    # figure below is the one that was verified rather than the one that was
+    # recorded.
+    expected_bytes: 175715854754
+    # The licence chain has two layers, and both are stated plainly.
+    #
+    # The base model zai-org/GLM-5.3-Flash is MIT. Its Hugging Face card
+    # declares license: mit and it ships a standard MIT LICENSE file with the
+    # copyright "Z.AI Co., Ltd".
+    #
+    # The EXL3 quantization carries its own licence, and that is the one an
+    # owner accepts here, because it is the artifact this recipe downloads.
+    # ShapleyMCG License 1.0 ships inside this repository at this revision
+    # (29,918 bytes, fetched and read in full). Read it before you accept it.
+    # Commercial use is permitted: section 2.1 grants a worldwide,
+    # royalty-free, non-exclusive licence for any purpose, commercial purposes
+    # included. No territory is excluded, and there is no revenue gate and no
+    # user-count gate. Attribution is a condition of the grant and not a
+    # courtesy: sections 3.1 to 3.3 require the licence in full, the copyright
+    # notice and clear attribution in any model card, README or documentation,
+    # and section 2.4 makes those conditions on scope, so use outside them is
+    # unlicensed. One named party is excluded from the grant entirely
+    # (sections 4 to 6), and you must not distribute the work to that party.
+    # Section 10.5 states that the licence is not OSI approved.
+    licence: ShapleyMCG License 1.0
+    licence_url: https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw/blob/25a44fdbf16862a46b7cc9921142c6c81350af2f/LICENSE
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 12000000000
+  safety_margin_bytes: 20000000000
+  # The checkpoint is readable without a token: every file this recipe pins was
+  # fetched anonymously while it was authored.
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+  vllm:
+    tensor_parallel_size: 2
+    kv_cache_dtype: fp8
+    # Left unset on purpose, following the launcher's own instruction not to
+    # pin it: SM121 already prefers FLASH_ATTN for non-causal dense SWA, and
+    # the launcher records that TRITON_ATTN was an SM120 copy this image does
+    # not carry. Pinning TRITON_ATTN also dropped its structured throughput
+    # from about 61.7 to about 29 tok/s.
+    attention_backend: ""
+    moe_backend: ""
+    linear_backend: ""
+    # 0.87, the launcher's own number for this two-node package.
+    gpu_memory_utilization: "0.87"
+    # 900000, and this is a reduction below native rather than an extension.
+    # The base config states max_position_embeddings 1048576, so native is 1M.
+    # The launcher reduces the served window for memory, and its README states
+    # that native 1M "still does not allocate".
+    max_model_len: 900000
+    max_num_seqs: 4
+    # 1024. The launcher's own comment explains the small budget: an 8192-token
+    # chunk over a long history oversubscribes GB10 persistent_topk shared
+    # memory, which crashed it at 300k.
+    max_num_batched_tokens: 1024
+    # The top of the launcher's MTP capture ladder, "1 2 3 4 6 8 12". basement
+    # expresses a ceiling and not a ladder. MTP k=2 decode runs 1 to 4
+    # sequences of 3 tokens, so 12 is the largest batch this configuration
+    # captures a graph for.
+    max_cudagraph_capture_size: 12
+    # The launcher serves --limit-mm-per-prompt {"image":4,"video":1}, which is
+    # what these two lines produce. This model takes images and video in and
+    # answers in text.
+    multimodal_image_limit: 4
+    multimodal_video_limit: 1
+    # Required by the launcher, and the reason is memory: profiling a dummy
+    # prompt at the maximum image and video size runs this unified part out of
+    # memory before the model ever serves.
+    skip_mm_profiling: true
+    # exl3. The runtime would otherwise load these weights with a kernel the
+    # launcher's README forbids for this checkpoint.
+    quantization: exl3
+    # MTP drafts 2 tokens from the checkpoint's own next-token-prediction
+    # layer, so there is no second artifact and speculative_model_role stays
+    # empty. This emits exactly the launcher's own document,
+    # {"method":"mtp","num_speculative_tokens":2}.
+    speculative_method: mtp
+    speculative_tokens: 2
+    speculative_moe_backend: ""
+    speculative_model_role: ""
+    speculative_draft_sample_method: ""
+    reasoning_parser: glm45
+    tool_call_parser: glm47
+    load_format: ""
+    # The template is not in the checkpoint: the launcher's README states the
+    # checkpoint's own jinja is language-only. The image carries the launcher's
+    # template at this absolute path, so it is pinned by the image digest.
+    chat_template_file: ""
+    chat_template_image_path: /opt/glm53/chat_template.jinja
+    # That template reads enable_thinking and clear_thinking, and thinking is
+    # on by default. It does not read preserve_thinking at all, so that flag is
+    # inert for this model and is set only to match the shape every other
+    # thinking-on recipe in this pack uses.
+    chat_template:
+      enable_thinking: true
+      preserve_thinking: true
+    # The checkpoint's own generation_config.json at this revision, which is
+    # byte-identical to the base model's. It states temperature and top_p and
+    # nothing else, so nothing else is pinned here.
+    generation:
+      temperature: 1.0
+      top_p: 0.95
+    # The launcher passes no --trust-remote-code. The Glm5Next implementation
+    # lives in the pinned image, not in the checkpoint.
+    trust_remote_code: false
+    chunked_prefill: false
+    async_scheduling: false
+    prefix_caching: true
+    auto_tool_choice: true
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_memory_capacity
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: verify_memory
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared

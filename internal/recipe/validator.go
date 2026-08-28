@@ -153,6 +153,11 @@ func Validate(r Recipe) error {
 		// "os.environ.get(key) != \"0\"", so "0" turns the guard off and any
 		// other value leaves it on. Only the two meaningful forms are admitted:
 		// "0" to opt out and "1" to state the default on purpose.
+		//
+		// The same patch reads a second name with the same meaning,
+		// VLLM_SUPPRESS_STOPS_IN_REASONING. Only the GLM53 name is admitted
+		// here, so a recipe author who copies the other spelling out of the
+		// patch is refused at load. The GLM53 name is the admitted spelling.
 		"GLM53_SUPPRESS_STOPS_IN_REASONING": {"0": true, "1": true},
 		// patch_scheduler_decode_floor.py documents its own value list:
 		// "skip / -1 (do not mix prefill with decode, default)", "N>0 (cap
@@ -163,6 +168,37 @@ func Validate(r Recipe) error {
 		// 128-token cap still stalls decode at about 10 tok/s, so it is a knob
 		// with no qualified value rather than a setting a recipe should carry.
 		"GLM53_MIXED_PREFILL_CHUNK": {"skip": true, "-1": true, "0": true, "off": true},
+		// The three remaining settings the GLM-5.3-Flash EXL3 launcher puts in
+		// its container environment. These are not patch toggles: they are
+		// runtime variables the stack itself reads. Each is quoted from
+		// start.sh at commit bd7f55ed and admitted at the one value that
+		// launcher runs, and at no other.
+		//
+		// EXL3_FUSED_MOE=1 selects the fused exl3_moe decode kernel
+		// (start.sh:169, "1 = fused exl3_moe (decode). 0 restores the
+		// unique-expert LinearEXL3 loop"). The 0 form is the slow fallback
+		// path, which nobody in this pack has qualified, so it is not
+		// admitted.
+		"EXL3_FUSED_MOE": {"1": true},
+		// PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True lets the caching
+		// allocator grow a segment instead of fragmenting the unified pool.
+		// The launcher hardcodes it in the shared docker-run environment
+		// block (start.sh:827) rather than exposing a variable for it, so
+		// this is the only value it ever takes.
+		"PYTORCH_CUDA_ALLOC_CONF": {"expandable_segments:True": true},
+		// VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 raises the EngineCore
+		// per-step timeout (start.sh:179, "EngineCore stock timeout is 300s;
+		// mid-serve Triton/TileLang JIT on TP=2 can exceed that without being
+		// a true hang. NCCL watchdog is still 600s").
+		//
+		// This matters more here than on the launcher's own kit. The launcher
+		// keeps its Triton and TileLang caches in host directories, so it
+		// compiles cold once. basement gives those two paths a private tmpfs,
+		// because their names are not cache variables this allowlist admits,
+		// so every container start compiles cold. A recipe that leaves the
+		// stock 300 seconds risks an EngineCore kill during warmup on exactly
+		// the first boot a qualification run performs.
+		"VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": {"1800": true},
 	}
 	// TMPDIR may only point at a surface the recipe itself declares writable:
 	// runtimes whose JIT caches load compiled objects need an exec-friendly

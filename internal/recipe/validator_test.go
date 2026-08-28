@@ -3,6 +3,7 @@ package recipe
 import (
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -30,8 +31,8 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recipes) != 12 {
-		t.Fatalf("got %d recipes, want 12", len(recipes))
+	if len(recipes) != 13 {
+		t.Fatalf("got %d recipes, want 13", len(recipes))
 	}
 	for _, r := range recipes {
 		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
@@ -214,6 +215,50 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	}
 	if flashNext.MemoryModel != nil {
 		t.Fatalf("a TP=2 recipe must not carry the flat single-node memory model: %#v", flashNext.MemoryModel)
+	}
+	// The pack's first two-node vLLM recipe, and its second serve on an image
+	// basement builds and publishes itself. Every value below was verified
+	// live against its primary source while the recipe was written.
+	glm, ok := Find(recipes, "glm53-flash-exl3-2s")
+	if !ok || glm.Runtime.Kind != "vllm" || !glm.Distributed() || glm.Topology.SparkCount != 2 {
+		t.Fatalf("unexpected GLM-5.3-Flash EXL3 recipe: %#v", glm)
+	}
+	if glm.Runtime.Reference() != "ghcr.io/punkjazz-labs/basement-vllm-glm53-flash-exl3@sha256:5c7a0f538f7aa05647ae0c97bc5333330c6441043f7e00defa14fc2cff6ee343" {
+		t.Fatalf("GLM-5.3-Flash runtime is not pinned: %#v", glm.Runtime)
+	}
+	// One artifact, and that is the licence ruling in the schema. The
+	// launcher's default path drafts with incoai/GLM-5.3-Flash-DFlash2 under
+	// CC BY-NC-ND 4.0. This recipe serves MTP from the checkpoint's own layer,
+	// so the drafter is neither declared nor downloaded.
+	if len(glm.Artifacts) != 1 || glm.Artifacts[0].Repository != "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw" {
+		t.Fatalf("GLM-5.3-Flash must serve one artifact and no separate drafter: %#v", glm.Artifacts)
+	}
+	// The revision start.sh fetches, not the mirror's main, and the exact tree
+	// sum at it. The install compares this total for equality before it fetches
+	// a byte, so an approximate figure is an install that never starts.
+	if glm.Artifacts[0].Revision != "25a44fdbf16862a46b7cc9921142c6c81350af2f" || glm.TotalArtifactBytes() != 175715854754 {
+		t.Fatalf("GLM-5.3-Flash weights are not pinned at the launcher's revision: %#v", glm.Artifacts[0])
+	}
+	if glm.Artifacts[0].Licence != "ShapleyMCG License 1.0" || !glm.Requirements.RequiredLicenceAccept {
+		t.Fatalf("GLM-5.3-Flash must name the quantization licence and gate on it: %#v", glm.Artifacts[0])
+	}
+	if v := glm.Service.VLLM; v.TensorParallelSize != 2 || v.Quantization != "exl3" || v.KVCacheDType != "fp8" ||
+		v.SpeculativeMethod != "mtp" || v.SpeculativeTokens != 2 || v.SpeculativeModelRole != "" ||
+		v.MaxModelLen != 900000 || v.MaxNumSeqs != 4 || v.MaxBatchedTokens != 1024 ||
+		v.MaxCUDAGraphCaptureSize != 12 || v.MultimodalImageLimit != 4 || v.MultimodalVideoLimit != 1 ||
+		!v.SkipMultimodalProfiling || !v.PrefixCaching || !v.AutoToolChoice ||
+		v.ReasoningParser != "glm45" || v.ToolCallParser != "glm47" ||
+		v.ChatTemplateImagePath != "/opt/glm53/chat_template.jinja" || v.ChatTemplateFile != "" {
+		t.Fatalf("unexpected GLM-5.3-Flash serve configuration: %#v", glm.Service.VLLM)
+	}
+	// A first start loads 175.7 GB across two nodes and compiles both JIT
+	// caches cold, because basement gives them a private tmpfs. The product's
+	// 20-minute default would call a healthy start a failure.
+	if glm.Runtime.StartTimeoutMinutes != 120 {
+		t.Fatalf("GLM-5.3-Flash startup timeout=%d minutes, want the derived 120", glm.Runtime.StartTimeoutMinutes)
+	}
+	if glm.MemoryModel != nil {
+		t.Fatalf("a TP=2 recipe must not carry the flat single-node memory model: %#v", glm.MemoryModel)
 	}
 	// The pack's first behaviour-modified derivative: Qwen3.8-27B with its
 	// refusal behaviour removed by weight ablation, shipped under the
@@ -896,26 +941,45 @@ func TestValidateAcceptsWritableCachePaths(t *testing.T) {
 	}
 }
 
-// vLLM builds DeepSeek V4 Flash's "mhc" kernels with tilelang, which writes
-// its JIT cache to /root/.tilelang at import time and dies on the read-only
-// root filesystem after the weights have loaded. No other recipe in the pack
-// compiles kernels that way, and every one of them serves on the unchanged
-// filesystem today, so none of them may quietly gain a writable mount.
-func TestOnlyTheTwoSparkFlashRecipeDeclaresAWritablePath(t *testing.T) {
+// Two recipes compile kernels into a cache under the read-only root, and both
+// die there without a writable mount. vLLM builds DeepSeek V4 Flash's "mhc"
+// kernels with tilelang, which writes /root/.tilelang at import time and fails
+// after the weights have loaded. The GLM-5.3-Flash EXL3 stack compiles both
+// Triton and TileLang kernels, at import and again mid-serve, so it needs both
+// caches as well as the exec-friendly temp dir the compiler loads its shared
+// objects from.
+//
+// Every other recipe serves on the unchanged filesystem, and a writable mount
+// is the one part of the schema that changes what the container's filesystem
+// means, so none of them may quietly gain one. The expected sets are written
+// out per recipe rather than counted, so adding a path to either of these two
+// is also a deliberate change to this test.
+func TestOnlyTheKernelCompilingRecipesDeclareWritablePaths(t *testing.T) {
 	recipes, err := Builtin()
 	if err != nil {
 		t.Fatal(err)
 	}
+	want := map[string][]string{
+		"deepseek-v4-flash-0731-2s": {"/root/.tilelang", "/root/tmp"},
+		"glm53-flash-exl3-2s":       {"/root/.tilelang", "/root/.triton", "/root/tmp"},
+	}
+	seen := map[string]bool{}
 	for _, r := range recipes {
-		if r.ID == "deepseek-v4-flash-0731-2s" {
-			want := []string{"/root/.tilelang", "/root/tmp"}
-			if len(r.Runtime.WritablePaths) != len(want) || r.Runtime.WritablePaths[0] != want[0] || r.Runtime.WritablePaths[1] != want[1] {
-				t.Fatalf("DeepSeek V4 Flash writable paths = %#v, want the tilelang kernel cache and its exec temp dir", r.Runtime.WritablePaths)
+		expected, compiles := want[r.ID]
+		if !compiles {
+			if len(r.Runtime.WritablePaths) != 0 {
+				t.Fatalf("%s gained writable paths: %#v", r.ID, r.Runtime.WritablePaths)
 			}
 			continue
 		}
-		if len(r.Runtime.WritablePaths) != 0 {
-			t.Fatalf("%s gained writable paths: %#v", r.ID, r.Runtime.WritablePaths)
+		seen[r.ID] = true
+		if !slices.Equal(r.Runtime.WritablePaths, expected) {
+			t.Fatalf("%s writable paths = %#v, want %#v", r.ID, r.Runtime.WritablePaths, expected)
+		}
+	}
+	for id := range want {
+		if !seen[id] {
+			t.Fatalf("%s is not in the built-in pack", id)
 		}
 	}
 }
@@ -1034,7 +1098,10 @@ func exl3MTPVLLM(v *VLLMConfig) {
 	// The EXL3 launcher pins no KV cache block size, unlike the NVFP4 MLA
 	// path this base recipe comes from.
 	v.BlockSize = 0
-	v.MaxCUDAGraphCaptureSize = 32
+	// The top of the launcher's MTP capture ladder, "1 2 3 4 6 8 12"
+	// (start.sh:163). The 32 that stood here before is the top of its DFlash2
+	// ladder, which is a different path this pack does not ship.
+	v.MaxCUDAGraphCaptureSize = 12
 	v.SpeculativeMethod = "mtp"
 	v.SpeculativeTokens = 2
 	v.SpeculativeMoE = ""
@@ -1221,9 +1288,59 @@ func TestGLMOverlayEnvironmentAdmitsOnlyThePatchesOwnForms(t *testing.T) {
 	// patch would accept and whose own note says it still stalls decode, and
 	// "SKIP" is a case the patch would lowercase into skip; the allowlist
 	// matches exactly, so a recipe writes the form the evidence shows.
+	//
+	// VLLM_SUPPRESS_STOPS_IN_REASONING is the second name the suppress patch
+	// reads with identical meaning. It is refused on purpose: one spelling is
+	// admitted, and the validator comment says which.
 	for name, values := range map[string][]string{
 		"GLM53_SUPPRESS_STOPS_IN_REASONING": {"2", "true", "on", ""},
 		"GLM53_MIXED_PREFILL_CHUNK":         {"128", "SKIP", "no", "yes"},
+		"VLLM_SUPPRESS_STOPS_IN_REASONING":  {"0", "1"},
+	} {
+		for _, value := range values {
+			candidate := clone()
+			candidate.Runtime.Environment[name] = value
+			err := Validate(candidate)
+			if err == nil || !strings.Contains(err.Error(), "outside the allowlist") {
+				t.Fatalf("%s=%q Validate()=%v, want an allowlist rejection", name, value, err)
+			}
+		}
+	}
+}
+
+// The three GLM-5.3 EXL3 launcher variables that are not patch toggles. Each
+// is admitted at the single value start.sh sets at bd7f55ed and at no other,
+// so a recipe cannot half-carry the launcher's package. The refused values are
+// the ones a maintainer would plausibly reach for: the fused-MoE opt-out that
+// nobody qualified, a different allocator configuration, and the stock 300
+// second EngineCore timeout the launcher raises because it kills a healthy
+// cold-JIT start.
+func TestGLMLauncherEnvironmentAdmitsOnlyTheValueTheLauncherRuns(t *testing.T) {
+	base := vllmCandidate(t)
+	clone := func() Recipe {
+		candidate := base
+		candidate.Runtime.Environment = make(map[string]string, len(base.Runtime.Environment)+1)
+		for name, value := range base.Runtime.Environment {
+			candidate.Runtime.Environment[name] = value
+		}
+		return candidate
+	}
+	admit := map[string]string{
+		"EXL3_FUSED_MOE":                     "1",
+		"PYTORCH_CUDA_ALLOC_CONF":            "expandable_segments:True",
+		"VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "1800",
+	}
+	for name, value := range admit {
+		candidate := clone()
+		candidate.Runtime.Environment[name] = value
+		if err := Validate(candidate); err != nil {
+			t.Fatalf("%s=%s Validate()=%v, want nil", name, value, err)
+		}
+	}
+	for name, values := range map[string][]string{
+		"EXL3_FUSED_MOE":                     {"0", "", "true"},
+		"PYTORCH_CUDA_ALLOC_CONF":            {"expandable_segments:False", "max_split_size_mb:128", "expandable_segments:true"},
+		"VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": {"300", "600", "3600", ""},
 	} {
 		for _, value := range values {
 			candidate := clone()

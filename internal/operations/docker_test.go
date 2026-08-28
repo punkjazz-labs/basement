@@ -424,7 +424,10 @@ func exl3Recipe(t *testing.T) recipe.Recipe {
 	block.MaxBatchedTokens = 1024
 	block.MaxModelLen = 900000
 	block.BlockSize = 0
-	block.MaxCUDAGraphCaptureSize = 32
+	// The top of the launcher's MTP capture ladder, "1 2 3 4 6 8 12"
+	// (start.sh:163). The 32 that stood here before is the top of its DFlash2
+	// ladder, which is a different path this pack does not ship.
+	block.MaxCUDAGraphCaptureSize = 12
 	block.SpeculativeMethod = "mtp"
 	block.SpeculativeTokens = 2
 	block.SpeculativeMoE = ""
@@ -443,9 +446,66 @@ func exl3Recipe(t *testing.T) recipe.Recipe {
 	return base
 }
 
+// TestShippedGLMRecipeEmitsTheLauncherPackage runs the command builder over
+// the recipe the pack actually ships, rather than over a fixture assembled in
+// this file. The fixture proves the schema fields can reach the command line;
+// only this proves the shipped recipe carries the launcher's package.
+//
+// Round 6's rule is that a recipe pins one config package and pins it whole,
+// so every value asserted here is read from start.sh at bd7f55ed and they all
+// belong to the same MTP launch.
+func TestShippedGLMRecipeEmitsTheLauncherPackage(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	glm, ok := recipe.Find(recipes, "glm53-flash-exl3-2s")
+	if !ok {
+		t.Fatal("GLM-5.3-Flash EXL3 two-Spark recipe missing")
+	}
+	head := Placement{Role: RoleHead, NodeName: "spark-a", NodeCount: 2, MasterAddress: "169.254.10.1", MasterPort: 29521}
+	args := vllmArgs(glm, head)
+	for flag, want := range map[string]string{
+		"--quantization":           "exl3",
+		"--kv-cache-dtype":         "fp8",
+		"--gpu-memory-utilization": "0.87",
+		"--max-model-len":          "900000",
+		"--max-num-seqs":           "4",
+		"--max-num-batched-tokens": "1024",
+		"--reasoning-parser":       "glm45",
+		"--tool-call-parser":       "glm47",
+		"--limit-mm-per-prompt":    `{"image":4,"video":1}`,
+		"--chat-template":          "/opt/glm53/chat_template.jinja",
+		"--tensor-parallel-size":   "2",
+		"--speculative-config":     `{"method":"mtp","num_speculative_tokens":2}`,
+		"--served-model-name":      "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw",
+		// The top of the launcher's MTP ladder. Its DFlash2 ladder ends at 32,
+		// and this recipe does not ship that path.
+		"--max-cudagraph-capture-size": "12",
+	} {
+		got, present := argumentValue(args, flag)
+		if !present || got != want {
+			t.Fatalf("%s=%q present=%v, want %q", flag, got, present, want)
+		}
+	}
+	for _, flag := range []string{"--enable-prefix-caching", "--enable-auto-tool-choice", "--skip-mm-profiling"} {
+		if !hasArgument(args, flag) {
+			t.Fatalf("%s missing from: %s", flag, strings.Join(args, " "))
+		}
+	}
+	// Flags the launcher does not run on this path. --enforce-eager and
+	// --language-model-only are off in its defaults, and this recipe pins no
+	// KV block size, no load format and no attention backend.
+	for _, flag := range []string{"--enforce-eager", "--language-model-only", "--block-size", "--load-format", "--attention-backend", "--enable-flashinfer-autotune"} {
+		if hasArgument(args, flag) {
+			t.Fatalf("%s reached a command the launcher does not run it in: %s", flag, strings.Join(args, " "))
+		}
+	}
+}
+
 // TestEXL3LaunchEmitsTheLauncherFlags pins the command builder against the
-// GLM-5.3-Flash EXL3 launcher's own vLLM flags. The recipe is not written
-// yet, so this test is what proves the schema fields reach the command line
+// GLM-5.3-Flash EXL3 launcher's own vLLM flags, over a fixture rather than
+// over the shipped recipe. It proves the schema fields reach the command line
 // at all: a field that validates and is never emitted serves silently without
 // it.
 func TestEXL3LaunchEmitsTheLauncherFlags(t *testing.T) {
