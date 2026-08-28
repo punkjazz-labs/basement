@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  CURATED, LAB_LOGOS, RECIPE_LOGOS, RECOMMENDED_ID, RELEASED, labFor, labKey, logoFor, sortCatalog,
+  CURATED, LAB_LOGOS, RECIPE_LOGOS, RECOMMENDED_ID, RELEASED, labFor, labKey, logoFor,
+  readableWeights, sortCatalog,
 } from './catalog'
 
 const entry = (
@@ -34,6 +35,7 @@ const SHIPPED = [
     1,
     'OBLITERATUS',
   ),
+  entry('glm53-flash-exl3-2s', 'GLM 5.3 Flash', 'Z.ai', 2, 'MiaAI Lab + Mia-AiLab'),
 ]
 
 // The dividers the catalog pane draws, in the order it draws them.
@@ -81,7 +83,7 @@ describe('labFor', () => {
 describe('sortCatalog', () => {
   it('reads the labs in the order the curated shelf meets them', () => {
     expect(labsOf(sortCatalog(SHIPPED))).toEqual([
-      'Qwen · Alibaba', 'poolside', 'DeepSeek', 'MiniMax', 'NVIDIA', 'Thinking Machines',
+      'Qwen · Alibaba', 'poolside', 'DeepSeek', 'MiniMax', 'NVIDIA', 'Z.ai', 'Thinking Machines',
     ])
   })
 
@@ -148,7 +150,7 @@ describe('sortCatalog', () => {
   it('is stable whatever order the catalog arrives in, and does not mutate it', () => {
     const reversed = [...SHIPPED].reverse()
     expect(sortCatalog(reversed).map(item => item.id)).toEqual(sortCatalog(SHIPPED).map(item => item.id))
-    expect(reversed[0].id).toBe('qwen38-27b-obliterated-q8-0-1s')
+    expect(reversed[0].id).toBe('glm53-flash-exl3-2s')
   })
 
   it('leaves a catalog of only uncurated recipes in a deterministic order', () => {
@@ -204,5 +206,46 @@ describe('logoFor', () => {
   // is none today, and the empty map is the honest way to say so.
   it('reads a recipe own mark before its lab mark', () => {
     expect(RECIPE_LOGOS).toEqual({})
+  })
+
+  // Z.ai arrives with GLM 5.3 Flash. The mark is the avatar the lab publishes
+  // on its own Hugging Face organization page, and the release date is the
+  // base model's own publication date, not the date of the quantization that
+  // serves it.
+  it('marks Z.ai with its own avatar and dates it by the base model', () => {
+    expect(logoFor(['glm53-flash-exl3-2s'], { model_by: 'Z.ai' })).toBe('/logos/zai.webp')
+    expect(RELEASED['glm53-flash-exl3-2s']).toBe('2026-08')
+    // The organization slug and the shouted form both read as the one lab, so
+    // a feed recipe that copies either still draws one divider and one mark.
+    expect(labFor({ model_by: 'zai-org' })).toBe('Z.ai')
+    expect(logoFor(['glm-whatever-next-2s'], { model_by: 'Z.AI' })).toBe('/logos/zai.webp')
+  })
+})
+
+// The quantization line says how the weights are stored, and nothing about how
+// good they are. A format is read from the repository's own basename, and a
+// bits-per-weight token is read only beside a format that is already named.
+describe('readableWeights', () => {
+  it('reads the EXL3 format with its width as one answer', () => {
+    expect(readableWeights('Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw'))
+      .toEqual({ name: 'GLM 5.3 Flash TR3', quant: 'EXL3 4bpw' })
+  })
+
+  it('leaves every format that names no width exactly as it read before', () => {
+    expect(readableWeights('poolside/Laguna-S-2.1-NVFP4'))
+      .toEqual({ name: 'Laguna S 2.1', quant: 'NVFP4' })
+    expect(readableWeights('unsloth/DeepSeek-V4-Flash-0731-GGUF'))
+      .toEqual({ name: 'DeepSeek V4 Flash 0731', quant: 'GGUF' })
+    expect(readableWeights('RadixArk/Qwen3.8-Flash-Next-NVFP4'))
+      .toEqual({ name: 'Qwen 3.8 Flash Next', quant: 'NVFP4' })
+  })
+
+  // A repository that states no format states no quantization, and its width
+  // stays part of the model's name rather than becoming a claim on its own.
+  it('claims no quantization from a width alone', () => {
+    expect(readableWeights('deepseek-ai/DeepSeek-V4-Flash-0731').quant).toBeUndefined()
+    expect(readableWeights('MiniMaxAI/MiniMax-H3')).toEqual({ name: 'MiniMax H3', quant: undefined })
+    expect(readableWeights('someone/Model-4bpw'))
+      .toEqual({ name: 'Model 4bpw', quant: undefined })
   })
 })

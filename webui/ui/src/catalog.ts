@@ -20,6 +20,7 @@ export const LAB_LOGOS: Record<string, string> = {
   nvidia: '/logos/nvidia.webp',
   minimax: '/logos/minimax.webp',
   'thinking machines': '/logos/thinkingmachines.webp',
+  'z.ai': '/logos/zai.webp',
 }
 
 // One recipe's own mark, read before the lab's. It holds the recipes that must
@@ -45,6 +46,10 @@ const LAB_ALIASES: Record<string, string> = {
   'qwen team, alibaba; abliteration by obliteratus': 'Qwen · Alibaba',
   'deepseek ai': 'DeepSeek',
   'thinking machines lab': 'Thinking Machines',
+  // Z.ai publishes under the organization slug zai-org, which is the form a
+  // feed recipe is most likely to copy. The lab's own name on that page is
+  // Z.ai, and the key folds case, so "Z.AI" already reads as one lab with it.
+  'zai-org': 'Z.ai',
 }
 
 // A recipe that names no lab at all reads as this rather than under a lab
@@ -92,6 +97,7 @@ export const RELEASED: Record<string, string> = {
   'minimax-h3-comfyui-1s': '2026-07', // MiniMaxAI/MiniMax-H3, published 2026-07-28 (Hugging Face API)
   'nemotron-omni-30b-a3b-nvfp4-1s': '2026-04', // the card's release date: build.nvidia.com, 04/28/2026
   'inkling-small-nvfp4-2s': '2026-07', // thinkingmachines/Inkling-Small-NVFP4, published 2026-07-27 (Hugging Face API)
+  'glm53-flash-exl3-2s': '2026-08', // zai-org/GLM-5.3-Flash, published 2026-08-25 (Hugging Face API)
 }
 
 // CURATED is the shelf basement puts its name to, in the order it means, and
@@ -165,7 +171,18 @@ export function sortCatalog<T extends Sortable>(recipes: readonly T[]): T[] {
     .map(entry => entry.recipe)
 }
 
-const QUANTS = new Set(['NVFP4', 'FP8', 'FP4', 'INT8', 'INT4', 'BF16', 'FP16', 'AWQ', 'GPTQ', 'GGUF'])
+// The weight formats a repository names inside its own basename. EXL3 joins
+// them for the GLM-5.3-Flash checkpoint, which is the pack's first ExLlamaV3
+// build. Every entry is a format and nothing else: this line says how the
+// weights are stored, never how good they are.
+const QUANTS = new Set(['NVFP4', 'FP8', 'FP4', 'INT8', 'INT4', 'BF16', 'FP16', 'AWQ', 'GPTQ', 'GGUF', 'EXL3'])
+
+// A bits-per-weight token. Some formats carry their width beside the format
+// name rather than inside it, as in "GLM-5.3-Flash-EXL3-TR3-4bpw", where the
+// stored format is EXL3 at 4 bits per weight. The width is read only beside a
+// format that is already named, so a repository that carries a width and names
+// no format still states no quantization and keeps the width in its name.
+const BITS_PER_WEIGHT = /^\d+bpw$/i
 const OWNERS: Record<string, string> = { nvidia: 'NVIDIA', poolside: 'poolside', unsloth: 'Unsloth', qwen: 'Qwen' }
 
 export const ownerName = (repository: string): string => {
@@ -175,15 +192,18 @@ export const ownerName = (repository: string): string => {
 
 // "poolside/Laguna-S-2.1-NVFP4" reads as "Laguna S 2.1" with NVFP4 called out
 // as the quantization, so rows speak the model's name, not its repo path.
+// "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw" reads as "GLM 5.3 Flash TR3" with
+// "EXL3 4bpw" as the quantization, because the format and its width are one
+// answer to one question.
 export function readableWeights(repository: string): { name: string; quant?: string } {
   const basename = repository.split('/').pop() ?? repository
-  let quant: string | undefined
-  const words = basename.split(/[-_]/).filter(word => {
-    if (QUANTS.has(word.toUpperCase())) {
-      quant = word.toUpperCase()
-      return false
-    }
-    return true
-  })
-  return { name: words.join(' ').replace(/^([A-Za-z]+?)(\d)/, '$1 $2'), quant }
+  const words = basename.split(/[-_]/)
+  const format = words.find(word => QUANTS.has(word.toUpperCase()))
+  const width = format ? words.find(word => BITS_PER_WEIGHT.test(word)) : undefined
+  const spoken = new Set([format, width].filter(word => word !== undefined))
+  const name = words.filter(word => !spoken.has(word)).join(' ')
+  return {
+    name: name.replace(/^([A-Za-z]+?)(\d)/, '$1 $2'),
+    quant: format && [format.toUpperCase(), width?.toLowerCase()].filter(Boolean).join(' '),
+  }
 }

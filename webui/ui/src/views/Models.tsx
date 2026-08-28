@@ -64,6 +64,8 @@ const USE: Record<string, string> = {
     'Mixture of experts, 31B total with 3B active, built for reasoning. Serves text today. 131K context.',
   'inkling-small-nvfp4-2s':
     'Mixture of experts, 276B total with 12B active. Reads text, images and audio. Runs across both Sparks.',
+  'glm53-flash-exl3-2s':
+    'Mixture of experts, 320B total with 18B active. Reads text, images and video. Thinks before it answers and calls tools. Serves 900K of its native 1M context. Runs across both Sparks.',
 }
 // What a row says about a model this build has written no line for. The feed
 // can add a recipe without a console build, and the catalog no longer groups
