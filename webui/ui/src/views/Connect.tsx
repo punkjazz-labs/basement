@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
-import { api, idempotency, copyText, type APIKey } from '../api'
-import { confirmBox, noticeBox } from '../confirm'
+import { copyText, type APIKey } from '../api'
+import { noticeBox } from '../confirm'
 import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
+import { confirmRevoke, createKey, deleteKey, listKeys } from '../keys'
 import { DEFAULT_ROLE } from '../roles'
+import { SecretReveal } from '../secret'
 
 const SNIPPETS = ['curl', 'Python', 'JavaScript', 'LiteLLM'] as const
 type Snippet = (typeof SNIPPETS)[number]
@@ -67,7 +69,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
   // the one role that answers before anything has been assigned to it.
   const model = `role/${DEFAULT_ROLE}`
 
-  const load = () => api<APIKey[]>('/api/v1/keys').then(setKeys).catch(() => {})
+  const load = () => listKeys().then(setKeys).catch(() => {})
   useEffect(() => {
     load()
   }, [])
@@ -75,11 +77,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
   const create = async (event: React.FormEvent) => {
     event.preventDefault()
     try {
-      const result = await api<{ key: APIKey; secret: string }>('/api/v1/keys', {
-        method: 'POST',
-        headers: idempotency(),
-        body: JSON.stringify({ name: newName }),
-      })
+      const result = await createKey(newName)
       setFreshSecret({ name: result.key.name, secret: result.secret })
       setNewName('')
       load()
@@ -89,15 +87,10 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
   }
 
   const revoke = async (key: APIKey) => {
-    const { ok } = await confirmBox({
-      title: `Revoke “${key.name}”?`,
-      body: 'Clients using this key stop working immediately.',
-      confirmLabel: 'Revoke key',
-      danger: true,
-    })
+    const { ok } = await confirmRevoke(key)
     if (!ok) return
     try {
-      await api(`/api/v1/keys/${encodeURIComponent(key.id)}`, { method: 'DELETE', body: '{}' })
+      await deleteKey(key)
       load()
     } catch (problem) {
       noticeBox('Could not revoke the key', problem instanceof Error ? problem.message : undefined)
@@ -137,17 +130,13 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
           <span className="muted">Needed by every client except this console.</span>
         </div>
         {freshSecret && (
-          <div className="secret-reveal" role="alert">
-            <strong>“{freshSecret.name}” created. Copy the key now.</strong>
-            <span className="muted">It will not be shown again.</span>
-            <code>{freshSecret.secret}</code>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button className="primary" onClick={() => copy('secret', freshSecret.secret)}>
-                {copied === 'secret' ? 'Copied' : 'Copy key'}
-              </button>
-              <button className="ghost" onClick={() => setFreshSecret(null)}>Done</button>
-            </div>
-          </div>
+          <SecretReveal
+            name={freshSecret.name}
+            secret={freshSecret.secret}
+            copied={copied === 'secret'}
+            onCopy={() => copy('secret', freshSecret.secret)}
+            onDone={() => setFreshSecret(null)}
+          />
         )}
         {keys.map(key => (
           <div className="key-row" key={key.id}>
