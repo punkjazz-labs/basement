@@ -31,3 +31,13 @@ export const confirmRevoke = (key: APIKey) =>
 
 export const deleteKey = (key: APIKey): Promise<unknown> =>
   api(`${KEYS_PATH}/${encodeURIComponent(key.id)}`, { method: 'DELETE', body: '{}' })
+
+// The whole revoke: ask, and delete only on a yes. It answers whether the key
+// went, so each screen knows whether it has a list to read again. A refused
+// question deletes nothing.
+export async function revokeKey(key: APIKey): Promise<boolean> {
+  const { ok } = await confirmRevoke(key)
+  if (!ok) return false
+  await deleteKey(key)
+  return true
+}

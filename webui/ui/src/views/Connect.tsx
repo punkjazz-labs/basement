@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { copyText, type APIKey } from '../api'
 import { noticeBox } from '../confirm'
 import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
-import { confirmRevoke, createKey, deleteKey, listKeys } from '../keys'
+import { createKey, listKeys, revokeKey } from '../keys'
 import { DEFAULT_ROLE } from '../roles'
 import { SecretReveal } from '../secret'
 
@@ -87,10 +87,8 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
   }
 
   const revoke = async (key: APIKey) => {
-    const { ok } = await confirmRevoke(key)
-    if (!ok) return
     try {
-      await deleteKey(key)
+      if (!await revokeKey(key)) return
       load()
     } catch (problem) {
       noticeBox('Could not revoke the key', problem instanceof Error ? problem.message : undefined)
