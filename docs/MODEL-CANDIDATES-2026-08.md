@@ -948,3 +948,17 @@ launcher's own numbers) and costs little on prose (24.6 against 26.9).
    correctness issues and an upstream that rewrote its weight-mirror target
    twice in that window. Round 5 recorded what upstream drift costs. A pin
    taken today may not survive the week.
+
+## Correction to Round 7, 2026-08-28
+
+Section 1 above records `patch_suppress_stops_in_reasoning.py` and
+`patch_scheduler_decode_floor.py` as already applied in the published image,
+and their runtime mounts as belt and braces. The image bytes disagree: both
+files are absent from the image, its config build history contains no `RUN`
+for either, and `/opt/glm53` holds ten files of which only
+`patch_glm_video_placeholders.py` is one of the three. The cause is a timing
+gap, because the image was created at 2026-08-28T10:46:05+03:00, about ten
+hours before the pinned commit `bd7f55ed`, so it was built from an earlier
+commit than the Dockerfile this research read. The launcher hides the gap,
+because it bind-mounts all three patches and runs them at container start, so
+`packaging/glm53-flash-image` bakes all three and not the video patch alone.
