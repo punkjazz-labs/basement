@@ -704,17 +704,23 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 	if s.PageSize != 0 && s.PageSize != 64 {
 		return errors.New("sglang page_size must be unset or 64")
 	}
-	// mamba_track_interval is checked against the page size because the
-	// Mamba state it saves is addressed in whole pages. An interval that is
-	// not a multiple of the page a recipe pins is the launcher's own
-	// documented error, and it is cheaper to refuse it here than on hardware.
+	// mamba_track_interval is checked against the page size because the Mamba
+	// state it saves is addressed in whole pages. The launcher pins the two
+	// together and never one alone, so an interval without a page is a shape
+	// no launcher has run, and it is the one shape where this schema would
+	// hold the interval to no rule at all. With a page pinned, the multiple is
+	// the launcher's own documented error, and it is cheaper to refuse it here
+	// than on hardware.
 	if s.MambaTrackInterval < 0 {
 		return errors.New("sglang mamba_track_interval must not be negative")
 	}
-	if s.MambaTrackInterval > 0 && s.PageSize > 0 && s.MambaTrackInterval%s.PageSize != 0 {
+	if s.MambaTrackInterval > 0 && s.PageSize == 0 {
+		return errors.New("sglang mamba_track_interval requires page_size")
+	}
+	if s.MambaTrackInterval > 0 && s.MambaTrackInterval%s.PageSize != 0 {
 		return errors.New("sglang mamba_track_interval must be a multiple of page_size")
 	}
-	if err := validateCUDAGraphBatchSizes(s.CudaGraphBSDecode); err != nil {
+	if err := validateCUDAGraphBatchSizes(s.CUDAGraphBSDecode, s.MaxRunningRequests); err != nil {
 		return err
 	}
 	if s.SpeculativeAlgorithm == "" && (s.SpeculativeNumDraftTokens != 0 || s.SpeculativeModelRole != "") {
@@ -747,6 +753,15 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 	if s.SpeculativeEagleTopK > 0 && !eagleFamilySpeculation[s.SpeculativeAlgorithm] {
 		return errors.New("sglang speculative_eagle_topk requires speculative_algorithm EAGLE, EAGLE3 or NEXTN")
 	}
+	// NEXTN is the narrow member of that family. It drafts with the head the
+	// checkpoint carries, and the implementation behind it takes one branch
+	// and no more: the qualified launcher refuses any other top-k before it
+	// starts a server. Upstream SGLang does accept a wider top-k for other
+	// architectures, so this rule is narrower than the runtime on purpose,
+	// and it widens when a second NEXTN launcher qualifies another value.
+	if s.SpeculativeAlgorithm == "NEXTN" && s.SpeculativeEagleTopK > 1 {
+		return errors.New("sglang speculative_eagle_topk must be 1 with speculative_algorithm NEXTN")
+	}
 	return validateChatTemplateFile(s.ChatTemplateFile)
 }
 
@@ -754,26 +769,41 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 // EAGLE-style heads, which are the ones --speculative-eagle-topk shapes.
 var eagleFamilySpeculation = map[string]bool{"EAGLE": true, "EAGLE3": true, "NEXTN": true}
 
+// cudaGraphBatchPattern admits a batch size as a launcher writes one: decimal
+// digits, no sign and no leading zero. Atoi would read "+2" and "007" as 2 and
+// 7, and they would then reach the container command in a form no launcher
+// uses, which makes a later drift comparison read as a change.
+var cudaGraphBatchPattern = regexp.MustCompile(`^[1-9][0-9]*$`)
+
 // validateCUDAGraphBatchSizes checks --cuda-graph-bs-decode, which is a list
 // rather than a number. SGLang captures one decode graph per batch size in
-// it, so every entry must be a batch a server can really run, and the list
-// must climb. A repeated or falling entry is a typing mistake rather than a
-// ladder, and a repeat would spend graph memory twice for the same batch. An
-// empty value leaves the flag off and SGLang's own list stands.
-func validateCUDAGraphBatchSizes(list string) error {
+// it, so the list must climb and no entry may name a batch the server will
+// never run: max_running_requests is the largest batch a recipe admits, and
+// the launcher's own note beside this flag is to extend the list alongside
+// that number. A graph for a larger batch is captured from the pool the
+// weights live in and can never be replayed, which is the graph-pool overrun
+// this flag exists to prevent. An empty value leaves the flag off and
+// SGLang's own list stands.
+func validateCUDAGraphBatchSizes(list string, maxRunningRequests int) error {
 	if list == "" {
 		return nil
 	}
-	problem := errors.New("sglang cuda_graph_bs_decode must be positive whole numbers, separated by spaces, in increasing order")
+	problem := errors.New("sglang cuda_graph_bs_decode must be positive whole numbers, separated by whitespace, in increasing order")
 	sizes := strings.Fields(list)
 	if len(sizes) == 0 {
 		return problem
 	}
 	previous := 0
 	for _, size := range sizes {
-		batch, err := strconv.Atoi(size)
-		if err != nil || batch <= 0 || batch <= previous {
+		if !cudaGraphBatchPattern.MatchString(size) {
 			return problem
+		}
+		batch, err := strconv.Atoi(size)
+		if err != nil || batch <= previous {
+			return problem
+		}
+		if batch > maxRunningRequests {
+			return errors.New("sglang cuda_graph_bs_decode must not name a batch above max_running_requests")
 		}
 		previous = batch
 	}

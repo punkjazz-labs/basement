@@ -424,7 +424,7 @@ func sglangRecipe() recipe.Recipe {
 				MambaSSMDType: "bfloat16", MambaFullMemoryRatio: "4.21", MambaRadixCacheStrategy: "extra_buffer_lazy",
 				MaxMambaCacheSize: 40, SpeculativeNumSteps: 3, SpeculativeEagleTopK: 1, SamplingDefaults: "model",
 				PageSize: 64, MambaTrackInterval: 64, AllowAutoTruncate: true, PLEOffloadEmbedding: true,
-				CudaGraphBSDecode: "1 2 4 8",
+				CUDAGraphBSDecode: "1 2 4 8",
 			},
 		},
 	}
@@ -512,7 +512,7 @@ func TestSGLangCommandOmitsUnsetFields(t *testing.T) {
 func TestSGLangCommandOmitsAnEmptyDecodeGraphList(t *testing.T) {
 	r := sglangRecipe()
 	block := *r.Service.SGLang
-	block.CudaGraphBSDecode = "   "
+	block.CUDAGraphBSDecode = "   "
 	r.Service.SGLang = &block
 	if args := sglangArgs(r, Placement{}); hasArgument(args, "--cuda-graph-bs-decode") {
 		t.Fatalf("sglang arguments carry a decode graph flag with no batch size: %s", strings.Join(args, " "))

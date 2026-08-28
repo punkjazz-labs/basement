@@ -917,7 +917,7 @@ func sglangArgs(r recipe.Recipe, placement Placement) []string {
 	// recipe's list is split into the words SGLang's own parser reads. A list
 	// of nothing leaves the flag off entirely: a bare flag with no batch size
 	// after it is an argument error, not a default.
-	if sizes := strings.Fields(s.CudaGraphBSDecode); len(sizes) > 0 {
+	if sizes := strings.Fields(s.CUDAGraphBSDecode); len(sizes) > 0 {
 		args = append(args, "--cuda-graph-bs-decode")
 		args = append(args, sizes...)
 	}

@@ -453,7 +453,10 @@ func sparseAttentionSGLang(s *SGLangConfig) {
 	s.MambaTrackInterval = 64
 	s.AllowAutoTruncate = true
 	s.PLEOffloadEmbedding = true
-	s.CudaGraphBSDecode = "1 2 3 4 5 6 7 8 10 12 14 16"
+	// The launcher's own pair: a decode graph ladder that stops at the
+	// largest batch the server admits.
+	s.MaxRunningRequests = 16
+	s.CUDAGraphBSDecode = "1 2 3 4 5 6 7 8 10 12 14 16"
 }
 
 // TestValidateAcceptsSGLangSparseAttentionFields covers the settings the
@@ -466,6 +469,20 @@ func TestValidateAcceptsSGLangSparseAttentionFields(t *testing.T) {
 	sparseAttentionSGLang(candidate.Service.SGLang)
 	if err := Validate(candidate); err != nil {
 		t.Fatalf("Validate()=%v, want nil", err)
+	}
+	// NEXTN drafts with one branch, which is the only top-k its launcher
+	// starts with, and leaving the value unset keeps the flag off the command
+	// line the way every other number in this block does.
+	candidate.Service.SGLang.SpeculativeEagleTopK = 0
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() with an unpinned top-k=%v, want nil", err)
+	}
+	// A ladder that stops short of max_running_requests is a smaller capture
+	// set, not an error; only a batch above it is refused.
+	candidate.Service.SGLang.SpeculativeEagleTopK = 1
+	candidate.Service.SGLang.CUDAGraphBSDecode = "1 2 4"
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() with a short decode ladder=%v, want nil", err)
 	}
 }
 
@@ -486,6 +503,29 @@ func TestSGLangSparseAttentionFieldsSurviveARoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(*decoded.Service.SGLang, *candidate.Service.SGLang) {
 		t.Fatalf("decoded sglang block=%#v, want %#v", *decoded.Service.SGLang, *candidate.Service.SGLang)
+	}
+}
+
+// TestSGLangSparseAttentionKeysAreTheDocumentedNames reads the new settings
+// from a hand-written fragment instead of from a marshalled struct. The round
+// trip above encodes with the same tags it then decodes with, so it would
+// accept a misspelled key; a recipe author writes these names by hand, and
+// each one has to match the flag it stands for.
+func TestSGLangSparseAttentionKeysAreTheDocumentedNames(t *testing.T) {
+	fragment := "page_size: 64\n" +
+		"mamba_track_interval: 64\n" +
+		"allow_auto_truncate: true\n" +
+		"ple_offload_embedding: true\n" +
+		"cuda_graph_bs_decode: \"1 2 4 8\"\n"
+	decoder := yaml.NewDecoder(strings.NewReader(fragment))
+	decoder.KnownFields(true)
+	var block SGLangConfig
+	if err := decoder.Decode(&block); err != nil {
+		t.Fatalf("decode sglang fragment=%v", err)
+	}
+	if block.PageSize != 64 || block.MambaTrackInterval != 64 || !block.AllowAutoTruncate ||
+		!block.PLEOffloadEmbedding || block.CUDAGraphBSDecode != "1 2 4 8" {
+		t.Fatalf("decoded block=%#v", block)
 	}
 }
 
@@ -531,17 +571,30 @@ func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
 		}, "speculative_eagle_topk requires speculative_algorithm EAGLE, EAGLE3 or NEXTN"},
 		{"chunked prefill size too large", func(r *Recipe) { r.Service.SGLang.ChunkedPrefillSize = 65537 }, "chunked_prefill_size must be between 0 and 65536"},
 		{"max mamba cache size too large", func(r *Recipe) { r.Service.SGLang.MaxMambaCacheSize = 4097 }, "max_mamba_cache_size must be between 0 and 4096"},
+		{"NEXTN drafting with more than one branch", func(r *Recipe) {
+			r.Service.SGLang.SpeculativeAlgorithm = "NEXTN"
+			r.Service.SGLang.SpeculativeNumDraftTokens = 4
+			r.Service.SGLang.SpeculativeEagleTopK = 2
+		}, "speculative_eagle_topk must be 1 with speculative_algorithm NEXTN"},
 		{"page size no launcher has run", func(r *Recipe) { r.Service.SGLang.PageSize = 32 }, "page_size must be unset or 64"},
 		{"mamba track interval off the page grid", func(r *Recipe) {
 			r.Service.SGLang.PageSize = 64
 			r.Service.SGLang.MambaTrackInterval = 96
 		}, "mamba_track_interval must be a multiple of page_size"},
+		{"mamba track interval with no page to sit on", func(r *Recipe) { r.Service.SGLang.MambaTrackInterval = 64 }, "mamba_track_interval requires page_size"},
 		{"negative mamba track interval", func(r *Recipe) { r.Service.SGLang.MambaTrackInterval = -64 }, "mamba_track_interval must not be negative"},
-		{"decode graph batch sizes that repeat", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "1 2 2" }, "cuda_graph_bs_decode must be positive whole numbers"},
-		{"decode graph batch sizes that fall", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "4 2" }, "cuda_graph_bs_decode must be positive whole numbers"},
-		{"decode graph batch size that is not a number", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "1 two 3" }, "cuda_graph_bs_decode must be positive whole numbers"},
-		{"decode graph batch size of zero", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "0 1" }, "cuda_graph_bs_decode must be positive whole numbers"},
-		{"decode graph batch sizes that are only spaces", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "   " }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch sizes that repeat", func(r *Recipe) { r.Service.SGLang.CUDAGraphBSDecode = "1 2 2" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch sizes that fall", func(r *Recipe) { r.Service.SGLang.CUDAGraphBSDecode = "4 2" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch size that is not a number", func(r *Recipe) { r.Service.SGLang.CUDAGraphBSDecode = "1 two 3" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch size of zero", func(r *Recipe) { r.Service.SGLang.CUDAGraphBSDecode = "0 1" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch size with a sign", func(r *Recipe) { r.Service.SGLang.CUDAGraphBSDecode = "1 +2 4" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch size with a leading zero", func(r *Recipe) { r.Service.SGLang.CUDAGraphBSDecode = "1 007 8" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch sizes that are only spaces", func(r *Recipe) { r.Service.SGLang.CUDAGraphBSDecode = "   " }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch above the largest the server admits", func(r *Recipe) {
+			// The candidate serves 8 requests at once, so a graph for 16
+			// could never be replayed.
+			r.Service.SGLang.CUDAGraphBSDecode = "1 2 16"
+		}, "cuda_graph_bs_decode must not name a batch above max_running_requests"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
