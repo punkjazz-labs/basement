@@ -962,3 +962,18 @@ hours before the pinned commit `bd7f55ed`, so it was built from an earlier
 commit than the Dockerfile this research read. The launcher hides the gap,
 because it bind-mounts all three patches and runs them at container start, so
 `packaging/glm53-flash-image` bakes all three and not the video patch alone.
+
+## Round 7 outcome, 2026-08-28
+
+The owner ruled option 1: ship the model on the MTP path and exclude the
+DFlash2 drafter, so the CC BY-NC-ND artifact is neither downloaded nor
+referenced, and the recipe carries the base MIT licence beside the
+checkpoint's ShapleyMCG License 1.0. The shipped shape is two Sparks at TP=2
+on basement's own image,
+`ghcr.io/punkjazz-labs/basement-vllm-glm53-flash-exl3@sha256:5c7a0f538f7aa05647ae0c97bc5333330c6441043f7e00defa14fc2cff6ee343`,
+which bakes all three launcher patches and was published by CI run
+33206079321. The recipe is `glm53-flash-exl3-2s`, version 1, candidate and not
+hardware-qualified, pinning the checkpoint at the launcher's own revision
+`25a44fdb`. One correction to section 3 above: the live tree sum at that
+revision is **175,715,854,754 bytes**, seven below the figure recorded there,
+and the install compares that total for equality.
