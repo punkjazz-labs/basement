@@ -484,7 +484,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
             <div className="m-id">
               {thisRecipe ? (
                 <>
-                  <Mark recipeIDs={[thisRecipe.id]} name={thisRecipe.display_name} size={24} />
+                  <Mark recipe={thisRecipe} recipeIDs={[thisRecipe.id]} size={24} />
                   <div className="nm" style={{ fontSize: 13 }}>{thisRecipe.display_name}</div>
                 </>
               ) : (
@@ -544,7 +544,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                   <div className="m-id">
                     {peerRecipe ? (
                       <>
-                        <Mark recipeIDs={[peerRecipe.id]} name={peerRecipe.display_name} size={24} />
+                        <Mark recipe={peerRecipe} recipeIDs={[peerRecipe.id]} size={24} />
                         <div className="nm" style={{ fontSize: 13 }}>{peerRecipe.display_name}</div>
                       </>
                     ) : (
@@ -635,8 +635,9 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                     {serving ? (
                       <>
                         <Mark
+                          recipe={servingRecipe}
                           recipeIDs={[serving.recipe_id]}
-                          name={servingRecipe?.display_name ?? serving.recipe_id}
+                          name={serving.recipe_id}
                           size={24}
                         />
                         {/* Named by this console's catalog when it knows the

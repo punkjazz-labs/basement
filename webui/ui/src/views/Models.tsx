@@ -35,21 +35,27 @@ import {
 // count with the active count where the two differ, what the model reads, and
 // the work it is for. Every claim traces to the recipe, to
 // docs/MODEL-CANDIDATES-2026-08.md, or to the publisher's own model card.
+//
+// What a model reads is read from the recipe, never from the card: a card can
+// describe a multimodal model that this recipe serves with images off, and the
+// line has to state what the install actually serves. So a recipe with
+// multimodal_image_limit 0 says it serves text today, and one with a limit
+// above 0 says it reads images.
 const USE: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s':
-    'Mixture of experts, 35B total with 3B active for each token. The quick daily model for chat, coding help and tool use.',
+    'Mixture of experts, 35B total with 3B active for each token. Reads text and images. The quick daily model for chat, coding help and tool use.',
   'qwen36-27b-nvfp4-1s':
-    'Dense 27B tuned for coding and agent work. Serves with speculative decoding for faster answers.',
+    'Dense 27B tuned for coding and agent work. Reads text and images. Serves with speculative decoding for faster answers.',
   'qwen35-122b-a10b-nvfp4-1s':
-    'Mixture of experts, 122B total with 10B active. It carries a built-in speculative head for faster decode. 262K context.',
+    'Mixture of experts, 122B total with 10B active. Serves text today, with a built-in speculative head for faster decoding. 262K context.',
   'qwen38-27b-nvfp4-1s':
     'Dense 27.8B with hybrid attention and built-in vision. Thinks before it answers by default. 262K context.',
   'qwen38-27b-obliterated-q8-0-1s':
     'A community build of Qwen 3.8 27B with the refusal behaviour removed by weight ablation. You own what you make with it.',
   'qwen38-flash-next-nvfp4-2s':
-    'Mixture of experts, 180B total with 6B active. Reads text, images and video. 262K context. Runs across both Sparks.',
+    'Mixture of experts, 176B total with 6B active. Reads text, images and video. 262K context. Runs across both Sparks.',
   'laguna-s-2-1-nvfp4-dflash-1s':
-    "poolside's coding model with its DFlash draft companion for faster decode. Built for long agent runs.",
+    "poolside's coding model with its DFlash draft companion for faster decoding. Built for long agent runs.",
   'deepseek-v4-flash-0731-2s':
     "DeepSeek's official V4 Flash release in its own weights, FP8 attention with FP4 experts. Runs across both Sparks.",
   'deepseek-v4-flash-0731-ud-iq3-xxs-1s':
@@ -61,6 +67,15 @@ const USE: Record<string, string> = {
   'inkling-small-nvfp4-2s':
     'Mixture of experts, 276B total with 12B active. Reads text, images and audio. Runs across both Sparks.',
 }
+// What a row says about a model this build has written no line for. The feed
+// can add a recipe without a console build, and the catalog no longer groups
+// by Spark count, so the fallback states the one thing every recipe knows and
+// the owner has to plan for: how many machines it needs.
+const fallbackUse = (recipe: Recipe): string =>
+  recipe.topology.spark_count > 1
+    ? `Local model that runs across ${recipe.topology.spark_count} Sparks.`
+    : 'Local model for your Spark.'
+
 // Community-reported typical speeds on a DGX Spark, shown until this device
 // measures its own number. Each figure traces to a corroborated measurement
 // recorded in docs/MODEL-CANDIDATES-2026-08.md.
@@ -1149,7 +1164,7 @@ export default function Models({
           }}
         >
           <div className="m-id">
-            <Mark recipeIDs={[recipe.id]} name={recipe.display_name} size={28} />
+            <Mark recipe={recipe} recipeIDs={[recipe.id]} size={28} />
             <div>
               <div className="nm">
                 {recipe.display_name}{' '}
@@ -1163,7 +1178,7 @@ export default function Models({
                   </span>
                 ))}
               </div>
-              <div className="use">{USE[recipe.id] ?? 'Local model for your Spark.'}</div>
+              <div className="use">{USE[recipe.id] ?? fallbackUse(recipe)}</div>
             </div>
           </div>
           <div className="m-num">
@@ -1419,7 +1434,7 @@ export default function Models({
       {featured && (
         <section className="hero" aria-label="Recommended model">
           <div className="hero-top">
-            <Mark recipeIDs={[featured.id]} name={featured.display_name} size={68} />
+            <Mark recipe={featured} recipeIDs={[featured.id]} size={68} />
             <div className="hero-name">
               <p className="kicker">Recommended for your Spark</p>
               <h2>{featured.display_name}</h2>

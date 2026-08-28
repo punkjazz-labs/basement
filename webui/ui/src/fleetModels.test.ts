@@ -1401,6 +1401,14 @@ describe('which tab a model sits under', () => {
     expect(shelves(split.labs)).toEqual([['Qwen · Alibaba', [fast.id, obliterated.id]]])
   })
 
+  // model_by is free text a feed can deliver in any case. One lab written two
+  // ways draws one divider, under the first spelling the catalog gave it.
+  it('draws one divider for a lab written two ways', () => {
+    const shouty = recipe('deepseek-v5-2s', 'DEEPSEEK')
+    const split = splitModels([flagship, shouty], none, none, [])
+    expect(shelves(split.labs)).toEqual([['DeepSeek', [flagship.id, shouty.id]]])
+  })
+
   // A recipe that names no maker still has to sit somewhere, and it sits
   // under the name it does declare rather than under a lab that has not
   // claimed it.

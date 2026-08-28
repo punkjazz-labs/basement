@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { copyText } from '../api'
+import { copyText, type Recipe } from '../api'
 import { Mark } from '../mark'
 import { confirmBox } from '../confirm'
 import {
@@ -140,10 +140,14 @@ const LiveAnswer = memo(function LiveAnswer({ text }: { text: string }) {
 
 // Streams straight through the manager's own /v1 proxy using the console
 // session — the same endpoint and behavior an API-key client gets.
-export default function Playground({ ready, modelID, modelName, recipeID, chatModels }: {
+export default function Playground({ ready, modelID, modelName, recipe, recipeID, chatModels }: {
   ready: boolean
   modelID?: string
   modelName?: string
+  // The recipe of the model serving here, where this console holds one. A
+  // model can serve whose recipe the catalog does not hold, so the mark this
+  // feeds asks for nothing it cannot do without.
+  recipe?: Recipe
   recipeID?: string
   // Every text model serving on this Spark right now. Two or more of them is
   // the whole condition for the council being offered at all.
@@ -684,7 +688,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   return (
     <div className="playground">
       <div className="section-head play-head">
-        <Mark recipeIDs={recipeID ? [recipeID] : []} name={targetName} size={30} />
+        <Mark recipe={recipe} recipeIDs={recipeID ? [recipeID] : []} name={targetName} size={30} />
         <div>
           <strong>{targetName}</strong>
           <div className="faint">Serving on this Spark</div>

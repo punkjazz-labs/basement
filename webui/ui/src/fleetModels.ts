@@ -3,7 +3,7 @@ import {
   type FleetDeploymentView, type FleetModelSnapshot, type FleetNodeSummary, type FleetSummary,
   type InstallRequest, type NodeInventory, type Peer, type PlacementCandidate, type PlacementPlan,
 } from './api'
-import { labFor } from './catalog'
+import { labFor, labKey } from './catalog'
 import { consoleKey, inFleet, isLocalNode, nodeName, nodeServing, nodeStatus, type NodeStatus } from './fleetInvite'
 
 // The Models view, read across the whole fleet. Everything here is pure: one
@@ -1009,7 +1009,9 @@ export interface ModelsSplit<T> {
 // A lab is added the first time one of its models appears, and every later
 // model of that lab joins the group it opened. Sorted input therefore yields
 // groups that run one after the other, and unsorted input still yields one
-// group per lab rather than the same lab twice.
+// group per lab rather than the same lab twice. Groups are held on the folded
+// lab key, so one lab written two ways draws one divider, under the first
+// spelling the catalog gave.
 export function splitModels<T extends TabbedRecipe>(
   recipes: readonly T[],
   localRecipeIDs: ReadonlySet<string>,
@@ -1024,10 +1026,11 @@ export function splitModels<T extends TabbedRecipe>(
       continue
     }
     const label = labFor(recipe)
-    let group = groups.get(label)
+    const key = labKey(label)
+    let group = groups.get(key)
     if (!group) {
       group = { label, models: [] }
-      groups.set(label, group)
+      groups.set(key, group)
       split.labs.push(group)
     }
     group.models.push(recipe)

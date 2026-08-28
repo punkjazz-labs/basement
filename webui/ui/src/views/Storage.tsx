@@ -99,6 +99,10 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
   const otherUsed = Math.max(total - managed - free, 0)
   const pct = (bytes: number) => `${Math.max((bytes / total) * 100, 0.4)}%`
   const recipeName = (id: string) => recipes.find(recipe => recipe.id === id)?.display_name ?? id
+  // Files outlive the recipe that downloaded them, so a row here can name an
+  // id this console no longer holds a recipe for. The mark reads the recipe
+  // where there is one, and falls back to a quiet block where there is none.
+  const recipeFor = (id?: string) => recipes.find(recipe => recipe.id === id)
 
   return (
     <div className="stack">
@@ -150,7 +154,12 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
                 const installed = models.some(model => model.recipe_id === group.recipeID)
                 return (
                   <div className="storage-row" key={group.recipeID}>
-                    <Mark recipeIDs={[group.recipeID]} name={recipeName(group.recipeID)} size={24} />
+                    <Mark
+                      recipe={recipeFor(group.recipeID)}
+                      recipeIDs={[group.recipeID]}
+                      name={recipeName(group.recipeID)}
+                      size={24}
+                    />
                     <div className="grow">
                       <strong>{recipeName(group.recipeID)}</strong>
                       <div className="faint" style={{ fontSize: 12 }}>
@@ -171,7 +180,7 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
                 const { name, quant } = readableWeights(artifact.repository)
                 return (
                   <div className="storage-row" key={`${artifact.repository}@${artifact.revision}`}>
-                    <Mark recipeIDs={[]} name={name} size={24} />
+                    <Mark name={name} size={24} />
                     <div className="grow">
                       <strong>{name}</strong>
                       <div className="faint" style={{ fontSize: 12 }}>
@@ -207,7 +216,12 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
             const usedBy = image.recipe_ids.map(recipeName).join(', ')
             return (
               <div className="storage-row" key={image.reference}>
-                <Mark recipeIDs={image.recipe_ids} name={title} size={24} />
+                <Mark
+                  recipe={recipeFor(image.recipe_ids[0])}
+                  recipeIDs={image.recipe_ids}
+                  name={title}
+                  size={24}
+                />
                 <div className="grow">
                   <strong>{title}</strong>
                   <div className="faint" style={{ fontSize: 12 }}>

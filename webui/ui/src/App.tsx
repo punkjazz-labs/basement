@@ -410,6 +410,7 @@ export default function App() {
               ready={activeModel?.status === 'ready'}
               modelID={activeRecipe?.service.served_model_id}
               modelName={activeRecipe?.display_name}
+              recipe={activeRecipe}
               recipeID={activeRecipe?.id}
               chatModels={chatModels}
             />

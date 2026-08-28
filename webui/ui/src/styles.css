@@ -20,7 +20,7 @@
   --accent-ink: #fff4e8;    /* text on orange */
   --accent-deep: #f2703c;   /* orange as text on dark surfaces */
   --live: #76b900;          /* NVIDIA green: a model is serving */
-  --chip: #1d4733;          /* forest: editorial stamps (RECOMMENDED) */
+  --chip: #1d4733;          /* forest: editorial stamps */
   --chip-line: #2f5f47;
   --warn: #d9a12f;
   --fail: #e0644e;
@@ -241,7 +241,7 @@ input[type='text'], input[type='password'], textarea {
 }
 .hero-top { display: flex; gap: 18px; align-items: center; }
 .hero-top img { width: 68px; height: 68px; border-radius: 15px; border: 1px solid var(--line); }
-.hero-top .mark { border-radius: 15px; }
+.hero-top .mark { width: 68px; height: 68px; border-radius: 15px; font-size: 28px; }
 .hero-name h2 { font-size: 21px; letter-spacing: -0.02em; }
 .hero-name .pub { color: var(--muted); font-size: 12.5px; margin: 2px 0 0; }
 .hero-get { margin-left: auto; display: grid; justify-items: center; gap: 5px; }
@@ -292,9 +292,11 @@ input[type='text'], input[type='password'], textarea {
 .m-id img { width: 28px; height: 28px; border-radius: 6px; flex: none; }
 /* A model from a lab this build ships no mark for. It stands in the same
    square the logos use, and stays quiet: it says the mark is missing, it does
-   not pretend to be a brand. */
+   not pretend to be a brand. Each place that sizes its logos sizes this the
+   same way, so a row of marks never draws two different squares. */
 .mark {
   flex: none; display: grid; place-items: center; border-radius: 6px;
+  width: 28px; height: 28px; font-size: 12px;
   background: var(--surface-2); border: 1px solid var(--line);
   color: var(--muted); font-weight: 700; text-transform: uppercase; line-height: 1;
 }
@@ -1251,6 +1253,7 @@ button.chip:hover { color: var(--ink); }
 .disk-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
 .storage-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .storage-row img { width: 24px; height: 24px; border-radius: 6px; flex: none; }
+.storage-row .mark { width: 24px; height: 24px; font-size: 10px; }
 .storage-row .grow strong { font-weight: 600; }
 
 /* The head over the transcript keeps its height while the transcript takes
@@ -1267,6 +1270,7 @@ button.chip:hover { color: var(--ink); }
   border-left: 2px solid var(--line-strong); padding-left: 10px; margin-bottom: 10px;
 }
 .play-head img { border-radius: 8px; flex: none; }
+.play-head .mark { width: 30px; height: 30px; border-radius: 8px; font-size: 13px; }
 .play-head strong { font-size: 14px; font-weight: 600; display: block; }
 .play-head .faint { font-size: 12px; }
 .storage-row:last-child { border-bottom: 0; }
