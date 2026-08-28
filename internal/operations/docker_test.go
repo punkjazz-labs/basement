@@ -423,6 +423,8 @@ func sglangRecipe() recipe.Recipe {
 				TrustRemoteCode: true, ChunkedPrefillSize: 8192, DisablePrefillCUDAGraph: true,
 				MambaSSMDType: "bfloat16", MambaFullMemoryRatio: "4.21", MambaRadixCacheStrategy: "extra_buffer_lazy",
 				MaxMambaCacheSize: 40, SpeculativeNumSteps: 3, SpeculativeEagleTopK: 1, SamplingDefaults: "model",
+				PageSize: 64, MambaTrackInterval: 64, AllowAutoTruncate: true, PLEOffloadEmbedding: true,
+				CudaGraphBSDecode: "1 2 4 8",
 			},
 		},
 	}
@@ -465,6 +467,13 @@ func TestSGLangCommandIsPinnedAndComplete(t *testing.T) {
 		"--speculative-num-steps", "3",
 		"--speculative-eagle-topk", "1",
 		"--sampling-defaults", "model",
+		"--page-size", "64",
+		"--mamba-track-interval", "64",
+		"--allow-auto-truncate",
+		"--ple-offload-embedding",
+		// One batch size per argument: SGLang's own parser reads a list here,
+		// so a single "1 2 4 8" argument would be read as one bad number.
+		"--cuda-graph-bs-decode", "1", "2", "4", "8",
 	}
 	if strings.Join(args, " ") != strings.Join(want, " ") {
 		t.Fatalf("sglang arguments\n got: %s\nwant: %s", strings.Join(args, " "), strings.Join(want, " "))
@@ -487,11 +496,26 @@ func TestSGLangCommandOmitsUnsetFields(t *testing.T) {
 		"--trust-remote-code", "--chunked-prefill-size", "--disable-prefill-cuda-graph",
 		"--mamba-ssm-dtype", "--mamba-full-memory-ratio", "--mamba-radix-cache-strategy",
 		"--max-mamba-cache-size", "--speculative-num-steps", "--speculative-eagle-topk",
-		"--sampling-defaults",
+		"--sampling-defaults", "--page-size", "--mamba-track-interval", "--allow-auto-truncate",
+		"--ple-offload-embedding", "--cuda-graph-bs-decode",
 	} {
 		if hasArgument(args, flag) {
 			t.Fatalf("sglang arguments carry %s with every hybrid-attention field unset", flag)
 		}
+	}
+}
+
+// A decode graph list that names no batch size must leave the flag off. The
+// validator refuses such a list, so this can only come from a caller that
+// built a configuration in Go; a bare --cuda-graph-bs-decode would then take
+// the next flag as its first batch size and the server would refuse to start.
+func TestSGLangCommandOmitsAnEmptyDecodeGraphList(t *testing.T) {
+	r := sglangRecipe()
+	block := *r.Service.SGLang
+	block.CudaGraphBSDecode = "   "
+	r.Service.SGLang = &block
+	if args := sglangArgs(r, Placement{}); hasArgument(args, "--cuda-graph-bs-decode") {
+		t.Fatalf("sglang arguments carry a decode graph flag with no batch size: %s", strings.Join(args, " "))
 	}
 }
 

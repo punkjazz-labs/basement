@@ -2,8 +2,11 @@ package recipe
 
 import (
 	"math"
+	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // isPinnedRevision reports whether s is a full git commit hash. The pack test
@@ -431,6 +434,61 @@ func TestValidateAcceptsSGLangHybridAttentionFields(t *testing.T) {
 	}
 }
 
+// sparseAttentionSGLang is the launch configuration of a compressed sparse
+// attention model: NEXTN drafting from the checkpoint's own head, a pinned
+// KV cache page, Mamba state tracked in whole pages, offloaded PLE embedding
+// tables and a short decode CUDA graph ladder. Every value here is one a
+// qualified launcher pins.
+func sparseAttentionSGLang(s *SGLangConfig) {
+	s.TrustRemoteCode = true
+	s.SpeculativeAlgorithm = "NEXTN"
+	s.SpeculativeNumSteps = 3
+	s.SpeculativeEagleTopK = 1
+	s.SpeculativeNumDraftTokens = 4
+	s.MambaSSMDType = "bfloat16"
+	s.MambaRadixCacheStrategy = "extra_buffer"
+	s.ReasoningParser = "auto"
+	s.ToolCallParser = "auto"
+	s.PageSize = 64
+	s.MambaTrackInterval = 64
+	s.AllowAutoTruncate = true
+	s.PLEOffloadEmbedding = true
+	s.CudaGraphBSDecode = "1 2 3 4 5 6 7 8 10 12 14 16"
+}
+
+// TestValidateAcceptsSGLangSparseAttentionFields covers the settings the
+// hybrid-attention test above does not reach: the page and tracking pair, the
+// two new switches, the decode graph list, NEXTN drafting with a top-k, the
+// plain extra_buffer Mamba strategy and the parsers a recipe leaves to the
+// chat template with "auto".
+func TestValidateAcceptsSGLangSparseAttentionFields(t *testing.T) {
+	candidate := sglangCandidate(t)
+	sparseAttentionSGLang(candidate.Service.SGLang)
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate()=%v, want nil", err)
+	}
+}
+
+// TestSGLangSparseAttentionFieldsSurviveARoundTrip proves the new settings
+// are schema rather than Go: a recipe carrying them is written out and read
+// back by the strict decoder, which refuses any field the schema does not
+// name, and every value arrives unchanged.
+func TestSGLangSparseAttentionFieldsSurviveARoundTrip(t *testing.T) {
+	candidate := sglangCandidate(t)
+	sparseAttentionSGLang(candidate.Service.SGLang)
+	document, err := yaml.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeStrict(document)
+	if err != nil {
+		t.Fatalf("DecodeStrict()=%v", err)
+	}
+	if !reflect.DeepEqual(*decoded.Service.SGLang, *candidate.Service.SGLang) {
+		t.Fatalf("decoded sglang block=%#v, want %#v", *decoded.Service.SGLang, *candidate.Service.SGLang)
+	}
+}
+
 func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
 	vllmBlock := func() *VLLMConfig {
 		recipes, err := Builtin()
@@ -466,13 +524,24 @@ func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
 		{"mamba full memory ratio too high", func(r *Recipe) { r.Service.SGLang.MambaFullMemoryRatio = "17" }, "mamba_full_memory_ratio must be a decimal above 0 and no greater than 16"},
 		{"sampling defaults outside policy", func(r *Recipe) { r.Service.SGLang.SamplingDefaults = "openai" }, "outside the recipe policy"},
 		{"speculative num steps without an algorithm", func(r *Recipe) { r.Service.SGLang.SpeculativeNumSteps = 3 }, "speculative_num_steps requires speculative_algorithm"},
-		{"speculative eagle topk with a non-EAGLE algorithm", func(r *Recipe) {
+		{"speculative eagle topk with an algorithm outside the EAGLE family", func(r *Recipe) {
 			r.Service.SGLang.SpeculativeAlgorithm = "NGRAM"
 			r.Service.SGLang.SpeculativeNumDraftTokens = 4
 			r.Service.SGLang.SpeculativeEagleTopK = 1
-		}, "speculative_eagle_topk requires speculative_algorithm EAGLE or EAGLE3"},
+		}, "speculative_eagle_topk requires speculative_algorithm EAGLE, EAGLE3 or NEXTN"},
 		{"chunked prefill size too large", func(r *Recipe) { r.Service.SGLang.ChunkedPrefillSize = 65537 }, "chunked_prefill_size must be between 0 and 65536"},
 		{"max mamba cache size too large", func(r *Recipe) { r.Service.SGLang.MaxMambaCacheSize = 4097 }, "max_mamba_cache_size must be between 0 and 4096"},
+		{"page size no launcher has run", func(r *Recipe) { r.Service.SGLang.PageSize = 32 }, "page_size must be unset or 64"},
+		{"mamba track interval off the page grid", func(r *Recipe) {
+			r.Service.SGLang.PageSize = 64
+			r.Service.SGLang.MambaTrackInterval = 96
+		}, "mamba_track_interval must be a multiple of page_size"},
+		{"negative mamba track interval", func(r *Recipe) { r.Service.SGLang.MambaTrackInterval = -64 }, "mamba_track_interval must not be negative"},
+		{"decode graph batch sizes that repeat", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "1 2 2" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch sizes that fall", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "4 2" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch size that is not a number", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "1 two 3" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch size of zero", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "0 1" }, "cuda_graph_bs_decode must be positive whole numbers"},
+		{"decode graph batch sizes that are only spaces", func(r *Recipe) { r.Service.SGLang.CudaGraphBSDecode = "   " }, "cuda_graph_bs_decode must be positive whole numbers"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

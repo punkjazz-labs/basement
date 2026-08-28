@@ -697,6 +697,26 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 	if s.MaxMambaCacheSize < 0 || s.MaxMambaCacheSize > 4096 {
 		return errors.New("sglang max_mamba_cache_size must be between 0 and 4096")
 	}
+	// page_size is the token count in one KV cache page. 64 is the only page
+	// size a qualified launcher has pinned: compressed sparse attention
+	// addresses its cache by page and needs that number, and no other page
+	// size has been seen accepted here. 0 leaves the flag off.
+	if s.PageSize != 0 && s.PageSize != 64 {
+		return errors.New("sglang page_size must be unset or 64")
+	}
+	// mamba_track_interval is checked against the page size because the
+	// Mamba state it saves is addressed in whole pages. An interval that is
+	// not a multiple of the page a recipe pins is the launcher's own
+	// documented error, and it is cheaper to refuse it here than on hardware.
+	if s.MambaTrackInterval < 0 {
+		return errors.New("sglang mamba_track_interval must not be negative")
+	}
+	if s.MambaTrackInterval > 0 && s.PageSize > 0 && s.MambaTrackInterval%s.PageSize != 0 {
+		return errors.New("sglang mamba_track_interval must be a multiple of page_size")
+	}
+	if err := validateCUDAGraphBatchSizes(s.CudaGraphBSDecode); err != nil {
+		return err
+	}
 	if s.SpeculativeAlgorithm == "" && (s.SpeculativeNumDraftTokens != 0 || s.SpeculativeModelRole != "") {
 		return errors.New("sglang speculative settings require speculative_algorithm")
 	}
@@ -715,16 +735,49 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 	if s.SpeculativeNumSteps > 0 && s.SpeculativeAlgorithm == "" {
 		return errors.New("sglang speculative_num_steps requires speculative_algorithm")
 	}
-	// speculative_eagle_topk is EAGLE and EAGLE3's own branching factor; a
-	// value set for any other algorithm asks the runtime for a knob it will
-	// not read.
+	// speculative_eagle_topk is the branching factor the EAGLE family drafts
+	// with at each step. NEXTN belongs to that family: it drafts with the
+	// multi-token-prediction head the checkpoint itself carries, and a
+	// qualified launcher pins its top-k at 1. Every other algorithm has no
+	// top-k to speak of, so a value set beside one asks the runtime for a
+	// knob it will not read.
 	if s.SpeculativeEagleTopK < 0 || s.SpeculativeEagleTopK > 32 {
 		return errors.New("sglang speculative_eagle_topk must be between 0 and 32")
 	}
-	if s.SpeculativeEagleTopK > 0 && s.SpeculativeAlgorithm != "EAGLE" && s.SpeculativeAlgorithm != "EAGLE3" {
-		return errors.New("sglang speculative_eagle_topk requires speculative_algorithm EAGLE or EAGLE3")
+	if s.SpeculativeEagleTopK > 0 && !eagleFamilySpeculation[s.SpeculativeAlgorithm] {
+		return errors.New("sglang speculative_eagle_topk requires speculative_algorithm EAGLE, EAGLE3 or NEXTN")
 	}
 	return validateChatTemplateFile(s.ChatTemplateFile)
+}
+
+// eagleFamilySpeculation names the speculative algorithms that draft with
+// EAGLE-style heads, which are the ones --speculative-eagle-topk shapes.
+var eagleFamilySpeculation = map[string]bool{"EAGLE": true, "EAGLE3": true, "NEXTN": true}
+
+// validateCUDAGraphBatchSizes checks --cuda-graph-bs-decode, which is a list
+// rather than a number. SGLang captures one decode graph per batch size in
+// it, so every entry must be a batch a server can really run, and the list
+// must climb. A repeated or falling entry is a typing mistake rather than a
+// ladder, and a repeat would spend graph memory twice for the same batch. An
+// empty value leaves the flag off and SGLang's own list stands.
+func validateCUDAGraphBatchSizes(list string) error {
+	if list == "" {
+		return nil
+	}
+	problem := errors.New("sglang cuda_graph_bs_decode must be positive whole numbers, separated by spaces, in increasing order")
+	sizes := strings.Fields(list)
+	if len(sizes) == 0 {
+		return problem
+	}
+	previous := 0
+	for _, size := range sizes {
+		batch, err := strconv.Atoi(size)
+		if err != nil || batch <= 0 || batch <= previous {
+			return problem
+		}
+		previous = batch
+	}
+	return nil
 }
 
 // llamaCppProblems validates the llama.cpp block against the whole recipe,

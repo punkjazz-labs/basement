@@ -901,6 +901,26 @@ func sglangArgs(r recipe.Recipe, placement Placement) []string {
 		args = append(args, "--speculative-eagle-topk", fmt.Sprint(s.SpeculativeEagleTopK))
 	}
 	args = appendOptional(args, "--sampling-defaults", s.SamplingDefaults)
+	if s.PageSize > 0 {
+		args = append(args, "--page-size", fmt.Sprint(s.PageSize))
+	}
+	if s.MambaTrackInterval > 0 {
+		args = append(args, "--mamba-track-interval", fmt.Sprint(s.MambaTrackInterval))
+	}
+	if s.AllowAutoTruncate {
+		args = append(args, "--allow-auto-truncate")
+	}
+	if s.PLEOffloadEmbedding {
+		args = append(args, "--ple-offload-embedding")
+	}
+	// --cuda-graph-bs-decode takes one batch size per argument, so the
+	// recipe's list is split into the words SGLang's own parser reads. A list
+	// of nothing leaves the flag off entirely: a bare flag with no batch size
+	// after it is an argument error, not a default.
+	if sizes := strings.Fields(s.CudaGraphBSDecode); len(sizes) > 0 {
+		args = append(args, "--cuda-graph-bs-decode")
+		args = append(args, sizes...)
+	}
 	return append(args, sglangDistributedArgs(placement)...)
 }
 

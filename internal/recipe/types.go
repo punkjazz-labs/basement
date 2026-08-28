@@ -451,6 +451,40 @@ type SGLangConfig struct {
 	// SamplingDefaults is --sampling-defaults, which source SGLang reads its
 	// default sampling parameters from when a request states none of its own.
 	SamplingDefaults string `yaml:"sampling_defaults" json:"sampling_defaults"`
+	// PageSize is --page-size, the number of tokens one KV cache page holds.
+	// A model served with compressed sparse attention cannot take the
+	// runtime's own default: that attention path addresses its cache by page
+	// and its qualified launcher pins 64 for exactly that reason. 0 leaves
+	// the flag off and SGLang's own default stands.
+	PageSize int `yaml:"page_size" json:"page_size"`
+	// MambaTrackInterval is --mamba-track-interval, how far apart SGLang
+	// keeps the Mamba states it can rewind a sequence to. The state is
+	// addressed in whole cache pages, so a qualified launcher documents two
+	// rules for it: the interval is a multiple of the page size, and it is
+	// never smaller than the draft token count. The validator holds a recipe
+	// to the first one, against the page size that recipe pins. 0 leaves the
+	// flag off and SGLang's own default stands.
+	MambaTrackInterval int `yaml:"mamba_track_interval" json:"mamba_track_interval"`
+	// AllowAutoTruncate turns on --allow-auto-truncate, which makes SGLang
+	// shorten a request that is longer than the context window instead of
+	// refusing it.
+	AllowAutoTruncate bool `yaml:"allow_auto_truncate" json:"allow_auto_truncate"`
+	// PLEOffloadEmbedding turns on --ple-offload-embedding, which keeps the
+	// checkpoint's per-layer embedding (PLE) n-gram tables in host memory
+	// instead of in device memory. It exists for a model that carries 52 GB
+	// of those tables in FP8. A GB10 spends one unified pool for both, and
+	// the qualified launcher's own warning says what a device-resident fp16
+	// copy of the tables costs there: it overcommits that pool and freezes
+	// the whole node.
+	PLEOffloadEmbedding bool `yaml:"ple_offload_embedding" json:"ple_offload_embedding"`
+	// CudaGraphBSDecode is --cuda-graph-bs-decode, the batch sizes SGLang
+	// captures decode CUDA graphs for, written as one increasing list of
+	// space-separated numbers. A recipe pins it because the runtime's own
+	// list is chosen for a larger device: on a GB10 the default list runs the
+	// graph pool out of memory, so a qualified launcher names the few batch
+	// sizes it really serves. Empty leaves the flag off and SGLang's own
+	// default stands.
+	CudaGraphBSDecode string `yaml:"cuda_graph_bs_decode" json:"cuda_graph_bs_decode"`
 }
 
 // LlamaCppConfig mirrors the subset of llama-server arguments a recipe is
