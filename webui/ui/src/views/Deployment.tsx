@@ -427,7 +427,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onCancel, onOp
           {succeeded && mediaReady && (job.kind === 'install' || job.kind === 'start') &&
             (isMedia ? onOpenGenerate : onOpenPlayground) && (
             <button className="brand" onClick={isMedia ? onOpenGenerate : onOpenPlayground}>
-              {isMedia ? 'Generate video' : 'Try it in the playground'}
+              {isMedia ? 'Generate video' : 'Try it in the chat'}
             </button>
           )}
           <button className="ghost" onClick={onClose}>Close</button>

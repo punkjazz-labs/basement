@@ -75,6 +75,16 @@ a { color: var(--ink); }
 .side-mark strong { font-size: 13.5px; font-weight: 650; letter-spacing: -0.01em; }
 
 .side nav { display: grid; gap: 1px; }
+.side-group { display: grid; gap: 1px; }
+/* The label over a group of screens. It is the catalog's divider device: a
+   quiet uppercase word with a hairline running to the edge, so the rail reads
+   as shelves rather than as one list. */
+.side .group {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 10px 5px; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint);
+}
+.side .group::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .side nav button {
   display: flex; align-items: center; gap: 8px; width: 100%;
   background: none; border: 0; color: var(--muted); text-align: left;
@@ -175,6 +185,34 @@ main.chat-tall .playground { flex: 1; min-height: 0; }
 }
 .empty p { margin: 0; }
 .empty-actions { display: flex; gap: 10px; justify-content: center; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+
+/* The one tooltip in the console: the sentence a control needs but does not
+   want standing on the screen. It opens on hover and on focus alike, so the
+   keyboard reaches everything the pointer does, and the text is a real
+   element the trigger names, so a screen reader reads it too. */
+.tip { position: relative; display: inline-flex; align-items: center; }
+.tip-trigger {
+  background: none; border: 0; padding: 0; color: var(--muted); font: inherit; font-size: 12px;
+  text-decoration: underline dotted; text-underline-offset: 3px; cursor: help;
+}
+.tip-trigger.mark {
+  width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--line-strong);
+  display: grid; place-items: center; color: var(--faint); font-size: 10px; line-height: 1;
+  text-decoration: none;
+}
+.tip-trigger:hover, .tip-trigger:focus-visible { color: var(--ink); }
+.tip-text {
+  position: absolute; left: 0; top: calc(100% + 7px); z-index: 30;
+  width: max-content; max-width: 40ch;
+  background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: 8px;
+  box-shadow: var(--shadow); padding: 8px 11px;
+  color: var(--muted); font-size: 12px; line-height: 1.55; font-weight: 400; text-align: left;
+  visibility: hidden; opacity: 0; transition: opacity 90ms ease;
+}
+.tip:hover .tip-text, .tip:focus-within .tip-text { visibility: visible; opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .tip-text { transition: none; }
+}
 
 /* One button family: pills. Orange marks the single primary action; everything
    else stays quiet so the orange always means "the thing to do next". */
@@ -368,8 +406,7 @@ input[type='text'], input[type='password'], textarea {
   border-radius: 4px; padding: 0 5px;
 }
 
-/* The card one strip chip opens: what that Spark reported about itself, and
-   the power mode this console can set on it. */
+/* The card one strip chip opens: what that Spark reported about itself. */
 .node-card {
   background: var(--surface); border: 1px solid var(--line-strong);
   border-radius: var(--radius); box-shadow: var(--shadow); max-width: 560px;
@@ -383,16 +420,30 @@ input[type='text'], input[type='password'], textarea {
 .node-card .row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 16px; }
 .node-card .row .k { color: var(--muted); }
 .node-card .row .v { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
-.node-card .row.power { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 12px; align-items: flex-start; }
-.node-card .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; }
-.node-card .seg button { background: none; border: 0; color: var(--muted); padding: 5px 12px; font: inherit; font-size: 13px; }
-.node-card .seg button + button { border-left: 1px solid var(--line-strong); }
-.node-card .seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); font-weight: 550; }
-.node-card .seg button:disabled { color: var(--faint); cursor: default; }
-.node-card .powernote { color: var(--faint); font-size: 12px; margin: 6px 16px 10px; max-width: 52ch; }
-.node-card .powernote .busy { color: var(--warn); font-family: var(--mono); }
-.node-card .powerfail { color: var(--warn); font-size: 12px; margin: 2px 16px 0; max-width: 52ch; }
-.node-card .everyspark { margin: 0 16px 12px; }
+
+/* A choice between two states, in one control. */
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; }
+.seg button { background: none; border: 0; color: var(--muted); padding: 5px 12px; font: inherit; font-size: 12.5px; }
+.seg button + button { border-left: 1px solid var(--line-strong); }
+.seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); font-weight: 550; }
+.seg button:disabled { color: var(--faint); cursor: default; }
+
+/* How hard each Spark runs its chip, on the Sparks page: one row per machine,
+   and the sentence that explains the choice in the tooltip over the list. */
+.power-list {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); max-width: 620px;
+}
+.power-list header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 16px; border-bottom: 1px solid var(--line);
+}
+.power-list header h2 { font-size: 13px; }
+.power-list .prow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; }
+.power-list .prow + .prow { border-top: 1px solid var(--line); }
+.power-list .prow .nm { font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 132px; }
+.power-list .prow .busy { color: var(--warn); font-family: var(--mono); font-size: 11.5px; }
+.power-list .powerfail { flex-basis: 100%; margin: 0; color: var(--warn); font-size: 12px; max-width: 62ch; }
 
 /* expanded detail — the "A depth" inside a row */
 .mdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }
@@ -453,10 +504,6 @@ input[type='text'], input[type='password'], textarea {
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
   display: grid; place-items: center; color: var(--accent-deep);
 }
-.explain-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 20px 0 4px; }
-.explain-grid .cell { border-top: 1px solid var(--line); padding-top: 12px; }
-.explain-grid h3 { font-size: 12.5px; font-weight: 650; margin: 0 0 5px; }
-.explain-grid p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
 .hero-note {
   margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line);
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
@@ -464,10 +511,6 @@ input[type='text'], input[type='password'], textarea {
 .hero-note p { margin: 0; font-size: 12.5px; color: var(--ink); max-width: 62ch; }
 .hero-note p strong { font-weight: 650; }
 .hero-note .spacer { flex: 1; }
-@media (max-width: 980px) {
-  .explain-grid { grid-template-columns: 1fr; gap: 12px; }
-  .explain-grid .cell { padding-top: 10px; }
-}
 
 .rtable { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
 .rthead, .rrow {
@@ -517,11 +560,6 @@ input[type='text'], input[type='password'], textarea {
 .rdetail .facts { margin-bottom: 16px; grid-template-columns: 150px 1fr; }
 .picker-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
 .picker-head h3 { font-size: 13px; font-weight: 650; margin: 0; }
-.budget-line {
-  font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line);
-  border-radius: 8px; padding: 8px 12px; margin-bottom: 12px;
-}
-.budget-line strong { color: var(--ink); font-weight: 600; }
 .swap-note { font-size: 11.5px; color: var(--warn); margin-top: 6px; display: flex; gap: 6px; align-items: flex-start; }
 .swap-note::before { content: "·"; color: var(--warn); font-weight: 800; }
 .install-choice .confirm-check.over { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
@@ -1236,6 +1274,13 @@ button.chip:hover { color: var(--ink); }
 
 /* ---- Monitor -------------------------------------------------------------- */
 
+/* The live meters, one section per Spark: which machine, what it serves, and
+   its own tiles under it. */
+.stack.mon { gap: 22px; }
+.mon-machine { display: grid; gap: 10px; }
+.mon-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.mon-head h2 { font-size: 13.5px; }
+.mon-head .muted { font-size: 12px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
 .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 13px 15px; display: grid; gap: 6px; }
 .tile .label { font-size: 10.5px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
@@ -1407,6 +1452,10 @@ button.chip:hover { color: var(--ink); }
   }
   .side-mark { padding: 0 8px 0 4px; }
   .side nav { display: flex; gap: 2px; }
+  /* One row of screens across the top. The group labels and their hairlines
+     belong to a rail that runs down the side, so they stand down here. */
+  .side-group { display: flex; gap: 2px; }
+  .side .group { display: none; }
   .side nav button { padding: 7px 10px; white-space: nowrap; }
   .side nav button[aria-current='true'] { box-shadow: inset 0 -2px 0 var(--accent); background: none; }
   .side-foot { display: none; }

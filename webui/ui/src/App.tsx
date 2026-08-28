@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   api, idempotency, setCSRF, terminal, formatBytes, OfflineError,
-  type FleetDeploymentView, type SystemInfo, type Recipe, type InstalledModel, type Job, type Peer,
-  type Telemetry, type UpdateInfo,
+  type FleetDeploymentView, type PeerSummary, type SystemInfo, type Recipe, type InstalledModel,
+  type Job, type Peer, type Telemetry, type UpdateInfo,
 } from './api'
 import Pairing from './views/Pairing'
 import Models from './views/Models'
@@ -20,9 +20,13 @@ import DeploymentDialog from './views/Deployment'
 import { ConfirmHost } from './confirm'
 import { initialManagerUpdateDialogState, managerUpdateDialogReducer } from './managerUpdate'
 import { servingChatModels } from './council'
+import { TABS, railGroups, tabLabel, type Tab } from './rail'
+import { LOCAL_MACHINE, forgetMachines, recordSilence, recordTelemetry } from './telemetry'
 
-const TABS = ['Models', 'Roles', 'Playground', 'Generate', 'Redactor', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
-type Tab = (typeof TABS)[number]
+// How often a paired Spark's meters are read. It is the pace every other peer
+// read in the console keeps, which is slower than this Spark's own five
+// seconds: the samples cross the network.
+const PEER_TELEMETRY_MS = 10_000
 
 // Redactor has no line here on purpose: its own bar names the open document,
 // and nothing above it needs to repeat what the screen already shows.
@@ -63,7 +67,6 @@ export default function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [peers, setPeers] = useState<Peer[]>([])
   const [connected, setConnected] = useState(true)
-  const [telemetry, setTelemetry] = useState<Telemetry | null>(null)
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [updateDialog, dispatchUpdateDialog] = useReducer(
     managerUpdateDialogReducer,
@@ -268,7 +271,10 @@ export default function App() {
       try {
         const next = await api<Telemetry>('/api/v1/telemetry')
         if (cancelled) return
-        setTelemetry(next)
+        // The Monitor tab draws this history rather than starting one of its
+        // own, so it opens with its charts already drawn. The rail reads the
+        // rate below from the same sample.
+        recordTelemetry(LOCAL_MACHINE, next)
         const total = next.active_model?.runtime_metrics?.generation_tokens_total
         if (typeof total === 'number') {
           const now = Date.now()
@@ -293,6 +299,36 @@ export default function App() {
     }
   }, [authed])
 
+  // The same meters from every paired Spark, read one by one through this
+  // manager. A Spark that does not answer keeps the samples it already sent;
+  // a Spark this console no longer holds loses them, because nothing can show
+  // them any more.
+  useEffect(() => {
+    if (!authed) return
+    forgetMachines([LOCAL_MACHINE, ...peers.map(peer => peer.id)])
+    if (peers.length === 0) return
+    let cancelled = false
+    const sample = async () => {
+      if (document.hidden) return
+      await Promise.all(peers.map(async peer => {
+        try {
+          const answer = await api<PeerSummary>(`/api/v1/peers/${encodeURIComponent(peer.id)}/telemetry`)
+          if (cancelled) return
+          if (answer.reachable && answer.telemetry) recordTelemetry(peer.id, answer.telemetry)
+          else recordSilence(peer.id)
+        } catch {
+          if (!cancelled) recordSilence(peer.id)
+        }
+      }))
+    }
+    void sample()
+    const timer = setInterval(sample, PEER_TELEMETRY_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [authed, peers])
+
   const activeModel = useMemo(() => models.find(model => model.active), [models])
   const activeRecipe = useMemo(
     () => recipes.find(recipe => recipe.id === activeModel?.recipe_id),
@@ -313,6 +349,19 @@ export default function App() {
       }
     })),
     [models, recipes],
+  )
+  // Every Spark the live meters are drawn for: this one first, then each
+  // paired Spark by the name this console knows it by. A member console and a
+  // standalone Spark hold no peers, so both draw one machine, as they always
+  // have.
+  const monitorMachines = useMemo(
+    () => [
+      { key: LOCAL_MACHINE, name: system?.hostname || 'This Spark' },
+      ...[...peers]
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map(peer => ({ key: peer.id, name: peer.name })),
+    ],
+    [system, peers],
   )
   const visibleTabs = TABS.filter(name =>
     name === 'Generate' ? activeMedia : name === 'Playground' ? !activeMedia : true,
@@ -365,11 +414,23 @@ export default function App() {
           <strong>basement</strong>
         </a>
         <nav aria-label="Console sections">
-          {visibleTabs.map(name => (
-            <button key={name} aria-current={tab === name} onClick={() => setTab(name)}>
-              {name}
-              {name === 'Activity' && runningJobs > 0 && <span className="badge">{runningJobs}</span>}
-            </button>
+          {railGroups(visibleTabs).map(group => (
+            <div
+              key={group.label}
+              className="side-group"
+              role="group"
+              aria-labelledby={group.label ? `rail-${group.label.toLowerCase()}` : undefined}
+            >
+              {group.label && (
+                <div className="group" id={`rail-${group.label.toLowerCase()}`}>{group.label}</div>
+              )}
+              {group.tabs.map(name => (
+                <button key={name} aria-current={tab === name} onClick={() => setTab(name)}>
+                  {tabLabel(name)}
+                  {name === 'Activity' && runningJobs > 0 && <span className="badge">{runningJobs}</span>}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="side-foot">
@@ -389,7 +450,7 @@ export default function App() {
       <div className="content">
         <header className="content-head">
           <div className="head-row">
-            <h1>{tab}</h1>
+            <h1>{tabLabel(tab)}</h1>
             {!connected && !updateDialog.reconnecting && <span className="offline" role="status">Disconnected</span>}
           </div>
           {DESC[tab] && <p className="desc">{DESC[tab]}</p>}
@@ -425,7 +486,7 @@ export default function App() {
             <Redactor />
           </div>
           {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
-          {tab === 'Monitor' && <Monitor telemetry={telemetry} activeName={activeRecipe?.display_name} />}
+          {tab === 'Monitor' && <Monitor machines={monitorMachines} recipes={recipes} />}
           {tab === 'Fleet' && <Fleet {...state} liveTPS={liveTPS} />}
           {tab === 'Storage' && <Storage {...state} />}
           {tab === 'Activity' && <Activity {...state} />}

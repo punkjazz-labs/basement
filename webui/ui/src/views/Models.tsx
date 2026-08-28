@@ -3,7 +3,7 @@ import {
   api, fetchFleetDeployments, idempotency, terminal, formatBytes, formatTokens, runtimeLabel, startTimeoutMinutes,
   modelStateWord, peerModelList,
   updatePlan, installRequest, installConfirmationsComplete, licenceArtifacts, territoryEligibilityLabel, trustLine,
-  type FleetDeploymentView, type FleetPowerMode, type FleetSummary, type InstalledModel, type Job, type Peer,
+  type FleetDeploymentView, type FleetSummary, type InstalledModel, type Job, type Peer,
   type Preflight,
   type PlacementPlan, type Recipe, type RecipeFeedCheck, type StorageInfo, type PeerSummary, type TokenUsage,
 } from '../api'
@@ -17,17 +17,15 @@ import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
   heldTabLabel, initialPlacement, installRoute, mergePlacements, modelChips, placedTarget,
   placementBusy, placementOptions, placementSwitchFrom, placementTargets, placementVerb,
-  placementWord, powerFanOut, powerFanOutBusy, powerRefusalLine, powerRefusedTitle, powerRow,
-  recipeBusy, retiredPowerSets, rowActionRoute, rowPlacement,
+  placementWord, powerRow,
+  recipeBusy, rowActionRoute, rowPlacement,
   shouldShowMemberBanner, splitModels,
   clearRecordBody, clearRecordTitle, releasePath, workingNodes, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CLEAR_RECORD, CLEAR_RECORD_CONFIRM,
-  COOL_MODE, COOL_MODE_LABEL, COOL_TAG, DISRUPTIVE_KINDS, EVERY_SPARK, FLEET_DEPLOYMENTS_PATH,
-  FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL,
+  COOL_TAG, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH,
   NO_PLACEMENT_BACK, NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
-  POWER_MODE_BUSY, POWER_MODE_NOTE, POWER_REFUSED_TITLE,
   type ActionTarget, type FleetDeploymentAction, type FleetRow, type ModelsTab,
-  type PlacementTarget, type PowerRow, type PowerState,
+  type PlacementTarget, type PowerRow,
 } from '../fleetModels'
 
 // What each model is, not what it is worth. Every line states the same class
@@ -98,6 +96,11 @@ interface ConfirmState {
 // to name it.
 const NODE_CARD_ID = 'fleet-node-card'
 
+// No power change is ever running from this screen: the switch lives on the
+// Sparks page. The strip still reads each Spark's mode through powerRow, and
+// this is the empty run list that read is made against.
+const NO_POWER_RUNS: ReadonlySet<string> = new Set()
+
 // The fleet in one line above the table: every Spark, whether it serves
 // something, and how much memory and disk it has free. Every number is one
 // that Spark reported about itself, and n/a means it has reported none yet.
@@ -144,20 +147,11 @@ function FleetStrip({ sparks, power, open, onOpen }: {
 const sizeLine = (free?: number, total?: number): string =>
   free === undefined && total === undefined ? 'n/a' : `${formatBytes(free)} free of ${formatBytes(total)}`
 
-// One Spark's card: what that machine has, and the one setting this console
-// can change on it from here. The power mode holds across restarts, so the
-// row states what the mode does with the figures measured on this hardware.
-// A Spark that has reported no mode gets a dead control and no selection:
-// nothing here guesses that a silent Spark runs at full speed.
-function NodeCard({ spark, power, everyBusy, onSet, onSetEveryone }: {
-  spark: FleetRow
-  power: PowerRow
-  // Whether a change is running on any Spark the fleet-wide button would
-  // name, which is not always this one.
-  everyBusy: boolean
-  onSet: (mode: string) => void
-  onSetEveryone: (mode: string) => void
-}) {
+// One Spark's card: what that machine reported about itself. The power mode
+// is set on the Sparks page, where every Spark has a switch of its own; this
+// screen is about models, and it only reads the mode for the "cool" tag on
+// the strip above.
+function NodeCard({ spark }: { spark: FleetRow }) {
   return (
     <div className="node-card" id={NODE_CARD_ID}>
       <header>
@@ -177,45 +171,6 @@ function NodeCard({ spark, power, everyBusy, onSet, onSetEveryone }: {
             {sizeLine(spark.inventory?.storage_available_bytes, spark.inventory?.storage_total_bytes)}
           </span>
         </div>
-        <div className="row power">
-          <span className="k">Power</span>
-          <span className="seg" role="group" aria-label="Power mode">
-            <button
-              type="button"
-              aria-pressed={power.mode === FULL_MODE}
-              disabled={power.disabled}
-              onClick={() => onSet(FULL_MODE)}
-            >
-              {FULL_MODE_LABEL}
-            </button>
-            <button
-              type="button"
-              aria-pressed={power.mode === COOL_MODE}
-              disabled={power.disabled}
-              onClick={() => onSet(COOL_MODE)}
-            >
-              {COOL_MODE_LABEL}
-            </button>
-          </span>
-        </div>
-      </div>
-      {/* That Spark's own words about a GPU that did not take the mode. The
-          mode the owner chose stays chosen while this stands: the setting is
-          stored, and it goes back on the chip at the next start. */}
-      {power.failure !== '' && <p className="powerfail">{power.failure}</p>}
-      <p className="powernote">
-        {power.busy && <span className="busy">{POWER_MODE_BUSY} </span>}
-        {POWER_MODE_NOTE}
-      </p>
-      <div className="everyspark">
-        <button
-          type="button"
-          className="ghost"
-          disabled={power.disabled || everyBusy}
-          onClick={() => onSetEveryone(power.mode)}
-        >
-          {EVERY_SPARK}
-        </button>
       </div>
     </div>
   )
@@ -320,14 +275,6 @@ export default function Models({
   // Which Spark's card is open under the fleet line. One at a time, and empty
   // for none: it is state of this screen alone.
   const [openSpark, setOpenSpark] = useState('')
-  // The power mode this console last set on each Spark, and what that Spark
-  // answered about it. The membership poll is up to ten seconds behind a
-  // change, and that Spark's own heartbeat is behind that again, so without
-  // this the switch would jump back to the old mode for a moment.
-  const [powerSet, setPowerSet] = useState<Map<string, PowerState>>(new Map())
-  // Every Spark a power change is running on now. A fleet-wide run names all
-  // of them at once, so no row can take a click the run is about to overwrite.
-  const [powerSetting, setPowerSetting] = useState<Set<string>>(new Set())
 
   // Storage tells us which recipes already have model files on disk, so a
   // partially downloaded model can offer to resume instead of start over.
@@ -475,34 +422,18 @@ export default function Models({
   // the summary this reads is replaced on every poll.
   const sparks = useMemo(() => fleetRows(fleet, peers, window.location.origin, Date.now()), [fleet, peers])
   const showFleet = leadsFleet && sparks.length > 1
-  // What each Spark's Power row shows: what that Spark reported, what this
-  // console set on it a moment ago, and whether a change is running there.
-  // The strip chip and the card read this one map, so a tag and a switch can
-  // never disagree.
+  // What each Spark's power mode says on the strip: the mode that Spark
+  // reported, read through the same row the switch on the Sparks page reads.
+  // Nothing is set from this screen, so no answer of this console's own is
+  // held here and no change can be running.
   const powerRows = useMemo(
-    () => new Map(sparks.map(spark =>
-      [spark.nodeID, powerRow(spark, powerSet.get(spark.nodeID), powerSetting)])),
-    [sparks, powerSet, powerSetting],
+    () => new Map(sparks.map(spark => [spark.nodeID, powerRow(spark, undefined, NO_POWER_RUNS)])),
+    [sparks],
   )
-  // The Spark whose card is open, and its Power row. A Spark that has left
-  // the fleet between the click and this render has no row, and so no card.
+  // The Spark whose card is open. A Spark that has left the fleet between the
+  // click and this render has no row, and so no card.
   const openRow = sparks.find(spark => spark.nodeID === openSpark)
-  const openPower = openRow && powerRows.get(openRow.nodeID)
   const showMemberBanner = shouldShowMemberBanner(fleetRoleSummary)
-
-  // A mode this console set is kept only until the fleet read carries it.
-  // This runs on every read, so the answer is retired the moment it has
-  // nothing left to add, and every later change is read from the fleet like
-  // any other fact about that Spark.
-  useEffect(() => {
-    const retired = retiredPowerSets(sparks, powerSet, powerSetting)
-    if (retired.length === 0) return
-    setPowerSet(previous => {
-      const next = new Map(previous)
-      for (const nodeID of retired) next.delete(nodeID)
-      return next
-    })
-  }, [sparks, powerSet, powerSetting])
 
   // Which Sparks hold this model, and which one serves it now. The Spark this
   // console runs on is named only while another Spark is on screen beside it.
@@ -634,65 +565,6 @@ export default function Models({
       noticeBox('That did not work', problem instanceof Error ? problem.message : String(problem))
     } finally {
       setBusy(id, false)
-    }
-  }
-
-  // Set the power mode on one Spark, or on every Spark in the fleet. One call
-  // per Spark, sent one after another, through the fleet door: the controller
-  // takes its own node id there too, so this console holds one way to write
-  // the setting rather than a local one and a remote one.
-  //
-  // Every Spark named is locked for the whole run. A Spark answers with the
-  // mode it now holds and with its own sentence if the GPU refused the
-  // change, and both stand until that Spark's next heartbeat carries them. A
-  // call that was refused outright changed nothing there, so that row goes
-  // back to what it last reported and the refusal is said in one notice at
-  // the end, one line per Spark.
-  const setPowerMode = async (targets: FleetRow[], mode: string) => {
-    if (mode === '' || targets.length === 0) return
-    if (targets.some(target => powerSetting.has(target.nodeID))) return
-    const named = targets.map(target => target.nodeID)
-    setPowerSetting(previous => new Set([...previous, ...named]))
-    setPowerSet(previous => {
-      const next = new Map(previous)
-      for (const id of named) next.set(id, { mode, failure: '' })
-      return next
-    })
-    const refused: string[] = []
-    try {
-      for (const target of targets) {
-        try {
-          const answer = await api<FleetPowerMode>(FLEET_POWER_MODE_PATH, {
-            method: 'POST',
-            headers: idempotency(),
-            body: JSON.stringify({ node_id: target.nodeID, mode }),
-          })
-          setPowerSet(previous =>
-            new Map(previous).set(target.nodeID, { mode: answer.mode, failure: answer.failure ?? '' }))
-        } catch (problem) {
-          setPowerSet(previous => {
-            const next = new Map(previous)
-            next.delete(target.nodeID)
-            return next
-          })
-          refused.push(powerRefusalLine(
-            target.displayName, problem instanceof Error ? problem.message : String(problem)))
-        }
-      }
-    } finally {
-      setPowerSetting(previous => {
-        const next = new Set(previous)
-        for (const id of named) next.delete(id)
-        return next
-      })
-    }
-    // A run over one Spark has one Spark to name; a fleet-wide run names none
-    // in the title and every refused one in the lines under it.
-    if (refused.length > 0) {
-      noticeBox(
-        targets.length === 1 ? powerRefusedTitle(targets[0].displayName) : POWER_REFUSED_TITLE,
-        refused.join('\n'),
-      )
     }
   }
 
@@ -1492,15 +1364,7 @@ export default function Models({
           onOpen={nodeID => setOpenSpark(openSpark === nodeID ? '' : nodeID)}
         />
       )}
-      {showFleet && openRow && openPower && (
-        <NodeCard
-          spark={openRow}
-          power={openPower}
-          everyBusy={powerFanOutBusy(sparks, powerSetting)}
-          onSet={mode => setPowerMode([openRow], mode)}
-          onSetEveryone={mode => setPowerMode(powerFanOut(sparks), mode)}
-        />
-      )}
+      {showFleet && openRow && <NodeCard spark={openRow} />}
       {showMemberBanner && (
         <MemberBanner controllerConsoleURL={fleetRoleSummary?.controller_console_url ?? ''} />
       )}

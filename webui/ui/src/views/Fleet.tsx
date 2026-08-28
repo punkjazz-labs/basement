@@ -1,12 +1,13 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  adoptedName, api, bareHost, copyText, formatBytes, rankCandidates,
+  adoptedName, api, bareHost, copyText, formatBytes, idempotency, rankCandidates,
   type AdoptStatus, type FleetCandidate, type FleetInvitation, type FleetInviteProgress,
-  type FleetSummary, type Peer, type PeerSummary,
+  type FleetPowerMode, type FleetSummary, type Peer, type PeerSummary,
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { Mark } from '../mark'
+import { Tip } from '../tip'
 import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
 import {
   fleetInvitations, fleetNodeFor, fleetSize, fleetStatusNote, fleetSummary, foundLine, foundSparks,
@@ -16,6 +17,13 @@ import {
   readIgnored, rememberIgnored, shouldSweepForSparks, sparkSubline,
   INVITATION_POLL_MS, INVITE_POLL_MS, MEMBERSHIP_POLL_MS,
 } from '../fleetInvite'
+import {
+  fleetRows, localPowerRow, powerFanOut, powerFanOutBusy, powerRefusalLine, powerRefusedTitle,
+  powerRow, retiredPowerSets,
+  COOL_MODE, COOL_MODE_LABEL, EVERY_SPARK, FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL,
+  LOCAL_POWER_MODE_PATH, POWER_MODE_BUSY, POWER_MODE_NOTE, POWER_REFUSED_TITLE,
+  type FleetRow, type PowerRow, type PowerState,
+} from '../fleetModels'
 
 interface FleetProps extends AppState {
   liveTPS: number | null
@@ -32,6 +40,9 @@ interface AddForm {
 type FindStage = 'scanning' | 'results' | 'credentials' | 'progress' | 'failed' | 'done'
 
 const EMPTY_FORM: AddForm = { name: '', base_url: '', api_key: '' }
+// What this page calls the machine the console is open on, in the table and
+// at the power switch alike.
+const THIS_SPARK = 'This Spark'
 // The same one-line install the website hands out. Nothing here is generated
 // per machine, so it can be copied straight into the other Spark's terminal.
 const INSTALL_COMMAND = 'curl -fsSL basement.punkjazz.ai/install.sh | sh'
@@ -41,6 +52,48 @@ const INSTALL_COMMAND = 'curl -fsSL basement.punkjazz.ai/install.sh | sh'
 // pending on screen and keeps its own word.
 const STEP_CLASS: Record<string, string> = { done: 'complete', running: 'active', failed: 'failed', pending: 'pending' }
 const STEP_WORD: Record<string, string> = { done: 'Done', running: 'Working', failed: 'Failed', pending: 'Waiting' }
+
+// One Spark's power switch: the machine, the two modes, and whatever else
+// that row carries. The mode holds across restarts, so this is a setting and
+// not an action. A Spark that has reported no mode gets a dead switch and no
+// selection: nothing here guesses that a silent Spark runs at full speed.
+export function PowerSwitch({ name, power, onSet, children }: {
+  name: string
+  power: PowerRow
+  onSet: (mode: string) => void
+  children?: ReactNode
+}) {
+  return (
+    <div className="prow">
+      <span className="nm">{name}</span>
+      <span className="seg" role="group" aria-label={`Power mode for ${name}`}>
+        <button
+          type="button"
+          aria-pressed={power.mode === FULL_MODE}
+          disabled={power.disabled}
+          onClick={() => onSet(FULL_MODE)}
+        >
+          {FULL_MODE_LABEL}
+        </button>
+        <button
+          type="button"
+          aria-pressed={power.mode === COOL_MODE}
+          disabled={power.disabled}
+          onClick={() => onSet(COOL_MODE)}
+        >
+          {COOL_MODE_LABEL}
+        </button>
+      </span>
+      {children}
+      {power.busy && <span className="busy">{POWER_MODE_BUSY}</span>}
+      {/* That Spark's own words about a GPU that did not take the mode. The
+          mode the owner chose stays chosen while this stands: the setting is
+          stored, and it goes back on the chip at the next start. A refusal is
+          not tooltip material, so it stays on the screen. */}
+      {power.failure !== '' && <p className="powerfail">{power.failure}</p>}
+    </div>
+  )
+}
 
 export default function Fleet({ system, recipes, models, peers, refreshPeers, liveTPS }: FleetProps) {
   const [summaries, setSummaries] = useState<Record<string, PeerSummary>>({})
@@ -86,6 +139,19 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const [inviteOpen, setInviteOpen] = useState(false)
   const inviteRef = useRef<HTMLDialogElement>(null)
   const sweptOnce = useRef(false)
+
+  // The power mode this console last set on each Spark, and what that Spark
+  // answered about it. The membership poll is up to ten seconds behind a
+  // change, and that Spark's own heartbeat is behind that again, so without
+  // this the switch would jump back to the old mode for a moment.
+  const [powerSet, setPowerSet] = useState<Map<string, PowerState>>(new Map())
+  // Every Spark a power change is running on now. A fleet-wide run names all
+  // of them at once, so no row can take a click the run is about to overwrite.
+  const [powerSetting, setPowerSetting] = useState<Set<string>>(new Set())
+  // What this Spark says about its own chip, for a console that leads no
+  // fleet. null is a mode this console has not read, which is not a mode.
+  const [localPower, setLocalPower] = useState<PowerState | null>(null)
+  const [localPowerBusy, setLocalPowerBusy] = useState(false)
 
   // The password is only ever in this component's state and in the one
   // request that carries it. Leaving the view drops it.
@@ -170,19 +236,157 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
     [membership, peers],
   )
 
+  // Which Spark this console speaks for. A controller answers for every Spark
+  // in its fleet, its own machine included; every other console answers for
+  // the one machine it runs on, and a member for none: the controller owns
+  // that machine's settings, and a switch that could only be refused would be
+  // a lie.
+  const leadsFleet = membership?.role === 'controller'
+  const isMember = membership?.role === 'member'
+
   // These rows do not poll the machines they describe: their freshness is the
   // membership summary's, so the summary is what gets re-read, once for the
-  // whole fleet and only while a row depends on it.
+  // whole fleet and only while something on this screen depends on it. The
+  // power switches depend on it too: a mode set from another console reaches
+  // this one through the same summary.
   const memberRowCount = memberRows.length
   useEffect(() => {
-    if (memberRowCount === 0) return
+    if (memberRowCount === 0 && !leadsFleet) return
     const poll = () => {
       if (document.hidden) return
       void refreshMembership()
     }
     const timer = setInterval(poll, MEMBERSHIP_POLL_MS)
     return () => clearInterval(timer)
-  }, [memberRowCount, refreshMembership])
+  }, [memberRowCount, leadsFleet, refreshMembership])
+
+  // Every Spark this console can set the mode on, in the order the fleet
+  // reports them. Read at the moment the summary arrives, which is the only
+  // moment any of it is fresh.
+  const sparks = useMemo(
+    () => (leadsFleet ? fleetRows(membership ?? null, peers, window.location.origin, Date.now()) : []),
+    [leadsFleet, membership, peers],
+  )
+  // What each Spark's switch shows: what that Spark reported, what this
+  // console set on it a moment ago, and whether a change is running there.
+  const powerRows = useMemo(
+    () => new Map(sparks.map(spark =>
+      [spark.nodeID, powerRow(spark, powerSet.get(spark.nodeID), powerSetting)])),
+    [sparks, powerSet, powerSetting],
+  )
+
+  // A mode this console set is kept only until the fleet read carries it.
+  // This runs on every read, so the answer is retired the moment it has
+  // nothing left to add, and every later change is read from the fleet like
+  // any other fact about that Spark.
+  useEffect(() => {
+    const retired = retiredPowerSets(sparks, powerSet, powerSetting)
+    if (retired.length === 0) return
+    setPowerSet(previous => {
+      const next = new Map(previous)
+      for (const nodeID of retired) next.delete(nodeID)
+      return next
+    })
+  }, [sparks, powerSet, powerSetting])
+
+  // Set the power mode on one Spark, or on every Spark in the fleet. One call
+  // per Spark, sent one after another, through the fleet door: the controller
+  // takes its own node id there too, so this console holds one way to write
+  // the setting rather than a local one and a remote one.
+  //
+  // Every Spark named is locked for the whole run. A Spark answers with the
+  // mode it now holds and with its own sentence if the GPU refused the
+  // change, and both stand until that Spark's next heartbeat carries them. A
+  // call that was refused outright changed nothing there, so that row goes
+  // back to what it last reported and the refusal is said in one notice at
+  // the end, one line per Spark.
+  const setPowerMode = async (targets: FleetRow[], mode: string) => {
+    if (mode === '' || targets.length === 0) return
+    if (targets.some(target => powerSetting.has(target.nodeID))) return
+    const named = targets.map(target => target.nodeID)
+    setPowerSetting(previous => new Set([...previous, ...named]))
+    setPowerSet(previous => {
+      const next = new Map(previous)
+      for (const id of named) next.set(id, { mode, failure: '' })
+      return next
+    })
+    const refused: string[] = []
+    try {
+      for (const target of targets) {
+        try {
+          const answer = await api<FleetPowerMode>(FLEET_POWER_MODE_PATH, {
+            method: 'POST',
+            headers: idempotency(),
+            body: JSON.stringify({ node_id: target.nodeID, mode }),
+          })
+          setPowerSet(previous =>
+            new Map(previous).set(target.nodeID, { mode: answer.mode, failure: answer.failure ?? '' }))
+        } catch (problem) {
+          setPowerSet(previous => {
+            const next = new Map(previous)
+            next.delete(target.nodeID)
+            return next
+          })
+          refused.push(powerRefusalLine(
+            target.displayName, problem instanceof Error ? problem.message : String(problem)))
+        }
+      }
+    } finally {
+      setPowerSetting(previous => {
+        const next = new Set(previous)
+        for (const id of named) next.delete(id)
+        return next
+      })
+    }
+    // A run over one Spark has one Spark to name; a fleet-wide run names none
+    // in the title and every refused one in the lines under it.
+    if (refused.length > 0) {
+      noticeBox(
+        targets.length === 1 ? powerRefusedTitle(targets[0].displayName) : POWER_REFUSED_TITLE,
+        refused.join('\n'),
+      )
+    }
+  }
+
+  // What this Spark holds now, read from its own door. A console that leads a
+  // fleet never asks: the summary already carries the mode of every Spark in
+  // it, this machine included.
+  useEffect(() => {
+    // undefined is a summary that has not answered yet, which is not the same
+    // as no fleet: the read waits for it rather than asking on a guess.
+    if (membership === undefined || leadsFleet || isMember) return
+    let cancelled = false
+    api<PowerState>(LOCAL_POWER_MODE_PATH)
+      .then(state => {
+        if (!cancelled) setLocalPower({ mode: state.mode ?? '', failure: state.failure ?? '' })
+      })
+      .catch(() => {
+        /* a manager that cannot read the mode leaves the switch dead */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [membership, leadsFleet, isMember])
+
+  // The same change on a Spark that answers for itself. The answer is the
+  // whole new state, so what the machine now holds and its own sentence about
+  // a GPU that refused the cap both come back together.
+  const setLocalPowerMode = async (mode: string) => {
+    if (mode === '' || localPowerBusy) return
+    setLocalPowerBusy(true)
+    try {
+      const answer = await api<PowerState>(LOCAL_POWER_MODE_PATH, {
+        method: 'POST',
+        headers: idempotency(),
+        body: JSON.stringify({ mode }),
+      })
+      setLocalPower({ mode: answer.mode ?? '', failure: answer.failure ?? '' })
+    } catch (problem) {
+      noticeBox(powerRefusedTitle(THIS_SPARK), problem instanceof Error ? problem.message : String(problem))
+    } finally {
+      setLocalPowerBusy(false)
+    }
+  }
 
   // The tab is opened from the click itself: a browser blocks a window opened
   // after an await, and the dialog promises that tab is already there.
@@ -477,7 +681,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
           <div className="mrow">
             <div className="m-id">
               <div>
-                <div className="nm">This Spark</div>
+                <div className="nm">{THIS_SPARK}</div>
                 <div className="use">{sparkSubline(system?.hostname ?? '', localRoleLine(membership ?? null))}</div>
               </div>
             </div>
@@ -697,6 +901,54 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
         </div>
       )}
 
+      {/* How hard each Spark runs its chip. One switch per machine, and the
+          sentence that explains the choice in a tooltip over the list rather
+          than under every row. A member console shows none: the controller
+          owns this machine's settings. */}
+      {membership !== undefined && !isMember && (
+        <section className="power-list" aria-label="Power mode">
+          <header>
+            <h2>Power</h2>
+            <Tip text={POWER_MODE_NOTE} label="What the power modes do" />
+          </header>
+          {leadsFleet ? (
+            sparks.map(spark => {
+              const power = powerRows.get(spark.nodeID)
+              if (!power) return null
+              return (
+                <PowerSwitch
+                  key={spark.nodeID}
+                  name={spark.displayName}
+                  power={power}
+                  onSet={mode => setPowerMode([spark], mode)}
+                >
+                  {/* One fan-out for the fleet, on the machine the console
+                      runs on: it copies this Spark's mode to every other one.
+                      It is dead for as long as any Spark it would name is
+                      already mid-change. */}
+                  {spark.isSelf && sparks.length > 1 && (
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={power.disabled || powerFanOutBusy(sparks, powerSetting)}
+                      onClick={() => setPowerMode(powerFanOut(sparks), power.mode)}
+                    >
+                      {EVERY_SPARK}
+                    </button>
+                  )}
+                </PowerSwitch>
+              )
+            })
+          ) : (
+            <PowerSwitch
+              name={THIS_SPARK}
+              power={localPowerRow(localPower, localPowerBusy)}
+              onSet={setLocalPowerMode}
+            />
+          )}
+        </section>
+      )}
+
       {/* A machine already running basement that this fleet has never met.
           Ignoring it says not now, for this session only. */}
       {found.map(spark => (
@@ -727,7 +979,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
         <form className="dialog-pad" onSubmit={submit} {...FORM_IGNORED_BY_MANAGERS}>
           <div className="dialog-head">
             <div>
-              <p className="kicker">Fleet</p>
+              <p className="kicker">Sparks</p>
               <h2>Add a Spark</h2>
             </div>
             <button type="button" className="dialog-close" onClick={() => dialogRef.current?.close()} aria-label="Close">×</button>
@@ -744,7 +996,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
               </div>
             </li>
             <li>
-              <strong>Generate an API key on that Spark's Connect tab</strong>
+              <strong>Generate an API key on that Spark's API tab</strong>
               <p>Open that console, create a key, and copy it. Shown only once.</p>
             </li>
             <li>
@@ -776,7 +1028,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                 />
               </label>
               {/* Not masked: this key was shown in the clear on the other
-                  Spark's Connect tab a moment ago, it is pasted once and
+                  Spark's API tab a moment ago, it is pasted once and
                   never read back here, and masking it only hid a bad paste
                   until the request failed. */}
               <label className="field">
@@ -811,7 +1063,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
         <div className="dialog-pad">
           <div className="dialog-head">
             <div>
-              <p className="kicker">Fleet</p>
+              <p className="kicker">Sparks</p>
               <h2>
                 {stage === 'credentials' ? 'Set up this Spark'
                   : stage === 'progress' || stage === 'failed' ? 'Setting up this Spark'
@@ -1048,7 +1300,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
         <div className="dialog-pad">
           <div className="dialog-head">
             <div>
-              <p className="kicker">Fleet</p>
+              <p className="kicker">Sparks</p>
               <h2>{inviteError ? `Could not add ${targetName}` : inviteTitle(inviteState, targetName)}</h2>
             </div>
             <button type="button" className="dialog-close" onClick={() => inviteRef.current?.close()} aria-label="Close">×</button>
@@ -1171,7 +1423,7 @@ export function FleetInvitationPrompt({ onAnswered }: { onAnswered: () => void }
             <div key={invitation.id} className={index > 0 ? 'invitation-entry' : undefined}>
               <div className="dialog-head">
                 <div>
-                  {index === 0 && <p className="kicker">Fleet</p>}
+                  {index === 0 && <p className="kicker">Sparks</p>}
                   <h2>{invitationTitle(invitation)}</h2>
                 </div>
               </div>

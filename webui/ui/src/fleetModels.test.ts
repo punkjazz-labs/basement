@@ -5,7 +5,7 @@ import type {
 import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
   heldSomewhere, heldTabLabel, initialPlacement, installRoute, joinCandidatesWithInventory,
-  machineNote, mergePlacements,
+  localPowerRow, machineNote, mergePlacements,
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
   placementVerb, placementWord, powerBusy, powerFanOut, powerFanOutBusy, powerRefusalLine,
   powerRefusedTitle, powerRow, recipeBusy, retiredPowerSets,
@@ -15,7 +15,8 @@ import {
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME,
   CHOOSE_FOR_ME_NOTE, CLEAR_RECORD, CLEAR_RECORD_CONFIRM, COOL_MODE, COOL_MODE_LABEL, COOL_TAG,
   DISRUPTIVE_KINDS,
-  FLEET_DEPLOYMENT_ACTIONS, FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL, MANY_SPARKS_TAB,
+  FLEET_DEPLOYMENT_ACTIONS, FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL,
+  LOCAL_POWER_MODE_PATH, MANY_SPARKS_TAB,
   NO_FLEET_ROW, NO_PLACEMENT_BACK,
   ONE_SPARK_TAB, PLACEMENT_REFUSED, PLACEMENT_WORKING, POWER_MODE_NOTE, POWER_REFUSED_TITLE,
   type ActionTarget, type FleetRow, type LabGroup, type PlacementTarget,
@@ -298,6 +299,39 @@ describe('the power mode a Spark reports', () => {
     )
     expect([FULL_MODE_LABEL, COOL_MODE_LABEL, COOL_TAG]).toEqual(['Full speed', 'Cool and quiet', 'cool'])
     expect(FLEET_POWER_MODE_PATH).toBe('/api/v1/fleet/power-mode')
+    expect(LOCAL_POWER_MODE_PATH).toBe('/api/v1/system/power-mode')
+  })
+})
+
+// A Spark that leads no fleet answers for itself, through its own door. The
+// switch it draws has to keep every rule the fleet rows keep.
+describe('the power mode of a Spark that answers for itself', () => {
+  const NO_TOOL = 'This machine has no nvidia-smi command, so the GPU clock did not change.'
+
+  it('shows the mode that Spark reported', () => {
+    expect(localPowerRow({ mode: COOL_MODE, failure: '' }, false))
+      .toEqual({ mode: 'cool', disabled: false, failure: '', tag: true, busy: false })
+    expect(localPowerRow({ mode: FULL_MODE, failure: '' }, false))
+      .toEqual({ mode: 'full', disabled: false, failure: '', tag: false, busy: false })
+  })
+
+  // A mode this console has not read is not full speed: it is nothing, and
+  // the switch says nothing.
+  it('draws no mode until it has read one', () => {
+    expect(localPowerRow(null, false)).toMatchObject({ mode: '', disabled: true, tag: false })
+    expect(localPowerRow({ mode: '', failure: '' }, false)).toMatchObject({ mode: '', disabled: true })
+    expect(localPowerRow({ mode: 'silent', failure: NO_TOOL }, false))
+      .toMatchObject({ mode: '', disabled: true, failure: '' })
+  })
+
+  it('locks the switch while a change is running', () => {
+    expect(localPowerRow({ mode: FULL_MODE, failure: '' }, true))
+      .toMatchObject({ mode: 'full', disabled: true, busy: true })
+  })
+
+  it('carries the machine\'s own sentence about a GPU that refused', () => {
+    expect(localPowerRow({ mode: COOL_MODE, failure: NO_TOOL }, false))
+      .toMatchObject({ mode: 'cool', failure: NO_TOOL, tag: true })
   })
 })
 

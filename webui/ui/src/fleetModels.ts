@@ -193,6 +193,12 @@ export const powerRefusedTitle = (displayName: string): string => `${displayName
 // and the console holds no second way to write the setting.
 export const FLEET_POWER_MODE_PATH = '/api/v1/fleet/power-mode'
 
+// Where a Spark that leads no fleet reads and sets its own mode. A standalone
+// Spark and a member hold no fleet node for the machine the console runs on,
+// so the fleet door has nothing to name; this is the door that machine has
+// always had for itself (internal/httpapi/power.go).
+export const LOCAL_POWER_MODE_PATH = '/api/v1/system/power-mode'
+
 // One Spark's power mode as either its heartbeat or a set answer reports it.
 // mode is "full", "cool", or empty for a Spark that has reported none.
 export interface PowerState {
@@ -284,6 +290,24 @@ export function powerRow(row: FleetRow, set: PowerState | undefined, setting: Re
     disabled: busy || !known,
     failure: known ? shown.failure : '',
     tag: known && shown.mode === COOL_MODE,
+    busy,
+  }
+}
+
+// The same row for a Spark that answers for itself: a console that leads no
+// fleet reads one machine's mode from the local door and shows it with the
+// same switch. It asks the same questions powerRow asks, of the one answer
+// that door gives, and it keeps the same rule at the heart of it: a mode this
+// console has not read is no mode at all, so the switch stays dead rather
+// than drawing a machine as running at full speed.
+export function localPowerRow(state: PowerState | null, busy: boolean): PowerRow {
+  const mode = state?.mode ?? ''
+  const known = mode === FULL_MODE || mode === COOL_MODE
+  return {
+    mode: known ? mode : '',
+    disabled: busy || !known,
+    failure: known ? state?.failure ?? '' : '',
+    tag: known && mode === COOL_MODE,
     busy,
   }
 }
