@@ -6,7 +6,7 @@
 // keys the view switch, the deep links from dialogs and the stored state all
 // use, so a rename there would be a refactor rather than a label pass.
 
-export const TABS = ['Models', 'Roles', 'Playground', 'Generate', 'Redactor', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
+export const TABS = ['Models', 'Roles', 'Playground', 'Generate', 'Redactor', 'Minutes', 'Connect', 'Monitor', 'Fleet', 'Storage', 'Activity'] as const
 export type Tab = (typeof TABS)[number]
 
 // What each screen is called on the rail. Only three tabs are called anything
@@ -33,11 +33,11 @@ export interface RailGroup {
 //
 // Generate stands beside the chat because it takes the chat's place: a Spark
 // serving a video model has no chat to offer, and App decides which of the
-// two is on the rail. Minutes has no row here: its console surface is a task
-// of its own, and a rail must not name a screen that does not exist.
+// two is on the rail. Minutes closes the group: it is a Mac app, so its row
+// leads to the settings that app asks for rather than to the app itself.
 export const RAIL: RailGroup[] = [
   { label: '', tabs: ['Models'] },
-  { label: 'Apps', tabs: ['Playground', 'Generate', 'Redactor'] },
+  { label: 'Apps', tabs: ['Playground', 'Generate', 'Redactor', 'Minutes'] },
   { label: 'System', tabs: ['Roles', 'Fleet', 'Monitor', 'Storage', 'Activity', 'Connect'] },
 ]
 

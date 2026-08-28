@@ -10,6 +10,7 @@ import Roles from './views/Roles'
 import Playground from './views/Playground'
 import Generate from './views/Generate'
 import Redactor from './views/Redactor'
+import Minutes, { MINUTES_HEAD_TIP } from './views/Minutes'
 import Connect from './views/Connect'
 import Monitor from './views/Monitor'
 import Fleet, { FleetInvitationPrompt } from './views/Fleet'
@@ -18,6 +19,7 @@ import Activity from './views/Activity'
 import ManagerUpdateDialog, { ManagerUpdateSidebar } from './views/ManagerUpdate'
 import DeploymentDialog from './views/Deployment'
 import { ConfirmHost } from './confirm'
+import { Tip } from './tip'
 import { initialManagerUpdateDialogState, managerUpdateDialogReducer } from './managerUpdate'
 import { servingChatModels } from './council'
 import { TABS, railGroups, tabLabel, type Tab } from './rail'
@@ -36,6 +38,14 @@ const DESC: Partial<Record<Tab, string>> = {
   Roles: 'Endpoints that stay the same while you change the model.',
   Connect: 'Endpoint, keys and snippets.',
   Monitor: 'Live GPU health and serving metrics.',
+}
+
+// What a screen is, for the screens that answer it in a sentence rather than
+// with a line of their own. It hangs on the title, because the title is the
+// name it explains, and it stays a tooltip because a page is a product and not
+// an explainer.
+const HEAD_TIP: Partial<Record<Tab, { text: string; label: string }>> = {
+  Minutes: { text: MINUTES_HEAD_TIP, label: 'What Minutes is' },
 }
 
 export interface AppState {
@@ -411,11 +421,13 @@ export default function App() {
   const working = jobs.some(job => !terminal(job.state))
   const failedRecently = !working && jobs[0]?.state === 'failed'
   const railClass = working ? 'working' : activeModel?.status === 'ready' ? 'serving' : failedRecently ? 'failed' : ''
-  const railLabel = working
-    ? 'Working'
-    : activeModel?.status === 'ready'
-      ? activeRecipe?.display_name ?? activeModel.recipe_id
-      : 'Idle'
+  // The model answering on this Spark right now, named the way the console
+  // names it everywhere. The rail light and the Minutes page read this one
+  // value, so neither of them asks the manager a question of its own.
+  const servingModel = activeModel?.status === 'ready'
+    ? activeRecipe?.display_name ?? activeModel.recipe_id
+    : undefined
+  const railLabel = working ? 'Working' : servingModel ?? 'Idle'
 
   const runningJobs = jobs.filter(job => !terminal(job.state)).length
 
@@ -490,6 +502,7 @@ export default function App() {
         <header className="content-head">
           <div className="head-row">
             <h1>{tabLabel(tab)}</h1>
+            {HEAD_TIP[tab] && <Tip text={HEAD_TIP[tab].text} label={HEAD_TIP[tab].label} />}
             {!connected && !updateDialog.reconnecting && <span className="offline" role="status">Disconnected</span>}
           </div>
           {DESC[tab] && <p className="desc">{DESC[tab]}</p>}
@@ -524,6 +537,10 @@ export default function App() {
           <div style={{ display: tab === 'Redactor' ? 'contents' : 'none' }}>
             <Redactor />
           </div>
+          {/* Minutes is unmounted with the tab: the page reads the keys again
+              only while it is waiting for the Mac's first request, and a
+              screen nobody is looking at must ask nothing. */}
+          {tab === 'Minutes' && <Minutes servingModel={servingModel} />}
           {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
           {tab === 'Monitor' && <Monitor machines={machines} recipes={recipes} />}
           {tab === 'Fleet' && <Fleet {...state} liveTPS={liveTPS} />}
