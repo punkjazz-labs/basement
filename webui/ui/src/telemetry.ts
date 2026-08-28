@@ -153,6 +153,11 @@ export function forgetMachines(keep: readonly string[]): void {
 
 // One Spark, as the Monitor tab draws it.
 export interface MonitorMachine {
+  // What tells this machine apart from every other one on the list, whatever
+  // this console can read of it: the fleet's own id for it, or the console
+  // URL the fleet holds it under where it has no id. Two Sparks never share
+  // one, which is why the page is keyed on this and not on the key below.
+  id: string
   // The key its samples are kept under: this Spark, or the id of a paired
   // Spark. Empty for a Spark whose meters this console cannot read at all,
   // which is a machine with a section and no chart rather than no section.
@@ -169,17 +174,36 @@ export interface MonitorMachine {
 // and a Spark it has an API key for. The peers table holds one machine at
 // most (ADR 0005), so a third Spark that joined the fleet by invitation has
 // no key here and is listed without one.
+//
+// One state this list cannot resolve: a member console opened at an address
+// the fleet did not pin. isLocalNode then has only the browser's own origin
+// to match against the console URL the fleet stored, so this machine can be
+// drawn twice, once as itself and once as a Spark with no key. The Sparks
+// page reads self the same way (membershipRows), so pinning that origin is
+// one fix for both pages rather than something this list can do alone.
 export function monitorMachines(
   sparks: readonly FleetRow[],
   peers: readonly Peer[],
   localName: string,
 ): MonitorMachine[] {
   const keyed = new Map(peers.map(peer => [consoleKey(peer.base_url), peer.id]))
+  // A row the fleet named is told apart by its node id; a row with none is
+  // told apart by the console URL the table already de-duplicates on, so
+  // every machine on the list carries something of its own.
+  const idOf = (spark: FleetRow) => spark.nodeID || consoleKey(spark.consoleURL)
   const own = sparks.find(spark => spark.isSelf)
-  const machines: MonitorMachine[] = [{ key: LOCAL_MACHINE, name: own?.displayName || localName }]
+  const machines: MonitorMachine[] = [{
+    id: own ? idOf(own) : LOCAL_MACHINE,
+    key: LOCAL_MACHINE,
+    name: own?.displayName || localName,
+  }]
   for (const spark of sparks) {
     if (spark.isSelf) continue
-    machines.push({ key: keyed.get(consoleKey(spark.consoleURL)) ?? '', name: spark.displayName })
+    machines.push({
+      id: idOf(spark),
+      key: keyed.get(consoleKey(spark.consoleURL)) ?? '',
+      name: spark.displayName,
+    })
   }
   return machines
 }

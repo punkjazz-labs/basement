@@ -176,7 +176,7 @@ export default function Monitor({ machines, recipes }: { machines: MonitorMachin
     <div className="stack mon">
       {machines.map(machine => (
         <MachineSection
-          key={machine.key}
+          key={machine.id}
           machine={machine}
           held={machineSeries(machine.key)}
           recipes={recipes}

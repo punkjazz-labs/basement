@@ -179,7 +179,9 @@ export const POWER_MODE_NOTE =
 // The quiet line while the call runs.
 export const POWER_MODE_BUSY = 'Setting the power mode.'
 
-// The ghost button that copies this Spark's mode to the whole fleet.
+// The label of the one control that sets the mode on every Spark at once. It
+// copies no machine's mode: the control offers both modes itself, so a Spark
+// that reports none can never hold the fleet back.
 export const EVERY_SPARK = 'Set for every Spark'
 
 // The title over the refusals one fleet-wide run left behind, and the one

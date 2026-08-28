@@ -309,25 +309,33 @@ export default function App() {
   // Which Sparks this console knows about. It is the same membership read the
   // Sparks page makes, and it is made here so the meters know every machine
   // they have to draw before that tab is ever opened.
+  //
+  // The first read always runs, and only a console that answers for a fleet
+  // keeps reading: a Spark that leads none has one machine to draw for as
+  // long as it stands alone, so a poll for it would buy nothing. Adding a
+  // Spark re-reads the peers list either way, and that brings this read back.
   useEffect(() => {
     if (!authed) return
     let cancelled = false
+    let timer: ReturnType<typeof setInterval> | undefined
     const read = async (first = false) => {
       if (!first && document.hidden) return
       try {
         const summary = fleetSummary(await api<unknown>('/api/v1/fleet'))
-        if (!cancelled) setFleet(summary)
+        if (cancelled) return
+        setFleet(summary)
+        const inFleet = summary !== null && summary.role !== 'standalone'
+        if (inFleet && timer === undefined) timer = setInterval(read, MEMBERSHIP_POLL_MS)
       } catch {
         if (!cancelled) setFleet(null)
       }
     }
     void read(true)
-    const timer = setInterval(read, MEMBERSHIP_POLL_MS)
     return () => {
       cancelled = true
-      clearInterval(timer)
+      if (timer !== undefined) clearInterval(timer)
     }
-  }, [authed])
+  }, [authed, peers])
 
   // The same meters from every paired Spark, read one by one through this
   // manager. A Spark that does not answer keeps the samples it already sent;

@@ -4,13 +4,15 @@ import type { Recipe, Telemetry } from './api'
 import Monitor from './views/Monitor'
 import { LOCAL_MACHINE, recordSilence, recordTelemetry, resetTelemetry } from './telemetry'
 
-// A fleet of three, as the Sparks page lists it: this machine, a Spark this
-// console holds a key for, and one that joined the fleet by invitation and
-// has no key here.
+// The fleet in the lab: this machine, a Spark this console holds a key for,
+// and two that joined by invitation and have no key here. The peers table
+// holds one machine at most, so two unreadable Sparks is the ordinary shape
+// of a fleet of four, and the two must never be drawn as one.
 const MACHINES = [
-  { key: LOCAL_MACHINE, name: 'spark-f1cc' },
-  { key: 'peer-1', name: 'spark-a393' },
-  { key: '', name: 'edgexpert-2051' },
+  { id: 'node-lead', key: LOCAL_MACHINE, name: 'spark-f1cc' },
+  { id: 'node-loft', key: 'peer-1', name: 'spark-a393' },
+  { id: 'node-msi-a', key: '', name: 'edgexpert-2051' },
+  { id: 'node-msi-b', key: '', name: 'edgexpert-37c4' },
 ]
 
 const NO_METERS = 'This console cannot read the meters of this Spark yet.'
@@ -51,18 +53,28 @@ describe('the live meters', () => {
   it('draws a section for every Spark the fleet holds', () => {
     recordTelemetry(LOCAL_MACHINE, serving('2026-08-28T10:00:00Z'))
     const markup = draw(CATALOG)
-    expect(markup.match(/mon-machine/g)).toHaveLength(3)
+    expect(markup.match(/mon-machine/g)).toHaveLength(4)
     expect(markup).toContain('spark-f1cc')
     expect(markup).toContain('spark-a393')
     expect(markup).toContain('edgexpert-2051')
+    expect(markup).toContain('edgexpert-37c4')
     expect(markup).toContain('Qwen 3.6 35B')
+  })
+
+  // Two Sparks this console cannot read are two machines, not one. They share
+  // the empty samples key, so the page is keyed on the fleet's own id: with
+  // the key alone, React holds one section for both.
+  it('keeps two unreadable Sparks apart', () => {
+    expect(new Set(MACHINES.map(machine => machine.id)).size).toBe(MACHINES.length)
+    const markup = draw()
+    expect(markup.match(new RegExp(NO_METERS, 'g'))).toHaveLength(2)
   })
 
   // A Spark this console cannot ask says so, in its own section. It is never
   // drawn with a chart, and never left out.
   it('says plainly which Spark it cannot read', () => {
     const markup = draw()
-    expect(markup.match(new RegExp(NO_METERS, 'g'))).toHaveLength(1)
+    expect(markup).toContain(NO_METERS)
     expect(markup).toContain('edgexpert-2051')
   })
 

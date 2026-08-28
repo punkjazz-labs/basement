@@ -156,10 +156,34 @@ describe('which Sparks the meters are drawn for', () => {
 
   it('lists every Spark in the fleet, this one first', () => {
     expect(monitorMachines(three, [peer], 'attic')).toEqual([
-      { key: LOCAL_MACHINE, name: 'spark-f1cc' },
-      { key: 'peer-1', name: 'spark-a393' },
-      { key: '', name: 'edgexpert-2051' },
+      { id: 'node-lead', key: LOCAL_MACHINE, name: 'spark-f1cc' },
+      { id: 'node-loft', key: 'peer-1', name: 'spark-a393' },
+      { id: 'node-msi', key: '', name: 'edgexpert-2051' },
     ])
+  })
+
+  // The peers table holds one machine at most, so a fleet of four has two
+  // Sparks this console cannot read. They share the empty samples key, so
+  // only the id keeps them apart, and the page is drawn from the id.
+  it('gives two unreadable Sparks two identities', () => {
+    const four = [...three, row('node-msi-b', 'edgexpert-37c4', 'http://edgexpert-37c4.local:7070')]
+    const machines = monitorMachines(four, [peer], 'attic')
+    expect(machines).toHaveLength(4)
+    expect(machines.filter(machine => machine.key === '').map(machine => machine.name))
+      .toEqual(['edgexpert-2051', 'edgexpert-37c4'])
+    expect(new Set(machines.map(machine => machine.id)).size).toBe(4)
+  })
+
+  // A row the fleet named with no id of its own still has to be told apart
+  // from every other row, so it takes the console URL the table already
+  // de-duplicates on.
+  it('tells apart two Sparks that report no node id', () => {
+    const nameless = [
+      row('', 'edgexpert-2051', 'http://edgexpert-2051.local:7070'),
+      row('', 'edgexpert-37c4', 'http://edgexpert-37c4.local:7070'),
+    ]
+    const machines = monitorMachines(nameless, [], 'attic')
+    expect(new Set(machines.map(machine => machine.id)).size).toBe(3)
   })
 
   // The order the fleet reports is not the order the meters draw: this
@@ -173,7 +197,8 @@ describe('which Sparks the meters are drawn for', () => {
   // A Spark that leads no fleet has no row of its own, so the list is made
   // from the name this console knows for itself.
   it('draws this machine alone when there is no fleet', () => {
-    expect(monitorMachines([], [], 'attic')).toEqual([{ key: LOCAL_MACHINE, name: 'attic' }])
+    expect(monitorMachines([], [], 'attic'))
+      .toEqual([{ id: LOCAL_MACHINE, key: LOCAL_MACHINE, name: 'attic' }])
   })
 
   // A Spark added by address has a row and a key, so its meters are readable
@@ -181,8 +206,8 @@ describe('which Sparks the meters are drawn for', () => {
   it('reads a Spark added by address through its own key', () => {
     const added = row('peer-1', 'spark-a393', 'http://spark-a393.local:7070')
     expect(monitorMachines([added], [peer], 'attic')).toEqual([
-      { key: LOCAL_MACHINE, name: 'attic' },
-      { key: 'peer-1', name: 'spark-a393' },
+      { id: LOCAL_MACHINE, key: LOCAL_MACHINE, name: 'attic' },
+      { id: 'peer-1', key: 'peer-1', name: 'spark-a393' },
     ])
   })
 
@@ -190,6 +215,7 @@ describe('which Sparks the meters are drawn for', () => {
   // different case must not lose the key.
   it('matches a peer to its row however the URL was written', () => {
     const loud = { ...peer, base_url: 'http://SPARK-A393.local:7070/' }
-    expect(monitorMachines(three, [loud], 'attic')[1]).toEqual({ key: 'peer-1', name: 'spark-a393' })
+    expect(monitorMachines(three, [loud], 'attic')[1])
+      .toEqual({ id: 'node-loft', key: 'peer-1', name: 'spark-a393' })
   })
 })
