@@ -1,8 +1,8 @@
 /* basement console — dark only, site palette (basement.punkjazz.ai).
    Near-black slate ground, cream ink, hairlines, dense 13px scale.
    Color roles are strict: orange = primary actions + the wordmark,
-   NVIDIA green = a model is serving (nothing else, ever), forest = the
-   RECOMMENDED stamp, amber = warning, red = failure. Measured numbers
+   NVIDIA green = a model is serving (nothing else, ever), forest = an
+   editorial stamp, amber = warning, red = failure. Measured numbers
    are receipts and stay quiet. */
 
 :root {
@@ -241,6 +241,7 @@ input[type='text'], input[type='password'], textarea {
 }
 .hero-top { display: flex; gap: 18px; align-items: center; }
 .hero-top img { width: 68px; height: 68px; border-radius: 15px; border: 1px solid var(--line); }
+.hero-top .mark { border-radius: 15px; }
 .hero-name h2 { font-size: 21px; letter-spacing: -0.02em; }
 .hero-name .pub { color: var(--muted); font-size: 12.5px; margin: 2px 0 0; }
 .hero-get { margin-left: auto; display: grid; justify-items: center; gap: 5px; }
@@ -271,10 +272,16 @@ input[type='text'], input[type='password'], textarea {
   height: 32px; background: var(--panel); border-bottom: 1px solid var(--line);
   font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
 }
+/* The lab that made the models below it. The hairline runs from the name to
+   the right edge, so a long list reads as shelves and not as one wall. It
+   takes the place of the line that used to sit under the label: one rule for
+   one divider. */
 .mgroup {
-  padding: 10px 16px 6px; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 10px 16px 6px; background: var(--panel);
   font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+  display: flex; align-items: center; gap: 10px;
 }
+.mgroup::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .mgroup + .mgroup, .mrow + .mgroup, .mdetail + .mgroup { border-top: 1px solid var(--line); margin-top: 0; }
 .mthead .r { text-align: right; }
 .mrow { min-height: 62px; border-bottom: 1px solid var(--line); padding-block: 10px; cursor: pointer; }
@@ -283,6 +290,14 @@ input[type='text'], input[type='password'], textarea {
 .mrow:last-child, .mdetail:last-child { border-bottom: 0; }
 .m-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .m-id img { width: 28px; height: 28px; border-radius: 6px; flex: none; }
+/* A model from a lab this build ships no mark for. It stands in the same
+   square the logos use, and stays quiet: it says the mark is missing, it does
+   not pretend to be a brand. */
+.mark {
+  flex: none; display: grid; place-items: center; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--line);
+  color: var(--muted); font-weight: 700; text-transform: uppercase; line-height: 1;
+}
 .m-id .nm { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .m-id .use { color: var(--muted); font-size: 12px; margin-top: 1px; }
 .tag {

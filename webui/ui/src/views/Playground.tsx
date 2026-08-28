@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from 'rea
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { copyText } from '../api'
-import { logoFor } from '../catalog'
+import { Mark } from '../mark'
 import { confirmBox } from '../confirm'
 import {
   answerMeta, answerMeter, clearQuestion, composerHeight, hasDelta, jumpInFlight, mergeDelta,
@@ -684,7 +684,7 @@ export default function Playground({ ready, modelID, modelName, recipeID, chatMo
   return (
     <div className="playground">
       <div className="section-head play-head">
-        <img src={logoFor(recipeID ? [recipeID] : [])} alt="" width="30" height="30" />
+        <Mark recipeIDs={recipeID ? [recipeID] : []} name={targetName} size={30} />
         <div>
           <strong>{targetName}</strong>
           <div className="faint">Serving on this Spark</div>

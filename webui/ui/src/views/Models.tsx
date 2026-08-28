@@ -9,7 +9,8 @@ import {
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
-import { LOGOS, RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
+import { RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
+import { Mark } from '../mark'
 import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS, NO_ANSWER } from '../fleetInvite'
 import {
@@ -23,19 +24,42 @@ import {
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CLEAR_RECORD, CLEAR_RECORD_CONFIRM,
   COOL_MODE, COOL_MODE_LABEL, COOL_TAG, DISRUPTIVE_KINDS, EVERY_SPARK, FLEET_DEPLOYMENTS_PATH,
   FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL,
-  NO_PLACEMENT_BACK, NO_PLACEMENT_LEFT, ONE_SPARK_GROUP, PLACEMENT_PLAN_PATH,
-  POWER_MODE_BUSY, POWER_MODE_NOTE, POWER_REFUSED_TITLE, TWO_SPARK_GROUP,
+  NO_PLACEMENT_BACK, NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
+  POWER_MODE_BUSY, POWER_MODE_NOTE, POWER_REFUSED_TITLE,
   type ActionTarget, type FleetDeploymentAction, type FleetRow, type ModelsTab,
   type PlacementTarget, type PowerRow, type PowerState,
 } from '../fleetModels'
 
+// What each model is, not what it is worth. Every line states the same class
+// of fact the model catalogs state: dense or mixture of experts, the parameter
+// count with the active count where the two differ, what the model reads, and
+// the work it is for. Every claim traces to the recipe, to
+// docs/MODEL-CANDIDATES-2026-08.md, or to the publisher's own model card.
 const USE: Record<string, string> = {
-  'qwen36-35b-a3b-nvfp4-1s': 'Fast enough to become your default. Best all-rounder.',
-  'qwen36-27b-nvfp4-1s': 'Flagship-level coding in a smaller footprint.',
-  'laguna-s-2-1-nvfp4-dflash-1s': 'Built for long, independent agent runs.',
-  'nemotron-omni-30b-a3b-nvfp4-1s': "NVIDIA's own reasoning model, tuned for this hardware.",
-  'qwen35-122b-a10b-nvfp4-1s': 'The biggest model a single Spark can hold.',
-  'deepseek-v4-flash-0731-2s': 'The flagship run. Needs two Sparks linked together.',
+  'qwen36-35b-a3b-nvfp4-1s':
+    'Mixture of experts, 35B total with 3B active for each token. The quick daily model for chat, coding help and tool use.',
+  'qwen36-27b-nvfp4-1s':
+    'Dense 27B tuned for coding and agent work. Serves with speculative decoding for faster answers.',
+  'qwen35-122b-a10b-nvfp4-1s':
+    'Mixture of experts, 122B total with 10B active. It carries a built-in speculative head for faster decode. 262K context.',
+  'qwen38-27b-nvfp4-1s':
+    'Dense 27.8B with hybrid attention and built-in vision. Thinks before it answers by default. 262K context.',
+  'qwen38-27b-obliterated-q8-0-1s':
+    'A community build of Qwen 3.8 27B with the refusal behaviour removed by weight ablation. You own what you make with it.',
+  'qwen38-flash-next-nvfp4-2s':
+    'Mixture of experts, 180B total with 6B active. Reads text, images and video. 262K context. Runs across both Sparks.',
+  'laguna-s-2-1-nvfp4-dflash-1s':
+    "poolside's coding model with its DFlash draft companion for faster decode. Built for long agent runs.",
+  'deepseek-v4-flash-0731-2s':
+    "DeepSeek's official V4 Flash release in its own weights, FP8 attention with FP4 experts. Runs across both Sparks.",
+  'deepseek-v4-flash-0731-ud-iq3-xxs-1s':
+    'The same DeepSeek V4 Flash compressed to a 3-bit GGUF so one Spark can hold it alone.',
+  'minimax-h3-comfyui-1s':
+    'A 33B video model. Makes short clips with sound from a prompt or a source image, through ComfyUI.',
+  'nemotron-omni-30b-a3b-nvfp4-1s':
+    'Mixture of experts, 31B total with 3B active, built for reasoning. Serves text today. 131K context.',
+  'inkling-small-nvfp4-2s':
+    'Mixture of experts, 276B total with 12B active. Reads text, images and audio. Runs across both Sparks.',
 }
 // Community-reported typical speeds on a DGX Spark, shown until this device
 // measures its own number. Each figure traces to a corroborated measurement
@@ -47,6 +71,7 @@ const REFERENCE_TPS: Record<string, number> = {
   'nemotron-omni-30b-a3b-nvfp4-1s': 57, // 56.94 median, dev.classmethod.jp, Omni NVFP4
   'qwen35-122b-a10b-nvfp4-1s': 28, // 28.3 corroborated baseline, ice-ice-bear bench + NVIDIA forum 365639
   'deepseek-v4-flash-0731-2s': 68, // 67.58 measured on 2x Spark vLLM NVFP4; inside the forum's 42-76 range
+  'deepseek-v4-flash-0731-ud-iq3-xxs-1s': 17, // 16.56 measured, dev.classmethod.jp 2026-08-02; the sweep's tweet agrees
 }
 interface ConfirmState {
   recipe: Recipe
@@ -1124,11 +1149,10 @@ export default function Models({
           }}
         >
           <div className="m-id">
-            <img src={LOGOS[recipe.id] ?? '/logos/nvidia.webp'} alt="" width="28" height="28" />
+            <Mark recipeIDs={[recipe.id]} name={recipe.display_name} size={28} />
             <div>
               <div className="nm">
                 {recipe.display_name}{' '}
-                {recipe.id === RECOMMENDED_ID && !revocation.installBlocked && <span className="tag">Recommended</span>}
                 {revocation.revoked && <span className="tag revoked">Revoked</span>}
                 {/* Which Sparks in the fleet hold this model. The lit chip is
                     the one serving it now. */}
@@ -1395,7 +1419,7 @@ export default function Models({
       {featured && (
         <section className="hero" aria-label="Recommended model">
           <div className="hero-top">
-            <img src={LOGOS[featured.id] ?? '/logos/nvidia.webp'} alt="" width="68" height="68" />
+            <Mark recipeIDs={[featured.id]} name={featured.display_name} size={68} />
             <div className="hero-name">
               <p className="kicker">Recommended for your Spark</p>
               <h2>{featured.display_name}</h2>
@@ -1514,12 +1538,16 @@ export default function Models({
                 <div className="empty">{CATALOG_EMPTY}</div>
               ) : (
                 <>
-                  {/* Spark count is the axis the catalog already sorts on, so
-                      it is the axis the groups read on. */}
-                  {split.oneSpark.length > 0 && <div className="mgroup">{ONE_SPARK_GROUP}</div>}
-                  {split.oneSpark.map(rowFor)}
-                  {split.twoSparks.length > 0 && <div className="mgroup">{TWO_SPARK_GROUP}</div>}
-                  {split.twoSparks.map(rowFor)}
+                  {/* One divider for each lab, in the order the catalog sorts
+                      them. The lab is what the owner reads a growing list by,
+                      and the newest model of a lab sits at the top of its
+                      group. */}
+                  {split.labs.map(group => (
+                    <Fragment key={group.label}>
+                      <div className="mgroup">{group.label}</div>
+                      {group.models.map(rowFor)}
+                    </Fragment>
+                  ))}
                 </>
               )}
             </div>

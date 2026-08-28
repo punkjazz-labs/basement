@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api, idempotency, formatBytes, type StorageInfo } from '../api'
 import type { AppState } from '../App'
-import { logoFor, readableWeights } from '../catalog'
+import { readableWeights } from '../catalog'
+import { Mark } from '../mark'
 import { confirmBox, noticeBox } from '../confirm'
 
 // Which runtime an image reference belongs to, matched on the substring each
@@ -149,7 +150,7 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
                 const installed = models.some(model => model.recipe_id === group.recipeID)
                 return (
                   <div className="storage-row" key={group.recipeID}>
-                    <img src={logoFor([group.recipeID])} alt="" width="24" height="24" />
+                    <Mark recipeIDs={[group.recipeID]} name={recipeName(group.recipeID)} size={24} />
                     <div className="grow">
                       <strong>{recipeName(group.recipeID)}</strong>
                       <div className="faint" style={{ fontSize: 12 }}>
@@ -170,7 +171,7 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
                 const { name, quant } = readableWeights(artifact.repository)
                 return (
                   <div className="storage-row" key={`${artifact.repository}@${artifact.revision}`}>
-                    <img src={logoFor([])} alt="" width="24" height="24" />
+                    <Mark recipeIDs={[]} name={name} size={24} />
                     <div className="grow">
                       <strong>{name}</strong>
                       <div className="faint" style={{ fontSize: 12 }}>
@@ -206,7 +207,7 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
             const usedBy = image.recipe_ids.map(recipeName).join(', ')
             return (
               <div className="storage-row" key={image.reference}>
-                <img src={logoFor(image.recipe_ids)} alt="" width="24" height="24" />
+                <Mark recipeIDs={image.recipe_ids} name={title} size={24} />
                 <div className="grow">
                   <strong>{title}</strong>
                   <div className="faint" style={{ fontSize: 12 }}>

@@ -3,6 +3,7 @@ import {
   type FleetDeploymentView, type FleetModelSnapshot, type FleetNodeSummary, type FleetSummary,
   type InstallRequest, type NodeInventory, type Peer, type PlacementCandidate, type PlacementPlan,
 } from './api'
+import { labFor } from './catalog'
 import { consoleKey, inFleet, isLocalNode, nodeName, nodeServing, nodeStatus, type NodeStatus } from './fleetInvite'
 
 // The Models view, read across the whole fleet. Everything here is pure: one
@@ -938,8 +939,6 @@ export type ModelsTab = 'mine' | 'catalog'
 export const ONE_SPARK_TAB = 'On your Spark'
 export const MANY_SPARKS_TAB = 'On your Sparks'
 export const CATALOG_TAB = 'Catalog'
-export const ONE_SPARK_GROUP = 'Runs on one Spark'
-export const TWO_SPARK_GROUP = 'Needs two Sparks'
 
 // What the catalog says when it holds nothing. Every model is already on a
 // Spark, which is good news, so the line states it and stops there.
@@ -952,10 +951,13 @@ export const CATALOG_EMPTY = 'Every model is installed.'
 export const heldTabLabel = (knownSparks: number): string =>
   knownSparks > 1 ? MANY_SPARKS_TAB : ONE_SPARK_TAB
 
-// The least a recipe has to say for the split to place it.
+// The least a recipe has to say for the split to place it. The catalog groups
+// by the lab that made the model, so the split reads the same two fields
+// catalog.ts reads to name that lab.
 export interface TabbedRecipe {
   id: string
-  topology: { spark_count: number }
+  model_by?: string
+  publisher?: string
 }
 
 // Whether this model already lives on a machine this console speaks for.
@@ -979,34 +981,56 @@ export function heldSomewhere(
   return sparks.some(spark => spark.installedModels.some(model => model.recipe_id === recipeID))
 }
 
+// One lab's models in the catalog, under the lab's own name.
+export interface LabGroup<T> {
+  label: string
+  models: T[]
+}
+
 // The table, cut into the two tabs. The catalog keeps its groups, because it
 // is the list that grows.
 export interface ModelsSplit<T> {
   // Every model on a Spark, in the order it was given in.
   held: T[]
-  // The catalog, in the same order, split by how many Sparks a model needs.
-  oneSpark: T[]
-  twoSparks: T[]
+  // The catalog, in the same order, under one group for each lab. How many
+  // Sparks a model needs is no longer the axis: with many models the maker is
+  // the question the owner asks first, and the models that need two Sparks
+  // say so in their own description line and in the install flow.
+  labs: LabGroup<T>[]
   // How many models the catalog holds in all, which is the count on its tab.
   catalogCount: number
 }
 
 // Which tab owns each model. The order inside each list is the order the
-// recipes arrived in, so the curated catalog order is kept unchanged.
+// recipes arrived in, so the order sortCatalog chose is kept unchanged: it
+// already puts the labs in the order they read on screen, and the newest
+// model of each lab at the top of its group.
+//
+// A lab is added the first time one of its models appears, and every later
+// model of that lab joins the group it opened. Sorted input therefore yields
+// groups that run one after the other, and unsorted input still yields one
+// group per lab rather than the same lab twice.
 export function splitModels<T extends TabbedRecipe>(
   recipes: readonly T[],
   localRecipeIDs: ReadonlySet<string>,
   peerRecipeIDs: ReadonlySet<string>,
   sparks: readonly FleetRow[],
 ): ModelsSplit<T> {
-  const split: ModelsSplit<T> = { held: [], oneSpark: [], twoSparks: [], catalogCount: 0 }
+  const split: ModelsSplit<T> = { held: [], labs: [], catalogCount: 0 }
+  const groups = new Map<string, LabGroup<T>>()
   for (const recipe of recipes) {
     if (heldSomewhere(recipe.id, localRecipeIDs, peerRecipeIDs, sparks)) {
       split.held.push(recipe)
       continue
     }
-    if (recipe.topology.spark_count > 1) split.twoSparks.push(recipe)
-    else split.oneSpark.push(recipe)
+    const label = labFor(recipe)
+    let group = groups.get(label)
+    if (!group) {
+      group = { label, models: [] }
+      groups.set(label, group)
+      split.labs.push(group)
+    }
+    group.models.push(recipe)
     split.catalogCount += 1
   }
   return split

@@ -16,10 +16,9 @@ import {
   CHOOSE_FOR_ME_NOTE, CLEAR_RECORD, CLEAR_RECORD_CONFIRM, COOL_MODE, COOL_MODE_LABEL, COOL_TAG,
   DISRUPTIVE_KINDS,
   FLEET_DEPLOYMENT_ACTIONS, FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL, MANY_SPARKS_TAB,
-  NO_FLEET_ROW, NO_PLACEMENT_BACK, ONE_SPARK_GROUP,
+  NO_FLEET_ROW, NO_PLACEMENT_BACK,
   ONE_SPARK_TAB, PLACEMENT_REFUSED, PLACEMENT_WORKING, POWER_MODE_NOTE, POWER_REFUSED_TITLE,
-  TWO_SPARK_GROUP,
-  type ActionTarget, type FleetRow, type PlacementTarget,
+  type ActionTarget, type FleetRow, type LabGroup, type PlacementTarget,
 } from './fleetModels'
 
 const inventory = (overrides: Partial<NodeInventory> = {}): NodeInventory => ({
@@ -1309,28 +1308,42 @@ describe('which tab a model sits under', () => {
   // carries no model list at all.
   const byAddress = (name: string): FleetRow => ({ ...row(name), legacyPeerOnly: true })
 
-  const recipe = (id: string, sparkCount = 1) => ({ id, topology: { spark_count: sparkCount } })
+  // The catalog groups by the lab that made the model, so a recipe here
+  // carries the same model_by field the manager sends.
+  const recipe = (id: string, model_by: string) => ({ id, model_by })
 
-  const fast = recipe('qwen36-35b-a3b-nvfp4-1s')
-  const coder = recipe('qwen36-27b-nvfp4-1s')
-  const agent = recipe('laguna-s-2-1-nvfp4-dflash-1s')
-  const flagship = recipe('deepseek-v4-flash-0731-2s', 2)
+  const fast = recipe('qwen36-35b-a3b-nvfp4-1s', 'Qwen team, Alibaba')
+  const coder = recipe('qwen36-27b-nvfp4-1s', 'Qwen team, Alibaba')
+  const agent = recipe('laguna-s-2-1-nvfp4-dflash-1s', 'poolside')
+  const flagship = recipe('deepseek-v4-flash-0731-2s', 'DeepSeek')
   const catalogue = [fast, coder, agent, flagship]
+
+  // What the catalog pane draws: one divider for each lab, and the models
+  // under it, in the order the split hands them over.
+  const shelves = <T extends { id: string }>(labs: LabGroup<T>[]) =>
+    labs.map(group => [group.label, group.models.map(model => model.id)])
 
   const none: ReadonlySet<string> = new Set()
 
   it('puts a model this Spark holds on the first tab', () => {
     const split = splitModels(catalogue, new Set([fast.id]), none, [])
     expect(split.held).toEqual([fast])
-    expect(split.oneSpark).toEqual([coder, agent])
-    expect(split.twoSparks).toEqual([flagship])
+    expect(shelves(split.labs)).toEqual([
+      ['Qwen · Alibaba', [coder.id]],
+      ['poolside', [agent.id]],
+      ['DeepSeek', [flagship.id]],
+    ])
     expect(split.catalogCount).toBe(3)
   })
 
   it('puts a model another Spark in the fleet holds on the first tab', () => {
     const split = splitModels(catalogue, none, none, [row('attic'), row('loft', [snapshot(coder.id)])])
     expect(split.held).toEqual([coder])
-    expect(split.oneSpark).toEqual([fast, agent])
+    expect(shelves(split.labs)).toEqual([
+      ['Qwen · Alibaba', [fast.id]],
+      ['poolside', [agent.id]],
+      ['DeepSeek', [flagship.id]],
+    ])
   })
 
   // A Spark added by address is in no fleet, so its row reports nothing. Its
@@ -1340,8 +1353,10 @@ describe('which tab a model sits under', () => {
   it('puts a model the paired Spark holds on the first tab', () => {
     const split = splitModels(catalogue, none, new Set([agent.id]), [byAddress('shed')])
     expect(split.held).toEqual([agent])
-    expect(split.oneSpark).toEqual([fast, coder])
-    expect(split.twoSparks).toEqual([flagship])
+    expect(shelves(split.labs)).toEqual([
+      ['Qwen · Alibaba', [fast.id, coder.id]],
+      ['DeepSeek', [flagship.id]],
+    ])
     expect(split.catalogCount).toBe(3)
   })
 
@@ -1349,7 +1364,10 @@ describe('which tab a model sits under', () => {
     const sparks = [row('attic', [snapshot(flagship.id)]), row('loft', [snapshot(flagship.id)])]
     const split = splitModels(catalogue, none, none, sparks)
     expect(split.held).toEqual([flagship])
-    expect(split.twoSparks).toEqual([])
+    expect(shelves(split.labs)).toEqual([
+      ['Qwen · Alibaba', [fast.id, coder.id]],
+      ['poolside', [agent.id]],
+    ])
     expect(split.catalogCount).toBe(3)
   })
 
@@ -1363,9 +1381,48 @@ describe('which tab a model sits under', () => {
   it('keeps the order it was given inside each group', () => {
     const split = splitModels(catalogue, none, none, [])
     expect(split.held).toEqual([])
-    expect(split.oneSpark).toEqual([fast, coder, agent])
-    expect(split.twoSparks).toEqual([flagship])
+    expect(shelves(split.labs)).toEqual([
+      ['Qwen · Alibaba', [fast.id, coder.id]],
+      ['poolside', [agent.id]],
+      ['DeepSeek', [flagship.id]],
+    ])
     expect(split.catalogCount).toBe(4)
+  })
+
+  // The obliterated build names its ablation author in the same field as the
+  // model's maker. It is still a Qwen model and it reads under the Qwen
+  // divider, not under a shelf of its own.
+  it('reads both forms of the Qwen team name as one lab', () => {
+    const obliterated = recipe(
+      'qwen38-27b-obliterated-q8-0-1s',
+      'Qwen team, Alibaba; abliteration by OBLITERATUS',
+    )
+    const split = splitModels([fast, obliterated], none, none, [])
+    expect(shelves(split.labs)).toEqual([['Qwen · Alibaba', [fast.id, obliterated.id]]])
+  })
+
+  // A recipe that names no maker still has to sit somewhere, and it sits
+  // under the name it does declare rather than under a lab that has not
+  // claimed it.
+  it('falls back to the publisher, then to Community', () => {
+    const published = { id: 'published-1s', publisher: 'Comfy-Org' }
+    const anonymous = { id: 'anonymous-1s' }
+    const split = splitModels([published, anonymous], none, none, [])
+    expect(shelves(split.labs)).toEqual([
+      ['Comfy-Org', [published.id]],
+      ['Community', [anonymous.id]],
+    ])
+  })
+
+  // sortCatalog hands the catalog over with each lab's models already
+  // together. A list that arrives in any other order still gets one divider
+  // for each lab, in the order each lab first appears.
+  it('gives a lab one group even when its models arrive apart', () => {
+    const split = splitModels([fast, agent, coder], none, none, [])
+    expect(shelves(split.labs)).toEqual([
+      ['Qwen · Alibaba', [fast.id, coder.id]],
+      ['poolside', [agent.id]],
+    ])
   })
 
   // The first run: nothing is installed on any machine this console speaks
@@ -1379,8 +1436,7 @@ describe('which tab a model sits under', () => {
     const split = splitModels(catalogue, new Set(catalogue.map(item => item.id)), none, [])
     expect(split.held).toEqual(catalogue)
     expect(split.catalogCount).toBe(0)
-    expect(split.oneSpark).toEqual([])
-    expect(split.twoSparks).toEqual([])
+    expect(split.labs).toEqual([])
   })
 
   it('reads a Spark added by address through its own summary, not its fleet row', () => {
@@ -1406,8 +1462,6 @@ describe('which tab a model sits under', () => {
     expect(ONE_SPARK_TAB).toBe('On your Spark')
     expect(MANY_SPARKS_TAB).toBe('On your Sparks')
     expect(CATALOG_TAB).toBe('Catalog')
-    expect(ONE_SPARK_GROUP).toBe('Runs on one Spark')
-    expect(TWO_SPARK_GROUP).toBe('Needs two Sparks')
     expect(CATALOG_EMPTY).toBe('Every model is installed.')
   })
 })

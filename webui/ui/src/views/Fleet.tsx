@@ -6,7 +6,7 @@ import {
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
-import { logoFor } from '../catalog'
+import { Mark } from '../mark'
 import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
 import {
   fleetInvitations, fleetNodeFor, fleetSize, fleetStatusNote, fleetSummary, foundLine, foundSparks,
@@ -484,7 +484,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
             <div className="m-id">
               {thisRecipe ? (
                 <>
-                  <img src={logoFor([thisRecipe.id])} alt="" width="24" height="24" />
+                  <Mark recipeIDs={[thisRecipe.id]} name={thisRecipe.display_name} size={24} />
                   <div className="nm" style={{ fontSize: 13 }}>{thisRecipe.display_name}</div>
                 </>
               ) : (
@@ -544,7 +544,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                   <div className="m-id">
                     {peerRecipe ? (
                       <>
-                        <img src={logoFor([peerRecipe.id])} alt="" width="24" height="24" />
+                        <Mark recipeIDs={[peerRecipe.id]} name={peerRecipe.display_name} size={24} />
                         <div className="nm" style={{ fontSize: 13 }}>{peerRecipe.display_name}</div>
                       </>
                     ) : (
@@ -634,7 +634,11 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                   <div className="m-id">
                     {serving ? (
                       <>
-                        <img src={logoFor([serving.recipe_id])} alt="" width="24" height="24" />
+                        <Mark
+                          recipeIDs={[serving.recipe_id]}
+                          name={servingRecipe?.display_name ?? serving.recipe_id}
+                          size={24}
+                        />
                         {/* Named by this console's catalog when it knows the
                             recipe, and by the id that Spark sent when it does
                             not. */}
