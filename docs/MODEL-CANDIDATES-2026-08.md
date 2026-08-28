@@ -295,3 +295,60 @@ docs/feed-acknowledged.yaml.
 - Becomes a recipe version when: the rewritten tree's method is re-read
   end to end and the bind-mounted-patch objections recorded in Round 4 for
   the single-Spark variant are re-evaluated against the hardened stack.
+
+## Round 6 — 2026-08-26, owner link (Qwen3.8-Flash-Next dual-Spark)
+
+Trigger: the owner sent MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks.
+Every fact verified live on 2026-08-26 (HF API, GitHub API, Docker Hub
+registry manifests). The whole stack landed that same day: the base image
+rebuilt 12:02 UTC, the checkpoint updated 12:28 UTC, the launcher
+published 17:19-17:38 UTC.
+
+### Qwen3.8-Flash-Next — ADDED as `qwen38-flash-next-nvfp4-2s` (first-party image)
+
+- Model: `Qwen/Qwen3.8-Flash-Next`, a Qwen4-architecture preview
+  (`qwen4_exp`): 176B MoE with about 6B active (launcher figure; the quant
+  card rounds to ~180B), 48 layers alternating Gated DeltaNet and QSA
+  sparse full attention, 512 routed experts with top-10 routing plus a
+  shared expert, PLE n-gram embedding tables, in-checkpoint MTP draft
+  layer, multimodal input (text, image, video), native context 262144,
+  thinking on by default.
+- Licence: "Qwen Community License 1.0" (LICENSE fetched verbatim
+  2026-08-26). Permissive; attribution display required above 100M MAU or
+  USD 20M monthly revenue; Model-as-a-Service and "AI Work Assistant"
+  businesses need a separate licence for commercial use. No territory
+  exclusions. Recipe sets required_licence_acceptance.
+- Checkpoint: `RadixArk/Qwen3.8-Flash-Next-NVFP4`, sha `7b719225` on
+  2026-08-26, 135,253,624,416 weight bytes per its own
+  qualification-notes.md (NVFP4 W4A4 routed experts, FP8 PLE tables, BF16
+  dense; 206 shards, 420 files). The card says "private candidate
+  release" and defers licence to the base model. Publisher-measured
+  quality in-tree: GSM8K 97.27 (reference band 97.12-97.50), AIME26
+  pass@1 98.75. Not our measurements.
+- Runtime: strictly two Sparks (135 GB does not fit one), SGLang TP=2
+  over the ConnectX-7 link, NEXTN speculation (3 steps, topk 1, 4 draft
+  tokens) over the in-checkpoint MTP head, nothing extra to download.
+- The SM121 blocker and its resolution: the stock
+  `lmsysorg/sglang:qwen38flashnext` image (index digest `12d3392b`,
+  RadixArk overlay build with self-declared provenance labels) fails on
+  GB10 because QSA resolves to flash-attn-4 CuTe kernels that fail MLIR
+  compilation on SM121; the launcher's KERNEL_PATCH builds a local
+  Triton-fallback derivative, which ADR 0012 cannot ship. Resolution:
+  `packaging/qwen38-flash-next-image/` reproduces that build as a
+  CI-published first-party image (the comfyui-image pattern), pinning the
+  base by digest and extracting the launcher's fallback byte-identically
+  (sha `195cebac`) at launcher commit `dccb035c`. The image also installs
+  `nvidia-nccl-cu13==2.30.7`: the launcher preloads host-staged NCCL
+  2.30.7 (its GLM-5.2 runbook pins >= 2.30.7 for CUDA graphs + TP on
+  GB10 + CX7) and basement cannot mount host libraries, so the pinned
+  wheel delivers the same library version by another path. Qualification
+  decides whether the combination holds.
+- Launcher-measured speeds on 2x GB10, TP=2, NEXTN (single source, its
+  benchmark commit 74cb0fa8 of 2026-08-26; kept out of the console's
+  reference numbers by the corroboration bar): 64.4 tok/s single stream
+  at TTFT 117 ms, 116.8 tok/s aggregate over two streams, 114.1 over
+  four.
+- GB10 warning carried into the recipe comments: never probe this model
+  with --load-format dummy; the fp16 copy of the ~26 GB/rank PLE table
+  overcommits unified memory and hard-freezes the node (launcher observed
+  it twice, full reboots).
