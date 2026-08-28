@@ -54,7 +54,9 @@ id: qwen38-flash-next-nvfp4-2s
 # One deliberate substitution inside that image. The launcher's validated
 # runtime preloads host-staged NCCL 2.30.7 on both nodes, because its GLM-5.2
 # runbook pins 2.30.7 or newer for CUDA graphs plus tensor parallelism on GB10
-# with ConnectX-7, and the base image bundles 2.29.7. A basement container
+# with ConnectX-7, and the launcher states the base image bundles 2.29.7 (the
+# registry metadata shows the system NCCL package, not the Python one, so that
+# figure has the launcher as its only source). A basement container
 # cannot mount host libraries, so the image installs nvidia-nccl-cu13==2.30.7
 # as a pinned wheel. The library version is the validated one and the delivery
 # path is not. Qualification decides whether the combination holds.
@@ -74,11 +76,21 @@ id: qwen38-flash-next-nvfp4-2s
 # streams the weights and never does this. Nothing in this recipe can ask for
 # dummy weights; the note is here for whoever debugs a start by hand.
 #
+# The launcher reports a second way to wedge a node, and this one is a
+# qualification watch item rather than a warning about a flag. The QSA indexer
+# holds a transient workspace for prefill that grows with the chunk size times
+# the history length: the launcher measures about 8 GB to 10 GB at chunk 4096
+# with 300,000 tokens of history, and it wedged its box at memory fraction
+# 0.85. This recipe runs chunk 4096 at fraction 0.70 over the native 262144
+# window, so it sits inside neither of those conditions, and a long-context
+# prefill is still the first thing to exercise on hardware here.
+#
 # The PLE tables stay in host memory (ple_offload_embedding). That is SGLang's
-# own auto-rule for this model on CUDA, and the launcher makes it explicit. It
-# costs about 26 GB of pinned host memory per rank at TP=2. Forcing the tables
-# into device memory costs about the same again on the device side and only
-# fits beside a lower memory fraction.
+# own auto-rule for this model on CUDA. It costs about 26 GB of pinned host
+# memory per rank at TP=2. Forcing the tables into device memory costs about
+# the same again on the device side and only fits beside a lower memory
+# fraction. This recipe states the placement rather than inheriting it; see
+# the deviations below.
 #
 # Deliberate differences from the observed launcher command, each with its
 # reason:
@@ -103,6 +115,14 @@ id: qwen38-flash-next-nvfp4-2s
 #   the value from max_running_requests when it is empty, and the runtime does
 #   the same derivation, so this recipe does not restate a number it would only
 #   copy.
+# - ple_offload_embedding is true, so the command carries
+#   --ple-offload-embedding. The launcher's default command carries no PLE
+#   flag at all: its PLE_OFFLOAD variable is empty by default, which leaves
+#   the placement to SGLang's auto-rule. The rule offloads on CUDA, and the
+#   launcher recommends offload on GB10, so this recipe pins that outcome with
+#   the launcher's own PLE_OFFLOAD=1 form rather than depending on a rule that
+#   a future runtime could change. The opposite setting is the one the
+#   launcher's crash notes warn about.
 # - The launcher's CPU pinning (--cpuset-cpus 5-9,15-19) is not carried. It is
 #   host-specific tuning, and the same choice was made for the Qwen3.8-27B
 #   recipe.
@@ -121,9 +141,13 @@ id: qwen38-flash-next-nvfp4-2s
 #   NCCL_NET=IB, NCCL_NET_PLUGIN=none, NCCL_NVLS_ENABLE=0, NCCL_CUMEM_ENABLE=0
 #   and NCCL_IB_ROCE_VERSION_NUM=2. The topology block admits a closed list of
 #   fabric controls, and widening that list is a schema change that
-#   qualification drives, not a recipe. The pack's other two-Spark SGLang
-#   recipe already runs its fabric without them, with the same GID index 3 that
-#   selects RoCEv2 in practice.
+#   qualification drives, not a recipe. The evidence that the fabric runs
+#   without them is the two-Spark DeepSeek V4 Flash recipe, which declares the
+#   same interconnect block with the same GID index 3 (the index that selects
+#   RoCEv2 in practice) and served on these two Sparks in the hardware
+#   qualification of 2026-08-04. The pack's other two-Spark SGLang recipe,
+#   Inkling Small, has the same shape but has not run on hardware yet, so it
+#   is a precedent for the form and not evidence for the fabric.
 # - The two CUDA architecture names sit in runtime.environment rather than in
 #   the topology block. They are compile targets for what the runtime builds at
 #   start, not fabric controls, and that is where the schema admits them.
@@ -267,7 +291,7 @@ service:
     # No second artifact: the draft weights are inside the primary checkpoint.
     speculative_model_role: ""
     # No chat template override: the pinned snapshot ships its own
-    # chat_template.jinja and trust_remote_code loads it.
+    # chat_template.jinja, which the runtime reads as a tokenizer asset.
     chat_template_file: ""
     # auto means the runtime derives both parsers from that chat template,
     # which is what the launcher asks for.
@@ -275,12 +299,17 @@ service:
     reasoning_parser: auto
     # flashinfer is required on SM121; the trtllm backend is SM100 only.
     attention_backend: flashinfer
-    # This architecture is not built into every runtime release, so the
-    # checkpoint ships the model code and the revision pin fixes those bytes.
+    # The launcher passes --trust-remote-code on every start, and this recipe
+    # matches it. What the flag does here is worth stating exactly, because
+    # this is a supply-chain surface: the pinned snapshot carries no Python
+    # file and no auto_map, so the flag authorizes no code from the artifact.
+    # The qwen4_exp implementation lives in the pinned image, which the
+    # launcher header names as sgl-project/sglang PR 36497 baked into the base
+    # build.
     trust_remote_code: true
     chunked_prefill_size: 4096
     # Prefill CUDA graphs are unreliable on GB10; both the launcher and the
-    # pack's other SM121 recipes turn them off.
+    # pack's other SM121 recipe turn them off.
     disable_prefill_cuda_graph: true
     # Compressed QSA addresses its cache in pages of 64, and the Mamba state
     # is tracked on the same grid.
