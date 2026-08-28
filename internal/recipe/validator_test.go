@@ -952,6 +952,33 @@ func TestVLLMPolicyBoundsTheGB10RuntimeSettings(t *testing.T) {
 			v.SpeculativeMethod, v.SpeculativeTokens = "", 0
 		}, "require a speculative method"},
 		{"DSpark pointed at a second model", func(v *VLLMConfig) { v.SpeculativeModelRole = "primary" }, "must not reference a separate speculative model"},
+		{"quantization outside the evidence", func(v *VLLMConfig) { v.Quantization = "marlin" }, "outside the recipe policy"},
+		{"unbounded decode batch", func(v *VLLMConfig) { v.MaxNumSeqs = maxVLLMNumSeqs + 1 }, "max_num_seqs must be no more than"},
+		{"unbounded scheduler token budget", func(v *VLLMConfig) {
+			v.MaxBatchedTokens = maxVLLMBatchedTokens + 1
+		}, "max_num_batched_tokens must be no more than"},
+		{"more MTP drafts than a checkpoint head produces", func(v *VLLMConfig) {
+			v.SpeculativeMethod, v.SpeculativeTokens = "mtp", maxMTPSpeculativeTokens+1
+			v.SpeculativeDraftSampleMethod = ""
+		}, "no more than 3 with speculative_method mtp"},
+		{"two chat templates at once", func(v *VLLMConfig) {
+			v.ChatTemplateFile, v.ChatTemplateImagePath = "chat_template.jinja", "/opt/glm53/chat_template.jinja"
+		}, "not both"},
+		{"image chat template that is not an absolute path", func(v *VLLMConfig) {
+			v.ChatTemplateImagePath = "opt/glm53/chat_template.jinja"
+		}, "must be an absolute container path"},
+		{"image chat template climbing out of its directory", func(v *VLLMConfig) {
+			v.ChatTemplateImagePath = "/opt/../model/chat_template.jinja"
+		}, "must be an absolute container path"},
+		{"image chat template over the weights", func(v *VLLMConfig) {
+			v.ChatTemplateImagePath = "/model/chat_template.jinja"
+		}, "collides with the container's /model mount"},
+		{"image chat template over the scratch tmpfs", func(v *VLLMConfig) {
+			v.ChatTemplateImagePath = "/tmp/chat_template.jinja"
+		}, "collides with the container's /tmp mount"},
+		{"image chat template over the compilation cache", func(v *VLLMConfig) {
+			v.ChatTemplateImagePath = "/root/.cache/chat_template.jinja"
+		}, "collides with the container's /root/.cache mount"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -964,6 +991,189 @@ func TestVLLMPolicyBoundsTheGB10RuntimeSettings(t *testing.T) {
 				t.Fatalf("Validate()=%v, want error containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+// vllmCandidate is the pack's two-Spark vLLM recipe, which is the topology an
+// EXL3 launcher runs at TP=2. The caller mutates the returned block.
+func vllmCandidate(t *testing.T) Recipe {
+	t.Helper()
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := Find(recipes, "deepseek-v4-flash-0731-2s")
+	if !ok {
+		t.Fatal("DeepSeek V4 Flash two-Spark recipe missing")
+	}
+	block := *base.Service.VLLM
+	base.Service.VLLM = &block
+	return base
+}
+
+// exl3MTPVLLM is the launch configuration of an EXL3 checkpoint served on the
+// MTP speculative path: the exl3 kernel named explicitly, an fp8 KV cache,
+// prefix caching on, a small decode batch beside a short scheduler budget, two
+// drafted tokens from the checkpoint's own MTP layer, and a chat template the
+// runtime image carries rather than the checkpoint.
+//
+// The parsers stay the base recipe's. The launcher's own parser names are not
+// in the vLLM allowlist yet, and this task widens the fields rather than the
+// parser sets.
+func exl3MTPVLLM(v *VLLMConfig) {
+	v.Quantization = "exl3"
+	v.KVCacheDType = "fp8"
+	v.PrefixCaching = true
+	v.MaxNumSeqs = 4
+	v.MaxBatchedTokens = 1024
+	v.MaxModelLen = 900000
+	// The EXL3 launcher pins no KV cache block size, unlike the NVFP4 MLA
+	// path this base recipe comes from.
+	v.BlockSize = 0
+	v.MaxCUDAGraphCaptureSize = 32
+	v.SpeculativeMethod = "mtp"
+	v.SpeculativeTokens = 2
+	v.SpeculativeMoE = ""
+	v.SpeculativeModelRole = ""
+	v.SpeculativeDraftSampleMethod = ""
+	v.ChatTemplateFile = ""
+	v.ChatTemplateImagePath = "/opt/glm53/chat_template.jinja"
+}
+
+// TestValidateAcceptsVLLMEXL3MTPFields is the admit side of every rule this
+// round adds: the quantization value, the two bounded batch budgets, the MTP
+// draft count and the image-resident chat template.
+func TestValidateAcceptsVLLMEXL3MTPFields(t *testing.T) {
+	candidate := vllmCandidate(t)
+	exl3MTPVLLM(candidate.Service.VLLM)
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate()=%v, want nil", err)
+	}
+	// Absent is still valid: no recipe that shipped before this round sets
+	// either new field, and both must stay optional.
+	candidate.Service.VLLM.Quantization = ""
+	candidate.Service.VLLM.ChatTemplateImagePath = ""
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() with both new fields unset=%v, want nil", err)
+	}
+}
+
+// TestMTPDraftBoundIsMethodSpecific proves the tight MTP bound narrows the one
+// method whose drafts come from the served checkpoint, and leaves a separate
+// drafter alone. The pack's DFlash recipe runs 15 drafted tokens from a
+// drafter it downloads, which the MTP ceiling must never refuse.
+func TestMTPDraftBoundIsMethodSpecific(t *testing.T) {
+	candidate := vllmCandidate(t)
+	vllm := candidate.Service.VLLM
+	vllm.SpeculativeMethod = "mtp"
+	vllm.SpeculativeDraftSampleMethod = ""
+	for _, tokens := range []int{1, 2, maxMTPSpeculativeTokens} {
+		vllm.SpeculativeTokens = tokens
+		if err := Validate(candidate); err != nil {
+			t.Fatalf("Validate() with %d MTP drafts=%v, want nil", tokens, err)
+		}
+	}
+	vllm.SpeculativeTokens = maxMTPSpeculativeTokens + 1
+	if err := Validate(candidate); err == nil || !strings.Contains(err.Error(), "with speculative_method mtp") {
+		t.Fatalf("Validate() with %d MTP drafts=%v, want a refusal", maxMTPSpeculativeTokens+1, err)
+	}
+
+	drafter := vllmCandidate(t)
+	drafter.Artifacts = append(append([]Artifact(nil), drafter.Artifacts...), Artifact{
+		Role: "drafter", Repository: drafter.Artifacts[0].Repository,
+		Revision: drafter.Artifacts[0].Revision, ExpectedBytes: 2342175855,
+		Licence: drafter.Artifacts[0].Licence, LicenceURL: drafter.Artifacts[0].LicenceURL,
+	})
+	drafter.Service.VLLM.SpeculativeMethod = "dflash"
+	drafter.Service.VLLM.SpeculativeModelRole = "drafter"
+	drafter.Service.VLLM.SpeculativeTokens = 15
+	if err := Validate(drafter); err != nil {
+		t.Fatalf("Validate() with 15 drafts from a separate drafter=%v, want nil", err)
+	}
+}
+
+// TestChatTemplateImagePathRejectsEveryManagedMount covers the artifact mounts
+// the table test above cannot reach: a recipe with a second artifact role
+// mounts that role's own path, and an image template may not sit there either.
+func TestChatTemplateImagePathRejectsEveryManagedMount(t *testing.T) {
+	recipes, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, ok := Find(recipes, "laguna-s-2-1-nvfp4-dflash-1s")
+	if !ok {
+		t.Fatal("Laguna DFlash recipe missing")
+	}
+	block := *base.Service.VLLM
+	base.Service.VLLM = &block
+	block.ChatTemplateImagePath = "/drafter/chat_template.jinja"
+	if err := Validate(base); err == nil || !strings.Contains(err.Error(), "collides with the container's /drafter mount") {
+		t.Fatalf("Validate()=%v, want the drafter mount collision", err)
+	}
+	block.ChatTemplateImagePath = "/opt/glm53/chat_template.jinja"
+	if err := Validate(base); err != nil {
+		t.Fatalf("Validate() with an image-resident template=%v, want nil", err)
+	}
+}
+
+// TestImageChatTemplateMustSurviveTheRecipesOwnMounts proves the second half
+// of the image template rule. A writable path is a private tmpfs mounted over
+// the image's own directory, so a template underneath one is gone before the
+// runtime reads it. The pack's two-Spark vLLM recipe declares two such paths.
+func TestImageChatTemplateMustSurviveTheRecipesOwnMounts(t *testing.T) {
+	candidate := vllmCandidate(t)
+	if len(candidate.Runtime.WritablePaths) == 0 {
+		t.Fatal("this test needs a recipe that declares a writable path")
+	}
+	writable := candidate.Runtime.WritablePaths[0]
+	candidate.Service.VLLM.ChatTemplateImagePath = writable + "/chat_template.jinja"
+	err := Validate(candidate)
+	if err == nil || !strings.Contains(err.Error(), "is inside the recipe's writable path "+writable) {
+		t.Fatalf("Validate()=%v, want a writable-path refusal", err)
+	}
+	// The same template outside every mount is exactly what the field is for.
+	candidate.Service.VLLM.ChatTemplateImagePath = "/opt/glm53/chat_template.jinja"
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate()=%v, want nil", err)
+	}
+}
+
+// TestVLLMEXL3MTPFieldsSurviveARoundTrip proves the new settings are schema
+// rather than Go: a recipe carrying them is written out and read back by the
+// strict decoder, which refuses any field the schema does not name, and every
+// value arrives unchanged.
+func TestVLLMEXL3MTPFieldsSurviveARoundTrip(t *testing.T) {
+	candidate := vllmCandidate(t)
+	exl3MTPVLLM(candidate.Service.VLLM)
+	document, err := yaml.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeStrict(document)
+	if err != nil {
+		t.Fatalf("DecodeStrict()=%v", err)
+	}
+	if !reflect.DeepEqual(*decoded.Service.VLLM, *candidate.Service.VLLM) {
+		t.Fatalf("decoded vllm block=%#v, want %#v", *decoded.Service.VLLM, *candidate.Service.VLLM)
+	}
+}
+
+// TestVLLMEXL3MTPKeysAreTheDocumentedNames reads the new settings from a
+// hand-written fragment instead of from a marshalled struct. The round trip
+// above encodes with the same tags it then decodes with, so it would accept a
+// misspelled key; a recipe author writes these names by hand, and each one has
+// to match the flag it stands for.
+func TestVLLMEXL3MTPKeysAreTheDocumentedNames(t *testing.T) {
+	fragment := "quantization: exl3\n" +
+		"chat_template_image_path: /opt/glm53/chat_template.jinja\n"
+	decoder := yaml.NewDecoder(strings.NewReader(fragment))
+	decoder.KnownFields(true)
+	var block VLLMConfig
+	if err := decoder.Decode(&block); err != nil {
+		t.Fatalf("decode vllm fragment=%v", err)
+	}
+	if block.Quantization != "exl3" || block.ChatTemplateImagePath != "/opt/glm53/chat_template.jinja" {
+		t.Fatalf("decoded block=%#v", block)
 	}
 }
 

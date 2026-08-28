@@ -380,6 +380,30 @@ type VLLMConfig struct {
 	// every recipe that shipped before this field, means no
 	// --compilation-config flag at all and vLLM's own defaults stand.
 	DisableQuantFusions bool `yaml:"disable_quant_fusions,omitempty" json:"disable_quant_fusions,omitempty"`
+	// Quantization is --quantization, the weight format vLLM loads the
+	// checkpoint with. vLLM reads that format from the checkpoint's own
+	// configuration, so a recipe states it only when the launcher it comes
+	// from states it. An EXL3 checkpoint is such a case: its launcher names
+	// the exl3 kernel and refuses the marlin kernel for the same weights, so
+	// the flag selects a kernel rather than describing the bytes. Absent,
+	// which is every recipe before this field, means no --quantization flag
+	// and vLLM's own detection stands.
+	Quantization string `yaml:"quantization,omitempty" json:"quantization,omitempty"`
+	// ChatTemplateImagePath is --chat-template pointed at a file the runtime
+	// image carries, written as an absolute container path.
+	//
+	// It is a separate field from ChatTemplateFile because the two name files
+	// with different guarantees, not because they format the same path in two
+	// ways. ChatTemplateFile is relative to the primary artifact mount: the
+	// manager downloads that file with the checkpoint and pins its bytes.
+	// This file is baked into the image, so the image digest is what proves
+	// it is there and the manager never fetches it. Joining an image path to
+	// the artifact mount would read a file inside the checkpoint instead, so
+	// the one field cannot carry both meanings.
+	//
+	// A recipe sets one or the other and never both, because vLLM reads one
+	// template. Absent means the recipe pins no image-resident template.
+	ChatTemplateImagePath string `yaml:"chat_template_image_path,omitempty" json:"chat_template_image_path,omitempty"`
 }
 
 // SGLangConfig mirrors the subset of sglang.launch_server arguments a recipe

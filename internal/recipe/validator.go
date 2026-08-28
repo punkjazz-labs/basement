@@ -481,6 +481,10 @@ func validateRuntimeBlocks(r Recipe, roles map[string]bool, sparkCount int) []st
 // files downloads the whole snapshot and is not checked here, so nothing
 // that shipped before per-file pinning changes meaning.
 func chatTemplateReachabilityProblems(r Recipe) []string {
+	var problems []string
+	if r.Service.VLLM != nil {
+		problems = append(problems, imageChatTemplateProblems(r, r.Service.VLLM.ChatTemplateImagePath)...)
+	}
 	template := ""
 	switch {
 	case r.Service.VLLM != nil:
@@ -492,12 +496,31 @@ func chatTemplateReachabilityProblems(r Recipe) []string {
 	}
 	index, ok := r.ArtifactIndex("primary")
 	if template == "" || !ok || len(r.Artifacts[index].Files) == 0 {
-		return nil
+		return problems
 	}
 	if primaryPinsFile(r, template) {
+		return problems
+	}
+	return append(problems, "chat_template_file "+template+" is not one of the files the primary artifact pins, so nothing will download it")
+}
+
+// imageChatTemplateProblems is the writable-path half of the image template
+// rule. validateChatTemplateImagePath holds the path off the mounts the
+// manager always makes, and it is checked inside the vLLM block because that
+// is where the field lives. This half needs the whole recipe: a writable path
+// is a private tmpfs the manager mounts over whatever the image has there, so
+// a template underneath one is empty from the moment the container starts.
+func imageChatTemplateProblems(r Recipe, template string) []string {
+	if template == "" {
 		return nil
 	}
-	return []string{"chat_template_file " + template + " is not one of the files the primary artifact pins, so nothing will download it"}
+	var problems []string
+	for _, writable := range r.Runtime.WritablePaths {
+		if pathsOverlap(template, writable) {
+			problems = append(problems, "chat_template_image_path "+template+" is inside the recipe's writable path "+writable+", which is mounted over the image's own copy")
+		}
+	}
+	return problems
 }
 
 // interconnectEnvironmentAllowlist is the entire environment a topology block
@@ -562,6 +585,32 @@ var allowedVLLMBlockSizes = map[int]bool{0: true, 16: true, 32: true, 64: true, 
 // recipe can name rather than trusting it.
 const maxVLLMCUDAGraphCaptureSize = 1024
 
+// maxVLLMNumSeqs bounds --max-num-seqs, the number of sequences the server
+// decodes at once. Each one holds its own KV cache from the same unified pool
+// the weights sit in, so an unbounded count is an out-of-memory a recipe asks
+// for. The widest any recipe in this pack runs is 32, and a launcher with a
+// long context runs 4, so this bound catches a typo rather than a deployment.
+const maxVLLMNumSeqs = 256
+
+// maxVLLMBatchedTokens bounds --max-num-batched-tokens, the token budget one
+// scheduler step may spend. It is the same kind of number as SGLang's
+// chunked_prefill_size and carries the same bound for the same reason: it sits
+// comfortably above the widest budget this pack has qualified (32768), so it
+// refuses an absurd value without narrowing any recipe that ships. 0 leaves
+// the flag off and vLLM's own default stands.
+const maxVLLMBatchedTokens = 65536
+
+// maxMTPSpeculativeTokens bounds the draft count for the mtp method only.
+// MTP drafts with the multi-token-prediction layers the served checkpoint
+// itself carries, so the count it can honour is fixed by the checkpoint
+// rather than chosen freely: the GLM-5.3-Flash EXL3 launcher runs 2, and the
+// widest any qualified MTP launcher in this pack runs is 3
+// (qwen36-27b-nvfp4-1s). A separate drafter is a different case and keeps the
+// wider bound, which is why this rule names the method instead of the field.
+// It is narrower than vLLM itself on purpose, and it widens when a launcher
+// qualifies another value.
+const maxMTPSpeculativeTokens = 3
+
 func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 	// Tensor parallelism spans the whole topology: one rank per Spark.
 	if v.TensorParallelSize != sparkCount || v.MaxModelLen <= 0 || v.MaxNumSeqs <= 0 || v.MaxBatchedTokens < 0 || v.MultimodalImageLimit < 0 || v.MultimodalImageLimit > 8 {
@@ -573,6 +622,12 @@ func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 	// mode are not stock vLLM: they exist in the GB10 build the two-Spark
 	// DeepSeek V4 Flash recipe pins, and a recipe that names them on an image
 	// without them fails at start rather than silently serving something else.
+	//
+	// The --speculative-config document carries only the members a launcher
+	// in this pack runs: the method, the draft token count, the draft model
+	// (through an artifact role) and the draft sample method. Its remaining
+	// members are deliberately absent, because no qualified recipe sets them,
+	// and a member the manager cannot qualify is a member it must not accept.
 	allowed := map[string]map[string]bool{
 		"kv": {"": true, "fp8": true, "nvfp4_ds_mla": true}, "attention": {"": true, "flashinfer": true},
 		"moe": {"": true, "auto": true, "marlin": true, "flashinfer_b12x": true}, "linear": {"": true, "flashinfer_b12x": true},
@@ -582,6 +637,12 @@ func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 		"tool":              {"qwen3_xml": true, "qwen3_coder": true, "poolside_v1": true, "deepseek_v4": true},
 		"load":              {"": true, "fastsafetensors": true},
 		"tokenizer":         {"": true, "auto": true, "deepseek_v4": true},
+		// vLLM detects the weight format from the checkpoint, so every recipe
+		// that shipped before this key passes no --quantization flag at all
+		// and stays valid with the empty value. exl3 is the one format a
+		// launcher here names explicitly, because the runtime could otherwise
+		// load those weights with a kernel the launcher refuses.
+		"quantization": {"": true, "exl3": true},
 	}
 	// disable_quant_fusions carries no allowlist because its type is one: the
 	// field is a boolean, so the only compilation configuration a recipe can
@@ -593,8 +654,17 @@ func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 		!allowed["spec_method"][v.SpeculativeMethod] || !allowed["spec_moe"][v.SpeculativeMoE] ||
 		!allowed["spec_draft_sample"][v.SpeculativeDraftSampleMethod] ||
 		!allowed["reasoning"][v.ReasoningParser] || !allowed["tool"][v.ToolCallParser] || !allowed["load"][v.LoadFormat] ||
-		!allowed["tokenizer"][v.TokenizerMode] {
+		!allowed["tokenizer"][v.TokenizerMode] || !allowed["quantization"][v.Quantization] {
 		return errors.New("vllm setting is outside the recipe policy")
+	}
+	// The two batch budgets are bounded above as well as below. Both are spent
+	// from the one unified pool the weights and the KV cache live in, so a
+	// number nobody meant is an out-of-memory rather than a slow server.
+	if v.MaxNumSeqs > maxVLLMNumSeqs {
+		return errors.New("vllm max_num_seqs must be no more than " + strconv.Itoa(maxVLLMNumSeqs))
+	}
+	if v.MaxBatchedTokens > maxVLLMBatchedTokens {
+		return errors.New("vllm max_num_batched_tokens must be no more than " + strconv.Itoa(maxVLLMBatchedTokens))
 	}
 	if !allowedVLLMBlockSizes[v.BlockSize] {
 		return errors.New("vllm block_size must be unset or one of 16, 32, 64, 128, 256")
@@ -623,14 +693,60 @@ func validateVLLM(v VLLMConfig, roles map[string]bool, sparkCount int) error {
 	if (v.SpeculativeMethod == "mtp" || v.SpeculativeMethod == "dspark") && v.SpeculativeModelRole != "" {
 		return errors.New("MTP and DSpark draft from the served model's own heads and must not reference a separate speculative model")
 	}
+	if v.SpeculativeMethod == "mtp" && v.SpeculativeTokens > maxMTPSpeculativeTokens {
+		return errors.New("vllm speculative_tokens must be no more than " + strconv.Itoa(maxMTPSpeculativeTokens) + " with speculative_method mtp")
+	}
 	if v.SpeculativeMethod == "dflash" && (v.SpeculativeModelRole == "" || !roles[v.SpeculativeModelRole] || v.SpeculativeModelRole == "primary") {
 		return errors.New("DFlash must reference a declared non-primary artifact role")
 	}
 	if err := validateChatTemplateFile(v.ChatTemplateFile); err != nil {
 		return err
 	}
+	// vLLM reads one chat template, so a recipe that pinned a checkpoint file
+	// and an image file would state two answers to one question and the
+	// command could honour only one of them.
+	if v.ChatTemplateFile != "" && v.ChatTemplateImagePath != "" {
+		return errors.New("a recipe names one chat template: set vllm chat_template_file or chat_template_image_path, not both")
+	}
+	if err := validateChatTemplateImagePath(v.ChatTemplateImagePath, roles); err != nil {
+		return err
+	}
 	if err := validateGeneration(v.Generation); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateChatTemplateImagePath checks a chat template the runtime image
+// carries. It checks the shape and never the existence: the file is inside a
+// pinned image, so the digest is what proves it is there, and this process
+// cannot read it.
+//
+// The path must sit outside every mount the manager owns, which is the rule
+// that gives the field its meaning. The manager mounts over the artifact
+// paths, the compilation cache and the scratch tmpfs, so a template under any
+// of them is not the image's file. Under an artifact mount it is a checkpoint
+// file, which chat_template_file already expresses and pins; under the cache
+// or scratch mount the image's copy is hidden and the runtime reads either
+// nothing or unpinned bytes.
+func validateChatTemplateImagePath(file string, roles map[string]bool) error {
+	if file == "" {
+		return nil
+	}
+	if len(file) > maxWritablePathLength || !writablePathPattern.MatchString(file) || path.Clean(file) != file {
+		return errors.New("chat_template_image_path must be an absolute container path with no trailing slash, relative segment or unusual character")
+	}
+	occupied := []string{TempMountPath, CacheMountPath}
+	for role := range roles {
+		occupied = append(occupied, ArtifactMountPath(role))
+	}
+	// The roles arrive in a map, so the list is sorted to keep one recipe's
+	// error message the same on every run.
+	sort.Strings(occupied)
+	for _, mount := range occupied {
+		if pathsOverlap(file, mount) {
+			return errors.New("chat_template_image_path " + file + " collides with the container's " + mount + " mount")
+		}
 	}
 	return nil
 }
