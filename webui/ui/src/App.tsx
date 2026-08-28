@@ -451,6 +451,7 @@ export default function App() {
   // One progress window, whichever Spark is doing the work. A job on another
   // Spark serves that Spark's endpoint, so this console's own playground and
   // generate tabs are not where it finishes.
+  const headTip = HEAD_TIP[tab]
   const selectedJob = jobs.find(job => job.id === selectedJobID) ?? remoteJob?.job ?? null
   const showingRemoteJob = remoteJob !== null && selectedJob === remoteJob.job
 
@@ -502,7 +503,7 @@ export default function App() {
         <header className="content-head">
           <div className="head-row">
             <h1>{tabLabel(tab)}</h1>
-            {HEAD_TIP[tab] && <Tip text={HEAD_TIP[tab].text} label={HEAD_TIP[tab].label} />}
+            {headTip && <Tip text={headTip.text} label={headTip.label} />}
             {!connected && !updateDialog.reconnecting && <span className="offline" role="status">Disconnected</span>}
           </div>
           {DESC[tab] && <p className="desc">{DESC[tab]}</p>}

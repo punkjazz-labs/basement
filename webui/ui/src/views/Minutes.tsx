@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { copyText, type APIKey } from '../api'
 import { noticeBox } from '../confirm'
-import { confirmRevoke, createKey, deleteKey, listKeys } from '../keys'
+import { createKey, listKeys, revokeKey } from '../keys'
 import {
   MINUTES_DOWNLOAD_URL, MINUTES_KEY_NAME, MINUTES_MODEL,
-  lastUsedLine, minutesEndpoint, minutesKey, minutesState, servingLine,
+  lastUsedLine, minutesEndpoint, minutesKey, minutesLines, minutesState, servingLine,
 } from '../minutes'
 import { SecretReveal } from '../secret'
 import { Tip } from '../tip'
@@ -25,6 +25,11 @@ const MODEL_TIP = 'standard follows whatever model is serving. Assign a fixed mo
 // request. It is the pace the other live reads in the console keep, and it
 // runs only while this page is on screen and waiting.
 export const MINUTES_KEYS_POLL_MS = 10_000
+
+// How often the page redraws its own clock. The last-used line is written in
+// minutes, so it is redrawn every minute; a done page asks the manager for
+// nothing, and this costs nothing but a render.
+export const MINUTES_CLOCK_MS = 60_000
 
 export interface MinutesPageProps {
   endpoint: string
@@ -80,7 +85,7 @@ export function MinutesPage(props: MinutesPageProps) {
             </>}
         {key === null
           ? <button className="primary act" onClick={props.onCreate}>Create key</button>
-          : <button className="ghost act" onClick={() => props.onRevoke(key)}>Revoke</button>}
+          : <button className="danger act" onClick={() => props.onRevoke(key)}>Revoke</button>}
       </div>
     </div>
   )
@@ -100,12 +105,16 @@ export function MinutesPage(props: MinutesPageProps) {
     </>
   )
 
-  // Green is the serving light and nothing else. A Spark with no model
-  // answering says so here, whatever the setup above it says.
-  const foot = (
+  // Green is the serving light and nothing else, so a line that is not about a
+  // model that answers stays amber.
+  const lines = minutesLines(steps, waiting, Boolean(props.servingModel))
+  const dotLine = (kind: 'waiting' | 'serving') => (
     <p className="minutes-state">
-      <span className={props.servingModel ? 'minutes-dot' : 'minutes-dot warn'} aria-hidden="true" />
-      {servingLine(props.servingModel)}
+      <span
+        className={kind === 'serving' && props.servingModel ? 'minutes-dot' : 'minutes-dot warn'}
+        aria-hidden="true"
+      />
+      {kind === 'waiting' ? 'Waiting for the first request.' : servingLine(props.servingModel)}
     </p>
   )
 
@@ -143,17 +152,12 @@ export function MinutesPage(props: MinutesPageProps) {
             <span className="num">3</span>
             <div className="body">
               <div className="hrow"><span className="h">Record a meeting</span></div>
-              {waiting && (
-                <p className="minutes-state">
-                  <span className="minutes-dot warn" aria-hidden="true" />
-                  Waiting for the first request.
-                </p>
-              )}
+              {lines.step !== 'none' && dotLine(lines.step)}
             </div>
           </div>
         </div>
       ) : settings}
-      {foot}
+      {lines.foot === 'serving' && dotLine('serving')}
     </div>
   )
 }
@@ -177,18 +181,32 @@ export default function Minutes({ servingModel }: { servingModel?: string }) {
     }
   }, [])
 
-  // The page turns itself over when the Mac calls: while it is waiting for
-  // that first request it reads the keys again on a slow tick. A page that has
-  // its answer stops, a hidden tab is skipped, and the timer dies with the
-  // view, so nothing is read while this screen is not on the console.
+  // The keys are read once when the page opens. This read stands apart from
+  // the poll below so that a page opening on a Spark that Minutes already uses
+  // reads the list once and not twice.
   useEffect(() => {
     void refresh()
+  }, [refresh])
+
+  // The page turns itself over when the Mac calls: while it is waiting for
+  // that first request it reads the keys again on a slow tick. A page that has
+  // its answer starts no timer at all, a hidden tab is skipped, and the timer
+  // dies with the view, so nothing is read while this screen is not on the
+  // console.
+  useEffect(() => {
     if (!waiting) return
     const timer = setInterval(() => {
       if (!document.hidden) void refresh()
     }, MINUTES_KEYS_POLL_MS)
     return () => clearInterval(timer)
   }, [refresh, waiting])
+
+  // The page's own clock, so "last used 5 minutes ago" is still true ten
+  // minutes later. It asks the manager for nothing.
+  useEffect(() => {
+    const clock = setInterval(() => setNowMs(Date.now()), MINUTES_CLOCK_MS)
+    return () => clearInterval(clock)
+  }, [])
 
   const copy = async (label: string, value: string) => {
     await copyText(value)
@@ -207,10 +225,9 @@ export default function Minutes({ servingModel }: { servingModel?: string }) {
   }
 
   const revoke = async (key: APIKey) => {
-    const { ok } = await confirmRevoke(key)
-    if (!ok) return
     try {
-      await deleteKey(key)
+      if (!await revokeKey(key)) return
+      // The secret on screen belongs to the key that just went.
       setSecret(null)
       await refresh()
     } catch (problem) {

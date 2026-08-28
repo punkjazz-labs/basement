@@ -216,11 +216,14 @@ main.chat-tall .playground { flex: 1; min-height: 0; }
 
 /* One button family: pills. Orange marks the single primary action; everything
    else stays quiet so the orange always means "the thing to do next". */
-button.primary {
+/* The download on the Minutes page is a primary action that leaves the
+   console, so it is a link and cannot be a button. It wears this same pill
+   rather than a second copy of it. */
+button.primary, a.minutes-download {
   background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent); border-radius: 999px;
   padding: 5px 16px; font-weight: 650; font-size: 12.5px;
 }
-button.primary:hover { filter: brightness(1.05); }
+button.primary:hover, a.minutes-download:hover { filter: brightness(1.05); }
 button.primary:disabled { background: var(--surface-2); color: var(--faint); border-color: var(--line-strong); cursor: default; filter: none; }
 button.ghost {
   background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink);
@@ -1646,14 +1649,9 @@ button.chip:hover { color: var(--ink); }
 .minutes-row .sub { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .minutes-row .act { margin-left: auto; flex: none; }
 
-/* The download leaves the console, so it is a link; it wears the page's one
-   orange because it is the next thing to do. */
-a.minutes-download {
-  margin-left: auto; flex: none; text-decoration: none;
-  background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent);
-  border-radius: 999px; padding: 5px 16px; font-size: 12.5px; font-weight: 650;
-}
-a.minutes-download:hover { filter: brightness(1.05); }
+/* The orange pill itself is the shared primary rule above. Only where the link
+   sits in its row belongs here. */
+a.minutes-download { margin-left: auto; flex: none; text-decoration: none; }
 
 /* Green stays the serving light and nothing else; amber is the page waiting. */
 .minutes-state { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; }

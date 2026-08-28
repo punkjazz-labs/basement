@@ -49,3 +49,21 @@ export function lastUsedLine(key: APIKey | null, nowMs: number): string {
 // knows is serving, and green stays the serving color.
 export const servingLine = (modelName?: string): string =>
   modelName ? `${modelName} is serving.` : 'No model is serving.'
+
+export interface MinutesDotLines {
+  step: 'waiting' | 'serving' | 'none'
+  foot: 'serving' | 'none'
+}
+
+// Which dot line each part of the page draws. Every state gives step 3 exactly
+// one line, and the page never draws the same line twice.
+//
+// While the steps are on screen the foot stays away, with one exception: a
+// Spark with nothing serving refuses the request step 3 waits for, so that one
+// fact is worth a second amber line. Green never appears beside the steps,
+// which leaves every dot in the setup with one meaning.
+export function minutesLines(steps: boolean, waiting: boolean, serving: boolean): MinutesDotLines {
+  if (!steps) return { step: 'none', foot: 'serving' }
+  if (!waiting) return { step: 'serving', foot: 'none' }
+  return { step: 'waiting', foot: serving ? 'none' : 'serving' }
+}
