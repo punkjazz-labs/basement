@@ -32,6 +32,11 @@ you are touching.
    receipts; commit messages carry the FR id.
 4. Human-present, human-typed sessions (no agent CLI): commits use the
    `manual:` prefix and judgments go to the cognition inbox via `kb-log`.
+   Exception: `protected_paths` refuse `manual:` commits from anyone. A
+   protected change needs an open Flight Recorder, a grant, and the FR id
+   as the commit prefix. Mint the Flight Recorder in a `hermes-agent-launch`
+   worktree: `hermes-session start` refuses a checkout that holds untracked
+   files, and a working checkout always holds some.
 5. Never modify verification (linters, tests config, audit scripts, hooks, CI)
    in the same task whose output it checks. Park the unit and escalate instead.
 6. Branch work only. Merging to the default branch needs an explicit
