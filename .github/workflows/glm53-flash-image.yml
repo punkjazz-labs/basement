@@ -1,0 +1,66 @@
+name: glm53-flash-image
+
+# Builds and publishes the pinned vLLM image that the GLM-5.3-Flash EXL3
+# two-Spark recipe references by digest. Publishing from CI rather than
+# from someone's machine is deliberate: the image bytes are then
+# traceable to a public build of the committed Dockerfile, which is
+# exactly the provenance that third-party images cannot offer.
+#
+# Tagged separately from manager releases (glm53-flash-image-v*) because
+# the image version tracks its base image and patch, not basement's, and
+# rebuilding it must not imply a manager release. The release workflow's
+# 'v*' trigger does not match these tags.
+
+on:
+  push:
+    tags: ['glm53-flash-image-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    # An arm64 runner because the GB10 is arm64 and the base image is a
+    # single arm64 manifest with no other architecture in it; building
+    # natively avoids emulation entirely.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # The base image is 9.79 GB compressed over 52 layers, and larger
+      # once unpacked. The hosted runner's preinstalled toolchains hold
+      # enough disk to make the pull fail, so they go first.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache \
+            /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - name: Log in to ghcr
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+
+      # On a tag push the image version comes from the tag; a manual
+      # workflow_dispatch run publishes v1 and is meant for the first
+      # publish or a re-run.
+      - name: Build image
+        run: |
+          version="${GITHUB_REF_NAME#glm53-flash-image-}"
+          [ "${GITHUB_REF_TYPE}" = tag ] || version=v1
+          image="ghcr.io/${{ github.repository_owner }}/basement-vllm-glm53-flash-exl3:${version}"
+          echo "IMAGE=${image}" >> "$GITHUB_ENV"
+          docker build --tag "${image}" packaging/glm53-flash-image
+
+      - name: Push image and report digest
+        run: |
+          docker push "${IMAGE}"
+          # The digest printed here is what a recipe pins. It is created by
+          # the registry at push time, so it cannot be known before this step.
+          docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{.}}{{"\n"}}{{end}}'
+          docker image inspect "${IMAGE}" --format 'Size: {{.Size}} bytes'
