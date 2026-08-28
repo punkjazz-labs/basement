@@ -1,0 +1,321 @@
+schema_version: 1
+id: qwen38-flash-next-nvfp4-2s
+# Qwen3.8-Flash-Next on two Sparks, served by SGLang at TP=2. The model is
+# Alibaba's Qwen4-architecture preview, and the checkpoint's own config at
+# the pinned revision names it: architecture Qwen4ExpForConditionalGeneration,
+# model type qwen4_exp, 48 decoder layers whose layer_types alternate three
+# linear-attention (Gated DeltaNet) layers to one full-attention layer, 512
+# routed experts with top-10 routing plus a shared expert, native context
+# 262144, and a vision tower, so it takes text, image and video in and answers
+# in text. Thinking is on in its chat template. All of that was read live from
+# the checkpoint on 2026-08-28.
+#
+# Parameter count, with both published figures, because they do not agree and
+# this recipe does not adjudicate. The launcher header states 176B total with
+# about 6B active. The quantization card states "~180B in total (360 GB BF16
+# source)" and lists the architecture as 48 decoder layers, 512 routed experts
+# plus a shared expert, and 1 MTP layer. The card rounds, and it counts the
+# checkpoint whole, including the multi-token-prediction draft layer that the
+# launcher describes as a separate part; that is the simplest reading of the
+# gap, not a fact either publisher states. The active figure has one source
+# only, the launcher.
+#
+# The full-attention layers run compressed QSA sparse attention, which is the
+# reason for two settings below that no other recipe in the pack carries:
+# page_size 64 and mamba_track_interval 64.
+#
+# Why two Sparks: the NVFP4 checkpoint is 135.25 GB, which does not fit one
+# 128 GB Spark. The launcher's own split at TP=2 is about 34 GB of routed
+# experts, about 26 GB of PLE tables and about 8 GB of dense weights per node,
+# so each machine holds about 68 GB. The checkpoint is three quantizations in
+# one, per the launcher header: 68.0 GB routed experts at NVFP4 W4A4 (ModelOpt,
+# group 16), 52.0 GB of PLE n-gram embedding tables at FP8-E4M3, and 16.0 GB of
+# BF16 dense weights (attention, GDN, routers, shared expert, vision, MTP and
+# the output head).
+#
+# Speculative decoding needs nothing extra to download. The multi-token
+# prediction draft layer ships inside this checkpoint, so NEXTN drafts from the
+# weights the install already fetched. The launcher pins top-k 1 and refuses to
+# start at any other value, because the qwen4_exp PLE implementation supports
+# only top-k 1; the schema now holds a recipe to the same rule.
+#
+# Why the image is basement's own build. The stock image for this model,
+# lmsysorg/sglang:qwen38flashnext, cannot serve it on a GB10: QSA resolves its
+# packed varlen attention to flash-attn-4 CuTe kernels, and those fail MLIR
+# compilation on SM121. The launcher ships the fix as a local docker build,
+# which ADR 0012 cannot ship, because a recipe pins image bytes. So
+# packaging/qwen38-flash-next-image reproduces that build in CI and publishes
+# it, the same way the ComfyUI image is published. It pins the stock image by
+# digest, extracts the launcher's Triton fallback kernel byte-identically from
+# its start.sh at the pinned commit, and applies the launcher's own patch step
+# with the launcher's own two anchor assertions. The published image's OCI
+# labels carry that chain and were read back from the registry at this digest.
+#
+# One deliberate substitution inside that image. The launcher's validated
+# runtime preloads host-staged NCCL 2.30.7 on both nodes, because its GLM-5.2
+# runbook pins 2.30.7 or newer for CUDA graphs plus tensor parallelism on GB10
+# with ConnectX-7, and the base image bundles 2.29.7. A basement container
+# cannot mount host libraries, so the image installs nvidia-nccl-cu13==2.30.7
+# as a pinned wheel. The library version is the validated one and the delivery
+# path is not. Qualification decides whether the combination holds.
+#
+# Speed, honestly: the launcher's own benchmark on its two-node cluster reports
+# 64.4 tok/s on one stream at 117 ms to first token, 116.8 tok/s aggregate over
+# two streams, and 114.1 over four. One source, its hardware, its
+# configuration, and its configuration is not this one (see the deviations
+# below). Nothing here is a basement measurement, and the console shows
+# measured speed only after a benchmark runs on this fleet.
+#
+# GB10 warning, carried from the launcher because it costs a power cycle:
+# never probe this model with --load-format dummy. The dummy-weight
+# initializer materializes an fp16 copy of the FP8 PLE table, which briefly
+# asks for more than 150 GB on a 121 GB unified part and hard-freezes the node.
+# The launcher hit it twice and needed full reboots. Real safetensors loading
+# streams the weights and never does this. Nothing in this recipe can ask for
+# dummy weights; the note is here for whoever debugs a start by hand.
+#
+# The PLE tables stay in host memory (ple_offload_embedding). That is SGLang's
+# own auto-rule for this model on CUDA, and the launcher makes it explicit. It
+# costs about 26 GB of pinned host memory per rank at TP=2. Forcing the tables
+# into device memory costs about the same again on the device side and only
+# fits beside a lower memory fraction.
+#
+# Deliberate differences from the observed launcher command, each with its
+# reason:
+# - mamba_full_memory_ratio is left unset, so SGLang's own default applies.
+#   The evidence at the pinned commit points two ways and this recipe follows
+#   the executable one. start.sh defaults MAMBA_FULL_MEMORY_RATIO to empty and
+#   passes --mamba-full-memory-ratio only when it is set, and the shipped
+#   .env.example also leaves it empty, so a user who runs the launcher as
+#   published runs without the flag. The launcher's README does document 0.3,
+#   but inside a different package: its tunables table pairs that 0.3 with
+#   mem_fraction_static 0.82, chunked_prefill_size 1024 and a YaRN-scaled
+#   900000-token context, and it notes that ratio 0.3 caps real concurrency at
+#   14. This recipe pins the start.sh package instead (0.70, 4096, 262144), so
+#   importing one number out of the other package would mix two configurations
+#   tuned against different memory budgets. A qualification that measures the
+#   README package can bring the whole package over, ratio included.
+# - context_length is the native 262144. The launcher's README describes a
+#   900000-token window through YaRN, and the pack's rule for YaRN is the one
+#   the Qwen3.8-27B recipe follows: pin the native window and leave the
+#   stretched one to a qualification that measures it here.
+# - max_mamba_cache_size is 0, which leaves the flag off. The launcher derives
+#   the value from max_running_requests when it is empty, and the runtime does
+#   the same derivation, so this recipe does not restate a number it would only
+#   copy.
+# - The launcher's CPU pinning (--cpuset-cpus 5-9,15-19) is not carried. It is
+#   host-specific tuning, and the same choice was made for the Qwen3.8-27B
+#   recipe.
+# - --enable-cache-report is not carried, because it is a diagnostic.
+#   --enable-metrics is not a recipe choice at all: the manager always passes
+#   it, because the console's telemetry tiles read that endpoint.
+# - Containers run with isolated IPC and an explicit 32 GiB /dev/shm (ADR
+#   0006). The launcher runs --ipc host. Two-Spark ranks reach each other over
+#   the cabled fabric and the RDMA devices, so the container keeps its own IPC
+#   namespace; memory_lock and ipc_lock carry the launcher's memlock ulimit and
+#   IPC_LOCK capability.
+# - The launcher serves on port 8888. Every runtime in this pack serves on its
+#   kind's own internal port, 8000 for SGLang, and the console maps the host
+#   port.
+# - Five of the launcher's NCCL environment names are not expressible here:
+#   NCCL_NET=IB, NCCL_NET_PLUGIN=none, NCCL_NVLS_ENABLE=0, NCCL_CUMEM_ENABLE=0
+#   and NCCL_IB_ROCE_VERSION_NUM=2. The topology block admits a closed list of
+#   fabric controls, and widening that list is a schema change that
+#   qualification drives, not a recipe. The pack's other two-Spark SGLang
+#   recipe already runs its fabric without them, with the same GID index 3 that
+#   selects RoCEv2 in practice.
+# - The two CUDA architecture names sit in runtime.environment rather than in
+#   the topology block. They are compile targets for what the runtime builds at
+#   start, not fabric controls, and that is where the schema admits them.
+#
+# memory_model is omitted, for the reason the other two-Spark recipes omit it:
+# TP=2 shards the weights across nodes, and the schema's flat single-node
+# formula would be wrong by construction.
+version: 1
+display_name: Qwen 3.8 Flash Next
+publisher: MiaAI Lab + RadixArk
+model_by: Qwen team, Alibaba
+recipe_by: MiaAI Lab
+model_released: August 2026
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks
+  revision: dccb035c559f342fe8c0f65eb427671c6cf60730
+topology:
+  spark_count: 2
+  interconnect:
+    kind: connectx7
+    # The launcher's own rendezvous port (DIST_PORT).
+    master_port: 26400
+    # Interface and HCA names are the fallback, not the source of truth. Each
+    # rank detects the port its own cable is in at deploy time and pins its
+    # transports to that, which matters here because the launcher's cluster
+    # wires head f1 to worker f0 and ours need not match either side.
+    shared_environment:
+      NCCL_IB_DISABLE: "0"
+      NCCL_IB_HCA: rocep1s0f0
+      NCCL_IB_GID_INDEX: "3"
+      NCCL_SOCKET_IFNAME: enp1s0f0np0
+      GLOO_SOCKET_IFNAME: enp1s0f0np0
+      TP_SOCKET_IFNAME: enp1s0f0np0
+      NCCL_CROSS_NIC: "0"
+      NCCL_IGNORE_CPU_AFFINITY: "1"
+      NCCL_DEBUG: WARN
+    head_environment: {}
+    worker_environment: {}
+runtime:
+  kind: sglang
+  # basement's own CI-published image, not a third-party one. See
+  # packaging/qwen38-flash-next-image/README.md for the whole provenance
+  # story. Read back from the registry at this digest on 2026-08-28: a single
+  # linux/arm64 manifest whose labels name the base image
+  # lmsysorg/sglang:qwen38flashnext@sha256:12d3392b..., the patch source
+  # MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks at dccb035c under MIT, and
+  # the SGLang commit d91c3682 the base was built from. image_bytes is that
+  # manifest's compressed layer sum, the same measure every other recipe in
+  # the pack states.
+  image: ghcr.io/punkjazz-labs/basement-sglang-qwen38-flash-next
+  digest: sha256:a7da51c60dcb673c72e3769187159b08207b51cf642cd4c3990d25083d8b7a4c
+  image_bytes: 14411614427
+  # Measured rather than modelled, which is the exception in this pack: this
+  # is the CI runner's own docker image inspect .Size for the image it had
+  # just pushed (workflow run 33154132937). It is an arm64 Linux measurement
+  # from a GitHub runner, not from a GB10, so qualification on hardware still
+  # corrects it. It is also well below the three times compressed size that
+  # unmeasured recipes use as their disk guardrail.
+  image_disk_bytes: 30453388032
+  # The two arch lists are the launcher's, and they matter on GB10: an image
+  # built before this part defaults them to the previous Blackwell generation,
+  # so anything compiled at start would target the wrong device.
+  environment:
+    TORCH_CUDA_ARCH_LIST: "12.1a"
+    FLASHINFER_CUDA_ARCH_LIST: "12.1a"
+  shm_bytes: 34359738368
+  memory_lock: true
+  ipc_lock: true
+  # The launcher's own readiness timeout is 90 minutes and its README reports
+  # a boot of about 10 minutes once the weights are on disk. A first start
+  # here loads 135 GB on two nodes and then compiles QSA and GDN Triton
+  # kernels and captures decode graphs, so the product's 20-minute default
+  # would call a healthy start a failure.
+  start_timeout_minutes: 90
+artifacts:
+  - role: primary
+    repository: RadixArk/Qwen3.8-Flash-Next-NVFP4
+    revision: 7b719225242aacd3dbd3f9407468c2ee9a9d2594
+    # Computed live from the repository tree at this revision on 2026-08-28:
+    # 419 files, of which 206 are weight shards worth 135,195,303,851 bytes.
+    # The repository's own qualification-notes.md states 135,253,624,416 bytes
+    # and 420 files, which is 1,522 bytes and one file above what the tree
+    # holds today. The shard count and the shard bytes agree exactly, so the
+    # difference sits in the small metadata files, not in the weights. This
+    # recipe pins the number it can verify.
+    expected_bytes: 135253622894
+    # This repository ships no licence file at this revision (checked live
+    # against its file listing) and its card defers licence terms to the source
+    # model. The source model Qwen/Qwen3.8-Flash-Next carries a LICENSE file
+    # whose own first line names it: Qwen Community License 1.0. It is
+    # permissive, with two conditions worth reading before you accept: a
+    # product above 100,000,000 monthly active users or USD 20,000,000 monthly
+    # revenue must display the model name in its interface, and a Model as a
+    # Service or AI Work Assistant business needs a separate licence from Qwen
+    # for commercial use. No territory is excluded. Following the pattern for a
+    # licence that lives upstream, the link points at the file itself in the
+    # base model's pinned tree, so the user sees the exact bytes they accept.
+    licence: Qwen Community License 1.0
+    licence_url: https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/de4b8e4d43b917e7706784d8bb445c9af86a3540/LICENSE
+    licence_repository: Qwen/Qwen3.8-Flash-Next
+    licence_revision: de4b8e4d43b917e7706784d8bb445c9af86a3540
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 12000000000
+  safety_margin_bytes: 20000000000
+  # The checkpoint is readable without a token: every file this recipe pins
+  # was fetched anonymously while it was authored.
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: RadixArk/Qwen3.8-Flash-Next-NVFP4
+  sglang:
+    tensor_parallel_size: 2
+    # 0.70, the launcher's GB10 number. Its arithmetic: 0.70 of about 122 GB
+    # of device budget, plus the about 26 GB per rank of pinned PLE host
+    # memory, plus the operating system, comes to about 119 GB of about 122.
+    # The launcher says not to raise it past about 0.75 while the PLE tables
+    # are offloaded.
+    mem_fraction_static: "0.70"
+    context_length: 262144
+    max_running_requests: 16
+    quantization: modelopt_fp4
+    # Left unset, so the runtime's own default applies (bf16). The launcher
+    # calls fp8 here experimental and ships with it empty.
+    kv_cache_dtype: ""
+    # NEXTN drafts with the checkpoint's own MTP layer: 3 steps, top-k 1, and
+    # 4 draft tokens, which is steps plus one, the relation the launcher
+    # enforces before it starts.
+    speculative_algorithm: NEXTN
+    speculative_num_steps: 3
+    speculative_eagle_topk: 1
+    speculative_num_draft_tokens: 4
+    # No second artifact: the draft weights are inside the primary checkpoint.
+    speculative_model_role: ""
+    # No chat template override: the pinned snapshot ships its own
+    # chat_template.jinja and trust_remote_code loads it.
+    chat_template_file: ""
+    # auto means the runtime derives both parsers from that chat template,
+    # which is what the launcher asks for.
+    tool_call_parser: auto
+    reasoning_parser: auto
+    # flashinfer is required on SM121; the trtllm backend is SM100 only.
+    attention_backend: flashinfer
+    # This architecture is not built into every runtime release, so the
+    # checkpoint ships the model code and the revision pin fixes those bytes.
+    trust_remote_code: true
+    chunked_prefill_size: 4096
+    # Prefill CUDA graphs are unreliable on GB10; both the launcher and the
+    # pack's other SM121 recipes turn them off.
+    disable_prefill_cuda_graph: true
+    # Compressed QSA addresses its cache in pages of 64, and the Mamba state
+    # is tracked on the same grid.
+    page_size: 64
+    mamba_ssm_dtype: bfloat16
+    mamba_radix_cache_strategy: extra_buffer
+    mamba_track_interval: 64
+    # Left unset on purpose. The ruling and its evidence are in the header
+    # comment above.
+    mamba_full_memory_ratio: ""
+    max_mamba_cache_size: 0
+    allow_auto_truncate: true
+    ple_offload_embedding: true
+    # The runtime's own decode graph ladder is sized for a larger device and
+    # runs the graph pool out of memory on a GB10, so the launcher names the
+    # batches it really serves. The list ends at max_running_requests.
+    cuda_graph_bs_decode: "1 2 3 4 5 6 7 8 10 12 14 16"
+operations:
+  - type: verify_architecture
+  - type: verify_dgx_spark
+  - type: verify_memory_capacity
+  - type: verify_disk
+  - type: verify_port
+  - type: verify_docker
+  - type: verify_nvidia_runtime
+  - type: verify_artifact_access
+  - type: pull_image
+  - type: download_artifact
+  - type: write_generated_config
+  - type: create_container
+  - type: verify_memory
+  - type: start_container
+  - type: wait_http
+  - type: verify_openai_inference
+uninstall:
+  - type: stop_container
+  - type: remove_container
+  - type: remove_artifact_if_unshared

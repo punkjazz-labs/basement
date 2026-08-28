@@ -30,8 +30,8 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recipes) != 11 {
-		t.Fatalf("got %d recipes, want 11", len(recipes))
+	if len(recipes) != 12 {
+		t.Fatalf("got %d recipes, want 12", len(recipes))
 	}
 	for _, r := range recipes {
 		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
@@ -184,6 +184,36 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if s := qwen38.Service.SGLang; s.SpeculativeAlgorithm != "EAGLE" || s.SpeculativeModelRole != "" ||
 		!s.TrustRemoteCode || s.MambaRadixCacheStrategy != "extra_buffer_lazy" || s.MaxMambaCacheSize != s.MaxRunningRequests*4 {
 		t.Fatalf("unexpected Qwen 3.8 serve configuration: %#v", s)
+	}
+	// The pack's first compressed sparse attention model, its first NEXTN
+	// speculation, and its first serve on an image basement builds and
+	// publishes itself. 135.25 GB of weights do not fit one Spark, so it runs
+	// at TP=2 with the draft head that ships inside the checkpoint, which is
+	// why a two-Spark recipe still declares exactly one artifact.
+	flashNext, ok := Find(recipes, "qwen38-flash-next-nvfp4-2s")
+	if !ok || flashNext.Runtime.Kind != "sglang" || !flashNext.Distributed() || flashNext.Topology.SparkCount != 2 {
+		t.Fatalf("unexpected Qwen 3.8 Flash Next recipe: %#v", flashNext)
+	}
+	if flashNext.Runtime.Reference() != "ghcr.io/punkjazz-labs/basement-sglang-qwen38-flash-next@sha256:a7da51c60dcb673c72e3769187159b08207b51cf642cd4c3990d25083d8b7a4c" {
+		t.Fatalf("Qwen 3.8 Flash Next runtime is not pinned: %#v", flashNext.Runtime)
+	}
+	if len(flashNext.Artifacts) != 1 || flashNext.TotalArtifactBytes() != 135253622894 || !isPinnedRevision(flashNext.Artifacts[0].Revision) {
+		t.Fatalf("Qwen 3.8 Flash Next weights are not pinned: %#v", flashNext.Artifacts)
+	}
+	// The checkpoint carries no licence file, so the terms come from the base
+	// model's own pinned tree rather than from a licence this recipe names by
+	// itself.
+	if flashNext.Artifacts[0].LicenceRepository != "Qwen/Qwen3.8-Flash-Next" || !isPinnedRevision(flashNext.Artifacts[0].LicenceRevision) {
+		t.Fatalf("Qwen 3.8 Flash Next licence is not pinned upstream: %#v", flashNext.Artifacts[0])
+	}
+	if s := flashNext.Service.SGLang; s.TensorParallelSize != 2 || s.SpeculativeAlgorithm != "NEXTN" || s.SpeculativeEagleTopK != 1 ||
+		s.SpeculativeNumDraftTokens != s.SpeculativeNumSteps+1 || s.SpeculativeModelRole != "" ||
+		s.PageSize != 64 || s.MambaTrackInterval != 64 || !s.AllowAutoTruncate || !s.PLEOffloadEmbedding ||
+		s.CUDAGraphBSDecode == "" {
+		t.Fatalf("unexpected Qwen 3.8 Flash Next serve configuration: %#v", s)
+	}
+	if flashNext.MemoryModel != nil {
+		t.Fatalf("a TP=2 recipe must not carry the flat single-node memory model: %#v", flashNext.MemoryModel)
 	}
 	// The pack's first behaviour-modified derivative: Qwen3.8-27B with its
 	// refusal behaviour removed by weight ablation, shipped under the
