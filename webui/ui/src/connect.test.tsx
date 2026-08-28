@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { APIKey } from './api'
 import Connect from './views/Connect'
 
@@ -69,6 +69,12 @@ vi.mock('./confirm', () => ({
 // The smallest thing that can run a function component: state that survives a
 // render, and effects that run after one. React batches and this does not, so
 // a state change only marks the page for redrawing; settle() below does it.
+//
+// One thing this harness does not do: an effect that returns a cleanup keeps
+// it. The returned function is stored nowhere and is never called, and no
+// unmount is modelled at all, so nothing in this file says anything about what
+// the API page tidies up. A view whose correctness rests on a cleanup needs a
+// harness that runs one.
 vi.mock('react', async importOriginal => {
   const actual = await importOriginal<typeof import('react')>()
   return {
@@ -123,12 +129,26 @@ const draw = () => {
   cells.effects.splice(0).forEach(run => run())
 }
 
+const tick = () => new Promise(resolve => setTimeout(resolve, 0))
+
+// How many quiet rounds end a settle. One round of waiting proves only that
+// nothing was owed on that round: a call held back by a single timer lands
+// after it, unseen, and every "deletes nothing" test below reads as green
+// while a delete is still on its way. So the page has to be quiet several
+// rounds running before this returns.
+const QUIET_ROUNDS = 3
+
 // Let every answer arrive, and redraw for as long as the page keeps changing.
 const settle = async () => {
-  for (let round = 0; round < 20; round++) {
-    await new Promise(resolve => setTimeout(resolve, 0))
-    if (!cells.dirty) return
-    draw()
+  let quiet = 0
+  for (let round = 0; round < 30; round++) {
+    await tick()
+    if (cells.dirty) {
+      draw()
+      quiet = 0
+      continue
+    }
+    if (++quiet >= QUIET_ROUNDS) return
   }
   throw new Error('the page never settled')
 }
@@ -187,6 +207,17 @@ beforeEach(() => {
   cells.effects.length = 0
   cells.dirty = false
   page = null
+})
+
+// Every test above that says "deletes nothing" is a claim about a moment. This
+// is the claim about after it: when the test ended, nothing was still on its
+// way to the manager. Without it a held-back call lands in the next test, which
+// starts on a cleared list and takes the blame for a call it never made.
+afterEach(async () => {
+  const settled = stub.sent.length
+  for (let round = 0; round < QUIET_ROUNDS; round++) await tick()
+  expect(stub.sent.slice(settled)).toEqual([])
+  vi.unstubAllGlobals()
 })
 
 describe('the key list on the API page', () => {
