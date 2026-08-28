@@ -271,10 +271,17 @@ describe('a key revoked', () => {
 describe('when the page reads the key list', () => {
   it('reads the list once when it opens', () => {
     expect(minutesSource).toMatch(/useEffect\(\(\) => \{\s*void refresh\(\)\s*\}, \[refresh\]\)/)
+    // The page starts a read of its own in two places only: this effect, and
+    // the tick below. A third one, or one put back at the head of the poll
+    // effect, opens the page on two reads again.
+    expect(minutesSource.match(/void refresh\(\)/g)).toHaveLength(2)
   })
 
+  // Anchored at the head of the effect on purpose. The same test, matching
+  // anywhere, stayed green while a read sat above the guard, because the guard
+  // was still above the timer. That is the double read this page was fixed for.
   it('starts no timer once the first request has arrived', () => {
-    expect(minutesSource).toMatch(/if \(!waiting\) return\s+const timer = setInterval\(/)
+    expect(minutesSource).toMatch(/useEffect\(\(\) => \{\s*if \(!waiting\) return\s+const timer = setInterval\(/)
   })
 
   it('reads again at the pace the view names, and skips a hidden tab', () => {
@@ -305,9 +312,15 @@ describe('when the page reads the key list', () => {
 describe('what Revoke does on this page', () => {
   const revoke = /const revoke = async \(key: APIKey\) => \{[\s\S]*?\n {2}\}/.exec(minutesSource)?.[0] ?? ''
 
+  // Three things, not one substring: the handler is found, it hands the key to
+  // the shared flow, and it stops on a no. The last line reads the whole file,
+  // so a page that words its own question or deletes a key by itself fails
+  // here even if it keeps a call named like the shared one.
   it('asks through the shared flow, so the question is asked once everywhere', () => {
     expect(revoke).not.toBe('')
-    expect(revoke).toContain('revokeKey(key)')
+    expect(revoke).toMatch(/if \(!await revokeKey\(key\)\) return/)
+    expect(minutesSource).toContain("import { createKey, listKeys, revokeKey } from '../keys'")
+    expect(minutesSource).not.toMatch(/deleteKey|confirmRevoke|confirmBox/)
   })
 
   // The secret block belongs to the key. Left standing after the key goes, it
