@@ -106,12 +106,13 @@ id: glm53-flash-exl3-2s
 #   shape both shipped two-Spark recipes already use, and each rank overrides
 #   the interface at deploy time anyway. This is the pack's addition, not the
 #   launcher's setting.
-# - Eleven of the launcher's other container variables are not expressible and
+# - Ten of the launcher's other container variables are not expressible and
 #   are not sent: HF_HUB_OFFLINE, TRANSFORMERS_OFFLINE, HF_HOME,
 #   VLLM_CACHE_ROOT, TRITON_CACHE_DIR, TILELANG_CACHE_DIR,
 #   FLASHINFER_DISABLE_VERSION_CHECK, VLLM_ENGINE_READY_TIMEOUT_S,
-#   VLLM_NO_USAGE_STATS, DO_NOT_TRACK and the two GLM53_BOOT_SHAPE_WARMUP
-#   warmup controls. The launcher's engine-ready guard is 3600 seconds;
+#   VLLM_NO_USAGE_STATS and DO_NOT_TRACK. The two GLM53_BOOT_SHAPE_WARMUP
+#   controls are host-side script settings and never enter the container.
+#   The launcher's engine-ready guard is 3600 seconds;
 #   basement's nearest equivalent is start_timeout_minutes below, which bounds
 #   the health wait rather than the engine.
 # - The launcher's --ulimit stack=67108864 is not carried. basement sets the
