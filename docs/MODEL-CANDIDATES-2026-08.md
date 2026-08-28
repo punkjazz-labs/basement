@@ -977,3 +977,20 @@ hardware-qualified, pinning the checkpoint at the launcher's own revision
 `25a44fdb`. One correction to section 3 above: the live tree sum at that
 revision is **175,715,854,754 bytes**, seven below the figure recorded there,
 and the install compares that total for equality.
+
+Qualification addendum (2026-08-29). The recipe is hardware-qualified at
+version 2 and the pair serves it. Three runs were needed. Run 1 exposed a
+fleet-wide two-Spark reservation defect, fixed and shipped as basement
+v0.5.24: the worker rank's 90-second lease was never renewed while the head
+staged images and weights, and the settled row then blocked its own job's
+identity. Run 2 passed all staging and failed only the live memory gate:
+this recipe's budget at the launcher's 0.87 utilization is about 114 GB, the
+12 GB reserve then demands 126 GB available, and a measured idle EdgeXpert
+with the stock desktop offers 125.4 GB. Version 2 sets the reserve to 10 GB,
+which still doubles the measured 5.0 GB system footprint; the utilization is
+the launcher's package number and did not change. Run 3 passed every step,
+and a manual completion against the pair returned finish_reason stop with
+the served name `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`. Two integration
+facts for API users: vLLM serves the checkpoint name rather than the recipe
+id, and the reasoning parser routes tokens to `reasoning_content`, so a
+small `max_tokens` ends as finish_reason length with a null `content`.
