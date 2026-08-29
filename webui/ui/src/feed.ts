@@ -49,7 +49,16 @@ export interface FeedNote {
   // An old index could be missing a revocation, which is worth an amber line.
   // Everything else the feed reports is ordinary and stays quiet.
   warn: boolean
+  // What the line does not say out loud. The console keeps its explanations in
+  // tooltips, so the reason a state matters sits here and not in the words the
+  // eye reads first.
+  title?: string
 }
+
+// What an old index and an unreachable feed mean, for the tooltip over the
+// line. The line itself states the fact; these state what follows from it.
+export const STALE_FEED_TITLE = 'This index can miss new recipes and withdrawals.'
+export const UNREACHABLE_FEED_TITLE = 'The last signed copy is on screen.'
 
 // The line under the models table. A feed that has never been fetched gets no
 // line at all: there is no feed running yet, and a sentence about one would be
@@ -61,18 +70,21 @@ export function feedNote(health: RecipeFeedHealth | null | undefined, nowMs: num
     const days = ageInDays(health.accepted_generated_at, nowMs)
     if (days !== null) {
       return {
-        text: `Recipe feed · ${days} ${days === 1 ? 'day' : 'days'} old; may be missing updates.`,
+        text: `Recipes ${days} ${days === 1 ? 'day' : 'days'} old`,
         warn: true,
+        title: STALE_FEED_TITLE,
       }
     }
   }
   if (health.state === 'unreachable') {
     const since = relativeTime(health.fetched_at, nowMs)
-    return since ? { text: `Recipe feed · unreachable since ${since}, showing the last signed copy`, warn: false } : null
+    return since
+      ? { text: `Recipes unreachable since ${since}`, warn: false, title: UNREACHABLE_FEED_TITLE }
+      : null
   }
   if (health.state === 'ok') {
     const updated = relativeTime(health.accepted_generated_at, nowMs)
-    return updated ? { text: `Recipe feed · updated ${updated}`, warn: false } : null
+    return updated ? { text: `Recipes updated ${updated}`, warn: false } : null
   }
   return null
 }
