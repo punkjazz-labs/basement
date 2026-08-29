@@ -699,7 +699,15 @@ func (s *Server) runPreflightSkippingReservation(ctx context.Context, selected r
 	if !checkedLiveMemory {
 		receipt, err := s.executor.Execute(ctx, execution, recipe.Operation{Type: "verify_memory"}, selected, nil)
 		if err != nil {
-			if owner := s.managedPortOwner(ctx, selected); owner != "" {
+			// This pardon belongs to preflight and to nothing else. Preflight
+			// measures the memory while the model this deployment replaces is
+			// still serving, so a shortfall here says only that the previous
+			// model still holds the node. The plan stops it before anything
+			// starts, or nothing starts at all. The plan's own verify_memory
+			// step runs after that stop, through nodeStep and the host
+			// executor, and it stays a strict live check with no pardon: at
+			// that point the memory must really be free.
+			if owner := s.managedMemoryOwner(ctx, selected); owner != "" {
 				receipt = map[string]any{"occupied_by_managed_recipe": owner, "rechecked_after_switch_stop": true}
 				err = nil
 			}
@@ -764,6 +772,29 @@ func (s *Server) withReclaimCandidates(ctx context.Context, selected recipe.Reci
 		}
 	}
 	return wrapped
+}
+
+// managedMemoryOwner names the model that holds this node's memory now, when
+// that model is one basement manages and the deployment being checked is not
+// it. Docker is asked first, exactly as the port check is (see the host
+// executor's verify_port): a running managed container is proof that stands on
+// every node, while the installed-model rows only exist on the manager that
+// installed them. A worker Spark keeps no such rows, so a store-only answer
+// left the worker failing a live memory check on the model its own head was
+// about to stop. The store still answers when Docker cannot, which keeps the
+// head's behaviour unchanged.
+func (s *Server) managedMemoryOwner(ctx context.Context, selected recipe.Recipe) string {
+	if lister, ok := s.localExecutor().(operations.ManagedContainerLister); ok {
+		containers, err := lister.ManagedContainers(ctx)
+		if err == nil {
+			for _, container := range containers {
+				if container.Running && container.RecipeID != selected.ID {
+					return container.RecipeID
+				}
+			}
+		}
+	}
+	return s.managedPortOwner(ctx, selected)
 }
 
 func (s *Server) managedPortOwner(ctx context.Context, selected recipe.Recipe) string {

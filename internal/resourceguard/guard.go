@@ -103,10 +103,22 @@ func CheckMemory(nodes []Node, expectedNodes int, policy MemoryPolicy) ([]Memory
 		if !policy.RequireLiveCapacity {
 			continue
 		}
-		if node.GPUMemoryFree < runtimeBudget {
+		runtimeShort := node.GPUMemoryFree < runtimeBudget
+		reserveShort := node.SystemMemoryAvailable < result.RequiredAvailableBytes
+		// On GB10 the device pool and the system pool are the same memory,
+		// measured by two different tools. When the inventory reports the same
+		// free bytes and the same total for both, one shortage is one fact, so
+		// the owner must read one sentence. Two sentences printed the same
+		// figure twice and looked like two separate problems. Hardware whose
+		// pools really differ still gets a clause for each pool.
+		if node.GPUMemoryFree == node.SystemMemoryAvailable && node.GPUMemoryTotal == node.SystemMemoryTotal && runtimeShort && reserveShort {
+			problems = append(problems, fmt.Sprintf("%s has %s of memory free; the model needs %s (%s to run and %s system reserve)", name, humanBytes(node.GPUMemoryFree), humanBytes(result.RequiredAvailableBytes), humanBytes(runtimeBudget), humanBytes(policy.HostReserveBytes)))
+			continue
+		}
+		if runtimeShort {
 			problems = append(problems, fmt.Sprintf("%s has %s of free GPU memory; %s is needed for weights, KV cache, and context", name, humanBytes(node.GPUMemoryFree), humanBytes(runtimeBudget)))
 		}
-		if node.SystemMemoryAvailable < result.RequiredAvailableBytes {
+		if reserveShort {
 			problems = append(problems, fmt.Sprintf("%s has %s of unified memory available; %s is needed including the %s system reserve", name, humanBytes(node.SystemMemoryAvailable), humanBytes(result.RequiredAvailableBytes), humanBytes(policy.HostReserveBytes)))
 		}
 	}

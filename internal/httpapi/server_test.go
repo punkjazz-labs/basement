@@ -39,6 +39,11 @@ type apiExecutor struct {
 	done     map[string]bool
 	running  bool
 	failPort bool
+	// failures make named checks report a real reason, and managed holds the
+	// containers this node's Docker daemon carries, so a test can put a model
+	// on the machine and then measure the memory it holds.
+	failures map[string]error
+	managed  []operations.ManagedContainer
 	// started and hold let a test look at a step while it is still running:
 	// a download closes started once it has reported progress, then waits
 	// for the test to close hold. Both nil means no step ever blocks.
@@ -50,11 +55,41 @@ func (a *apiExecutor) ArtifactPath(r recipe.Recipe) string { return "/managed/" 
 func (a *apiExecutor) RuntimeImageBytes(_ context.Context, r recipe.Recipe) (int64, bool) {
 	return r.Runtime.ImageDiskBytes, true
 }
+
+// fail makes one check report a real reason for the rest of the test.
+func (a *apiExecutor) fail(operation string, reason error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.failures == nil {
+		a.failures = map[string]error{}
+	}
+	a.failures[operation] = reason
+}
+
+// runContainer puts a managed container on this node's Docker daemon.
+func (a *apiExecutor) runContainer(container operations.ManagedContainer) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.managed = append(a.managed, container)
+}
+
+// ManagedContainers is what this node's own daemon holds. A worker Spark keeps
+// no installed-model rows, so its containers are the only local proof of which
+// model owns its memory.
+func (a *apiExecutor) ManagedContainers(context.Context) ([]operations.ManagedContainer, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]operations.ManagedContainer{}, a.managed...), nil
+}
+
 func (a *apiExecutor) Execute(_ context.Context, _ operations.Execution, op recipe.Operation, _ recipe.Recipe, progress operations.Progress) (map[string]any, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if op.Type == "verify_port" && a.failPort {
 		return nil, errors.New("port 8000 is occupied")
+	}
+	if reason := a.failures[op.Type]; reason != nil {
+		return nil, reason
 	}
 	a.done[op.Type] = true
 	if op.Type == "start_container" {

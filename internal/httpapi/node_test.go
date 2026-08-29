@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
+	"github.com/punkjazz-labs/basement/internal/resourceguard"
 	"github.com/punkjazz-labs/basement/internal/store"
 )
 
@@ -382,6 +384,142 @@ func checkFor(body map[string]any, operation string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// liveMemoryShortfall is what the shipped guard says on a GB10 whose memory is
+// already held: the live check fails on a node whose device pool and system
+// pool are the same memory. The message comes from the guard itself, so a test
+// about what the owner reads is testing the copy that ships.
+func liveMemoryShortfall(t *testing.T, node string, freeBytes int64) error {
+	t.Helper()
+	_, err := resourceguard.CheckMemory([]resourceguard.Node{{
+		Name: node, SystemMemoryTotal: 128_000_000_000, SystemMemoryAvailable: freeBytes,
+		GPUMemoryTotal: 128_000_000_000, GPUMemoryFree: freeBytes,
+	}}, 1, resourceguard.MemoryPolicy{
+		MinimumTotalBytes: 120_000_000_000, HostReserveBytes: 12_000_000_000,
+		RuntimeBudgetBytes: 91_000_000_000, RequireLiveCapacity: true,
+	})
+	if err == nil {
+		t.Fatal("the fixture's live memory check passed; it must fail")
+	}
+	return err
+}
+
+// nominalCapacityShortfall is the machine that is simply too small. It says
+// nothing about what runs right now, so no running model can excuse it.
+func nominalCapacityShortfall(t *testing.T, node string) error {
+	t.Helper()
+	_, err := resourceguard.CheckMemory([]resourceguard.Node{{
+		Name: node, SystemMemoryTotal: 64_000_000_000, SystemMemoryAvailable: 60_000_000_000,
+		GPUMemoryTotal: 64_000_000_000, GPUMemoryFree: 60_000_000_000,
+	}}, 1, resourceguard.MemoryPolicy{
+		MinimumTotalBytes: 120_000_000_000, HostReserveBytes: 12_000_000_000,
+		RuntimeBudgetBytes: 40_000_000_000,
+	})
+	if err == nil {
+		t.Fatal("the fixture's capacity check passed; it must fail")
+	}
+	return err
+}
+
+// servingContainer is the model this Spark runs right now.
+func servingContainer(r recipe.Recipe) operations.ManagedContainer {
+	return operations.ManagedContainer{
+		Name: "basement-" + r.ID, Running: true, RecipeID: r.ID,
+		Version: strconv.Itoa(r.Version), HostPort: r.Service.DefaultHostPort,
+	}
+}
+
+// The two-Spark failure of 2026-08-29. One model served across both Sparks.
+// The owner chose the switch flow for another model, and that plan stops the
+// serving model before anything starts. Preflight still measures the worker's
+// memory while the old model holds it, and the worker keeps no installed-model
+// rows, so it could not name the holder and failed the deployment at Check
+// system. The running container is the proof the worker does hold.
+func TestWorkerForgivesLiveMemoryHeldByTheModelItStillRuns(t *testing.T) {
+	fixture := newNodeFixture(t)
+	fixture.localExec.fail("verify_memory", liveMemoryShortfall(t, "spark-b", 6_300_000_000))
+	fixture.localExec.runContainer(servingContainer(fixture.single))
+
+	status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-switch"})
+	if status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("the worker refused a switch that stops the model holding its memory: status=%d body=%#v", status, body)
+	}
+	check := checkFor(body, "verify_memory")
+	if check == nil || check["ok"] != true {
+		t.Fatalf("worker live memory check=%#v", check)
+	}
+	receipt, _ := check["receipt"].(map[string]any)
+	if receipt["occupied_by_managed_recipe"] != fixture.single.ID {
+		t.Fatalf("the receipt does not name the model that holds the memory: %#v", receipt)
+	}
+}
+
+// Nothing this manager owns holds the memory, so the failure stands. The owner
+// then reads one sentence: on a GB10 the device pool and the system pool are
+// the same memory, and reporting the same figure twice looked like two
+// separate problems.
+func TestWorkerRefusesLiveMemoryNoManagedModelHoldsAndSaysItOnce(t *testing.T) {
+	fixture := newNodeFixture(t)
+	fixture.localExec.fail("verify_memory", liveMemoryShortfall(t, "spark-b", 6_300_000_000))
+
+	status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-switch"})
+	if status != http.StatusOK || body["ready"] != false {
+		t.Fatalf("a worker with no free memory reported itself ready: status=%d body=%#v", status, body)
+	}
+	check := checkFor(body, "verify_memory")
+	if check == nil || check["ok"] != false {
+		t.Fatalf("worker live memory check=%#v", check)
+	}
+	message, _ := check["error"].(string)
+	if !strings.Contains(message, "spark-b has 6.3 GB of memory free; the model needs 103 GB (91.0 GB to run and 12.0 GB system reserve)") {
+		t.Fatalf("the shortfall does not read as one plain sentence: %q", message)
+	}
+	if strings.Count(message, "6.3 GB") != 1 || strings.Contains(message, "free GPU memory") {
+		t.Fatalf("the same memory is reported twice: %q", message)
+	}
+}
+
+// A machine that is too small for the model is never forgiven. Nominal
+// capacity does not change when a model stops, so a running container says
+// nothing about it.
+func TestWorkerNeverForgivesAMachineTooSmallForTheModel(t *testing.T) {
+	fixture := newNodeFixture(t)
+	fixture.localExec.fail("verify_memory_capacity", nominalCapacityShortfall(t, "spark-b"))
+	fixture.localExec.runContainer(servingContainer(fixture.single))
+
+	status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-switch"})
+	if status != http.StatusOK || body["ready"] != false {
+		t.Fatalf("a Spark too small for the model reported itself ready: status=%d body=%#v", status, body)
+	}
+	check := checkFor(body, "verify_memory_capacity")
+	if check == nil || check["ok"] != false {
+		t.Fatalf("worker capacity check=%#v", check)
+	}
+	if receipt, _ := check["receipt"].(map[string]any); receipt["occupied_by_managed_recipe"] != nil {
+		t.Fatalf("a running model excused a machine that is too small: %#v", receipt)
+	}
+}
+
+// The plan's own memory check runs after the previous model stops, so it must
+// stay strict. A running managed container excuses nothing here: at this point
+// the memory has to be free.
+func TestThePlanStepMemoryCheckIsNeverForgiven(t *testing.T) {
+	fixture := newNodeFixture(t)
+	fixture.localExec.fail("verify_memory", liveMemoryShortfall(t, "spark-b", 6_300_000_000))
+	fixture.localExec.runContainer(servingContainer(fixture.single))
+
+	status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("verify_memory", "job-switch", fixture.distributed))
+	if status != http.StatusOK {
+		t.Fatalf("worker step status=%d body=%#v", status, body)
+	}
+	message, _ := body["error"].(string)
+	if message == "" {
+		t.Fatalf("the plan's memory check was forgiven while a model still held the memory: %#v", body)
+	}
+	if !strings.Contains(message, "of memory free") {
+		t.Fatalf("the step did not report the live shortfall: %q", message)
+	}
 }
 
 func TestWorkerAdmitsOneDelegatedJobAtATime(t *testing.T) {

@@ -65,6 +65,39 @@ func TestMemoryGuardRejectsLiveOOMRisk(t *testing.T) {
 	}
 }
 
+// On a GB10 the device pool and the system pool are the same memory, read by
+// two different tools. A shortage there is one fact, so the owner reads one
+// sentence. The live failure of 2026-08-29 printed the same 6.3 GB twice and
+// looked like two separate problems. Hardware whose pools really differ still
+// gets a clause for each pool.
+func TestOneUnifiedMemoryShortfallReadsAsOneSentence(t *testing.T) {
+	policy := MemoryPolicy{MinimumTotalBytes: 120_000_000_000, HostReserveBytes: 12_000_000_000, RuntimeBudgetBytes: 91_000_000_000, RequireLiveCapacity: true}
+	unified := Node{Name: "spark-b", SystemMemoryTotal: 128_000_000_000, SystemMemoryAvailable: 6_300_000_000, GPUMemoryTotal: 128_000_000_000, GPUMemoryFree: 6_300_000_000}
+	_, err := CheckMemory([]Node{unified}, 1, policy)
+	if err == nil {
+		t.Fatal("a node with 6.3 GB free passed a 103 GB model")
+	}
+	want := "spark-b has 6.3 GB of memory free; the model needs 103 GB (91.0 GB to run and 12.0 GB system reserve)"
+	if err.Error() != want {
+		t.Fatalf("CheckMemory() = %q, want %q", err.Error(), want)
+	}
+	if strings.Count(err.Error(), "6.3 GB") != 1 {
+		t.Fatalf("the same free memory is reported twice: %q", err)
+	}
+
+	// Two pools that hold different memory are two facts, and each keeps its
+	// own clause.
+	separate := unified
+	separate.GPUMemoryFree = 5_000_000_000
+	_, err = CheckMemory([]Node{separate}, 1, policy)
+	if err == nil {
+		t.Fatal("a node with separate exhausted pools passed")
+	}
+	if !strings.Contains(err.Error(), "free GPU memory") || !strings.Contains(err.Error(), "system reserve") {
+		t.Fatalf("separate pools lost a clause: %q", err)
+	}
+}
+
 func TestMultiNodeGuardsDoNotPoolCapacity(t *testing.T) {
 	nodes := []Node{
 		{Name: "spark-1", SystemMemoryTotal: 140, SystemMemoryAvailable: 130, GPUMemoryTotal: 140, GPUMemoryFree: 130, DataDiskAvailable: 160, RuntimeDiskAvailable: 160, SharedDataRuntimeDisk: true},
