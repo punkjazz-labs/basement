@@ -18,8 +18,9 @@ import {
   heldTabLabel, initialPlacement, installRoute, mergePlacements, modelChips, placedTarget,
   placementBusy, placementOptions, placementSwitchFrom, placementTargets, placementVerb,
   placementWord, powerRow,
-  recipeBusy, rowActionRoute, rowPlacement, rowStateLine, servingPlace, shortSparkName,
-  shouldShowMemberBanner, splitModels, splitServing,
+  isTypical, openPillClass,
+  recipeBusy, rowActionRoute, rowPlacement, rowStateLine, servingPlace, servingSparkName,
+  shortSparkName, shouldShowMemberBanner, speedText, splitModels, splitServing,
   clearRecordBody, clearRecordTitle, releasePath, workingNodes, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CLEAR_RECORD, CLEAR_RECORD_CONFIRM,
   COOL_TAG, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH,
@@ -110,19 +111,15 @@ const REFERENCE_TPS: Record<string, number> = {
   'deepseek-v4-flash-0731-ud-iq3-xxs-1s': 17, // 16.56 measured, dev.classmethod.jp 2026-08-02; the sweep's tweet agrees
 }
 
-// The one number every speed cell and every band line reads: what this Spark
-// measured, or the community figure with a tilde on it, or n/a. A media model
-// generates no tokens, so it has no number of this kind at all. The tilde is
-// also what the note under the table looks for, so the note can never speak
-// for a figure that is not on screen.
-const speedText = (recipe: Recipe, measured?: number): string =>
-  recipe.media_generation
-    ? 'n/a'
-    : measured
-      ? measured.toFixed(1)
-      : REFERENCE_TPS[recipe.id]
-        ? `~${REFERENCE_TPS[recipe.id]}`
-        : 'n/a'
+// One recipe's speed, read through the same helper the tests hold: what this
+// Spark measured, or the community figure under its mark, or n/a. This is the
+// only place the community table is joined to a recipe.
+const speedOf = (recipe: Recipe, measured?: number): string =>
+  speedText(measured, REFERENCE_TPS[recipe.id], !recipe.media_generation)
+
+// The unit of that number. The header over the table carries it, so the cell
+// only draws it for the widths that hide the header (see styles.css).
+const SPEED_UNIT = 'tok/s'
 
 // The note under the table, shown only while a "~" number is on screen. It is
 // about the tilde and nothing else, so it names it.
@@ -1077,13 +1074,14 @@ export default function Models({
     // The machine the band names. A model that spans the fleet names the set
     // rather than a machine, and a console that knows no Spark name says
     // nothing about where the model runs.
-    const servingSpark = host ? otherName : isActive ? selfName : otherServing ? otherName : ''
+    const servingSpark = servingSparkName(
+      { onHost: host !== undefined, here: isActive, elsewhere: otherServing }, selfName, otherName)
     return {
       recipe, model, revocation, isMedia, busy, isActive, fits, canPair, measuring,
       host, hostServing, hostLocked, otherURL, otherWord, otherName, otherServing,
       measured, served, servedTotal, updateAvailable, chips, placement,
       state, spec: SPEC[recipe.id] ?? fallbackUse(recipe),
-      speed: speedText(recipe, measured),
+      speed: speedOf(recipe, measured),
       place: servingPlace(recipe.topology.spark_count, servingSpark),
       // What the band above the table is built from: this Spark serves the
       // model, or another one does.
@@ -1111,7 +1109,7 @@ export default function Models({
     }
     // The band's Open is the only orange button on this screen. Every other
     // action, on the band and in the table alike, is a ghost.
-    const openClass = asBand ? 'primary' : 'ghost'
+    const openClass = openPillClass(asBand)
     const expand = {
       role: 'button' as const,
       tabIndex: 0,
@@ -1398,12 +1396,21 @@ export default function Models({
               </div>
               {/* One line, whatever it has to say: the state while the model is
                   in one worth a word, and what the model is the rest of the
-                  time. */}
-              <div className={`spec ${state?.warn ? 'warn' : ''}`}>{state ? state.text : spec}</div>
+                  time. The line is cut to one line, so what it says is also
+                  what it says on hover. */}
+              <div className={`spec ${state?.warn ? 'warn' : ''}`} title={spec}>
+                {state ? state.text : spec}
+              </div>
             </div>
           </div>
           <div className="m-num">
-            <span className="n">{speed}</span>
+            {/* The unit lives in the header over this column. A screen narrow
+                enough to hide that header draws it here instead, so the number
+                is never bare and never says its unit twice. */}
+            <span className="n">
+              {speed}
+              {!isMedia && <small className="unit">{SPEED_UNIT}</small>}
+            </span>
           </div>
           <div className="m-num">
             <span className="n">{formatBytes(recipe.artifact_bytes)}</span>
@@ -1429,8 +1436,8 @@ export default function Models({
     ? (tab === 'mine' ? split.held : split.labs.flatMap(group => group.models))
     : rows
   const anyTypical =
-    bands.some(read => read.speed.startsWith('~')) ||
-    onScreen.some(recipe => speedText(recipe, installed.get(recipe.id)?.tokens_per_second).startsWith('~'))
+    bands.some(read => isTypical(read.speed)) ||
+    onScreen.some(recipe => isTypical(speedOf(recipe, installed.get(recipe.id)?.tokens_per_second)))
 
   return (
     <div className="stack">
@@ -1584,7 +1591,7 @@ export default function Models({
         const note = feedNote(system.recipe_feed, Date.now())
         return (
           <div className="feed-line">
-            {note && <p className={`table-note ${note.warn ? 'warn' : ''}`} title={note.title}>{note.text}</p>}
+            {note && <p className={`table-note ${note.warn ? 'warn' : ''}`}>{note.text}</p>}
             <button type="button" className="ghost" disabled={checkingFeed} onClick={checkForRecipes}>
               {checkingFeed ? 'Checking' : 'Check now'}
             </button>

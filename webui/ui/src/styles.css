@@ -360,6 +360,10 @@ input[type='text'], input[type='password'], textarea {
 .m-num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .m-num .n { font-size: 13px; font-weight: 550; }
 .m-num .n small { color: var(--faint); font-weight: 400; margin-left: 2px; font-size: 10.5px; }
+/* The unit of the speed number. The header over the column carries it at every
+   width that draws the header; below that width the header is gone and the
+   cell says it instead, so the unit is on screen exactly once. */
+.m-num .n .unit { display: none; }
 .m-status { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); padding-left: 20px; }
 .sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); flex: none; }
 .sdot.on { background: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 15%, transparent); }
@@ -369,9 +373,6 @@ input[type='text'], input[type='password'], textarea {
 /* A model that lives on another Spark in the fleet says so under its status,
    in the same quiet voice the rest of the row uses. */
 .m-status .peer-note { display: block; color: var(--faint); font-size: 11px; margin-top: 1px; }
-/* Something is true of the model that its status word does not carry, such as
-   a recipe the publisher has withdrawn under a model that keeps serving. */
-.m-status .peer-note.warn { color: var(--warn); }
 /* A version the publisher has withdrawn, on a row with nothing installed. */
 .tag.revoked {
   color: var(--fail); background: transparent;
@@ -1477,6 +1478,8 @@ button.chip:hover { color: var(--ink); }
   .m-id { grid-column: 1 / -1; }
   .m-id .spec { white-space: normal; }
   .m-num { text-align: left; }
+  /* The header is hidden just above, so the number carries its own unit. */
+  .m-num .n .unit { display: inline; }
   .m-status { padding-left: 0; }
   .m-actions { grid-column: 1 / -1; justify-content: flex-start; }
   .m-caret { display: none; }
