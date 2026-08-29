@@ -541,44 +541,14 @@ func TestDistributedLeaseRenewalCoversStagingAndSkipsEverythingElse(t *testing.T
 // at startup and must never be a renewal source again.
 func TestARestartedHeadNeverRenewsADeadDeploymentsWorkerRank(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "manager.db")
-	s, err := store.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := twoSparkRecipe(t)
-	r.ID = "restarted-head-model"
-	install, _, err := s.CreateJob(ctx, "install", r.ID, "serving-before-the-upgrade", map[string]any{"confirmed": true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := New(s, newFleetExecutor(), []recipe.Recipe{r})
-	before.Start(install.ID)
-	waitJob(t, s, install.ID, "ready")
-	// A first activation also measures the model, and that job outlives the
-	// install. Closing the database under it is a test artefact, not part of
-	// the incident, so the fixture waits for this manager to go quiet.
-	waitJobsSettled(t, s)
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// The upgrade restarts the manager. The model is marked recovering and the
-	// serve job's reservation is all that is left of the deployment.
-	s, err = store.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s.Close() })
 	fake := newFleetExecutor()
-	restarted := New(s, fake, []recipe.Recipe{r})
-	restarted.recoveryRetryDelay = 20 * time.Millisecond
-	reservationID := fleet.ReservationID(fleet.ClaimKindLocalJob, install.ID)
+	restarted, s, r, install := servingHeadAfterRestart(t, fake)
+	reservationID := fleet.ReservationID(fleet.ClaimKindLocalJob, install)
 	held, err := restarted.Reservations().Reservation(ctx, reservationID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if held.State != "active" || held.Claims.JobID != install.ID {
+	if held.State != "active" || held.Claims.JobID != install {
 		t.Fatalf("the dead serve job left a %q reservation for job %q, so this test no longer replays the incident", held.State, held.Claims.JobID)
 	}
 
@@ -613,6 +583,174 @@ func TestARestartedHeadNeverRenewsADeadDeploymentsWorkerRank(t *testing.T) {
 	if renewals := fake.recordedRenewals(); len(renewals) != 1 || renewals[0] != recovery+"@"+r.ID {
 		t.Fatalf("after recovery the head renews %v, want only its own job %s", renewals, recovery)
 	}
+}
+
+// servingHeadAfterRestart serves a two-Spark model, then restarts the manager
+// over the same database the way an upgrade does: the store marks the active
+// model recovering, and all that is left of the deployment is the serve job's
+// reservation and a manager that never drove it. It returns the new manager
+// and the job that died with the old one.
+func servingHeadAfterRestart(t *testing.T, fake operations.Executor) (*Engine, *store.Store, recipe.Recipe, string) {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := twoSparkRecipe(t)
+	r.ID = "restarted-head-model"
+	install, _, err := s.CreateJob(ctx, "install", r.ID, "serving-before-the-upgrade", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := New(s, newFleetExecutor(), []recipe.Recipe{r})
+	before.Start(install.ID)
+	waitJob(t, s, install.ID, "ready")
+	// A first activation also measures the model, and that job outlives the
+	// install. Closing the database under it is a test artefact, not part of
+	// the incident, so the fixture waits for this manager to go quiet.
+	waitJobsSettled(t, s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	restarted := New(s, fake, []recipe.Recipe{r})
+	restarted.recoveryRetryDelay = 20 * time.Millisecond
+	return restarted, s, r, install.ID
+}
+
+// Startup must settle the dead rows BEFORE the allocator rebuilds this node's
+// runtime claim, and the order is load-bearing rather than cosmetic. The
+// allocator reads the active rows to decide which models already hold the
+// runtime slot, so a dead row still active at that moment is counted as the
+// serving model's own claim and no recovery claim is built for it; releasing
+// the row afterwards then leaves the slot owned by nothing at all. The model
+// stays installed and active, but any other model can walk onto the machine,
+// and it stays that way until a recovery start succeeds.
+func TestStartupSettlesTheDeadRowBeforeItRebuildsTheRuntimeClaim(t *testing.T) {
+	ctx := context.Background()
+	restarted, _, r, _ := servingHeadAfterRestart(t, newFleetExecutor())
+	if err := restarted.ReconcileReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	allocator := restarted.Reservations()
+	recovered, err := allocator.Reservation(ctx, fleet.ReservationID(fleet.ClaimKindRecovered, r.ID))
+	if err != nil {
+		t.Fatalf("startup left the serving model with no recovery claim at all: %v", err)
+	}
+	if recovered.State != "active" {
+		t.Fatalf("the serving model's recovery claim is %q, so this node's runtime slot is owned by nothing", recovered.State)
+	}
+
+	// Owned, and guarded: a stranger must not be able to take the runtime slot
+	// of a machine whose own model is still installed and active.
+	const strangerID = "reservation-of-another-model"
+	if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: strangerID, DeploymentID: "job:" + strangerID, DriverNodeID: allocator.NodeID(),
+		RecipeID: "some-other-model", RecipeVersion: 1,
+		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindLocalJob, JobID: "job-of-another-model",
+			Runtime: true, Ports: []int{}, FabricInterfaces: []string{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Commit(ctx, strangerID, fleet.LocalPrepareToken(strangerID), []byte(`{"kind":"local-engine"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.Activate(ctx, strangerID, ""); !errors.Is(err, store.ErrReservationConflict) {
+		t.Fatalf("an unrelated model took the runtime slot of a serving machine: err=%v", err)
+	}
+}
+
+// A job the previous manager left interrupted is resumed with the reservation
+// it already holds, so it never prepares a new one: the resuming manager
+// adopts the existing row instead. That adoption is the only thing that puts a
+// resumed job back into this process's memory, and a resumed two-Spark install
+// goes straight back to staging, where the worker's rank is active on a
+// nine-heartbeat lease and the head is the only thing that can keep it alive.
+// Losing the adoption would let the worker reclaim the rank in the middle of
+// the resumed download, which is the 2026-08-28 failure.
+func TestAResumedInstallKeepsRenewingItsWorkerRank(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := twoSparkRecipe(t)
+	r.ID = "resumed-staging-model"
+	install, _, err := s.CreateJob(ctx, "install", r.ID, "staging-before-the-restart", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the previous manager durably left behind when it stopped in the
+	// middle of staging: a committed local claim with its job attached.
+	reservationID := fleet.ReservationID(fleet.ClaimKindLocalJob, install.ID)
+	fingerprint, err := fleet.RecipeFingerprint(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocator := fleet.NewAllocator(s, "local")
+	if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: reservationID, DeploymentID: "job:" + install.ID, DriverNodeID: allocator.NodeID(),
+		RecipeID: r.ID, RecipeVersion: r.Version, RecipeFingerprint: fingerprint,
+		Claims: fleet.ClaimsForRecipe(r, fleet.RecipeClaimOptions{
+			Kind: fleet.ClaimKindLocalJob, JobID: install.ID, ReserveDisk: true, Runtime: true,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Commit(ctx, reservationID, fleet.LocalPrepareToken(reservationID), []byte(`{"kind":"local-engine"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.AttachJob(ctx, reservationID, install.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	fake := newGatedFleetExecutor(r.ID)
+	t.Cleanup(fake.unblock)
+	resuming := New(s, fake, []recipe.Recipe{r})
+	if err := resuming.ReconcileReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := resuming.ResumeInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fake.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the interrupted install never resumed to its download")
+	}
+
+	held, err := resuming.Reservations().Reservation(ctx, reservationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.State != "committed" {
+		t.Fatalf("the resumed job's reservation is %q, so this test no longer covers the staging window", held.State)
+	}
+	if err := resuming.RenewDistributedReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if renewals := fake.recordedRenewals(); len(renewals) != 1 || renewals[0] != install.ID+"@"+r.ID {
+		t.Fatalf("the resumed job's worker rank was left to expire: renewals=%v", renewals)
+	}
+
+	fake.unblock()
+	waitJob(t, s, install.ID, "ready")
 }
 
 func waitJobsSettled(t *testing.T, s *store.Store) {
