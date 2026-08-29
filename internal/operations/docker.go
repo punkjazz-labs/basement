@@ -303,8 +303,12 @@ func containerEnvironment(r recipe.Recipe, placement Placement) []string {
 	}
 	// The root filesystem is read-only and /root/.cache is the one writable
 	// mount; Triton defaults to /root/.triton and crashes the engine on a
-	// read-only rootfs, so steer it into the persistent cache.
-	defaults := map[string]string{"TRITON_CACHE_DIR": "/root/.cache/triton"}
+	// read-only rootfs, so steer it into the persistent cache. tilelang has
+	// the same failure mode against /root/.tilelang.
+	defaults := map[string]string{
+		"TRITON_CACHE_DIR":   "/root/.cache/triton",
+		"TILELANG_CACHE_DIR": "/root/.cache/tilelang",
+	}
 	// The comfyui image bakes its own cache and home paths onto the read-only
 	// root filesystem, so they have to be redirected before the runtime can
 	// start at all. See comfyUIEnvironment.

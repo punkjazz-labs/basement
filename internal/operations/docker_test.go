@@ -102,6 +102,69 @@ func TestDockerCreateUsesConstrainedStructuredRequest(t *testing.T) {
 	}
 }
 
+// TestContainerEnvironmentSteersTileLangCacheForSGLang is a regression from a
+// real install failure on qwen38-flash-next-nvfp4-2s, the first SGLang recipe
+// whose model imports tilelang: tilelang's KernelCache defaults to making
+// /root/.tilelang, and the container's root filesystem is read only, so the
+// engine died with OSError after the weights had already loaded. The recipe
+// sets no cache variable of its own, so the manager's default has to steer
+// tilelang into the writable mount the way it already does for Triton.
+func TestContainerEnvironmentSteersTileLangCacheForSGLang(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := recipe.Find(recipes, "qwen38-flash-next-nvfp4-2s")
+	if !ok {
+		t.Fatal("Qwen 3.8 Flash Next recipe missing")
+	}
+	if r.Runtime.Kind != "sglang" {
+		t.Fatalf("recipe kind=%s, want sglang", r.Runtime.Kind)
+	}
+	if _, set := r.Runtime.Environment["TILELANG_CACHE_DIR"]; set {
+		t.Fatal("fixture recipe already sets TILELANG_CACHE_DIR, so it cannot prove the default")
+	}
+	tileLangSteered := false
+	for _, entry := range containerEnvironment(r, Placement{}) {
+		if entry == "TILELANG_CACHE_DIR=/root/.cache/tilelang" {
+			tileLangSteered = true
+		}
+	}
+	if !tileLangSteered {
+		t.Fatalf("tilelang cache is not steered into the writable mount (read-only rootfs would crash the engine): %#v", containerEnvironment(r, Placement{}))
+	}
+}
+
+// TestContainerEnvironmentTileLangCacheOverrideWins proves a recipe that
+// names TILELANG_CACHE_DIR itself keeps its own value, the same override
+// precedence the Triton default already honours.
+func TestContainerEnvironmentTileLangCacheOverrideWins(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := recipe.Find(recipes, "qwen38-flash-next-nvfp4-2s")
+	if !ok {
+		t.Fatal("Qwen 3.8 Flash Next recipe missing")
+	}
+	r.Runtime.Environment["TILELANG_CACHE_DIR"] = "/root/.cache/custom-tilelang"
+	overridden, defaulted := false, false
+	for _, entry := range containerEnvironment(r, Placement{}) {
+		switch entry {
+		case "TILELANG_CACHE_DIR=/root/.cache/custom-tilelang":
+			overridden = true
+		case "TILELANG_CACHE_DIR=/root/.cache/tilelang":
+			defaulted = true
+		}
+	}
+	if !overridden {
+		t.Fatalf("recipe override lost to the default: %#v", containerEnvironment(r, Placement{}))
+	}
+	if defaulted {
+		t.Fatalf("both the override and the default are present: %#v", containerEnvironment(r, Placement{}))
+	}
+}
+
 // TestMiniMaxH3ContainerPublishesComfyUIPortWithIsolatedIPC proves the first
 // non-8000 recipe reaches Docker as its own port and never falls into the
 // distributed host-IPC branch that would override its shared-memory policy.
