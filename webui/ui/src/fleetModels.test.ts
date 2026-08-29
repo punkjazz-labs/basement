@@ -9,11 +9,12 @@ import {
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
   placementVerb, placementWord, powerBusy, powerFanOut, powerFanOutBusy, powerRefusalLine,
   powerRefusedTitle, powerRow, recipeBusy, retiredPowerSets,
-  rowActionRoute, rowPlacement, rowStateLine, servingPlace, shortSparkName, shouldShowMemberBanner,
-  splitModels, splitServing, workingNodes, workingPlacement,
+  isTypical, openPillClass,
+  rowActionRoute, rowPlacement, rowStateLine, servingPlace, servingSparkName, shortSparkName,
+  shouldShowMemberBanner, speedText, splitModels, splitServing, workingNodes, workingPlacement,
   clearRecordBody, clearRecordTitle, releasePath,
   ACTION_REFUSAL, ADOPT_PATH, BOTH_SPARKS, BOTH_SPARKS_CHIP,
-  CATALOG_EMPTY, CATALOG_TAB, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME,
+  CATALOG_EMPTY, CATALOG_TAB, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME, GHOST_PILL, NO_SPEED, PRIMARY_PILL,
   CHOOSE_FOR_ME_NOTE, CLEAR_RECORD, CLEAR_RECORD_CONFIRM, COOL_MODE, COOL_MODE_LABEL, COOL_TAG,
   DISRUPTIVE_KINDS,
   FLEET_DEPLOYMENT_ACTIONS, FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL,
@@ -837,6 +838,71 @@ describe('which models stand over the table', () => {
     // A console that can name no Spark says nothing about where it runs.
     expect(servingPlace(1, '')).toBe('')
   })
+
+  // The band states which machine runs the model. That is a claim about the
+  // fleet, so the two machines must never be swapped.
+  it('names this Spark while this Spark serves, and the other one otherwise', () => {
+    const here = { onHost: false, here: true, elsewhere: false }
+    const there = { onHost: false, here: false, elsewhere: true }
+    expect(servingSparkName(here, 'f1cc', '37c4')).toBe('f1cc')
+    expect(servingSparkName(there, 'f1cc', '37c4')).toBe('37c4')
+  })
+
+  // A model another Spark in the fleet holds runs there whatever else is true,
+  // because this Spark holds no copy of it to serve.
+  it('names the host Spark for a model this one does not hold', () => {
+    expect(servingSparkName({ onHost: true, here: false, elsewhere: true }, 'f1cc', '37c4')).toBe('37c4')
+    expect(servingSparkName({ onHost: true, here: false, elsewhere: false }, 'f1cc', '37c4')).toBe('37c4')
+  })
+
+  it('names no machine while nothing serves', () => {
+    expect(servingSparkName({ onHost: false, here: false, elsewhere: false }, 'f1cc', '37c4')).toBe('')
+  })
+})
+
+// The number in the speed cell, and the mark that says where it came from.
+describe('the speed one model shows', () => {
+  it('shows the measurement this Spark made, to one decimal', () => {
+    expect(speedText(22.24, 80, true)).toBe('22.2')
+    // A measurement outranks the community figure, and needs no mark.
+    expect(isTypical(speedText(22.24, 80, true))).toBe(false)
+  })
+
+  // A community report is not a measurement, and the mark is the whole of what
+  // says so. Losing it would make a borrowed number read as this Spark's own.
+  it('marks a community report with a tilde', () => {
+    expect(speedText(undefined, 80, true)).toBe('~80')
+    expect(isTypical(speedText(undefined, 80, true))).toBe(true)
+  })
+
+  it('says n/a rather than nothing, and never guesses', () => {
+    expect(speedText(undefined, undefined, true)).toBe(NO_SPEED)
+    // A model that generates media serves no tokens at all, whatever figures
+    // are held for it.
+    expect(speedText(9.5, 80, false)).toBe(NO_SPEED)
+    expect(isTypical(NO_SPEED)).toBe(false)
+  })
+
+  // The note under the table explains the mark, so it is shown only while the
+  // mark is on screen. The gate reads the very string the cell draws.
+  it('gates the note under the table on the mark itself', () => {
+    expect(isTypical(speedText(undefined, 19.4, true))).toBe(true)
+    expect(isTypical(speedText(38, undefined, true))).toBe(false)
+    expect(isTypical(speedText(undefined, undefined, false))).toBe(false)
+  })
+})
+
+// Orange means one thing on this console: the primary action. The page holds
+// one of them, on the band, and every action in the table below is a ghost.
+describe('which button wears the orange pill', () => {
+  it('gives the band the primary pill and the row a ghost', () => {
+    expect(openPillClass(true)).toBe(PRIMARY_PILL)
+    expect(openPillClass(false)).toBe(GHOST_PILL)
+  })
+
+  it('keeps the two pills apart', () => {
+    expect(PRIMARY_PILL).not.toBe(GHOST_PILL)
+  })
 })
 
 // The one line a row says about its own state, in place of what the model is.
@@ -844,6 +910,27 @@ describe('the state line under a model name', () => {
   it('says nothing at all about an installed or a catalog model', () => {
     expect(rowStateLine('Installed', '')).toBeNull()
     expect(rowStateLine('Not installed', '')).toBeNull()
+  })
+
+  // The ordinary two-Spark row: this console holds no copy, another Spark
+  // holds a stopped one. The chip beside the name already says which Spark,
+  // and the tab already says the model is installed somewhere, so the line
+  // says neither and the model's own spec line stands.
+  it('gives the line back to the spec for a model another Spark holds', () => {
+    expect(rowStateLine('Installed', 'on 37c4')).toBeNull()
+    expect(rowStateLine('Not installed', 'on 37c4')).toBeNull()
+  })
+
+  // Both machines hold it and both are quiet about it. Two quiet words are
+  // still nothing to say.
+  it('says nothing when both machines have it installed', () => {
+    expect(rowStateLine('Installed', 'Installed on 37c4')).toBeNull()
+  })
+
+  // A quiet word on the other Spark never takes the line from this Spark's own
+  // state either.
+  it('drops a quiet word from the other Spark', () => {
+    expect(rowStateLine('Failed', 'Installed on 37c4')).toEqual({ text: 'Failed', warn: true })
   })
 
   it('names the Spark a failure happened on, in amber', () => {

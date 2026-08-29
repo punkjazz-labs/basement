@@ -667,6 +667,59 @@ export function servingPlace(sparkCount: number, sparkName: string): string {
   return sparkName
 }
 
+// Which machine the band names. A model another Spark in the fleet holds runs
+// on that Spark, whatever else is true of it. Otherwise this Spark names
+// itself while it serves, and the Spark that serves it names itself when this
+// one does not. Naming the wrong machine here is a false claim on screen, not
+// a decoration, so the choice is made in one place and tested.
+export interface ServingHost {
+  // Another Spark in the fleet holds this model, and this one does not.
+  onHost: boolean
+  here: boolean
+  elsewhere: boolean
+}
+
+export function servingSparkName(place: ServingHost, selfName: string, otherName: string): string {
+  if (place.onHost) return otherName
+  if (place.here) return selfName
+  return place.elsewhere ? otherName : ''
+}
+
+// ---- The one number a speed cell shows ---------------------------------------
+
+// What a community-reported figure carries and a measured one does not. The
+// note under the table looks for this mark, so a number that loses it stops
+// the note that explains it as well.
+export const TYPICAL_MARK = '~'
+export const NO_SPEED = 'n/a'
+
+// The speed of one model in the words the cell and the band both use: what
+// this Spark measured, or the community figure under the mark, or n/a. A
+// model that generates media serves no tokens, so it has no speed of this kind
+// at all.
+export function speedText(measured: number | undefined, reference: number | undefined, tokenBased: boolean): string {
+  if (!tokenBased) return NO_SPEED
+  if (measured) return measured.toFixed(1)
+  return reference ? `${TYPICAL_MARK}${reference}` : NO_SPEED
+}
+
+// Whether that number is a community report rather than a measurement. It is
+// the whole gate on the note under the table: the note speaks for the mark, so
+// it is shown only while the mark is on screen.
+export const isTypical = (speed: string): boolean => speed.startsWith(TYPICAL_MARK)
+
+// ---- The one orange button on the page ---------------------------------------
+
+// The pill family the console draws its actions with. Orange is the primary
+// action and nothing else, so exactly one control on this page may wear it.
+export const PRIMARY_PILL = 'primary'
+export const GHOST_PILL = 'ghost'
+
+// Which of the two the Open button wears. The band is the page's answer and
+// carries its one orange pill; the same button inside the table is a ghost,
+// with every other action beside it.
+export const openPillClass = (asBand: boolean): string => (asBand ? PRIMARY_PILL : GHOST_PILL)
+
 // ---- What a row says about its own state -------------------------------------
 
 // The two words a row keeps to itself. Under the first tab every model is
@@ -683,20 +736,38 @@ export interface StateLine {
   warn: boolean
 }
 
+// The word another Spark's note leads with, or nothing at all when the note
+// only names a place. "Installed on 37c4" leads with "Installed"; "on 37c4"
+// leads with no word, because it says where the model is and not what it does,
+// and the chip beside the name has already said where it is.
+const noteWord = (otherNote: string): string => {
+  if (otherNote === '' || otherNote.startsWith('on ')) return ''
+  const at = otherNote.indexOf(' on ')
+  return at === -1 ? otherNote : otherNote.slice(0, at)
+}
+
 // The line under a model's name, in place of its spec line, while the model is
 // in a state worth a line. It composes the words the row already worked out:
 // its own state word, and what another Spark said about the same model. A
 // serving model never reaches here, because a serving model is a band above
 // the table.
+//
+// Neither machine's quiet word ever takes the line. Under the first tab every
+// model is installed, on this Spark or on another one, so "Installed on 37c4"
+// and the bare "on 37c4" both state what the tab and the chip have already
+// stated, and the line the reader wants there is what the model is.
 export function rowStateLine(statusText: string, otherNote: string): StateLine | null {
-  const word = QUIET_STATES.has(statusText) ? '' : statusText
-  const text = word === ''
-    ? otherNote
-    : otherNote === ''
-      ? word
-      : otherNote.startsWith('on ') ? `${word} ${otherNote}` : `${word} · ${otherNote}`
-  if (text === '') return null
-  return { text, warn: WARN_STATES.some(state => text.startsWith(state)) }
+  const own = QUIET_STATES.has(statusText) ? '' : statusText
+  const theirWord = noteWord(otherNote)
+  const theirs = theirWord !== '' && !QUIET_STATES.has(theirWord) ? otherNote : ''
+  const line = (text: string): StateLine =>
+    ({ text, warn: WARN_STATES.some(state => text.startsWith(state)) })
+  // Only the other Spark has something to say, or neither has.
+  if (own === '') return theirs === '' ? null : line(theirs)
+  // This row has a word of its own. A note that only names a place belongs to
+  // that word; a second state stands beside it rather than running into it.
+  if (theirs !== '') return line(`${own} · ${theirs}`)
+  return line(theirWord === '' && otherNote !== '' ? `${own} ${otherNote}` : own)
 }
 
 // A placement candidate with the free memory and free disk of the machine it
