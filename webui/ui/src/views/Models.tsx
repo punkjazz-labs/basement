@@ -11,7 +11,9 @@ import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { Mark } from '../mark'
-import { REVOKE_TITLE, feedNote, revokeBody, revoked, rowRevocation } from '../feed'
+import {
+  CHECK_HOLD_MS, REVOKE_TITLE, checkLabel, feedNote, feedUnchanged, revokeBody, revoked, rowRevocation,
+} from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS, NO_ANSWER } from '../fleetInvite'
 import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
@@ -269,8 +271,11 @@ export default function Models({
   // The feed check under the table. checkingFeed is the button's busy state;
   // feedError only ever holds a problem with the request itself, because a
   // feed this Spark could not reach comes back as feed health and is said by
-  // the line beside the button.
+  // the line beside the button. nothingNew is the answer of a check that
+  // accepted the same index, which leaves the line unchanged and would
+  // otherwise read as a dead button.
   const [checkingFeed, setCheckingFeed] = useState(false)
+  const [nothingNew, setNothingNew] = useState(false)
   const [feedError, setFeedError] = useState('')
   const [placement, setPlacement] = useState<Placement>('local')
   // What the controller answered when it planned this install across the
@@ -591,19 +596,35 @@ export default function Models({
   // manager answers with the feed health the check produced; this screen then
   // reads the system and the catalog again, so a newer index moves the line
   // under the table and the rows above it together.
+  //
+  // The index this console holds before the check is what the answer is
+  // measured against. A newer one is told by the line, which starts saying
+  // "just now"; the same one is told by the button, because nothing else on
+  // the screen moved.
   const checkForRecipes = async () => {
     if (checkingFeed) return
+    const before = system?.recipe_feed?.accepted_generated_at
     setCheckingFeed(true)
+    setNothingNew(false)
     setFeedError('')
     try {
-      await api<RecipeFeedCheck>('/api/v1/recipes/refresh', { method: 'POST' })
+      const checked = await api<RecipeFeedCheck>('/api/v1/recipes/refresh', { method: 'POST' })
       await refresh()
+      setNothingNew(feedUnchanged(before, checked.accepted_generated_at))
     } catch (problem) {
       setFeedError(problem instanceof Error ? problem.message : 'The check did not work.')
     } finally {
       setCheckingFeed(false)
     }
   }
+
+  // The button takes its own answer back. Every check clears nothingNew before
+  // it starts, so this timer only ever runs over the answer that started it.
+  useEffect(() => {
+    if (!nothingNew) return
+    const timer = setTimeout(() => setNothingNew(false), CHECK_HOLD_MS)
+    return () => clearTimeout(timer)
+  }, [nothingNew])
 
   const run = async (id: string, work: () => Promise<void>) => {
     if (pending.has(id)) return
@@ -1593,7 +1614,7 @@ export default function Models({
           <div className="feed-line">
             {note && <p className={`table-note ${note.warn ? 'warn' : ''}`}>{note.text}</p>}
             <button type="button" className="ghost" disabled={checkingFeed} onClick={checkForRecipes}>
-              {checkingFeed ? 'Checking' : 'Check now'}
+              {checkLabel(checkingFeed, nothingNew)}
             </button>
             {feedError && <p className="table-note warn">{feedError}</p>}
           </div>

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { RecipeFeedHealth } from './api'
-import { ageInDays, feedNote, relativeTime, revokeBody, revoked, rowRevocation } from './feed'
+import {
+  ageInDays, checkLabel, feedNote, feedUnchanged, relativeTime, revokeBody, revoked, rowRevocation,
+} from './feed'
 
 const NOW = Date.parse('2026-08-12T12:00:00Z')
 const ago = (ms: number): string => new Date(NOW - ms).toISOString()
@@ -81,6 +83,37 @@ describe('the line under the models table', () => {
     expect(feedNote(health({ state: 'unreachable', fetched_at: null }), NOW)).toBeNull()
     expect(feedNote(health({ stale: true, accepted_generated_at: null }), NOW)).toBeNull()
     expect(feedNote(health({ state: 'something new' }), NOW)).toBeNull()
+  })
+})
+
+describe('the button that asks the feed now', () => {
+  const index = ago(3 * HOUR)
+
+  it('answers for itself when the check found the same index', () => {
+    expect(feedUnchanged(index, index)).toBe(true)
+    expect(checkLabel(false, feedUnchanged(index, index))).toBe('Nothing new')
+  })
+
+  it('goes straight back when the check brought a newer index', () => {
+    expect(feedUnchanged(index, ago(MINUTE))).toBe(false)
+    expect(checkLabel(false, feedUnchanged(index, ago(MINUTE)))).toBe('Check now')
+  })
+
+  it('reads the same instant written two ways as the same index', () => {
+    expect(feedUnchanged('2026-08-12T09:00:00Z', '2026-08-12T09:00:00.000+00:00')).toBe(true)
+    expect(feedUnchanged('2026-08-12T09:00:00Z', '2026-08-12T10:00:00+01:00')).toBe(true)
+  })
+
+  it('counts a first accepted index, and a lost one, as a change', () => {
+    expect(feedUnchanged(null, index)).toBe(false)
+    expect(feedUnchanged(index, null)).toBe(false)
+    expect(feedUnchanged(null, null)).toBe(true)
+    expect(feedUnchanged(undefined, 'not a date')).toBe(true)
+  })
+
+  it('says nothing but Checking while the check runs', () => {
+    expect(checkLabel(true, false)).toBe('Checking')
+    expect(checkLabel(true, true)).toBe('Checking')
   })
 })
 

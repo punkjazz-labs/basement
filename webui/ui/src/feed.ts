@@ -84,6 +84,41 @@ export function feedNote(health: RecipeFeedHealth | null | undefined, nowMs: num
   return null
 }
 
+// ---- The button that asks the feed now -------------------------------------
+
+// The whole vocabulary of that button. Three words, and no sentence anywhere
+// else: a check that brought a newer index is answered by the line above,
+// which then says the recipes were updated just now, but a check that found
+// the same index moves nothing on screen, so the button answers for itself.
+export const CHECK_IDLE = 'Check now'
+export const CHECK_BUSY = 'Checking'
+export const CHECK_UNCHANGED = 'Nothing new'
+
+// How long the button holds "Nothing new" before it offers the check again.
+export const CHECK_HOLD_MS = 4000
+
+// Both sides as a moment, or null when there is no index to speak of. Text is
+// never compared: the same instant written two ways is the same index.
+function moment(iso: string | null | undefined): number | null {
+  if (!iso) return null
+  const at = Date.parse(iso)
+  return Number.isNaN(at) ? null : at
+}
+
+// Whether the check accepted the same index the console already had. A
+// timestamp on one side only is a change: this Spark either gained its first
+// accepted index or lost the one it had.
+export function feedUnchanged(before: string | null | undefined, after: string | null | undefined): boolean {
+  return moment(before) === moment(after)
+}
+
+// What the button says. Busy wins over everything, because a check that is
+// running has not answered yet.
+export function checkLabel(busy: boolean, unchanged: boolean): string {
+  if (busy) return CHECK_BUSY
+  return unchanged ? CHECK_UNCHANGED : CHECK_IDLE
+}
+
 // ---- A recipe the publisher has withdrawn ----------------------------------
 
 export const REVOKE_TITLE = 'Revoked by the publisher'

@@ -186,7 +186,7 @@ export default function App() {
   }, [authed, refresh])
 
   // The manager refreshes its recipe catalog from the signed remote index in
-  // the background every few hours (spec 04); this light poll is what lets
+  // the background every hour (spec 04); this light poll is what lets
   // an already-open console notice a "Recipe updated" row without the user
   // reloading the page. Silent on failure, like every other poll here — the
   // next successful tick just catches up.
