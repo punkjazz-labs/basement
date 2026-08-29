@@ -1,4 +1,4 @@
-import type { RecipeFeedHealth } from './api'
+import type { RecipeFeedCheck, RecipeFeedHealth } from './api'
 
 // What the console says about the recipe feed, and about a recipe the
 // publisher has withdrawn. Everything here is pure: Models.tsx renders these
@@ -110,6 +110,23 @@ function moment(iso: string | null | undefined): number | null {
 // accepted index or lost the one it had.
 export function feedUnchanged(before: string | null | undefined, after: string | null | undefined): boolean {
   return moment(before) === moment(after)
+}
+
+// Whether the finished check can honestly say it found nothing new. The state
+// is read before the timestamps, and it decides most of this: a check that
+// never reached the feed leaves accepted_generated_at exactly where it was, so
+// the timestamps alone would report a successful check with nothing to find.
+// Only "ok" is a check that reached the feed, and only "ok" carries an index in
+// force. An unreachable feed is said by the line beside the button, a feed
+// never fetched is said by nothing at all, and the button stays out of both.
+//
+// refreshed_recently needs no branch of its own. The manager sets it when a
+// second check arrives inside its 30 second window, and answers with the health
+// of the check just before it. That health came from a real fetch seconds old,
+// so "ok" plus the same index is as true for it as for a fetch this click made.
+export function checkFoundNothingNew(before: string | null | undefined, checked: RecipeFeedCheck): boolean {
+  if (checked.state !== 'ok') return false
+  return feedUnchanged(before, checked.accepted_generated_at)
 }
 
 // What the button says. Busy wins over everything, because a check that is

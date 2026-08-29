@@ -12,7 +12,7 @@ import { confirmBox, noticeBox } from '../confirm'
 import { RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { Mark } from '../mark'
 import {
-  CHECK_HOLD_MS, REVOKE_TITLE, checkLabel, feedNote, feedUnchanged, revokeBody, revoked, rowRevocation,
+  CHECK_HOLD_MS, REVOKE_TITLE, checkFoundNothingNew, checkLabel, feedNote, revokeBody, revoked, rowRevocation,
 } from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS, NO_ANSWER } from '../fleetInvite'
 import {
@@ -598,9 +598,11 @@ export default function Models({
   // under the table and the rows above it together.
   //
   // The index this console holds before the check is what the answer is
-  // measured against. A newer one is told by the line, which starts saying
-  // "just now"; the same one is told by the button, because nothing else on
-  // the screen moved.
+  // measured against, and feed.ts owns the whole decision. A newer index is
+  // told by the line, which starts saying "just now"; the same index is told
+  // by the button, because nothing else on the screen moved; a check that
+  // never reached the feed is told by the line or by nothing, and the button
+  // claims no answer it does not have.
   const checkForRecipes = async () => {
     if (checkingFeed) return
     const before = system?.recipe_feed?.accepted_generated_at
@@ -610,7 +612,7 @@ export default function Models({
     try {
       const checked = await api<RecipeFeedCheck>('/api/v1/recipes/refresh', { method: 'POST' })
       await refresh()
-      setNothingNew(feedUnchanged(before, checked.accepted_generated_at))
+      setNothingNew(checkFoundNothingNew(before, checked))
     } catch (problem) {
       setFeedError(problem instanceof Error ? problem.message : 'The check did not work.')
     } finally {

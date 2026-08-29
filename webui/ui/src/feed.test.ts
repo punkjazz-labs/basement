@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { RecipeFeedHealth } from './api'
+import type { RecipeFeedCheck, RecipeFeedHealth } from './api'
 import {
-  ageInDays, checkLabel, feedNote, feedUnchanged, relativeTime, revokeBody, revoked, rowRevocation,
+  ageInDays, checkFoundNothingNew, checkLabel, feedNote, feedUnchanged, relativeTime, revokeBody, revoked,
+  rowRevocation,
 } from './feed'
 
 const NOW = Date.parse('2026-08-12T12:00:00Z')
@@ -88,6 +89,42 @@ describe('the line under the models table', () => {
 
 describe('the button that asks the feed now', () => {
   const index = ago(3 * HOUR)
+  // What the manager answers a forced check with: the health that check
+  // produced, plus whether it reported a check made moments earlier.
+  const checked = (overrides: Partial<RecipeFeedCheck> = {}): RecipeFeedCheck => ({
+    state: 'ok',
+    accepted_generated_at: index,
+    fetched_at: ago(0),
+    stale: false,
+    refreshed_recently: false,
+    ...overrides,
+  })
+
+  it('answers Nothing new only after a check that reached the feed', () => {
+    expect(checkFoundNothingNew(index, checked())).toBe(true)
+    expect(checkFoundNothingNew(index, checked({ accepted_generated_at: ago(MINUTE) }))).toBe(false)
+  })
+
+  // A check that never reached the feed leaves the accepted index exactly
+  // where it was, so the timestamps agree while the check found nothing at
+  // all. The state is what separates the two, whatever the timestamps say.
+  it('claims nothing at all when the check did not reach the feed', () => {
+    expect(checkFoundNothingNew(index, checked({ state: 'unreachable' }))).toBe(false)
+    expect(checkFoundNothingNew(index, checked({ state: 'unreachable', fetched_at: ago(2 * DAY) }))).toBe(false)
+    expect(checkFoundNothingNew(null, checked({ state: 'never_fetched', accepted_generated_at: null, fetched_at: null })))
+      .toBe(false)
+    expect(checkFoundNothingNew(index, checked({ state: 'never_fetched' }))).toBe(false)
+  })
+
+  // The manager answers a second check inside its 30 second window with the
+  // health of the check before it. That check reached the feed, so its answer
+  // is still true.
+  it('speaks for a check made moments earlier as readily as for its own', () => {
+    expect(checkFoundNothingNew(index, checked({ refreshed_recently: true }))).toBe(true)
+    expect(checkFoundNothingNew(index, checked({ refreshed_recently: true, accepted_generated_at: ago(MINUTE) })))
+      .toBe(false)
+    expect(checkFoundNothingNew(index, checked({ refreshed_recently: true, state: 'unreachable' }))).toBe(false)
+  })
 
   it('answers for itself when the check found the same index', () => {
     expect(feedUnchanged(index, index)).toBe(true)
