@@ -1191,6 +1191,79 @@ func TestAWorkerCompletesTheSwitchOnceTheDelegatedStopHasRun(t *testing.T) {
 	}
 }
 
+// A check that this node refuses aborts the claim it made for that job, and a
+// rank identity is per job, so the same job meets its own dead row when it asks
+// again. Nothing else clears it: the identity is the same bytes every time. So
+// a job that was told "not yet" once could never be told "yes", and the answer
+// it got was about the reservation, not about the machine.
+//
+// This is the guardrail half. The machine really is short of memory, the check
+// says so, and the same job asks again once the memory is free.
+func TestAWorkerCheckThatFailedIsAskedAgainByTheSameJob(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	allocator := fixture.api.engine.Reservations()
+	identity := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-one", fixture.distributed.ID, fixture.distributed.Version)
+	fixture.localExec.fail("verify_memory", liveMemoryShortfall(t, "spark-b", 6_300_000_000))
+
+	status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-one"})
+	if status != http.StatusOK || body["ready"] != false {
+		t.Fatalf("a machine with no memory free was reported ready: status=%d body=%#v", status, body)
+	}
+	refused, err := allocator.Reservation(ctx, identity)
+	if err != nil || refused.State != "aborted" {
+		t.Fatalf("a refused check did not settle its own claim: %+v err=%v", refused, err)
+	}
+
+	// The memory is free now, and the job asks again under the same identity.
+	fixture.localExec.succeed("verify_memory")
+	status, body = fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-one"})
+	if status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("the same job could never be admitted after one refusal: status=%d body=%#v", status, body)
+	}
+	admitted, err := allocator.Reservation(ctx, identity)
+	if err != nil || admitted.State != "active" {
+		t.Fatalf("the retried check did not take this node's rank: %+v err=%v", admitted, err)
+	}
+}
+
+// The same trap on the other road to an aborted row. A check this node refuses
+// for the runtime slot aborts its claim too, and a switch meets that refusal
+// first: the head learns it must name the model it replaces, and asks again
+// under the same job. Both of this node's abort paths have to leave an identity
+// its own job can use again.
+func TestARefusedSwitchCheckIsAskedAgainOnceItNamesWhatItReplaces(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	allocator := fixture.api.engine.Reservations()
+	serveID := servingRank(t, fixture, "job-serve", fixture.distributed)
+	fixture.localExec.runContainer(servingContainer(fixture.distributed))
+	identity := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-install-inkling", fixture.sglang.ID, fixture.sglang.Version)
+
+	status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.sglang, "job_id": "job-install-inkling"})
+	if status != http.StatusConflict {
+		t.Fatalf("a check naming nothing was admitted while a model serves: status=%d body=%#v", status, body)
+	}
+	refused, err := allocator.Reservation(ctx, identity)
+	if err != nil || refused.State != "aborted" {
+		t.Fatalf("a refused check did not settle its own claim: %+v err=%v", refused, err)
+	}
+
+	status, body = fixture.post(t, "/api/v1/internal/node/preflight", fixture.key,
+		map[string]any{"recipe": fixture.sglang, "job_id": "job-install-inkling", "replaces_recipe_id": fixture.distributed.ID})
+	if status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("the same job could not ask again after naming what it replaces: status=%d body=%#v", status, body)
+	}
+	admitted, err := allocator.Reservation(ctx, identity)
+	if err != nil || admitted.State != "active" {
+		t.Fatalf("the retried check did not take this node's rank: %+v err=%v", admitted, err)
+	}
+	replaced, err := allocator.Reservation(ctx, serveID)
+	if err != nil || replaced.State != "released" {
+		t.Fatalf("the replaced model kept its claim on this node: %+v err=%v", replaced, err)
+	}
+}
+
 func TestWorkerReservationRenewalKeepsAHealthyHeadActive(t *testing.T) {
 	ctx := context.Background()
 	fixture := newNodeFixture(t)

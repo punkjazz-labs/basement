@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -155,5 +156,102 @@ func TestReclaimingReservationBlocksRuntimeUntilContainerStopFinishes(t *testing
 	}
 	if err := database.ActivateNodeReservation(ctx, "next-driver", ""); err != nil {
 		t.Fatalf("runtime remained blocked after reclaim finished: %v", err)
+	}
+}
+
+// The delete guard is what the doc comment promises: a live reservation is
+// never removed, whoever calls this. The allocator has a guard of its own, so
+// this one is the second half of a duplicated list, and only a test at this
+// layer can say whether it still holds. A row that is settled holds no claim
+// and its identity has to become free again; a row that is not settled is the
+// only record that this node is spoken for, and deleting it would let a second
+// deployment onto a machine that is already busy.
+func TestSettledDeleteNeverRemovesALiveReservation(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		state   string
+		wantOut bool
+	}{
+		{state: "released", wantOut: true},
+		{state: "expired", wantOut: true},
+		{state: "aborted", wantOut: true},
+		{state: "prepared"},
+		{state: "committed"},
+		{state: "active"},
+		{state: "reclaiming"},
+		{state: "maintenance"},
+	} {
+		t.Run(test.state, func(t *testing.T) {
+			database, err := Open(filepath.Join(t.TempDir(), "manager.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			const id = "reservation-under-test"
+			grant := []byte(`{"grant":"one"}`)
+			if _, _, err := database.PrepareNodeReservation(ctx, NodeReservation{
+				ReservationID: id, DeploymentID: "deployment-one", RecipeID: "recipe-one", RecipeVersion: 1,
+				RecipeFingerprint: "fingerprint-one", ClaimsJSON: []byte(`{"version":1,"kind":"local-job","runtime":true}`),
+				PrepareTokenHash: "token-hash", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if test.state != "prepared" {
+				if _, err := database.CommitNodeReservation(ctx, id, "token-hash", grant); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch test.state {
+			case "aborted":
+				if err := database.AbortNodeReservation(ctx, id); err != nil {
+					t.Fatal(err)
+				}
+			case "maintenance":
+				if err := database.ActivateNodeMaintenanceReservation(ctx, id); err != nil {
+					t.Fatal(err)
+				}
+			case "active", "reclaiming", "expired", "released":
+				if err := database.ActivateNodeReservation(ctx, id, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch test.state {
+			case "released":
+				if err := database.ReleaseNodeReservation(ctx, id); err != nil {
+					t.Fatal(err)
+				}
+			case "reclaiming", "expired":
+				// The sweep's own road to these two: a lease nobody renewed.
+				if err := database.RenewNodeReservation(ctx, id, time.Now().Add(-time.Minute)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.BeginNodeReservationReclaim(ctx, id, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+				if test.state == "expired" {
+					if err := database.FinishNodeReservationReclaim(ctx, id); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			staged, err := database.NodeReservation(ctx, id)
+			if err != nil || staged.State != test.state {
+				t.Fatalf("the fixture is in state %q, want %q: err=%v", staged.State, test.state, err)
+			}
+
+			if err := database.DeleteSettledNodeReservation(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			after, err := database.NodeReservation(ctx, id)
+			if test.wantOut {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("a %s row survived, so its identity stays blocked: %+v err=%v", test.state, after, err)
+				}
+				return
+			}
+			if err != nil || after.State != test.state {
+				t.Fatalf("a live %s row was deleted, so this node's only record of being busy is gone: %+v err=%v", test.state, after, err)
+			}
+		})
 	}
 }
