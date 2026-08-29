@@ -941,18 +941,22 @@ func TestValidateAcceptsWritableCachePaths(t *testing.T) {
 	}
 }
 
-// Two recipes compile kernels into a cache under the read-only root, and both
-// die there without a writable mount. vLLM builds DeepSeek V4 Flash's "mhc"
-// kernels with tilelang, which writes /root/.tilelang at import time and fails
-// after the weights have loaded. The GLM-5.3-Flash EXL3 stack compiles both
-// Triton and TileLang kernels, at import and again mid-serve, so it needs both
-// caches as well as the exec-friendly temp dir the compiler loads its shared
-// objects from.
+// Three recipes compile kernels into a cache under the read-only root, or
+// need an exec-friendly temp dir for one, and none may quietly get by without
+// a writable mount. vLLM builds DeepSeek V4 Flash's "mhc" kernels with
+// tilelang, which writes /root/.tilelang at import time and fails after the
+// weights have loaded. The GLM-5.3-Flash EXL3 stack compiles both Triton and
+// TileLang kernels, at import and again mid-serve, so it needs both caches as
+// well as the exec-friendly temp dir the compiler loads its shared objects
+// from. SGLang's Qwen 3.8 Flash Next only needs the temp dir: the manager's
+// own TILELANG_CACHE_DIR default already steers the JIT cache itself into the
+// writable /root/.cache bind mount, the same way it does for Triton, so this
+// recipe does not repeat that cache as a private tmpfs.
 //
 // Every other recipe serves on the unchanged filesystem, and a writable mount
 // is the one part of the schema that changes what the container's filesystem
 // means, so none of them may quietly gain one. The expected sets are written
-// out per recipe rather than counted, so adding a path to either of these two
+// out per recipe rather than counted, so adding a path to any of these three
 // is also a deliberate change to this test.
 func TestOnlyTheKernelCompilingRecipesDeclareWritablePaths(t *testing.T) {
 	recipes, err := Builtin()
@@ -960,8 +964,9 @@ func TestOnlyTheKernelCompilingRecipesDeclareWritablePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string][]string{
-		"deepseek-v4-flash-0731-2s": {"/root/.tilelang", "/root/tmp"},
-		"glm53-flash-exl3-2s":       {"/root/.tilelang", "/root/.triton", "/root/tmp"},
+		"deepseek-v4-flash-0731-2s":  {"/root/.tilelang", "/root/tmp"},
+		"glm53-flash-exl3-2s":        {"/root/.tilelang", "/root/.triton", "/root/tmp"},
+		"qwen38-flash-next-nvfp4-2s": {"/root/tmp"},
 	}
 	seen := map[string]bool{}
 	for _, r := range recipes {

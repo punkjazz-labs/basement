@@ -155,7 +155,7 @@ id: qwen38-flash-next-nvfp4-2s
 # memory_model is omitted, for the reason the other two-Spark recipes omit it:
 # TP=2 shards the weights across nodes, and the schema's flat single-node
 # formula would be wrong by construction.
-version: 1
+version: 2
 display_name: Qwen 3.8 Flash Next
 publisher: MiaAI Lab + RadixArk
 model_by: Qwen team, Alibaba
@@ -215,6 +215,17 @@ runtime:
   environment:
     TORCH_CUDA_ARCH_LIST: "12.1a"
     FLASHINFER_CUDA_ARCH_LIST: "12.1a"
+    # tilelang exports each compiled kernel into a tempfile directory and then
+    # loads the shared object from there, so the process temp dir must allow
+    # exec; /tmp stays noexec, so TMPDIR moves to its own writable mount. This
+    # is the same trap the GLM 5.3 Flash and DeepSeek V4 Flash two-Spark
+    # recipes hit on this hardware.
+    TMPDIR: /root/tmp
+  # tilelang loads the shared object it just compiled from TMPDIR above, and
+  # the scratch tmpfs every container gets is noexec, so /root/tmp needs its
+  # own writable, exec-permitted mount.
+  writable_paths:
+    - /root/tmp
   shm_bytes: 34359738368
   memory_lock: true
   ipc_lock: true
