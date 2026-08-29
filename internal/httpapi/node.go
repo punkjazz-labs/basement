@@ -181,6 +181,37 @@ func (s *Server) renewLegacyRankReservation(ctx context.Context, reservationID s
 	return expires, nil
 }
 
+// adoptableRankReservation names the rank claim this node already holds for
+// one recipe, whatever deployment made it, so a step that ends this node's
+// part in that deployment can hand back the very claim the model serves under
+// instead of raising a second one against it. Only a live claim can be adopted:
+// a settled or reclaiming row holds nothing to hand back, and a reclaiming rank
+// is being stopped by this node's own sweep already.
+//
+// The recipe is the boundary and it is never crossed. A stop of one model must
+// not free the rank another model is serving on, so a row for another recipe is
+// left exactly as it is, whether or not it blocks anything. An active row wins
+// over a committed one because it is the claim that owns the runtime slot.
+func (s *Server) adoptableRankReservation(ctx context.Context, recipeID string) (string, error) {
+	reservations, err := s.engine.Reservations().AllReservations(ctx)
+	if err != nil {
+		return "", err
+	}
+	committed := ""
+	for _, reservation := range reservations {
+		if reservation.Claims.Kind != fleet.ClaimKindLegacyRank || reservation.RecipeID != recipeID {
+			continue
+		}
+		if reservation.State == "active" {
+			return reservation.ReservationID, nil
+		}
+		if reservation.State == "committed" && committed == "" {
+			committed = reservation.ReservationID
+		}
+	}
+	return committed, nil
+}
+
 func (s *Server) renewActiveLegacyJob(ctx context.Context, jobID string) (time.Time, error) {
 	reservations, err := s.engine.Reservations().AllReservations(ctx)
 	if err != nil {
@@ -332,21 +363,52 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("this Spark can only be driven as a worker node"))
 		return
 	}
-	reservationID, err := s.prepareLegacyRankReservation(r.Context(), request.JobID, trusted)
-	if err != nil {
-		writeError(w, http.StatusConflict, err)
-		return
-	}
-	if err := s.engine.Reservations().Activate(r.Context(), reservationID, ""); err != nil {
-		writeError(w, http.StatusConflict, fmt.Errorf("this node's runtime is already reserved by another deployment: %w", err))
-		return
-	}
-	if _, err := s.renewLegacyRankReservation(r.Context(), reservationID); err != nil {
-		writeError(w, http.StatusConflict, fmt.Errorf("renew this node's delegated runtime reservation: %w", err))
-		return
-	}
+	reservationID := ""
 	if releasingOperations[request.Operation] {
-		defer s.engine.Reservations().Release(context.Background(), reservationID)
+		// A releasing step hands this node's rank back; it must never compete
+		// for the slot it exists to free. A rank identity is per job, and the
+		// rank that serves belongs to the job that STARTED the model, while a
+		// stop always arrives under a job of its own. Preparing a fresh claim
+		// here therefore made the stop of a serving two-Spark model race the
+		// model's own serve reservation, and this Spark refused its own head:
+		// the model could not be stopped from the console at all, and it was
+		// left half dead, with the head rank exited and the worker rank still
+		// holding the memory (hardware, 2026-08-29). A releasing step adopts
+		// the rank this node already holds for that same recipe, whichever
+		// deployment made it, and hands that one back. The switch flow rides
+		// this same path: it stops the previous model under the new install
+		// job's id.
+		adopted, err := s.adoptableRankReservation(r.Context(), trusted.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if adopted != "" {
+			reservationID = adopted
+			defer s.engine.Reservations().Release(context.Background(), adopted)
+		}
+		// An empty answer means this node holds no rank for that recipe, so
+		// there is nothing to hand back and nothing to claim either. A
+		// releasing step only frees this machine's own resources, and the
+		// executor reads a reservation id for one purpose alone, discounting a
+		// disk claim in verify_disk, which no releasing operation runs. So the
+		// step runs unreserved instead of taking the slot in order to free it,
+		// and an unrelated model serving here cannot block it.
+	} else {
+		prepared, err := s.prepareLegacyRankReservation(r.Context(), request.JobID, trusted)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		if err := s.engine.Reservations().Activate(r.Context(), prepared, ""); err != nil {
+			writeError(w, http.StatusConflict, fmt.Errorf("this node's runtime is already reserved by another deployment: %w", err))
+			return
+		}
+		if _, err := s.renewLegacyRankReservation(r.Context(), prepared); err != nil {
+			writeError(w, http.StatusConflict, fmt.Errorf("renew this node's delegated runtime reservation: %w", err))
+			return
+		}
+		reservationID = prepared
 	}
 	execution := operations.Execution{ReservationID: reservationID, Kind: "worker", RemoveArtifacts: request.RemoveArtifacts, Placement: request.Placement}
 	if request.RemoveArtifacts {

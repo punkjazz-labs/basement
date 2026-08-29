@@ -44,6 +44,9 @@ type apiExecutor struct {
 	// on the machine and then measure the memory it holds.
 	failures map[string]error
 	managed  []operations.ManagedContainer
+	// reserved records the reservation each operation actually ran under, so a
+	// test can prove which claim a delegated step used, or that it used none.
+	reserved map[string]string
 	// started and hold let a test look at a step while it is still running:
 	// a download closes started once it has reported progress, then waits
 	// for the test to close hold. Both nil means no step ever blocks.
@@ -82,9 +85,13 @@ func (a *apiExecutor) ManagedContainers(context.Context) ([]operations.ManagedCo
 	return append([]operations.ManagedContainer{}, a.managed...), nil
 }
 
-func (a *apiExecutor) Execute(_ context.Context, _ operations.Execution, op recipe.Operation, _ recipe.Recipe, progress operations.Progress) (map[string]any, error) {
+func (a *apiExecutor) Execute(_ context.Context, execution operations.Execution, op recipe.Operation, _ recipe.Recipe, progress operations.Progress) (map[string]any, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.reserved == nil {
+		a.reserved = map[string]string{}
+	}
+	a.reserved[op.Type] = execution.ReservationID
 	if op.Type == "verify_port" && a.failPort {
 		return nil, errors.New("port 8000 is occupied")
 	}
