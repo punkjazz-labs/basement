@@ -4,7 +4,9 @@ import {
   type InstallRequest, type NodeInventory, type Peer, type PlacementCandidate, type PlacementPlan,
 } from './api'
 import { labFor, labKey } from './catalog'
-import { consoleKey, inFleet, isLocalNode, nodeName, nodeServing, nodeStatus, type NodeStatus } from './fleetInvite'
+import {
+  consoleKey, inFleet, isLocalNode, nodeName, nodeServing, nodeStatus, NO_ANSWER, type NodeStatus,
+} from './fleetInvite'
 
 // The Models view, read across the whole fleet. Everything here is pure: one
 // row per Spark, which placement owns which model on which Spark, and what a
@@ -577,6 +579,31 @@ function adoptRoute(target: ActionTarget): ActionRoute {
 
 // ---- The Sparks named on a model's row ---------------------------------------
 
+// The part of a Spark's name the owner already says out loud: everything after
+// the last dash. "edgexpert-37c4" is "37c4" and "spark-f1cc" is "f1cc".
+const lastToken = (displayName: string): string => {
+  const at = displayName.lastIndexOf('-')
+  return at > 0 && at < displayName.length - 1 ? displayName.slice(at + 1) : displayName
+}
+
+// The short name a chip, a band or a state line calls a Spark by. A name with
+// no dash has no shorter form, and a short form that two Sparks would share
+// names neither of them, so in both cases the whole name stands. The fleet
+// strip keeps whole names always: it is the one place that says which machine
+// is which.
+export function shortSparkName(displayName: string, fleet: readonly string[]): string {
+  const short = lastToken(displayName)
+  if (short === displayName) return displayName
+  const shared = fleet.some(other => other !== displayName && lastToken(other) === short)
+  return shared ? displayName : short
+}
+
+// The chip a model that spans the pair carries. Two Sparks are "both": the
+// fleet holds two machines and the model runs on the two of them.
+export const BOTH_SPARKS_CHIP = 'both'
+// The same fact in the band's own line, where the word stands alone.
+export const BOTH_SPARKS = 'both Sparks'
+
 // One name beside a model. live means that model is serving there now.
 export interface NodeChip {
   key: string
@@ -586,18 +613,90 @@ export interface NodeChip {
 
 // Which Sparks hold this model, as the row names them. A model that needs
 // more than one Spark runs across all of them at once and cannot be moved
-// between them, so it gets one chip that counts the machines rather than a
+// between them, so it gets one chip that speaks for the set rather than a
 // chip for each.
 export function modelChips(sparks: FleetRow[], recipeID: string, sparkCount: number): NodeChip[] {
   const holders = sparks.filter(spark => spark.installedModels.some(model => model.recipe_id === recipeID))
   if (holders.length === 0) return []
   const live = holders.some(spark => spark.serving?.recipe_id === recipeID)
-  if (sparkCount > 1) return [{ key: 'topology', name: `${sparkCount} Sparks`, live }]
+  if (sparkCount > 1) {
+    return [{ key: 'topology', name: sparkCount === 2 ? BOTH_SPARKS_CHIP : `${sparkCount} Sparks`, live }]
+  }
+  const fleet = sparks.map(spark => spark.displayName)
   return holders.map(spark => ({
     key: spark.nodeID,
-    name: spark.displayName,
+    name: shortSparkName(spark.displayName, fleet),
     live: spark.serving?.recipe_id === recipeID,
   }))
+}
+
+// ---- The band over the table -------------------------------------------------
+
+// Where a model serves right now. Models.tsx fills both fields with the reads
+// its rows have always made: this Spark's own model list, and what another
+// Spark reports about the same model.
+export interface ServingRead {
+  here: boolean
+  elsewhere: boolean
+}
+
+export const servesNow = (read: ServingRead): boolean => read.here || read.elsewhere
+
+// The model that serves is the page's answer, so it leaves the table and
+// stands over it in a band of its own. Two Sparks can each serve one, so this
+// answers with a list rather than with one model, in the order the table held
+// them. Everything else stays a row, and nothing appears twice.
+export function splitServing<T extends { serving: ServingRead }>(
+  models: readonly T[],
+): { bands: T[]; rows: T[] } {
+  const bands: T[] = []
+  const rows: T[] = []
+  for (const model of models) {
+    if (servesNow(model.serving)) bands.push(model)
+    else rows.push(model)
+  }
+  return { bands, rows }
+}
+
+// Where the band says the model runs: across the pair, across more machines
+// than that, or on the one Spark that holds it. A console that can name no
+// Spark says nothing rather than naming the wrong one.
+export function servingPlace(sparkCount: number, sparkName: string): string {
+  if (sparkCount === 2) return BOTH_SPARKS
+  if (sparkCount > 2) return `${sparkCount} Sparks`
+  return sparkName
+}
+
+// ---- What a row says about its own state -------------------------------------
+
+// The two words a row keeps to itself. Under the first tab every model is
+// installed and in the catalog none of them is, so the word would only repeat
+// what the tab and the chips have already said.
+const QUIET_STATES: ReadonlySet<string> = new Set(['Installed', 'Not installed'])
+
+// The states that read as a warning rather than as work under way. Each one
+// leads the line it appears in, so the whole line is read from its first word.
+const WARN_STATES: readonly string[] = ['Failed', 'Revoked', NO_ANSWER]
+
+export interface StateLine {
+  text: string
+  warn: boolean
+}
+
+// The line under a model's name, in place of its spec line, while the model is
+// in a state worth a line. It composes the words the row already worked out:
+// its own state word, and what another Spark said about the same model. A
+// serving model never reaches here, because a serving model is a band above
+// the table.
+export function rowStateLine(statusText: string, otherNote: string): StateLine | null {
+  const word = QUIET_STATES.has(statusText) ? '' : statusText
+  const text = word === ''
+    ? otherNote
+    : otherNote === ''
+      ? word
+      : otherNote.startsWith('on ') ? `${word} ${otherNote}` : `${word} · ${otherNote}`
+  if (text === '') return null
+  return { text, warn: WARN_STATES.some(state => text.startsWith(state)) }
 }
 
 // A placement candidate with the free memory and free disk of the machine it

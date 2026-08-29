@@ -9,10 +9,11 @@ import {
   modelChips, placedTarget, placementBusy, placementOptions, placementSwitchFrom, placementTargets,
   placementVerb, placementWord, powerBusy, powerFanOut, powerFanOutBusy, powerRefusalLine,
   powerRefusedTitle, powerRow, recipeBusy, retiredPowerSets,
-  rowActionRoute, rowPlacement, shouldShowMemberBanner,
-  splitModels, workingNodes, workingPlacement,
+  rowActionRoute, rowPlacement, rowStateLine, servingPlace, shortSparkName, shouldShowMemberBanner,
+  splitModels, splitServing, workingNodes, workingPlacement,
   clearRecordBody, clearRecordTitle, releasePath,
-  ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME,
+  ACTION_REFUSAL, ADOPT_PATH, BOTH_SPARKS, BOTH_SPARKS_CHIP,
+  CATALOG_EMPTY, CATALOG_TAB, CHOOSE_FOR_ME, CHOOSE_FOR_ME_NAME,
   CHOOSE_FOR_ME_NOTE, CLEAR_RECORD, CLEAR_RECORD_CONFIRM, COOL_MODE, COOL_MODE_LABEL, COOL_TAG,
   DISRUPTIVE_KINDS,
   FLEET_DEPLOYMENT_ACTIONS, FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL,
@@ -710,20 +711,30 @@ describe('the Sparks named on a model row', () => {
     ])
   })
 
-  it('counts the machines for a model that needs more than one Spark', () => {
+  // A model that spans the pair is on both machines at once, and "both" is
+  // what the owner of two Sparks calls that.
+  it('says both for a model that needs the pair', () => {
     const sparks = [
       spark('attic', [snapshot('deepseek-v4-flash-0731-2s')]),
       spark('loft', [snapshot('deepseek-v4-flash-0731-2s')]),
     ]
     expect(modelChips(sparks, 'deepseek-v4-flash-0731-2s', 2)).toEqual([
-      { key: 'topology', name: '2 Sparks', live: false },
+      { key: 'topology', name: BOTH_SPARKS_CHIP, live: false },
+    ])
+  })
+
+  // Three or more machines have no such word, so the chip counts them.
+  it('counts the machines past a pair', () => {
+    const sparks = [spark('attic', [snapshot('inkling-small-nvfp4-2s')])]
+    expect(modelChips(sparks, 'inkling-small-nvfp4-2s', 3)).toEqual([
+      { key: 'topology', name: '3 Sparks', live: false },
     ])
   })
 
   it('lights the counted chip while the model serves', () => {
     const sparks = [spark('attic', [snapshot('deepseek-v4-flash-0731-2s', true)])]
     expect(modelChips(sparks, 'deepseek-v4-flash-0731-2s', 2)).toEqual([
-      { key: 'topology', name: '2 Sparks', live: true },
+      { key: 'topology', name: BOTH_SPARKS_CHIP, live: true },
     ])
   })
 
@@ -739,6 +750,130 @@ describe('the Sparks named on a model row', () => {
     expect(modelChips(sparks, 'qwen36-27b-nvfp4-1s', 1)).toEqual([
       { key: 'node-attic', name: 'attic', live: false },
     ])
+  })
+
+  // The chip carries the short name, which is the name the owner already uses
+  // for the machine.
+  it('names each Spark short', () => {
+    const sparks = [
+      spark('edgexpert-2051', [snapshot('qwen36-27b-nvfp4-1s')]),
+      spark('edgexpert-37c4', [snapshot('qwen36-27b-nvfp4-1s', true)]),
+    ]
+    expect(modelChips(sparks, 'qwen36-27b-nvfp4-1s', 1)).toEqual([
+      { key: 'node-edgexpert-2051', name: '2051', live: false },
+      { key: 'node-edgexpert-37c4', name: '37c4', live: true },
+    ])
+  })
+})
+
+// The name a chip, a state line and the band call a Spark by. The fleet strip
+// over the table keeps whole names; everything under it is short, because the
+// same name is repeated on every row.
+describe('the short name of a Spark', () => {
+  const fleet = ['edgexpert-2051', 'edgexpert-37c4', 'spark-f1cc']
+
+  it('keeps the part after the last dash', () => {
+    expect(shortSparkName('edgexpert-37c4', fleet)).toBe('37c4')
+    expect(shortSparkName('spark-f1cc', fleet)).toBe('f1cc')
+  })
+
+  it('leaves a name with no dash whole', () => {
+    expect(shortSparkName('attic', ['attic', 'loft'])).toBe('attic')
+    // A name that only ends or begins with a dash has no part to take.
+    expect(shortSparkName('spark-', ['spark-'])).toBe('spark-')
+    expect(shortSparkName('-f1cc', ['-f1cc'])).toBe('-f1cc')
+  })
+
+  // A short name two machines would share names neither of them, so both keep
+  // the whole name rather than the console guessing which one is meant.
+  it('keeps both names whole when the short forms would collide', () => {
+    const clashing = ['edgexpert-37c4', 'spark-37c4', 'edgexpert-2051']
+    expect(shortSparkName('edgexpert-37c4', clashing)).toBe('edgexpert-37c4')
+    expect(shortSparkName('spark-37c4', clashing)).toBe('spark-37c4')
+    // The Spark that shares its short name with nobody still reads short.
+    expect(shortSparkName('edgexpert-2051', clashing)).toBe('2051')
+  })
+})
+
+// The band over the table. A model that serves is the page's answer, so it
+// leaves the table; everything else stays a row.
+describe('which models stand over the table', () => {
+  const model = (id: string, here: boolean, elsewhere: boolean) =>
+    ({ id, serving: { here, elsewhere } })
+  const idle = (id: string) => model(id, false, false)
+
+  it('lifts the model this Spark serves out of the table', () => {
+    const split = splitServing([idle('one'), model('two', true, false), idle('three')])
+    expect(split.bands.map(item => item.id)).toEqual(['two'])
+    expect(split.rows.map(item => item.id)).toEqual(['one', 'three'])
+  })
+
+  it('lifts a model that serves on another Spark out of the table too', () => {
+    const split = splitServing([idle('one'), model('two', false, true)])
+    expect(split.bands.map(item => item.id)).toEqual(['two'])
+    expect(split.rows.map(item => item.id)).toEqual(['one'])
+  })
+
+  it('stands nothing over a table where nothing serves', () => {
+    const split = splitServing([idle('one'), idle('two')])
+    expect(split.bands).toEqual([])
+    expect(split.rows.map(item => item.id)).toEqual(['one', 'two'])
+  })
+
+  // Two Sparks can each serve one model. Both stand over the table, in the
+  // order the table held them, and neither is repeated below.
+  it('stands one band over the table for each serving model', () => {
+    const split = splitServing([
+      model('one', true, false), idle('two'), model('three', false, true),
+    ])
+    expect(split.bands.map(item => item.id)).toEqual(['one', 'three'])
+    expect(split.rows.map(item => item.id)).toEqual(['two'])
+  })
+
+  it('names the pair, a larger set, and one machine', () => {
+    expect(servingPlace(2, '2051')).toBe(BOTH_SPARKS)
+    expect(servingPlace(3, '2051')).toBe('3 Sparks')
+    expect(servingPlace(1, '37c4')).toBe('37c4')
+    // A console that can name no Spark says nothing about where it runs.
+    expect(servingPlace(1, '')).toBe('')
+  })
+})
+
+// The one line a row says about its own state, in place of what the model is.
+describe('the state line under a model name', () => {
+  it('says nothing at all about an installed or a catalog model', () => {
+    expect(rowStateLine('Installed', '')).toBeNull()
+    expect(rowStateLine('Not installed', '')).toBeNull()
+  })
+
+  it('names the Spark a failure happened on, in amber', () => {
+    expect(rowStateLine('Failed', 'on 37c4')).toEqual({ text: 'Failed on 37c4', warn: true })
+    expect(rowStateLine('Failed', '')).toEqual({ text: 'Failed', warn: true })
+  })
+
+  it('reads a revoked recipe and a silent Spark as warnings too', () => {
+    expect(rowStateLine('Revoked', '')).toEqual({ text: 'Revoked', warn: true })
+    expect(rowStateLine('No answer', 'on 37c4')).toEqual({ text: 'No answer on 37c4', warn: true })
+  })
+
+  it('says work under way quietly', () => {
+    expect(rowStateLine('Installing', 'on 37c4')).toEqual({ text: 'Installing on 37c4', warn: false })
+    expect(rowStateLine('Starting', '')).toEqual({ text: 'Starting', warn: false })
+    expect(rowStateLine('Recovering', '')).toEqual({ text: 'Recovering', warn: false })
+  })
+
+  // A model installed here says nothing about itself, and the other Spark's
+  // own word takes the line instead.
+  it('gives the line to the other Spark while this one has nothing to say', () => {
+    expect(rowStateLine('Installed', 'Installing on 37c4'))
+      .toEqual({ text: 'Installing on 37c4', warn: false })
+  })
+
+  // Both machines have something to say, so both are said, and neither word is
+  // run into the other.
+  it('keeps two states apart', () => {
+    expect(rowStateLine('Failed', 'Installing on 37c4'))
+      .toEqual({ text: 'Failed · Installing on 37c4', warn: true })
   })
 })
 
