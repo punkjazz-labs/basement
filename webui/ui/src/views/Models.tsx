@@ -18,8 +18,8 @@ import {
   heldTabLabel, initialPlacement, installRoute, mergePlacements, modelChips, placedTarget,
   placementBusy, placementOptions, placementSwitchFrom, placementTargets, placementVerb,
   placementWord, powerRow,
-  recipeBusy, rowActionRoute, rowPlacement,
-  shouldShowMemberBanner, splitModels,
+  recipeBusy, rowActionRoute, rowPlacement, rowStateLine, servingPlace, shortSparkName,
+  shouldShowMemberBanner, splitModels, splitServing,
   clearRecordBody, clearRecordTitle, releasePath, workingNodes, workingPlacement,
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CLEAR_RECORD, CLEAR_RECORD_CONFIRM,
   COOL_TAG, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH,
@@ -67,6 +67,27 @@ const USE: Record<string, string> = {
   'glm53-flash-exl3-2s':
     'Mixture of experts, 320B total with 18B active. Reads text, images and video. Thinks before it answers and calls tools. Serves 900K of its native 1M context. Runs across both Sparks.',
 }
+// The same model, in the one line a row has room for. Every segment restates a
+// fact the USE line above already states, in the words a model card uses: the
+// shape and the size, what the model reads, and the one figure that decides
+// whether it suits the work. Nothing new is claimed here, and the full
+// sentence is not lost: it opens the row's own expansion.
+const SPEC: Record<string, string> = {
+  'qwen36-35b-a3b-nvfp4-1s': '35B MoE, 3B active · vision · chat, coding, tools',
+  'qwen36-27b-nvfp4-1s': '27B dense · vision · coding and agents',
+  'qwen35-122b-a10b-nvfp4-1s': '122B MoE, 10B active · text · 262K context',
+  'qwen38-27b-nvfp4-1s': '27.8B dense · vision · 262K context',
+  'qwen38-27b-obliterated-q8-0-1s': '27B dense · refusals removed · community build',
+  'qwen38-flash-next-nvfp4-2s': '176B MoE, 6B active · vision, video · 262K context',
+  'laguna-s-2-1-nvfp4-dflash-1s': 'Coding model · DFlash draft decoding · long agent runs',
+  'deepseek-v4-flash-0731-2s': 'Official weights · FP8 attention, FP4 experts',
+  'deepseek-v4-flash-0731-ud-iq3-xxs-1s': 'DeepSeek V4 Flash · 3-bit GGUF · fits one Spark',
+  'minimax-h3-comfyui-1s': '33B video · short clips with sound · ComfyUI',
+  'nemotron-omni-30b-a3b-nvfp4-1s': '31B MoE, 3B active · reasoning · 131K context',
+  'inkling-small-nvfp4-2s': '276B MoE, 12B active · vision, audio',
+  'glm53-flash-exl3-2s': '320B MoE, 18B active · vision, video · 900K context',
+}
+
 // What a row says about a model this build has written no line for. The feed
 // can add a recipe without a console build, and the catalog no longer groups
 // by Spark count, so the fallback states the one thing every recipe knows and
@@ -88,6 +109,29 @@ const REFERENCE_TPS: Record<string, number> = {
   'deepseek-v4-flash-0731-2s': 68, // 67.58 measured on 2x Spark vLLM NVFP4; inside the forum's 42-76 range
   'deepseek-v4-flash-0731-ud-iq3-xxs-1s': 17, // 16.56 measured, dev.classmethod.jp 2026-08-02; the sweep's tweet agrees
 }
+
+// The one number every speed cell and every band line reads: what this Spark
+// measured, or the community figure with a tilde on it, or n/a. A media model
+// generates no tokens, so it has no number of this kind at all. The tilde is
+// also what the note under the table looks for, so the note can never speak
+// for a figure that is not on screen.
+const speedText = (recipe: Recipe, measured?: number): string =>
+  recipe.media_generation
+    ? 'n/a'
+    : measured
+      ? measured.toFixed(1)
+      : REFERENCE_TPS[recipe.id]
+        ? `~${REFERENCE_TPS[recipe.id]}`
+        : 'n/a'
+
+// The note under the table, shown only while a "~" number is on screen. It is
+// about the tilde and nothing else, so it names it.
+const TYPICAL_NOTE = '~ speeds are community reports. Basement measures after install.'
+
+// Where the token totals came from, in the tooltip over the line. The figures
+// speak for themselves; this is the part that would make the line a sentence.
+const TOKENS_COUNTED = 'Counted on this Spark since basement started counting.'
+
 interface ConfirmState {
   recipe: Recipe
   preflight: Preflight
@@ -132,6 +176,7 @@ function FleetStrip({ sparks, power, open, onOpen }: {
         >
           <i className={`sdot ${spark.status.dot}`} aria-hidden="true" />
           <span className="fs-name">{spark.displayName}</span>
+          <span className="fs-sep" aria-hidden="true">·</span>
           <b>
             {formatBytes(spark.inventory?.memory_available_bytes)} memory ·{' '}
             {formatBytes(spark.inventory?.storage_available_bytes)} disk
@@ -139,7 +184,6 @@ function FleetStrip({ sparks, power, open, onOpen }: {
           {power.get(spark.nodeID)?.tag && <span className="fs-cool">{COOL_TAG}</span>}
         </button>
       ))}
-      <span className="fs-end">{sparks.length} Sparks</span>
     </div>
   )
 }
@@ -424,6 +468,12 @@ export default function Models({
   // the summary this reads is replaced on every poll.
   const sparks = useMemo(() => fleetRows(fleet, peers, window.location.origin, Date.now()), [fleet, peers])
   const showFleet = leadsFleet && sparks.length > 1
+  // Every Spark this console can name, which is what says whether a short name
+  // is still unmistakable. The name of the machine this console runs on is one
+  // of them, and it is the machine a band names when the model serves here.
+  const sparkNames = useMemo(() => sparks.map(spark => spark.displayName), [sparks])
+  const self = sparks.find(spark => spark.isSelf)
+  const selfName = self ? shortSparkName(self.displayName, sparkNames) : ''
   // What each Spark's power mode says on the strip: the mode that Spark
   // reported, read through the same row the switch on the Sparks page reads.
   // Nothing is set from this screen, so no answer of this console's own is
@@ -925,7 +975,13 @@ export default function Models({
   const featured = firstRun ? sorted.find(recipe => recipe.id === RECOMMENDED_ID && !recipe.revoked) : undefined
   const rows = featured ? sorted.filter(recipe => recipe.id !== featured.id) : sorted
 
-  const rowFor = (recipe: Recipe) => {
+  // Everything one model says about itself, read before anything is drawn. The
+  // band over the table and the row inside it are the same model in two
+  // shapes, and both are drawn from this one read, so neither can state
+  // something the other would deny. The page also has to know which models
+  // serve before it draws either shape, which is the other reason the read
+  // stands on its own.
+  const readModel = (recipe: Recipe) => {
     const model = installed.get(recipe.id)
     // Which of the two revocation surfaces this row is in, if either: a
     // withdrawn version nobody here installed, or a withdrawn version that is
@@ -979,7 +1035,11 @@ export default function Models({
     // A Spark the fleet is working on speaks through its placement until it
     // names the model itself, which is what puts the work on screen while an
     // install runs there.
-    const otherName = host ? host.displayName : workingSpark?.displayName ?? peer?.name ?? ''
+    const fullOtherName = host ? host.displayName : workingSpark?.displayName ?? peer?.name ?? ''
+    // Every place a row names a Spark, it names it short: the chips, the state
+    // line and the band all say "37c4", which is the name the owner already
+    // uses. The fleet strip over the table keeps the whole names.
+    const otherName = fullOtherName === '' ? '' : shortSparkName(fullOtherName, sparkNames)
     const otherURL = host ? host.consoleURL : workingSpark?.consoleURL ?? peer?.base_url ?? ''
     const otherWord = host ? hostWord : working ? placementWord(working) : peerWord
     const otherServing = host
@@ -1003,17 +1063,44 @@ export default function Models({
     // status; one that lives on both keeps this Spark's status in front.
     const statusText = readsRevoked ? 'Revoked' : !model && otherWord ? otherWord : localStatus
     const otherNote = otherName && otherWord ? (!model ? `on ${otherName}` : `${otherWord} on ${otherName}`) : ''
-    // Serving is serving, whichever Spark is doing it; the annotation says
-    // which one.
-    const dotClass = readsRevoked ? 'fail' : isActive || otherServing ? 'on' : busy || otherBusy ? 'busy' : ''
     const measured = model?.tokens_per_second
-    const reference = REFERENCE_TPS[recipe.id]
     // Counting happens only while basement serves the model on this Spark,
     // so a model without a reading yet says so instead of showing zeros.
     const served = usage.get(recipe.id)
     const servedTotal = served ? served.prompt_tokens + served.generation_tokens : 0
     const updateAvailable = Boolean(model && model.recipe_version < recipe.version)
     const chips = nodeChips(recipe)
+    // The one line under the name. A state worth saying takes the line;
+    // otherwise the line says what the model is. "Installed" and "Not
+    // installed" say nothing at all: the tab and the chips already did.
+    const state = rowStateLine(statusText, otherNote)
+    // The machine the band names. A model that spans the fleet names the set
+    // rather than a machine, and a console that knows no Spark name says
+    // nothing about where the model runs.
+    const servingSpark = host ? otherName : isActive ? selfName : otherServing ? otherName : ''
+    return {
+      recipe, model, revocation, isMedia, busy, isActive, fits, canPair, measuring,
+      host, hostServing, hostLocked, otherURL, otherWord, otherName, otherServing,
+      measured, served, servedTotal, updateAvailable, chips, placement,
+      state, spec: SPEC[recipe.id] ?? fallbackUse(recipe),
+      speed: speedText(recipe, measured),
+      place: servingPlace(recipe.topology.spark_count, servingSpark),
+      // What the band above the table is built from: this Spark serves the
+      // model, or another one does.
+      serving: { here: isActive, elsewhere: otherServing },
+    }
+  }
+
+  // One model, drawn as a row in the table or as the band over it. The band is
+  // the same model with the same actions: only the shape changes, and the one
+  // orange button on the page, which is the band's own Open.
+  const modelLine = (read: ReturnType<typeof readModel>, asBand = false) => {
+    const {
+      recipe, model, revocation, isMedia, busy, isActive, fits, canPair, measuring,
+      host, hostServing, hostLocked, otherURL, otherWord, otherName, otherServing,
+      measured, served, servedTotal, updateAvailable, chips, placement,
+      state, spec, speed, place,
+    } = read
     const open = expanded === recipe.id
     const toggle = () => setExpanded(open ? '' : recipe.id)
     // Buttons act without toggling the row; empty space anywhere else in the
@@ -1022,27 +1109,284 @@ export default function Models({
       event.stopPropagation()
       work()
     }
+    // The band's Open is the only orange button on this screen. Every other
+    // action, on the band and in the table alike, is a ghost.
+    const openClass = asBand ? 'primary' : 'ghost'
+    const expand = {
+      role: 'button' as const,
+      tabIndex: 0,
+      'aria-expanded': open,
+      onClick: toggle,
+      onKeyDown: (event: React.KeyboardEvent) => {
+        if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault()
+          toggle()
+        }
+      },
+    }
+    const nameLine = (
+      <>
+        {recipe.display_name}{' '}
+        {revoked(revocation) && <span className="tag revoked">Revoked</span>}
+      </>
+    )
+    const actions = (
+      <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
+        {/* This model lives on another Spark in the fleet, so the row acts
+            on that Spark. The fleet may hold no placement for it yet; the
+            first action records one. While that Spark does not answer,
+            its buttons stay in place and stay dead: the row says what it
+            last knew, and promises nothing. */}
+        {host ? (
+          <>
+            {hostServing ? (
+              <button
+                className="ghost"
+                disabled={hostLocked}
+                onClick={act(() => simpleAction(recipe, host, 'stop'))}
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                className="ghost"
+                disabled={hostLocked}
+                onClick={act(() => startOrSwitch(recipe, host))}
+              >
+                {host.serving && host.serving.recipe_id !== recipe.id ? 'Switch to' : 'Start'}
+              </button>
+            )}
+            {/* The playground and the generate tab only reach the model
+                this Spark serves, so a live model on another Spark is
+                opened on that Spark's own console. */}
+            {otherServing && otherURL && (
+              <button
+                className={openClass}
+                onClick={act(() => window.open(otherURL, '_blank', 'noopener,noreferrer'))}
+              >
+                Open on {otherName}
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            {/* A withdrawn version is refused by the manager, so the button
+                that would only fail is offered dead rather than hidden: the
+                row still says what this model is and why it cannot start. */}
+            {!model && (fits || !canPair || revocation.installBlocked) && (
+              <button
+                className="ghost"
+                disabled={busy || !fits || revocation.installBlocked}
+                onClick={act(() => startInstall(recipe))}
+              >
+                {busy ? 'Working' : fits || revocation.installBlocked ? installVerb(recipe) : 'Needs a Spark'}
+              </button>
+            )}
+            {!model && !fits && canPair && !revocation.installBlocked && (
+              <button className="ghost" onClick={act(openFleet)}>Pair a second Spark</button>
+            )}
+            {model && isActive && (
+              <>
+                <button className="ghost" disabled={busy} onClick={act(() => simpleAction(recipe, undefined, 'stop'))}>Stop</button>
+                {updateAvailable && (
+                  <button
+                    className="ghost"
+                    disabled={busy || revocation.installBlocked}
+                    onClick={act(() => startInstall(recipe))}
+                  >
+                    Update
+                  </button>
+                )}
+                <button className={openClass} disabled={busy} onClick={act(isMedia ? openGenerate : openPlayground)}>
+                  {isMedia ? 'Generate' : 'Open'}
+                </button>
+              </>
+            )}
+            {model && !isActive && model.status !== 'recovering' && (
+              <>
+                {updateAvailable && (
+                  <button
+                    className="ghost"
+                    disabled={busy || revocation.installBlocked}
+                    onClick={act(() => startInstall(recipe))}
+                  >
+                    Update
+                  </button>
+                )}
+                <button className="ghost" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
+                  {activeOther(recipe.id) ? 'Switch to' : 'Start'}
+                </button>
+              </>
+            )}
+            {model?.status === 'recovering' && <button className="ghost" disabled onClick={act(() => {})}>Recovering</button>}
+            {/* The model serves on a Spark this console can reach but
+                cannot act on, so opening that console is the whole of what
+                this row can offer for it. */}
+            {otherURL && otherWord && (
+              <button
+                className={otherServing && !isActive ? openClass : 'ghost'}
+                onClick={act(() => window.open(otherURL, '_blank', 'noopener,noreferrer'))}
+              >
+                Open on {otherName}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    )
+    const detail = open && (
+      <div className="mdetail">
+        {revoked(revocation) && (() => {
+          const body = revokeBody(revocation, isActive)
+          return (
+            <div className="revoke-line">
+              <strong>{REVOKE_TITLE}</strong>
+              {body && <span>{body}</span>}
+            </div>
+          )
+        })()}
+        {/* What this model is, in full. The line above it says the same
+            thing in one line; the sentence belongs to the depth. */}
+        <div className="use">{USE[recipe.id] ?? fallbackUse(recipe)}</div>
+        <div className="board">
+          <div className="cell">
+            <div className="l">Speed</div>
+            <div className="v">
+              {speed}{' '}
+              {!isMedia && <small>tok/s</small>}
+            </div>
+            <div className={`q ${measured && !isMedia ? 'ok' : ''}`}>
+              {isMedia ? 'not token based' : measured ? 'measured on this Spark' : 'typical on a Spark'}
+            </div>
+          </div>
+          <div className="cell">
+            <div className="l">First token</div>
+            <div className="v">{model?.time_to_first_token_ms ? model.time_to_first_token_ms : 'n/a'} <small>ms</small></div>
+          </div>
+          <div className="cell">
+            <div className="l">Tokens served</div>
+            <div className="v" title={served ? servedTotal.toLocaleString() : undefined}>
+              {served ? formatTokens(servedTotal) : 'n/a'}
+            </div>
+            <div className="q">{served ? 'since basement started counting' : 'no usage counted yet'}</div>
+          </div>
+          <div className="cell">
+            <div className="l">Download</div>
+            <div className="v">{formatBytes(recipe.artifact_bytes)}</div>
+          </div>
+          <div className="cell">
+            <div className="l">Space needed</div>
+            <div className="v">{formatBytes(recipe.required_bytes)}</div>
+          </div>
+        </div>
+        <dl className="facts">
+          <dt>Model by</dt><dd>{recipe.model_by || recipe.publisher}</dd>
+          <dt>Released</dt><dd>{recipe.model_released || 'n/a'}</dd>
+          <dt>Quantization</dt>
+          <dd>{recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
+          <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
+          <dt>Recipe version</dt><dd>v{recipe.version}</dd>
+          {updateAvailable && model && (
+            <>
+              <dt>Update</dt>
+              <dd className="update-line">v{model.recipe_version} installed, v{recipe.version} available</dd>
+            </>
+          )}
+          {served && (
+            <>
+              <dt>Prompt tokens</dt>
+              <dd title={served.prompt_tokens.toLocaleString()}>{formatTokens(served.prompt_tokens)}</dd>
+              <dt>Generated tokens</dt>
+              <dd title={served.generation_tokens.toLocaleString()}>{formatTokens(served.generation_tokens)}</dd>
+            </>
+          )}
+          <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
+          <dt>Runtime</dt><dd><code>{runtimeLabel(recipe.runtime.kind)} · pinned digest</code></dd>
+          <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
+          {recipe.artifacts.map(artifact => (
+            <Fragment key={artifact.role}>
+              <dt>{artifact.role === 'primary' ? 'Weights' : artifact.role === 'drafter' ? 'Draft weights' : artifact.role}</dt>
+              <dd>
+                <code>{artifact.repository}@{artifact.revision.slice(0, 12)}</code>{' '}
+                <a href={artifact.licence_url} target="_blank" rel="noreferrer">{artifact.licence} licence ↗</a>
+              </dd>
+            </Fragment>
+          ))}
+        </dl>
+        {/* The same tools, on the machine that holds the model. Another
+            Spark in the fleet carries them there, through the placement
+            its first action records. */}
+        {(model || host) && (() => {
+          // A tool on this Spark's own row answers to this Spark alone.
+          // What another Spark is doing with the same recipe has never
+          // stopped a local button and must not start now.
+          const toolsLocked = host ? hostLocked : busy
+          return (
+            <div className="row-tools">
+              {(host ? hostServing : isActive) && (
+                <>
+                  {!isMedia && (
+                    <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(recipe, host, 'benchmark')}>Measure speed</button>
+                  )}
+                  <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(recipe, host, 'smoke-test')}>Check health</button>
+                </>
+              )}
+              {/* The fleet holds a record it can no longer read, so every
+                  button above is dead and stays dead. This is the one way
+                  out: it ends the record, and the model goes with it. */}
+              {host && placement && placement.stale === true && (
+                <button
+                  className="danger"
+                  disabled={pending.has(recipe.id)}
+                  onClick={() => clearRecord(recipe, host, placement)}
+                >
+                  {CLEAR_RECORD}
+                </button>
+              )}
+              <button className="danger" disabled={toolsLocked} onClick={() => remove(recipe, host)}>Uninstall</button>
+            </div>
+          )
+        })()}
+      </div>
+    )
+    // The model that serves, over the table rather than inside it. It carries
+    // the same expansion the row carries, and opens it the same way.
+    if (asBand) {
+      return (
+        <div className="mband-group" key={recipe.id}>
+          <div className={`mband ${open ? 'open' : ''}`} {...expand}>
+            <div className="m-id">
+              <Mark recipe={recipe} recipeIDs={[recipe.id]} size={34} />
+              <div>
+                <p className="tagline">Serving</p>
+                <div className="nm">{nameLine}</div>
+                {/* Speed, size, and the machine it runs on. A benchmark
+                    running against it adds its own word: the number beside it
+                    is about to change. */}
+                <div className="meta">
+                  {[
+                    isMedia ? 'n/a' : `${speed} tok/s`,
+                    formatBytes(recipe.artifact_bytes),
+                    place,
+                    measuring ? 'measuring' : '',
+                  ].filter(Boolean).join(' · ')}
+                </div>
+              </div>
+            </div>
+            {actions}
+          </div>
+          {detail}
+        </div>
+      )
+    }
     return (
       <Fragment key={recipe.id}>
-        <div
-          className={`mrow ${open ? 'open' : ''}`}
-          role="button"
-          tabIndex={0}
-          aria-expanded={open}
-          onClick={toggle}
-          onKeyDown={event => {
-            if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
-              event.preventDefault()
-              toggle()
-            }
-          }}
-        >
+        <div className={`mrow ${open ? 'open' : ''}`} {...expand}>
           <div className="m-id">
             <Mark recipe={recipe} recipeIDs={[recipe.id]} size={28} />
             <div>
               <div className="nm">
-                {recipe.display_name}{' '}
-                {revocation.revoked && <span className="tag revoked">Revoked</span>}
+                {nameLine}
                 {/* Which Sparks in the fleet hold this model. The lit chip is
                     the one serving it now. */}
                 {chips.map(chip => (
@@ -1052,249 +1396,41 @@ export default function Models({
                   </span>
                 ))}
               </div>
-              <div className="use">{USE[recipe.id] ?? fallbackUse(recipe)}</div>
+              {/* One line, whatever it has to say: the state while the model is
+                  in one worth a word, and what the model is the rest of the
+                  time. */}
+              <div className={`spec ${state?.warn ? 'warn' : ''}`}>{state ? state.text : spec}</div>
             </div>
           </div>
           <div className="m-num">
-            <span className="n">
-              {isMedia ? 'n/a' : measured ? measured.toFixed(1) : reference ? `~${reference}` : 'n/a'}
-              {!isMedia && <small>tok/s</small>}
-            </span>
-            <span className={`sub ${measured && !isMedia ? 'ok' : ''}`}>
-              {isMedia ? 'media generation' : measured ? 'measured here' : 'typical'}
-            </span>
+            <span className="n">{speed}</span>
           </div>
           <div className="m-num">
             <span className="n">{formatBytes(recipe.artifact_bytes)}</span>
           </div>
-          <div className="m-status">
-            <span className={`sdot ${dotClass}`} aria-hidden="true" />
-            <span>
-              {statusText}
-              {otherNote && <small className="peer-note">{otherNote}</small>}
-              {/* The status above is true and stays true: this only adds what
-                  the publisher has since said about the version it runs. */}
-              {revocation.installedRevoked && <small className="peer-note warn">Recipe revoked</small>}
-            </span>
-          </div>
-          <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
-            {/* This model lives on another Spark in the fleet, so the row acts
-                on that Spark. The fleet may hold no placement for it yet; the
-                first action records one. While that Spark does not answer,
-                its buttons stay in place and stay dead: the row says what it
-                last knew, and promises nothing. */}
-            {host ? (
-              <>
-                {hostServing ? (
-                  <button
-                    className="ghost"
-                    disabled={hostLocked}
-                    onClick={act(() => simpleAction(recipe, host, 'stop'))}
-                  >
-                    Stop
-                  </button>
-                ) : (
-                  <button
-                    className="primary"
-                    disabled={hostLocked}
-                    onClick={act(() => startOrSwitch(recipe, host))}
-                  >
-                    {host.serving && host.serving.recipe_id !== recipe.id ? 'Switch to' : 'Start'}
-                  </button>
-                )}
-                {/* The playground and the generate tab only reach the model
-                    this Spark serves, so a live model on another Spark is
-                    opened on that Spark's own console. */}
-                {otherServing && otherURL && (
-                  <button
-                    className="primary"
-                    onClick={act(() => window.open(otherURL, '_blank', 'noopener,noreferrer'))}
-                  >
-                    Open on {otherName}
-                  </button>
-                )}
-              </>
-            ) : (
-              <>
-                {otherURL && otherWord && (
-                  <button
-                    className="ghost"
-                    onClick={act(() => window.open(otherURL, '_blank', 'noopener,noreferrer'))}
-                  >
-                    Open on {otherName}
-                  </button>
-                )}
-                {/* A withdrawn version is refused by the manager, so the button
-                    that would only fail is offered dead rather than hidden: the
-                    row still says what this model is and why it cannot start. */}
-                {!model && (fits || !canPair || revocation.installBlocked) && (
-                  <button
-                    className="primary"
-                    disabled={busy || !fits || revocation.installBlocked}
-                    onClick={act(() => startInstall(recipe))}
-                  >
-                    {busy ? 'Working' : fits || revocation.installBlocked ? installVerb(recipe) : 'Needs a Spark'}
-                  </button>
-                )}
-                {!model && !fits && canPair && !revocation.installBlocked && (
-                  <button className="primary" onClick={act(openFleet)}>Pair a second Spark</button>
-                )}
-                {model && isActive && (
-                  <>
-                    <button className="ghost" disabled={busy} onClick={act(() => simpleAction(recipe, undefined, 'stop'))}>Stop</button>
-                    {updateAvailable && (
-                      <button
-                        className="ghost"
-                        disabled={busy || revocation.installBlocked}
-                        onClick={act(() => startInstall(recipe))}
-                      >
-                        Update
-                      </button>
-                    )}
-                    <button className="primary" disabled={busy} onClick={act(isMedia ? openGenerate : openPlayground)}>
-                      {isMedia ? 'Generate' : 'Open'}
-                    </button>
-                  </>
-                )}
-                {model && !isActive && model.status !== 'recovering' && (
-                  <>
-                    {updateAvailable && (
-                      <button
-                        className="ghost"
-                        disabled={busy || revocation.installBlocked}
-                        onClick={act(() => startInstall(recipe))}
-                      >
-                        Update
-                      </button>
-                    )}
-                    <button className="primary" disabled={busy} onClick={act(() => startOrSwitch(recipe))}>
-                      {activeOther(recipe.id) ? 'Switch to' : 'Start'}
-                    </button>
-                  </>
-                )}
-                {model?.status === 'recovering' && <button className="ghost" disabled onClick={act(() => {})}>Recovering</button>}
-              </>
-            )}
-          </div>
+          {actions}
           <span className={`m-caret ${open ? 'open' : ''}`} aria-hidden="true">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
           </span>
         </div>
-        {open && (
-          <div className="mdetail">
-            {revoked(revocation) && (() => {
-              const body = revokeBody(revocation, isActive)
-              return (
-                <div className="revoke-line">
-                  <strong>{REVOKE_TITLE}</strong>
-                  {body && <span>{body}</span>}
-                </div>
-              )
-            })()}
-            <div className="board">
-              <div className="cell">
-                <div className="l">Speed</div>
-                <div className="v">
-                  {isMedia ? 'n/a' : measured ? measured.toFixed(1) : reference ? `~${reference}` : 'n/a'}{' '}
-                  {!isMedia && <small>tok/s</small>}
-                </div>
-                <div className={`q ${measured && !isMedia ? 'ok' : ''}`}>
-                  {isMedia ? 'not token based' : measured ? 'measured on this Spark' : 'typical on a Spark'}
-                </div>
-              </div>
-              <div className="cell">
-                <div className="l">First token</div>
-                <div className="v">{model?.time_to_first_token_ms ? model.time_to_first_token_ms : 'n/a'} <small>ms</small></div>
-              </div>
-              <div className="cell">
-                <div className="l">Tokens served</div>
-                <div className="v" title={served ? servedTotal.toLocaleString() : undefined}>
-                  {served ? formatTokens(servedTotal) : 'n/a'}
-                </div>
-                <div className="q">{served ? 'since basement started counting' : 'no usage counted yet'}</div>
-              </div>
-              <div className="cell">
-                <div className="l">Download</div>
-                <div className="v">{formatBytes(recipe.artifact_bytes)}</div>
-              </div>
-              <div className="cell">
-                <div className="l">Space needed</div>
-                <div className="v">{formatBytes(recipe.required_bytes)}</div>
-              </div>
-            </div>
-            <dl className="facts">
-              <dt>Model by</dt><dd>{recipe.model_by || recipe.publisher}</dd>
-              <dt>Released</dt><dd>{recipe.model_released || 'n/a'}</dd>
-              <dt>Quantization</dt>
-              <dd>{recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
-              <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
-              <dt>Recipe version</dt><dd>v{recipe.version}</dd>
-              {updateAvailable && model && (
-                <>
-                  <dt>Update</dt>
-                  <dd className="update-line">v{model.recipe_version} installed, v{recipe.version} available</dd>
-                </>
-              )}
-              {served && (
-                <>
-                  <dt>Prompt tokens</dt>
-                  <dd title={served.prompt_tokens.toLocaleString()}>{formatTokens(served.prompt_tokens)}</dd>
-                  <dt>Generated tokens</dt>
-                  <dd title={served.generation_tokens.toLocaleString()}>{formatTokens(served.generation_tokens)}</dd>
-                </>
-              )}
-              <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
-              <dt>Runtime</dt><dd><code>{runtimeLabel(recipe.runtime.kind)} · pinned digest</code></dd>
-              <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
-              {recipe.artifacts.map(artifact => (
-                <Fragment key={artifact.role}>
-                  <dt>{artifact.role === 'primary' ? 'Weights' : artifact.role === 'drafter' ? 'Draft weights' : artifact.role}</dt>
-                  <dd>
-                    <code>{artifact.repository}@{artifact.revision.slice(0, 12)}</code>{' '}
-                    <a href={artifact.licence_url} target="_blank" rel="noreferrer">{artifact.licence} licence ↗</a>
-                  </dd>
-                </Fragment>
-              ))}
-            </dl>
-            {/* The same tools, on the machine that holds the model. Another
-                Spark in the fleet carries them there, through the placement
-                its first action records. */}
-            {(model || host) && (() => {
-              // A tool on this Spark's own row answers to this Spark alone.
-              // What another Spark is doing with the same recipe has never
-              // stopped a local button and must not start now.
-              const toolsLocked = host ? hostLocked : busy
-              return (
-                <div className="row-tools">
-                  {(host ? hostServing : isActive) && (
-                    <>
-                      {!isMedia && (
-                        <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(recipe, host, 'benchmark')}>Measure speed</button>
-                      )}
-                      <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(recipe, host, 'smoke-test')}>Check health</button>
-                    </>
-                  )}
-                  {/* The fleet holds a record it can no longer read, so every
-                      button above is dead and stays dead. This is the one way
-                      out: it ends the record, and the model goes with it. */}
-                  {host && placement && placement.stale === true && (
-                    <button
-                      className="danger"
-                      disabled={pending.has(recipe.id)}
-                      onClick={() => clearRecord(recipe, host, placement)}
-                    >
-                      {CLEAR_RECORD}
-                    </button>
-                  )}
-                  <button className="danger" disabled={toolsLocked} onClick={() => remove(recipe, host)}>Uninstall</button>
-                </div>
-              )
-            })()}
-          </div>
-        )}
+        {detail}
       </Fragment>
     )
   }
+
+  // The models on the owner's own Sparks, read once. The bands over the table
+  // and the rows inside it come out of that one read, so no model can stand in
+  // both places or in neither.
+  const { bands, rows: tableRows } = splitServing(split.held.map(readModel))
+  // The note under the table speaks for the "~" numbers on screen, so it is
+  // shown only while one of them is: the rows of the tab in front, and the
+  // bands, which stand over both tabs.
+  const onScreen = showTabs
+    ? (tab === 'mine' ? split.held : split.labs.flatMap(group => group.models))
+    : rows
+  const anyTypical =
+    bands.some(read => read.speed.startsWith('~')) ||
+    onScreen.some(recipe => speedText(recipe, installed.get(recipe.id)?.tokens_per_second).startsWith('~'))
 
   return (
     <div className="stack">
@@ -1399,14 +1535,18 @@ export default function Models({
         </div>
       )}
 
+      {/* What runs, over what is only installed. Two Sparks can each serve a
+          model, so this is a list; it is empty while nothing serves anywhere. */}
+      {bands.map(read => modelLine(read, true))}
+
       <div className="mtable">
         <div className="mthead" aria-hidden="true">
-          <span>Model</span><span className="r">Speed</span><span className="r">Disk</span><span style={{ paddingLeft: 20 }}>Status</span><span />
+          <span>Model</span><span className="r">Tok/s</span><span className="r">Disk</span><span /><span />
         </div>
         {showTabs ? (
           <>
             <div className="mpane" id="pane-held" role="tabpanel" aria-labelledby="tab-held" hidden={tab !== 'mine'}>
-              {split.held.map(rowFor)}
+              {tableRows.map(read => modelLine(read))}
             </div>
             <div
               className="mpane"
@@ -1426,7 +1566,7 @@ export default function Models({
                   {split.labs.map(group => (
                     <Fragment key={group.label}>
                       <div className="mgroup">{group.label}</div>
-                      {group.models.map(rowFor)}
+                      {group.models.map(recipe => modelLine(readModel(recipe)))}
                     </Fragment>
                   ))}
                 </>
@@ -1434,7 +1574,7 @@ export default function Models({
             </div>
           </>
         ) : (
-          rows.map(rowFor)
+          rows.map(recipe => modelLine(readModel(recipe)))
         )}
       </div>
       {/* Where the recipes in that table came from, and how fresh they are.
@@ -1444,9 +1584,9 @@ export default function Models({
         const note = feedNote(system.recipe_feed, Date.now())
         return (
           <div className="feed-line">
-            {note && <p className={`table-note ${note.warn ? 'warn' : ''}`}>{note.text}</p>}
+            {note && <p className={`table-note ${note.warn ? 'warn' : ''}`} title={note.title}>{note.text}</p>}
             <button type="button" className="ghost" disabled={checkingFeed} onClick={checkForRecipes}>
-              {checkingFeed ? 'Checking' : 'Check for new recipes'}
+              {checkingFeed ? 'Checking' : 'Check now'}
             </button>
             {feedError && <p className="table-note warn">{feedError}</p>}
           </div>
@@ -1454,9 +1594,10 @@ export default function Models({
       })()}
       {/* Only shown once something has actually been counted. Basement
           counts a model's tokens while it serves it here, so an empty total
-          means no serving has been sampled yet, not that nothing ran. */}
+          means no serving has been sampled yet, not that nothing ran. Where
+          and since when it counted is the tooltip over the line. */}
       {tokens && tokens.totals.prompt_tokens + tokens.totals.generation_tokens > 0 && (
-        <div className="token-total">
+        <div className="token-total" title={TOKENS_COUNTED}>
           <span
             className="n"
             title={(tokens.totals.prompt_tokens + tokens.totals.generation_tokens).toLocaleString()}
@@ -1464,19 +1605,17 @@ export default function Models({
             {formatTokens(tokens.totals.prompt_tokens + tokens.totals.generation_tokens)}
           </span>
           <span>
-            tokens served on this Spark since basement started counting
+            tokens served
             <small title={tokens.totals.prompt_tokens.toLocaleString()}>
-              {formatTokens(tokens.totals.prompt_tokens)} prompt
+              · {formatTokens(tokens.totals.prompt_tokens)} prompt
             </small>
             <small title={tokens.totals.generation_tokens.toLocaleString()}>
-              {formatTokens(tokens.totals.generation_tokens)} generated
+              · {formatTokens(tokens.totals.generation_tokens)} generated
             </small>
           </span>
         </div>
       )}
-      <p className="table-note">
-        “Typical” speeds are community-reported. Basement measures the real number after install.
-      </p>
+      {anyTypical && <p className="table-note">{TYPICAL_NOTE}</p>}
 
       <dialog ref={dialogRef} onClose={() => setConfirm(null)} aria-label="Confirm installation">
         {confirm && (() => {

@@ -300,7 +300,7 @@ input[type='text'], input[type='password'], textarea {
 
 .mtable { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
 .mthead, .mrow {
-  display: grid; grid-template-columns: minmax(240px, 1.5fr) 108px 84px 118px minmax(196px, auto) 18px;
+  display: grid; grid-template-columns: minmax(240px, 1.5fr) 92px 92px minmax(196px, auto) 18px;
   align-items: center; padding: 0 16px; column-gap: 8px;
 }
 .m-caret { display: flex; justify-content: flex-end; color: var(--faint); transition: transform 0.15s ease; }
@@ -341,8 +341,17 @@ input[type='text'], input[type='password'], textarea {
   background: var(--surface-2); border: 1px solid var(--line);
   color: var(--muted); font-weight: 700; text-transform: uppercase; line-height: 1;
 }
+.m-id > div { min-width: 0; }
 .m-id .nm { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .m-id .use { color: var(--muted); font-size: 12px; margin-top: 1px; }
+/* The second and last line of a model's row: one short line about the model,
+   or the state the model is in while that is worth saying. It holds one line
+   whatever it says, so every row is the same height. */
+.m-id .spec {
+  color: var(--muted); font-size: 12px; margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.m-id .spec.warn { color: var(--warn); }
 .tag {
   font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em;
   color: var(--ink); background: var(--chip); border: 1px solid var(--chip-line);
@@ -351,8 +360,6 @@ input[type='text'], input[type='password'], textarea {
 .m-num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .m-num .n { font-size: 13px; font-weight: 550; }
 .m-num .n small { color: var(--faint); font-weight: 400; margin-left: 2px; font-size: 10.5px; }
-.m-num .sub { display: block; font-size: 10.5px; color: var(--faint); font-family: var(--sans); white-space: nowrap; }
-.m-num .sub.ok { color: var(--muted); font-weight: 550; }
 .m-status { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); padding-left: 20px; }
 .sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); flex: none; }
 .sdot.on { background: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 15%, transparent); }
@@ -382,6 +389,31 @@ input[type='text'], input[type='password'], textarea {
 .node-chip.live { color: var(--ink); border-color: color-mix(in srgb, var(--live) 40%, var(--line-strong)); }
 .node-chip.live i { background: var(--live); }
 
+/* The model that serves, over the table rather than inside it. Green says one
+   thing on this console and says it here: this model is serving. The band
+   carries the page's one orange button, and opens the same depth a row opens. */
+.mband {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center;
+  border: 1px solid color-mix(in srgb, var(--live) 25%, var(--line));
+  border-radius: 10px; background: color-mix(in srgb, var(--live) 4%, var(--surface));
+  box-shadow: inset 2px 0 0 var(--live); padding: 13px 16px; cursor: pointer;
+}
+.mband.open { border-radius: 10px 10px 0 0; }
+.mband-group .mdetail {
+  border: 1px solid var(--line); border-top: 0; border-radius: 0 0 10px 10px;
+}
+.mband .m-id img, .mband .m-id .mark { width: 34px; height: 34px; border-radius: 8px; font-size: 14px; }
+.mband .nm { font-size: 15px; }
+.mband .tagline {
+  margin: 0; font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: color-mix(in srgb, var(--live) 65%, var(--ink));
+}
+.mband .meta {
+  font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums;
+  color: var(--faint); margin-top: 3px;
+}
+
 /* The whole fleet in one line over the table: each Spark, what it has free,
    and how many Sparks that is. It uses the same dot as every status cell. */
 .fleet-strip {
@@ -394,7 +426,7 @@ input[type='text'], input[type='password'], textarea {
 .fleet-strip .fs-node { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .fleet-strip .fs-node b { font-weight: 500; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--faint); font-size: 11.5px; }
 .fleet-strip .fs-name { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
-.fleet-strip .fs-end { margin-left: auto; color: var(--faint); font-size: 11.5px; }
+.fleet-strip .fs-sep { color: var(--faint); }
 /* Each chip opens that Spark's own card below the line. */
 .fleet-strip button.fs-node {
   background: none; border: 0; color: inherit; font: inherit; text-align: left;
@@ -457,6 +489,9 @@ input[type='text'], input[type='password'], textarea {
 
 /* expanded detail — the "A depth" inside a row */
 .mdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }
+/* What the model is, in full. The row over it states the same thing in one
+   line; this is where the sentence lives. */
+.mdetail .use { color: var(--muted); font-size: 12.5px; margin: 0 0 14px; max-width: 62ch; }
 .mdetail .board { display: flex; border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 14px; gap: 0; }
 .mdetail .board .cell { flex: 1; padding: 0 16px; border-right: 1px solid var(--line); }
 .mdetail .board .cell:first-child { padding-left: 0; }
@@ -1438,9 +1473,10 @@ button.chip:hover { color: var(--ink); }
   .mthead { display: none; }
   .mthead + .mrow { border-top: 0; }
   .mrow { grid-template-columns: 1fr auto; row-gap: 10px; }
+  .mband { grid-template-columns: 1fr; row-gap: 12px; }
   .m-id { grid-column: 1 / -1; }
+  .m-id .spec { white-space: normal; }
   .m-num { text-align: left; }
-  .m-num .sub { white-space: normal; }
   .m-status { padding-left: 0; }
   .m-actions { grid-column: 1 / -1; justify-content: flex-start; }
   .m-caret { display: none; }
