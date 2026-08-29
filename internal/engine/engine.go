@@ -381,11 +381,59 @@ func sameStrings(left, right []string) bool {
 // jobs or health-checks a serving model. It is separate from New because the
 // caller must surface a database or catalogue inconsistency rather than hide
 // it inside a constructor that historically cannot fail.
+//
+// One refusal is not a corrupt state and must not be fatal. A fleet upgrade
+// holds its maintenance latch ACROSS the manager restart on purpose, and that
+// latch closes runtime admission, so rebuilding the recovering model's runtime
+// claim is refused for as long as the upgrade runs. The latch is released when
+// the upgrade run finalizes, which needs this manager serving, so exiting here
+// is a deadlock, not a safety measure: v0.5.26 crash-looped a controller every
+// five seconds past sixty restarts until an operator released the row by hand
+// (hardware, 2026-08-29). Before this task the collision was merely hidden —
+// the stale active row made Reconcile skip the claim it now builds. The node is
+// not left open in the meantime: the latch itself refuses every other runtime
+// claimant, and the deferred pass takes the slot the moment the latch clears.
+// Every other error still stops the manager.
 func (e *Engine) ReconcileReservations(ctx context.Context) error {
 	if err := e.releaseAbandonedJobReservations(ctx); err != nil {
 		return err
 	}
-	return e.reservations.Reconcile(ctx, e.allRecipes())
+	err := e.reservations.Reconcile(ctx, e.allRecipes())
+	if err == nil || !errors.Is(err, store.ErrReservationConflict) {
+		return err
+	}
+	latched, latchErr := e.reservations.MaintenanceActive(ctx)
+	if latchErr != nil || !latched {
+		return err
+	}
+	e.reconcileWhenMaintenanceEnds()
+	return nil
+}
+
+// reconcileWhenMaintenanceEnds finishes the startup reconciliation the upgrade
+// latch refused. It waits rather than counting attempts, for the reason
+// watchRecovery waits: a fleet upgrade holds the latch for as long as the whole
+// fleet needs, so any fixed budget would recreate the stuck-forever bug on a
+// slow fleet. It ends by itself when the database closes. The recovery start
+// ReconcileActiveModel launches is the other way this model can come to own the
+// runtime slot, and whichever arrives first, the other stands down: an active
+// claim for the recipe makes Reconcile leave the slot alone, and the recovery
+// job's own activation names this claim as the predecessor it replaces.
+func (e *Engine) reconcileWhenMaintenanceEnds() {
+	go func() {
+		ctx := context.Background()
+		for {
+			latched, err := e.reservations.MaintenanceActive(ctx)
+			if err != nil {
+				return
+			}
+			if !latched {
+				break
+			}
+			time.Sleep(e.recoveryRetryDelay)
+		}
+		_ = e.reservations.Reconcile(ctx, e.allRecipes())
+	}()
 }
 
 // releaseAbandonedJobReservations settles the local claims of jobs no process

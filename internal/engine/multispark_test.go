@@ -650,20 +650,138 @@ func TestStartupSettlesTheDeadRowBeforeItRebuildsTheRuntimeClaim(t *testing.T) {
 
 	// Owned, and guarded: a stranger must not be able to take the runtime slot
 	// of a machine whose own model is still installed and active.
-	const strangerID = "reservation-of-another-model"
+	if err := refuseStranger(t, allocator, "another-model"); !errors.Is(err, store.ErrReservationConflict) {
+		t.Fatalf("an unrelated model took the runtime slot of a serving machine: err=%v", err)
+	}
+}
+
+// holdUpgradeLatch takes the maintenance reservation a fleet upgrade holds
+// across the manager restart it causes, exactly as the updater does.
+func holdUpgradeLatch(t *testing.T, allocator *fleet.Allocator) string {
+	t.Helper()
+	ctx := context.Background()
+	latchID := fleet.ReservationID(fleet.ClaimKindUpdate, "fleet-upgrade")
 	if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
-		ReservationID: strangerID, DeploymentID: "job:" + strangerID, DriverNodeID: allocator.NodeID(),
-		RecipeID: "some-other-model", RecipeVersion: 1,
-		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindLocalJob, JobID: "job-of-another-model",
-			Runtime: true, Ports: []int{}, FabricInterfaces: []string{}},
+		ReservationID: latchID, DeploymentID: "upgrade:fleet-upgrade", DriverNodeID: allocator.NodeID(),
+		RecipeID: "basement-manager", RecipeVersion: 1,
+		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindUpdate, Runtime: true,
+			Ports: []int{}, FabricInterfaces: []string{}},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := allocator.Commit(ctx, strangerID, fleet.LocalPrepareToken(strangerID), []byte(`{"kind":"local-engine"}`)); err != nil {
+	if _, err := allocator.Commit(ctx, latchID, fleet.LocalPrepareToken(latchID), []byte(`{"kind":"test-upgrade"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := allocator.Activate(ctx, strangerID, ""); !errors.Is(err, store.ErrReservationConflict) {
-		t.Fatalf("an unrelated model took the runtime slot of a serving machine: err=%v", err)
+	if err := allocator.ActivateMaintenance(ctx, latchID); err != nil {
+		t.Fatal(err)
+	}
+	return latchID
+}
+
+// refuseStranger walks an unrelated model all the way to the runtime slot and
+// reports the step that refuses it. The refusal moves with the guard: the
+// upgrade latch turns even a prepare away, while an ordinary active claim lets
+// the row exist and refuses the activation, and both are the same property.
+func refuseStranger(t *testing.T, allocator *fleet.Allocator, name string) error {
+	t.Helper()
+	ctx := context.Background()
+	reservationID := "reservation-of-" + name
+	if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: reservationID, DeploymentID: "job:" + reservationID, DriverNodeID: allocator.NodeID(),
+		RecipeID: name, RecipeVersion: 1,
+		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindLocalJob, JobID: "job-of-" + name,
+			Runtime: true, Ports: []int{}, FabricInterfaces: []string{}},
+	}); err != nil {
+		return err
+	}
+	if _, err := allocator.Commit(ctx, reservationID, fleet.LocalPrepareToken(reservationID), []byte(`{"kind":"local-engine"}`)); err != nil {
+		return err
+	}
+	return allocator.Activate(ctx, reservationID, "")
+}
+
+// The v0.5.26 field failure of 2026-08-29. A fleet upgrade holds its
+// maintenance latch across the manager restart it causes, and that latch closes
+// runtime admission. With the dead serve row correctly settled first, the
+// allocator went on to rebuild the recovering model's runtime claim, the latch
+// refused it, and the manager treated the refusal as a corrupt state: exit 1,
+// restarted by systemd every five seconds, past sixty restarts. The latch is
+// only released when the upgrade run finalizes, and that needs this manager
+// serving, so the machine could not leave the loop without hand surgery on the
+// database. Startup must survive its own upgrade.
+func TestStartupSurvivesTheUpgradeLatchItRestartedUnder(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	restarted, _, r, install := servingHeadAfterRestart(t, fake)
+	allocator := restarted.Reservations()
+	latchID := holdUpgradeLatch(t, allocator)
+
+	// The production startup sequence, in the order main runs it.
+	if err := restarted.ReconcileReservations(ctx); err != nil {
+		t.Fatalf("startup died on the fleet upgrade's own latch, which is the crash loop: %v", err)
+	}
+	if err := restarted.ResumeInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.ReconcileActiveModel(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Surviving the latch must not cost the round 1 property: the dead
+	// deployment's row is still settled.
+	settled, err := allocator.Reservation(ctx, fleet.ReservationID(fleet.ClaimKindLocalJob, install))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.State != "released" {
+		t.Fatalf("the dead serve job's claim is %q after a latched startup", settled.State)
+	}
+	// Nothing is open while the latch is held: the latch is the guard.
+	if err := refuseStranger(t, allocator, "stranger-during-upgrade"); !errors.Is(err, store.ErrReservationConflict) {
+		t.Fatalf("an unrelated model took the runtime slot while the upgrade held the node: err=%v", err)
+	}
+
+	// The upgrade finalizes, which it can now do, and the slot must end up
+	// guarded again by a claim that names this machine's own model.
+	if err := allocator.Release(ctx, latchID); err != nil {
+		t.Fatal(err)
+	}
+	waitRuntimeClaim(t, allocator, r.ID)
+	if err := refuseStranger(t, allocator, "stranger-after-upgrade"); !errors.Is(err, store.ErrReservationConflict) {
+		t.Fatalf("the runtime slot was left open after the upgrade latch cleared: err=%v", err)
+	}
+}
+
+// The deferred pass is what rebuilds the claim the latch refused, so it holds
+// even when no recovery start ever runs — the case where the gap would
+// otherwise be unbounded.
+func TestTheClaimTheUpgradeLatchRefusedIsRebuiltWhenItClears(t *testing.T) {
+	ctx := context.Background()
+	restarted, _, r, _ := servingHeadAfterRestart(t, newFleetExecutor())
+	allocator := restarted.Reservations()
+	latchID := holdUpgradeLatch(t, allocator)
+
+	if err := restarted.ReconcileReservations(ctx); err != nil {
+		t.Fatalf("startup died on the fleet upgrade's own latch: %v", err)
+	}
+	recoveredID := fleet.ReservationID(fleet.ClaimKindRecovered, r.ID)
+	if held, err := allocator.Reservation(ctx, recoveredID); err == nil && held.State == "active" {
+		t.Fatal("the recovery claim was activated while the upgrade latch was still held")
+	}
+
+	if err := allocator.Release(ctx, latchID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		recovered, err := allocator.Reservation(ctx, recoveredID)
+		if err == nil && recovered.State == "active" {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the recovery claim was never rebuilt after the upgrade latch cleared: %+v err=%v", recovered.State, err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -774,6 +892,29 @@ func waitJobsSettled(t *testing.T, s *store.Store) {
 	}
 	jobs, _ := s.ListJobs(context.Background(), 100)
 	t.Fatalf("jobs never settled: %+v", jobs)
+}
+
+// waitRuntimeClaim waits until this node's runtime slot is owned by a claim
+// that names one model. Which legitimate claim it is deliberately does not
+// matter: the recovery claim and the recovery start's own job claim are both
+// correct owners, and the second is designed to replace the first.
+func waitRuntimeClaim(t *testing.T, allocator *fleet.Allocator, recipeID string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		reservations, err := allocator.AllReservations(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, reservation := range reservations {
+			if reservation.State == "active" && reservation.RecipeID == recipeID {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("nothing ever claimed this node's runtime slot for %s", recipeID)
 }
 
 func waitModelStatus(t *testing.T, s *store.Store, recipeID, want string) {
