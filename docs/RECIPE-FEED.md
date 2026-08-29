@@ -17,7 +17,7 @@ The feed is two files at a fixed URL: `index.json` and `index.json.sig`.
 is a detached signature over `index.json`. The manager checks the signature
 before it reads the recipe list.
 
-The manager fetches both files every 6 hours. It also fetches them once at
+The manager fetches both files every hour. It also fetches them once at
 startup.
 
 A recipe in the feed can carry a higher version number than the matching

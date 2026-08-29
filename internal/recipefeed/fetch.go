@@ -44,8 +44,14 @@ const (
 	maxIndexBytes     = 8 << 20 // 8 MiB
 	maxSignatureBytes = 4 << 10 // 4 KiB (real content is ~88 bytes)
 
-	fetchTimeout    = 15 * time.Second
-	RefreshInterval = 6 * time.Hour
+	fetchTimeout = 15 * time.Second
+
+	// RefreshInterval is how often the scheduled cycle asks the feed. It is
+	// hourly because a recipe published in the morning must reach a running
+	// Spark the same morning, without a person clicking anything. The cost is
+	// one small fetch each hour: an index that did not move has the same
+	// generated_at as the accepted one, which accept() takes as a no-op.
+	RefreshInterval = 1 * time.Hour
 
 	// StalenessBound is how old the accepted index may be before the console
 	// must say so (ADR 0009 item 7). A machine that has not fetched in a

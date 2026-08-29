@@ -124,6 +124,20 @@ func newTestFetcher(t *testing.T, embedded []recipe.Recipe, pub ed25519.PublicKe
 	return f
 }
 
+// The two durations that decide when a Spark looks and when it warns. They
+// are plain constants nothing else asserts, so this is the only place a
+// change to either one is caught.
+func TestTheScheduledCheckIsHourly(t *testing.T) {
+	if RefreshInterval != time.Hour {
+		t.Fatalf("RefreshInterval=%s, want 1h: a recipe published in the morning must reach a running Spark the same morning", RefreshInterval)
+	}
+	// The check got faster; how old an index may be before the console says so
+	// did not change with it.
+	if StalenessBound != 30*24*time.Hour {
+		t.Fatalf("StalenessBound=%s, want 720h", StalenessBound)
+	}
+}
+
 func TestAcceptValidIndexUpdatesSnapshot(t *testing.T) {
 	pub, priv := testKeypair(t)
 	embedded := []recipe.Recipe{testRecipe(t, "recipe-a", 1)}
