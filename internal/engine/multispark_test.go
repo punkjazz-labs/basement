@@ -1,10 +1,12 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -783,6 +785,240 @@ func TestTheClaimTheUpgradeLatchRefusedIsRebuiltWhenItClears(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// foreignRank puts this node's runtime slot in the hands of a worker rank held
+// for another Spark's deployment. Reconcile deliberately never releases one, so
+// a claim that collides with it collides with something no upgrade is holding
+// and nothing is going to clear.
+func foreignRank(t *testing.T, allocator *fleet.Allocator) {
+	t.Helper()
+	ctx := context.Background()
+	const rankID = "reservation-of-another-sparks-rank"
+	if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: rankID, DeploymentID: "legacy-rank:another-spark", DriverNodeID: "legacy-head",
+		RecipeID: "another-spark-model", RecipeVersion: 1,
+		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindLegacyRank, JobID: "job-of-another-spark",
+			Runtime: true, Ports: []int{}, FabricInterfaces: []string{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Commit(ctx, rankID, fleet.LocalPrepareToken(rankID), []byte(`{"kind":"legacy-rank-compatibility"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.Activate(ctx, rankID, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// syncBuffer collects a logger's output from the goroutine that writes it.
+type syncBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
+// Waiting out the upgrade latch is a targeted exception, not a blanket one. A
+// refusal with no upgrade behind it describes a node whose admission really is
+// taken by something else, and deferring that would hand a corrupt startup the
+// same patience a fleet upgrade gets.
+func TestStartupStillDiesOnAConflictNoUpgradeIsHolding(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := singleSpark(recipes).ID
+	s := recoveringModel(t, filepath.Join(t.TempDir(), "manager.db"), recipes, id)
+	t.Cleanup(func() { s.Close() })
+	runner := New(s, &fakeExecutor{}, recipes)
+	foreignRank(t, runner.Reservations())
+
+	if err := runner.ReconcileReservations(ctx); !errors.Is(err, store.ErrReservationConflict) {
+		t.Fatalf("startup treated a conflict no upgrade is holding as transient, so a node that is genuinely taken now reads as a fleet upgrade: err=%v", err)
+	}
+}
+
+// The exception is for one error, not for whatever happens to arrive while an
+// upgrade runs. A latch held elsewhere on the node must not turn an unknown
+// startup failure into something the manager shrugs off.
+func TestStartupStillDiesOnAnErrorTheUpgradeLatchCannotExplain(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := singleSpark(recipes).ID
+	s := recoveringModel(t, filepath.Join(t.TempDir(), "manager.db"), recipes, id)
+	t.Cleanup(func() { s.Close() })
+	runner := New(s, &fakeExecutor{}, recipes)
+	allocator := runner.Reservations()
+	// A row already sitting under the recovery identity, carrying details that
+	// are not the ones startup is about to ask for. Prepare answers that from
+	// the row itself, before anything looks at the latch, and its answer is not
+	// a resource conflict.
+	recoveredID := fleet.ReservationID(fleet.ClaimKindRecovered, id)
+	if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: recoveredID, DeploymentID: "recovered:a-different-model", DriverNodeID: allocator.NodeID(),
+		RecipeID: id, RecipeVersion: 1,
+		Claims: fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindRecovered, Runtime: true,
+			Ports: []int{}, FabricInterfaces: []string{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holdUpgradeLatch(t, allocator)
+
+	err = runner.ReconcileReservations(ctx)
+	if err == nil || errors.Is(err, store.ErrReservationConflict) {
+		t.Fatalf("startup deferred an error the upgrade latch cannot explain: err=%v", err)
+	}
+}
+
+// The deferred pass must not touch this node while the upgrade owns it. The
+// witness is an ordinary claim that a reconciliation pass settles: its job ends
+// during the upgrade, so any pass that runs would release it, and it may not
+// move until the latch is gone.
+func TestTheDeferredPassChangesNothingWhileTheUpgradeHoldsThisNode(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := singleSpark(recipes)
+	path := filepath.Join(t.TempDir(), "manager.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetInstalled(ctx, store.InstalledModel{RecipeID: selected.ID, RecipeVersion: selected.Version,
+		Status: "ready", ArtifactPath: "/managed/" + selected.ID, ContainerID: "existing-container", Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	witnessJob, _, err := s.CreateJob(ctx, "install", selected.ID, "interrupted-before-the-upgrade", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	witnessID := fleet.ReservationID(fleet.ClaimKindLocalJob, witnessJob.ID)
+	fingerprint, err := fleet.RecipeFingerprint(selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := fleet.NewAllocator(s, "local")
+	if _, _, err := previous.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: witnessID, DeploymentID: "job:" + witnessJob.ID, DriverNodeID: previous.NodeID(),
+		RecipeID: selected.ID, RecipeVersion: selected.Version, RecipeFingerprint: fingerprint,
+		Claims: fleet.ClaimsForRecipe(selected, fleet.RecipeClaimOptions{
+			Kind: fleet.ClaimKindLocalJob, JobID: witnessJob.ID, ReserveDisk: true,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := previous.Commit(ctx, witnessID, fleet.LocalPrepareToken(witnessID), []byte(`{"kind":"local-engine"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := previous.AttachJob(ctx, witnessID, witnessJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	runner := New(s, &fakeExecutor{}, recipes)
+	runner.recoveryRetryDelay = 10 * time.Millisecond
+	allocator := runner.Reservations()
+	latchID := holdUpgradeLatch(t, allocator)
+	if err := runner.ReconcileReservations(ctx); err != nil {
+		t.Fatalf("startup died on the fleet upgrade's own latch: %v", err)
+	}
+
+	// The interrupted job ends while the upgrade still holds the node.
+	if err := s.UpdateJobState(ctx, witnessJob.ID, "failed", "ended during the upgrade"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * runner.recoveryRetryDelay)
+	witness, err := allocator.Reservation(ctx, witnessID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if witness.State != "committed" {
+		t.Fatalf("a reconciliation pass ran while the fleet upgrade held this node: the witness claim is %q", witness.State)
+	}
+
+	// The same pass settles it once the latch is gone, which is what makes the
+	// witness a witness rather than a row nothing was ever going to touch.
+	if err := allocator.Release(ctx, latchID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		settled, err := allocator.Reservation(ctx, witnessID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if settled.State == "released" {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the deferred pass never ran after the upgrade latch cleared: the witness claim is %q", settled.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A deferred pass that keeps failing has no job row, no HTTP response and no
+// caller: without a report it fails in a place nobody can look. The node's own
+// runtime slot is what is at stake, so silence here is the one outcome that
+// must not happen.
+func TestAPersistentDeferredFailureIsReported(t *testing.T) {
+	ctx := context.Background()
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := singleSpark(recipes).ID
+	s := recoveringModel(t, filepath.Join(t.TempDir(), "manager.db"), recipes, id)
+	t.Cleanup(func() { s.Close() })
+	runner := New(s, &fakeExecutor{}, recipes)
+	runner.recoveryRetryDelay = 10 * time.Millisecond
+	journal := &syncBuffer{}
+	runner.SetLogger(slog.New(slog.NewTextHandler(journal, nil)))
+	allocator := runner.Reservations()
+	// Taken before the latch, because a latch turns even a prepare away.
+	foreignRank(t, allocator)
+	latchID := holdUpgradeLatch(t, allocator)
+	if err := runner.ReconcileReservations(ctx); err != nil {
+		t.Fatalf("startup died on the fleet upgrade's own latch: %v", err)
+	}
+
+	// The upgrade finalizes, and what the latch was hiding is a conflict the
+	// upgrade was never the cause of.
+	if err := allocator.Release(ctx, latchID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(journal.String(), "rebuild this node's runtime claim after the fleet upgrade") {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("a deferred reconciliation that keeps failing was never reported anywhere")
 }
 
 // A job the previous manager left interrupted is resumed with the reservation

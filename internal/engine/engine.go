@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"strconv"
@@ -54,6 +55,13 @@ type Engine struct {
 	// switchGuard is taken around the part of a job that changes which model
 	// serves; see SetSwitchGuard. Held atomically for the same reason.
 	switchGuard atomic.Pointer[SwitchGuard]
+	// logger carries the failures of work no caller is waiting on. Everything
+	// else this engine does answers to a job row or an HTTP response, which is
+	// why nothing here needed a logger before; background reconciliation has
+	// neither, so a failure there would otherwise be invisible. Installed after
+	// construction like the hooks above, and for the same reason power.Control
+	// is given the manager's logger: the alternative is a silent component.
+	logger atomic.Pointer[slog.Logger]
 	// driving names the jobs whose local reservation THIS process owns. A
 	// reservation row outlives the process that made it, so its state and its
 	// job id together still cannot say that the job behind it is alive; only
@@ -139,6 +147,21 @@ func (e *Engine) SetReservationAllocator(allocator *fleet.Allocator) {
 }
 
 func (e *Engine) Reservations() *fleet.Allocator { return e.reservations }
+
+// SetLogger gives the engine the manager's own logger. An engine without one
+// still runs every job exactly the same way; it only loses the report of a
+// background failure, so tests and package-level callers may leave it unset.
+func (e *Engine) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		e.logger.Store(logger)
+	}
+}
+
+func (e *Engine) logError(message string, err error) {
+	if logger := e.logger.Load(); logger != nil {
+		logger.Error(message, "error", redact.String(err.Error()))
+	}
+}
 
 // SetRecipes replaces the recipe catalog and history. all must be
 // monotonically growing (never drop a version some installed model may
@@ -419,20 +442,37 @@ func (e *Engine) ReconcileReservations(ctx context.Context) error {
 // runtime slot, and whichever arrives first, the other stands down: an active
 // claim for the recipe makes Reconcile leave the slot alone, and the recovery
 // job's own activation names this claim as the predecessor it replaces.
+//
+// The attempt lives inside the wait, and only one thing ends it: a pass that
+// succeeds. Reconciling once on the way out would have converged to nothing —
+// a second upgrade taking the latch in the gap, or a conflict that only becomes
+// reportable once the latch clears, would leave the recovered claim unbuilt and
+// this node's runtime slot silently unowned, which is the hazard the whole task
+// exists to close. A refusal the latch explains is this waiter's ordinary
+// business and stays quiet; anything else is a failure nobody is waiting on, so
+// it goes to the manager's log, once per distinct reason.
 func (e *Engine) reconcileWhenMaintenanceEnds() {
 	go func() {
 		ctx := context.Background()
+		reported := ""
 		for {
 			latched, err := e.reservations.MaintenanceActive(ctx)
 			if err != nil {
 				return
 			}
 			if !latched {
-				break
+				failure := e.reservations.Reconcile(ctx, e.allRecipes())
+				if failure == nil {
+					return
+				}
+				relatched, latchErr := e.reservations.MaintenanceActive(ctx)
+				if latchErr == nil && !relatched && reported != failure.Error() {
+					reported = failure.Error()
+					e.logError("rebuild this node's runtime claim after the fleet upgrade", failure)
+				}
 			}
 			time.Sleep(e.recoveryRetryDelay)
 		}
-		_ = e.reservations.Reconcile(ctx, e.allRecipes())
 	}()
 }
 

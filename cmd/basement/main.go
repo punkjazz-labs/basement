@@ -120,6 +120,11 @@ func main() {
 	executor := operations.NewFleetExecutor(operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider), operations.NewPeerClient(worker))
 	jobEngine := engine.New(db, executor, recipes)
 	jobEngine.SetReservationAllocator(fleetManager.Allocator())
+	// Startup reconciliation can be deferred past a fleet upgrade's latch, and
+	// what finishes it afterwards answers to nobody. Wired before the startup
+	// steps below, so a deferred pass that keeps failing is in the journal
+	// rather than nowhere.
+	jobEngine.SetLogger(logger)
 
 	// No network was involved above. Fetching starts only in the background;
 	// the embedded recipes remain the permanent offline floor either way.
