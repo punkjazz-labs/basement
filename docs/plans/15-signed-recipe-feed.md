@@ -15,7 +15,7 @@ should read `internal/recipefeed/fetch.go`, `internal/recipe/index.go`,
 `internal/recipe/signature.go`, `internal/recipe/merge.go`, and `cmd/sign-index/`.
 Working today:
 
-- `recipefeed.Fetcher` fetches `IndexURL` every `RefreshInterval` (6 hours), verifies a
+- `recipefeed.Fetcher` fetches `IndexURL` every `RefreshInterval` (1 hour), verifies a
   detached ed25519 signature over the exact bytes **before** parsing, drops individually
   invalid recipes without poisoning the batch, caches verified bytes plus signature in
   `dataDir/recipes-cache/`, re-verifies the cache on every start, rejects an index older
