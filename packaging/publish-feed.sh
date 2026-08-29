@@ -124,13 +124,14 @@ published_sig="$work/published-index.json.sig"
 # is cache lag, not a bad publish, and it clears itself. Ask again every 30
 # seconds for up to 7 minutes, which covers the whole cache window, and pass on
 # the first byte match. A mismatch that outlives the window is a real failure
-# and still fails the run. The curls are silent here because a retry must cost
-# one line at most; the failure below says what a failed run needs to know.
+# and still fails the run. A retry says only that the bytes do not match yet,
+# because it cannot know why; curl keeps -S so a fetch that failed on its own
+# terms puts its reason in the log of an unattended run.
 verify_deadline=$((SECONDS + 420))
 verified=""
 while :; do
-  if curl -fsL "$index_url" -o "$published_index" &&
-    curl -fsL "$index_url.sig" -o "$published_sig" &&
+  if curl -fsSL "$index_url" -o "$published_index" &&
+    curl -fsSL "$index_url.sig" -o "$published_sig" &&
     cmp -s "$index_path" "$published_index" &&
     cmp -s "$index_path.sig" "$published_sig"; then
     verified=yes
@@ -139,7 +140,7 @@ while :; do
   if [ "$SECONDS" -ge "$verify_deadline" ]; then
     break
   fi
-  echo "==> the published feed still reads as the old one; asking again in 30s"
+  echo "==> the published feed does not match yet; asking again in 30s"
   sleep 30
 done
 
