@@ -264,13 +264,18 @@ func (a *Allocator) Release(ctx context.Context, reservationID string) error {
 	return a.database.ReleaseNodeReservation(ctx, reservationID)
 }
 
-// ClearSettled removes a released or expired reservation so its deterministic
-// identity can be prepared again. A settled row holds no claim; left in place
-// it makes Prepare return it unchanged and Activate refuse it, which the
-// caller reads as a fatal admission conflict. That is the 2026-08-12 recovery
-// crash-loop, relearned on 2026-08-28 by the legacy-rank worker path when a
-// reclaimed rank wedged its own job's identity. A row in any other state is
-// left alone: the caller's Prepare and Activate judge a live claim.
+// ClearSettled removes a released, expired, or aborted reservation so its
+// deterministic identity can be prepared again. A settled row holds no claim;
+// left in place it makes Prepare return it unchanged and Activate refuse it,
+// which the caller reads as a fatal admission conflict. That is the
+// 2026-08-12 recovery crash-loop, relearned on 2026-08-28 by the legacy-rank
+// worker path when a reclaimed rank wedged its own job's identity, and again
+// on 2026-08-29 when a failed worker preflight aborted its own reservation
+// and the same job's retry hit "reservation is aborted". Clearing an aborted
+// row can never free a live resource, because only a prepared or committed
+// row can be aborted and an active one never becomes aborted. A row in any
+// other state is left alone: the caller's Prepare and Activate judge a live
+// claim.
 func (a *Allocator) ClearSettled(ctx context.Context, reservationID string) error {
 	existing, err := a.Reservation(ctx, reservationID)
 	if errors.Is(err, os.ErrNotExist) {
@@ -279,10 +284,11 @@ func (a *Allocator) ClearSettled(ctx context.Context, reservationID string) erro
 	if err != nil {
 		return err
 	}
-	if existing.State != "released" && existing.State != "expired" {
-		return nil
+	switch existing.State {
+	case "released", "expired", "aborted":
+		return a.database.DeleteSettledNodeReservation(ctx, reservationID)
 	}
-	return a.database.DeleteSettledNodeReservation(ctx, reservationID)
+	return nil
 }
 
 func (a *Allocator) ReleaseRecipe(ctx context.Context, recipeID, exceptReservationID string) error {

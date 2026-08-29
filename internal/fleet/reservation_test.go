@@ -161,6 +161,7 @@ func TestClearSettledFreesDeadIdentitiesAndKeepsLiveOnes(t *testing.T) {
 	}{
 		{name: "released", state: "released", wantGone: true},
 		{name: "expired", state: "expired", wantGone: true},
+		{name: "aborted", state: "aborted", wantGone: true},
 		{name: "prepared", state: "prepared", wantState: "prepared"},
 		{name: "committed", state: "committed", wantState: "committed"},
 		{name: "active", state: "active", wantState: "active"},
@@ -195,6 +196,10 @@ func TestClearSettledFreesDeadIdentitiesAndKeepsLiveOnes(t *testing.T) {
 				}
 			case "released":
 				if err := allocator.Release(ctx, reservationID); err != nil {
+					t.Fatal(err)
+				}
+			case "aborted":
+				if err := allocator.Abort(ctx, reservationID); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -247,6 +252,59 @@ func TestClearSettledFreesDeadIdentitiesAndKeepsLiveOnes(t *testing.T) {
 	defer database.Close()
 	if err := NewAllocator(database, "node-local").ClearSettled(ctx, "reservation-that-never-existed"); err != nil {
 		t.Fatalf("clearing an identity nothing ever used: %v", err)
+	}
+}
+
+// A worker preflight that failed once aborts its own reservation, and the
+// same job retries under the same deterministic identity. An aborted row is
+// settled: only a prepared or committed row can be aborted, so it holds no
+// live claim. Left in place it makes the retry's Prepare return the aborted
+// row unchanged, the commit then fails with "reservation is aborted", and
+// that job can never place its rank on this Spark again.
+func TestAbortedRankIdentityIsPreparedAndCommittedAgainBySameJob(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	allocator := NewAllocator(database, "node-local")
+
+	reservationID := ExactRecipeReservationID(ClaimKindLegacyRank, "node-local", "job-one", "rank-recipe", 1)
+	request := ReservationRequest{
+		ReservationID: reservationID, DeploymentID: "legacy-rank:job-one",
+		DriverNodeID: "legacy-head", RecipeID: "rank-recipe", RecipeVersion: 1,
+		Claims:       Claims{Version: ClaimsVersion, Kind: ClaimKindLegacyRank, JobID: "job-one", Runtime: true},
+		PrepareToken: LocalPrepareToken(reservationID), ExpiresAt: time.Now().Add(time.Hour),
+	}
+	grant := []byte(`{"kind":"legacy-rank-compatibility"}`)
+	if _, _, err := allocator.Prepare(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Commit(ctx, reservationID, LocalPrepareToken(reservationID), grant); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.Abort(ctx, reservationID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The retry does what the worker preflight does: clear the settled row,
+	// then prepare and commit the same identity again.
+	if err := allocator.ClearSettled(ctx, reservationID); err != nil {
+		t.Fatal(err)
+	}
+	retried, created, err := allocator.Prepare(ctx, request)
+	if err != nil {
+		t.Fatalf("the retry could not prepare the aborted identity again: %v", err)
+	}
+	if !created || retried.State != "prepared" {
+		t.Fatalf("retry prepare state=%q created=%v, want a new prepared row", retried.State, created)
+	}
+	if _, err := allocator.Commit(ctx, reservationID, LocalPrepareToken(reservationID), grant); err != nil {
+		t.Fatalf("the retry could not commit the aborted identity again: %v", err)
+	}
+	if err := allocator.Activate(ctx, reservationID, ""); err != nil {
+		t.Fatalf("the retry could not take the runtime slot: %v", err)
 	}
 }
 

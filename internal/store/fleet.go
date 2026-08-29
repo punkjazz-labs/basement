@@ -1277,10 +1277,12 @@ func (s *Store) ReleaseNodeReservation(ctx context.Context, reservationID string
 // its identity can be prepared again. Recovery reservations use one
 // deterministic identity per recipe, and a settled row left under that
 // identity would otherwise block startup recovery forever: Prepare returns
-// the row unchanged and Activate refuses it. The state guard means a live
-// reservation is never deleted, whoever calls this.
+// the row unchanged and Activate refuses it. A worker rank identity settles
+// the same way when its own preflight aborts. The state guard means a live
+// reservation is never deleted, whoever calls this: an aborted row is only
+// ever made from a prepared or committed one, never from an active one.
 func (s *Store) DeleteSettledNodeReservation(ctx context.Context, reservationID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM node_reservations WHERE reservation_id=? AND state IN ('released','expired')`, reservationID)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM node_reservations WHERE reservation_id=? AND state IN ('released','expired','aborted')`, reservationID)
 	return err
 }
 
