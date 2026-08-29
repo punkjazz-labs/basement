@@ -54,6 +54,16 @@ type Engine struct {
 	// switchGuard is taken around the part of a job that changes which model
 	// serves; see SetSwitchGuard. Held atomically for the same reason.
 	switchGuard atomic.Pointer[SwitchGuard]
+	// driving names the jobs whose local reservation THIS process owns. A
+	// reservation row outlives the process that made it, so its state and its
+	// job id together still cannot say that the job behind it is alive; only
+	// this manager's own memory can. Membership deliberately outlives the
+	// job's run, because a start that leaves a model serving keeps its
+	// reservation and must keep renewing the worker rank underneath it. It
+	// ends when the job hands that reservation back; an entry another job's
+	// switch or stop releases is left behind, because a released row already
+	// fails every gate that reads this.
+	driving map[string]bool
 	// recoveryRetryDelay paces the retries of a recovery start whose
 	// reservation was refused. A fleet upgrade restarts the manager while the
 	// upgrade's maintenance reservation still closes runtime admission, so
@@ -113,7 +123,7 @@ type plannedOperation struct {
 // overlaid yet. SetRecipes takes over both from the first background
 // recipe-index refresh onward.
 func New(s *store.Store, executor operations.Executor, recipes []recipe.Recipe) *Engine {
-	e := &Engine{store: s, executor: executor, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1), reservations: fleet.NewAllocator(s, "local"), recoveryRetryDelay: 15 * time.Second, recovering: map[string]bool{}}
+	e := &Engine{store: s, executor: executor, running: map[string]context.CancelFunc{}, recipeLocks: map[string]*sync.Mutex{}, runtime: make(chan struct{}, 1), reservations: fleet.NewAllocator(s, "local"), driving: map[string]bool{}, recoveryRetryDelay: 15 * time.Second, recovering: map[string]bool{}}
 	e.SetRecipes(recipes, recipes)
 	return e
 }
@@ -271,6 +281,7 @@ func (e *Engine) prepareJobReservation(ctx context.Context, job store.Job, selec
 		if err := e.reservations.AttachJob(ctx, reservationID, job.ID); err != nil {
 			return "", false, err
 		}
+		e.noteDriving(kind, job.ID)
 		return reservationID, true, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", false, err
@@ -294,7 +305,33 @@ func (e *Engine) prepareJobReservation(ctx context.Context, job store.Job, selec
 	if err := e.reservations.AttachJob(ctx, reservationID, job.ID); err != nil {
 		return "", false, err
 	}
+	e.noteDriving(kind, job.ID)
 	return reservationID, true, nil
+}
+
+// noteDriving records that this process, not a previous one, holds the local
+// reservation of a job. Only a local-job claim names a job at all: an
+// independent deployment's claim belongs to the controller that made it, and
+// is never this manager's to renew.
+func (e *Engine) noteDriving(kind, jobID string) {
+	if kind != fleet.ClaimKindLocalJob || jobID == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.driving[jobID] = true
+}
+
+func (e *Engine) forgetDriving(jobID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.driving, jobID)
+}
+
+func (e *Engine) isDriving(jobID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.driving[jobID]
 }
 
 func (e *Engine) recordJobReservationID(ctx context.Context, job store.Job, reservationID string) error {
@@ -345,7 +382,62 @@ func sameStrings(left, right []string) bool {
 // caller must surface a database or catalogue inconsistency rather than hide
 // it inside a constructor that historically cannot fail.
 func (e *Engine) ReconcileReservations(ctx context.Context) error {
+	if err := e.releaseAbandonedJobReservations(ctx); err != nil {
+		return err
+	}
 	return e.reservations.Reconcile(ctx, e.allRecipes())
+}
+
+// releaseAbandonedJobReservations settles the local claims of jobs no process
+// is driving any more. A reservation row outlives the manager that made it, so
+// after a restart every local-job row names a job of the previous process, and
+// only the ones ResumeInterrupted is about to resume still have an owner. The
+// rest are the 2026-08-29 two-Spark wedge: the serve job of a model this
+// restart marked recovering left its row active with a job id, the head kept
+// renewing the worker's rank from that row alone, and the worker refused every
+// recovery start and every stop because its own rank never went stale. A
+// settled row makes the head stop being a renewal source at once, so the
+// worker reclaims on its ordinary deadline.
+//
+// Ordering. This runs before the allocator's own reconciliation, so a released
+// row no longer counts as the active model's runtime claim and Reconcile
+// rebuilds that claim as the recovery reservation it is meant to be, rather
+// than leaving this node's runtime slot owned by nothing. Both run before
+// ResumeInterrupted and ReconcileActiveModel: nothing is running yet, which is
+// why a job that will legitimately be resumed with its claim is recognised
+// from its durable state and not from this manager's memory. ReconcileActiveModel
+// then launches the recovery start, which prepares a reservation of its own.
+func (e *Engine) releaseAbandonedJobReservations(ctx context.Context) error {
+	reservations, err := e.reservations.AllReservations(ctx)
+	if err != nil {
+		return err
+	}
+	for _, reservation := range reservations {
+		if reservation.State != "committed" && reservation.State != "active" {
+			continue
+		}
+		if reservation.Claims.Kind != fleet.ClaimKindLocalJob {
+			continue
+		}
+		jobID := reservation.JobID
+		if jobID == "" {
+			jobID = reservation.Claims.JobID
+		}
+		if jobID == "" || e.isDriving(jobID) {
+			continue
+		}
+		job, err := e.store.GetJob(ctx, jobID)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil && job.State == "interrupted" {
+			continue
+		}
+		if err := e.reservations.Release(ctx, reservation.ReservationID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RenewDistributedReservations proves that this manager still owns every
@@ -365,6 +457,17 @@ func (e *Engine) ReconcileReservations(ctx context.Context) error {
 // local reservation in a defer on every job end that does not keep it, so a
 // released row fails this gate, renewals stop, and the worker reclaims on
 // its ordinary deadline.
+//
+// The row alone is still not proof that anything is alive. A manager upgrade
+// restarted the head under a serving two-Spark model, and the old serve job's
+// row came back active with its job id attached, so the sweep renewed the
+// worker's rank on behalf of a process that no longer existed: the worker's
+// lease never went stale, its sweep never reclaimed, and recovery, stop and
+// start were all refused with "this node's runtime is already reserved" until
+// an operator stopped the head by hand (hardware, 2026-08-29). Renewal
+// therefore also requires that this process owns the job's reservation, which
+// covers the job it is running now and the job that left this model serving
+// under this same process, and never a row inherited from a dead one.
 func (e *Engine) RenewDistributedReservations(ctx context.Context) error {
 	renewer, ok := e.executor.(operations.DriverLeaseRenewer)
 	if !ok {
@@ -377,6 +480,9 @@ func (e *Engine) RenewDistributedReservations(ctx context.Context) error {
 	var joined error
 	for _, reservation := range reservations {
 		if (reservation.State != "committed" && reservation.State != "active") || reservation.Claims.Kind != fleet.ClaimKindLocalJob || reservation.Claims.JobID == "" {
+			continue
+		}
+		if !e.isDriving(reservation.Claims.JobID) {
 			continue
 		}
 		selected, ok := recipe.FindVersion(e.allRecipes(), reservation.RecipeID, reservation.RecipeVersion)
@@ -855,6 +961,7 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		if !hasReservation || keepReservation {
 			return
 		}
+		e.forgetDriving(job.ID)
 		_ = e.reservations.Release(context.Background(), reservationID)
 		// A failed switch may have transferred the allocation before its
 		// durable model transaction completed. Re-reading installed_models

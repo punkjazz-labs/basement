@@ -459,6 +459,51 @@ func TestWorkerReservationExpiresSoADeadHeadCannotWedgeThisSpark(t *testing.T) {
 	}
 }
 
+// The worker half of the 2026-08-29 wedge. This Spark held an active rank for
+// the head's serve job. The head restarted, that job died with it, but its
+// surviving reservation row kept the sweep renewing this rank, so the recovery
+// start the head launched next was refused by its own worker and burned its
+// retry budget against a conflict that could never clear. Once the head stops
+// renewing a dead deployment, the ordinary lease deadline is all this node
+// needs to hand itself to the recovery job. Each recovery attempt is a new
+// job, so it asks under a job id of its own.
+func TestARecoveryStartIsAdmittedOnceTheDeadHeadStopsRenewing(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-before-the-upgrade"}); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("serving head preflight status=%d body=%#v", status, body)
+	}
+	if status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("start_container", "job-before-the-upgrade", fixture.distributed)); status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("serving head start status=%d body=%#v", status, body)
+	}
+
+	// The restarted head launches its recovery start. While the dead job's
+	// rank still holds a lease, this Spark can only refuse it.
+	if status, _ := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-reconcile-first"}); status != http.StatusConflict {
+		t.Fatalf("the recovery start was admitted while a leased rank still held this Spark, status=%d", status)
+	}
+	if err := fixture.api.ReclaimExpiredDriverReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !fixture.localExec.isRunning() {
+		t.Fatal("a rank whose lease is still live was reclaimed")
+	}
+
+	// Nothing renews a dead deployment any more, so the lease lapses and the
+	// sweep takes this node back.
+	allocator := fixture.api.engine.Reservations()
+	reservationID := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-before-the-upgrade", fixture.distributed.ID, fixture.distributed.Version)
+	if err := allocator.Renew(ctx, reservationID, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.api.ReclaimExpiredDriverReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-reconcile-next"}); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("the recovery start was still locked out after the dead lease expired: status=%d body=%#v", status, body)
+	}
+}
+
 // The live two-Spark failure of 2026-08-28: the head activated this worker's
 // rank at preflight, then staged an image and weights for longer than the
 // nine-heartbeat lease, so the sweep reclaimed the rank and settled the row.

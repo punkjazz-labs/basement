@@ -450,29 +450,41 @@ func TestWorkerLeaseIsRenewedWhileTheHeadIsStillStaging(t *testing.T) {
 }
 
 // Renewal follows this manager's own deployments and nothing else: a settled
-// reservation, a claim that names no job, another node's rank, and a
-// single-Spark model all have no worker lease to keep alive.
+// reservation, a claim that names no job, another node's rank, a job this
+// process never drove, and a single-Spark model all have no worker lease to
+// keep alive.
 func TestDistributedLeaseRenewalCoversStagingAndSkipsEverythingElse(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
-		name        string
+		name string
+		// driving means this manager still has the job in memory, as it does
+		// for every job it prepared itself. A row it never prepared was left
+		// behind by a manager that is gone.
+		driving     bool
 		state       string
 		kind        string
 		jobID       string
 		single      bool
 		wantRenewed bool
 	}{
-		{name: "committed deployment in staging", state: "committed", kind: fleet.ClaimKindLocalJob, jobID: "job-staging", wantRenewed: true},
-		{name: "active deployment serving", state: "active", kind: fleet.ClaimKindLocalJob, jobID: "job-serving", wantRenewed: true},
-		{name: "released deployment", state: "released", kind: fleet.ClaimKindLocalJob, jobID: "job-over"},
-		{name: "claim naming no job", state: "committed", kind: fleet.ClaimKindLocalJob, jobID: ""},
-		{name: "another driver's rank on this node", state: "active", kind: fleet.ClaimKindLegacyRank, jobID: "job-remote"},
-		{name: "single-Spark deployment", state: "committed", kind: fleet.ClaimKindLocalJob, jobID: "job-single", single: true},
+		{name: "committed deployment in staging", driving: true, state: "committed", kind: fleet.ClaimKindLocalJob, jobID: "job-staging", wantRenewed: true},
+		{name: "active deployment serving", driving: true, state: "active", kind: fleet.ClaimKindLocalJob, jobID: "job-serving", wantRenewed: true},
+		{name: "released deployment", driving: true, state: "released", kind: fleet.ClaimKindLocalJob, jobID: "job-over"},
+		{name: "claim naming no job", driving: true, state: "committed", kind: fleet.ClaimKindLocalJob, jobID: ""},
+		{name: "another driver's rank on this node", driving: true, state: "active", kind: fleet.ClaimKindLegacyRank, jobID: "job-remote"},
+		{name: "single-Spark deployment", driving: true, state: "committed", kind: fleet.ClaimKindLocalJob, jobID: "job-single", single: true},
+		{name: "serving deployment of a manager that is gone", state: "active", kind: fleet.ClaimKindLocalJob, jobID: "job-of-a-dead-process"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			fake := newFleetExecutor()
 			runner, _, distributed, single := mixedFleet(t, fake)
+			if test.driving {
+				// Memory records the job, never the row's own kind: a rank
+				// belonging to another driver must be skipped for what it is,
+				// not because this fixture forgot it.
+				runner.noteDriving(fleet.ClaimKindLocalJob, test.jobID)
+			}
 			selected := distributed
 			if test.single {
 				selected = single
@@ -516,6 +528,153 @@ func TestDistributedLeaseRenewalCoversStagingAndSkipsEverythingElse(t *testing.T
 			}
 		})
 	}
+}
+
+// The live two-Spark failure of 2026-08-29: a manager upgrade restarted the
+// head under a serving distributed model. The old serve job died with that
+// process, but its local reservation came back active with the job id still
+// attached, so the restarted head renewed the worker's rank from the row every
+// ten seconds forever. The worker's lease never went stale, its sweep never
+// reclaimed the rank, and the designed recovery start, a stop, and a start
+// were all refused with "this node's runtime is already reserved" until an
+// operator stopped the head manager by hand. A dead job's row must be settled
+// at startup and must never be a renewal source again.
+func TestARestartedHeadNeverRenewsADeadDeploymentsWorkerRank(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "manager.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := twoSparkRecipe(t)
+	r.ID = "restarted-head-model"
+	install, _, err := s.CreateJob(ctx, "install", r.ID, "serving-before-the-upgrade", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := New(s, newFleetExecutor(), []recipe.Recipe{r})
+	before.Start(install.ID)
+	waitJob(t, s, install.ID, "ready")
+	// A first activation also measures the model, and that job outlives the
+	// install. Closing the database under it is a test artefact, not part of
+	// the incident, so the fixture waits for this manager to go quiet.
+	waitJobsSettled(t, s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The upgrade restarts the manager. The model is marked recovering and the
+	// serve job's reservation is all that is left of the deployment.
+	s, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	fake := newFleetExecutor()
+	restarted := New(s, fake, []recipe.Recipe{r})
+	restarted.recoveryRetryDelay = 20 * time.Millisecond
+	reservationID := fleet.ReservationID(fleet.ClaimKindLocalJob, install.ID)
+	held, err := restarted.Reservations().Reservation(ctx, reservationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.State != "active" || held.Claims.JobID != install.ID {
+		t.Fatalf("the dead serve job left a %q reservation for job %q, so this test no longer replays the incident", held.State, held.Claims.JobID)
+	}
+
+	if err := restarted.ReconcileReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := restarted.Reservations().Reservation(ctx, reservationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.State != "released" {
+		t.Fatalf("the dead serve job's claim is %q after startup, so the restarted head is still a renewal source for it", settled.State)
+	}
+	if err := restarted.RenewDistributedReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if renewals := fake.recordedRenewals(); len(renewals) != 0 {
+		t.Fatalf("the restarted head renewed the worker rank of a job that died with the previous process: %v", renewals)
+	}
+
+	// Recovery can now take the pair back, because the worker is free to
+	// reclaim its own rank, and the head renews for that job alone.
+	if err := restarted.ReconcileActiveModel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitModelStatus(t, s, r.ID, "ready")
+	waitJobsSettled(t, s)
+	if err := restarted.RenewDistributedReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovery := onlyStartJob(t, s, r.ID)
+	if renewals := fake.recordedRenewals(); len(renewals) != 1 || renewals[0] != recovery+"@"+r.ID {
+		t.Fatalf("after recovery the head renews %v, want only its own job %s", renewals, recovery)
+	}
+}
+
+func waitJobsSettled(t *testing.T, s *store.Store) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		jobs, err := s.ListJobs(context.Background(), 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		settled := true
+		for _, job := range jobs {
+			if !terminal(job.State) {
+				settled = false
+			}
+		}
+		if settled {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	jobs, _ := s.ListJobs(context.Background(), 100)
+	t.Fatalf("jobs never settled: %+v", jobs)
+}
+
+func waitModelStatus(t *testing.T, s *store.Store, recipeID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		model, err := s.Model(context.Background(), recipeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if model.Status == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	jobs, _ := s.ListJobs(context.Background(), 5)
+	t.Fatalf("model %s never became %s; jobs=%+v", recipeID, want, jobs)
+}
+
+func onlyStartJob(t *testing.T, s *store.Store, recipeID string) string {
+	t.Helper()
+	jobs, err := s.ListJobs(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := ""
+	for _, job := range jobs {
+		if job.Kind != "start" || job.RecipeID != recipeID {
+			continue
+		}
+		if found != "" {
+			t.Fatalf("recovery ran more than one start job for %s", recipeID)
+		}
+		found = job.ID
+	}
+	if found == "" {
+		t.Fatalf("recovery never created a start job for %s", recipeID)
+	}
+	return found
 }
 
 func TestTwoSparkArtifactDownloadsOverlapAndKeepReceiptsPerNode(t *testing.T) {
