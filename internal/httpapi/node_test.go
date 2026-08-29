@@ -182,6 +182,15 @@ func workerStep(operation, jobID string, r recipe.Recipe) map[string]any {
 	}
 }
 
+// workerStepReplacing is a delegated step of a job that takes this node's
+// runtime slot from another model, which is what every step of a switch is
+// until the model it replaces has been stopped.
+func workerStepReplacing(operation, jobID string, r recipe.Recipe, replaces string) map[string]any {
+	step := workerStep(operation, jobID, r)
+	step["replaces_recipe_id"] = replaces
+	return step
+}
+
 func TestDelegatedWorkerStepsRunLocallyAndAreNotForwarded(t *testing.T) {
 	fixture := newNodeFixture(t)
 	status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("create_container", "job-1", fixture.distributed))
@@ -874,6 +883,117 @@ func TestADelegatedStopWithNoRankToHandBackStillStops(t *testing.T) {
 	}
 }
 
+// A staging step can be the first thing a job asks of this node: its check may
+// have run before a restart, or its rank may have lapsed while the head staged
+// its own copy. Such a step takes the same claim the check takes, so it has to
+// be able to name the same model.
+func TestAWorkerAdmitsAStagingStepThatNamesTheModelItReplaces(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	allocator := fixture.api.engine.Reservations()
+	serveID := servingRank(t, fixture, "job-serve", fixture.distributed)
+
+	step := workerStepReplacing("pull_image", "job-install-inkling", fixture.sglang, fixture.distributed.ID)
+	status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, step)
+	if status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("a staging step naming the model it replaces was refused: status=%d body=%#v", status, body)
+	}
+	replaced, err := allocator.Reservation(ctx, serveID)
+	if err != nil || replaced.State != "released" {
+		t.Fatalf("the replaced model kept its claim on this node: %+v err=%v", replaced, err)
+	}
+	arrived := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-install-inkling", fixture.sglang.ID, fixture.sglang.Version)
+	claimed, err := allocator.Reservation(ctx, arrived)
+	if err != nil || claimed.State != "active" {
+		t.Fatalf("the arriving model did not take this node's rank: %+v err=%v", claimed, err)
+	}
+}
+
+// A rank is handed back because it stopped, never because a stop was tried. A
+// rank whose container is still up must keep its claim: this node is occupied,
+// and it is the claim that says so. Releasing it would admit a second model
+// onto memory the first one still holds, and it would put that rank out of
+// reach of the sweep for good, because only an active or reclaiming row is ever
+// reclaimed.
+func TestAFailedDelegatedStopKeepsTheRankItCouldNotHandBack(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	allocator := fixture.api.engine.Reservations()
+	serveID := servingRank(t, fixture, "job-serve", fixture.distributed)
+	fixture.localExec.fail("stop_container", errors.New("the container manager refused to stop this rank"))
+
+	status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("stop_container", "job-stop", fixture.distributed))
+	if status != http.StatusOK {
+		t.Fatalf("worker step status=%d body=%#v", status, body)
+	}
+	if message, _ := body["error"].(string); message == "" {
+		t.Fatalf("a stop that failed was reported as a success: %#v", body)
+	}
+	held, err := allocator.Reservation(ctx, serveID)
+	if err != nil || held.State != "active" {
+		t.Fatalf("a rank that never stopped was handed back anyway: %+v err=%v", held, err)
+	}
+	// This node stays closed while that rank runs.
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.sglang, "job_id": "job-install-inkling"}); status != http.StatusConflict {
+		t.Fatalf("another model was admitted onto a rank that is still running: status=%d body=%#v", status, body)
+	}
+
+	// The head's teardown sends the stop again. It adopts the very same rank,
+	// and this time the rank really does go back.
+	fixture.localExec.succeed("stop_container")
+	status, body = fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("stop_container", "job-stop", fixture.distributed))
+	if status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("the retried stop was refused: status=%d body=%#v", status, body)
+	}
+	if used := fixture.localExec.reservationFor("stop_container"); used != serveID {
+		t.Fatalf("the retry ran under %q, want the serving rank %q", used, serveID)
+	}
+	handedBack, err := allocator.Reservation(ctx, serveID)
+	if err != nil || handedBack.State != "released" {
+		t.Fatalf("the stopped rank was not handed back: %+v err=%v", handedBack, err)
+	}
+}
+
+// The rank belongs to the model, not to the version of it that took the rank.
+// A managed container is named after the recipe id alone, so a rank an earlier
+// version left running is the rank this stop is about, and a stop that walked
+// past it would leave this node holding memory nobody can free.
+func TestADelegatedStopAdoptsTheRankOfAnyVersionOfTheSameModel(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	allocator := fixture.api.engine.Reservations()
+
+	// A rank this node took for another version of the model being stopped.
+	otherVersion := fixture.distributed.Version + 1
+	rankID := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-serve-other-version", fixture.distributed.ID, otherVersion)
+	if _, _, err := allocator.Prepare(ctx, fleet.ReservationRequest{
+		ReservationID: rankID, DeploymentID: "legacy-rank:job-serve-other-version", DriverNodeID: "legacy-head",
+		RecipeID: fixture.distributed.ID, RecipeVersion: otherVersion,
+		Claims:       fleet.Claims{Version: fleet.ClaimsVersion, Kind: fleet.ClaimKindLegacyRank, Runtime: true},
+		PrepareToken: fleet.LocalPrepareToken(rankID), ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Commit(ctx, rankID, fleet.LocalPrepareToken(rankID), []byte(`{"kind":"legacy-rank-compatibility"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := allocator.Activate(ctx, rankID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("stop_container", "job-stop", fixture.distributed))
+	if status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("the stop was refused by a rank of the model it stops: status=%d body=%#v", status, body)
+	}
+	if used := fixture.localExec.reservationFor("stop_container"); used != rankID {
+		t.Fatalf("the stop ran under %q, want the rank of the other version %q", used, rankID)
+	}
+	handedBack, err := allocator.Reservation(ctx, rankID)
+	if err != nil || handedBack.State != "released" {
+		t.Fatalf("the rank of the other version was not handed back: %+v err=%v", handedBack, err)
+	}
+}
+
 // The recipe is the boundary. One model serves across both Sparks while a stop
 // of another model arrives here, and that stop must not touch the serving
 // model's rank. Freeing it would leave this node's memory owned by nothing
@@ -918,20 +1038,17 @@ func TestADelegatedBringUpStepStillRefusesAnotherDeploymentsRank(t *testing.T) {
 	}
 }
 
-// Where the owner's switch stops today, recorded exactly. The plan asks this
-// Spark to check itself first, and it asks before it stops the model it
-// replaces: distributedPlans puts verify_peer_node in front of the staging
-// steps and in front of previousStopPlans. This node's own check takes the
-// runtime slot for the new job when it passes, and the slot belongs to the
-// model that serves here now. So the switch gets a refusal at "check the other
-// Spark", one step in front of the stop this file's other tests repair.
+// A deployment that names no model to replace is refused for as long as one
+// serves here, and so is a deployment that names a model this node does not
+// hold. This is the plain install: nothing about it says this node's slot is
+// free, so it gets the answer it has always got. Only a job whose own plan
+// stops the model that serves may say so, and it has to say which model
+// (TestAWorkerAdmitsADeploymentThatNamesTheModelItReplaces).
 //
-// The memory check is not the reason. The model that serves holds the memory
-// and this node forgives that, so the answer here is the reservation, which is
-// the point of the test: this is the last thing between the owner's click and
-// a switch that completes. A later change must make this node admit a check
-// that names the model it replaces. When it does, this test changes with it.
-func TestASwitchIsRefusedBeforeItCanStopTheModelItReplaces(t *testing.T) {
+// The memory check is not the reason for the refusal. The model that serves
+// holds the memory and this node forgives that at a check, so what answers here
+// is the reservation and nothing else.
+func TestAWorkerRefusesADeploymentThatNamesNoModelToReplace(t *testing.T) {
 	ctx := context.Background()
 	fixture := newNodeFixture(t)
 	allocator := fixture.api.engine.Reservations()
@@ -940,28 +1057,88 @@ func TestASwitchIsRefusedBeforeItCanStopTheModelItReplaces(t *testing.T) {
 	fixture.localExec.runContainer(servingContainer(fixture.distributed))
 	fixture.localExec.fail("verify_memory", liveMemoryShortfall(t, "spark-b", 6_300_000_000))
 
-	status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.sglang, "job_id": "job-install-inkling"})
-	if status != http.StatusConflict {
-		t.Fatalf("this Spark now admits a switch check while another model serves: status=%d body=%#v", status, body)
-	}
-	message, _ := body["error"].(string)
-	if !strings.Contains(message, "already reserved by another deployment") {
-		t.Fatalf("the switch was refused for another reason than the runtime slot: %q", message)
-	}
-	if strings.Contains(message, "of memory free") {
-		t.Fatalf("the memory check refused the switch, which the pardon must prevent: %q", message)
-	}
-	// Every staging step of the new model is refused for the same reason, and
-	// the plan runs those before the stop too.
-	for _, operation := range []string{"pull_image", "download_artifact", "write_generated_config"} {
-		if status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep(operation, "job-install-inkling", fixture.sglang)); status != http.StatusConflict {
-			t.Fatalf("%s for the new model was admitted: status=%d body=%#v", operation, status, body)
+	for _, named := range []string{"", "a-model-this-node-does-not-hold"} {
+		check := map[string]any{"recipe": fixture.sglang, "job_id": "job-install-inkling", "replaces_recipe_id": named}
+		status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, check)
+		if status != http.StatusConflict {
+			t.Fatalf("a check naming %q was admitted while another model serves: status=%d body=%#v", named, status, body)
+		}
+		message, _ := body["error"].(string)
+		if !strings.Contains(message, "already reserved by another deployment") {
+			t.Fatalf("the check was refused for another reason than the runtime slot: %q", message)
+		}
+		if strings.Contains(message, "of memory free") {
+			t.Fatalf("the memory check refused the deployment, which the pardon must prevent: %q", message)
+		}
+		// Every staging step is refused for the same reason, and the plan runs
+		// those before any stop too.
+		for _, operation := range []string{"pull_image", "download_artifact", "write_generated_config"} {
+			step := workerStepReplacing(operation, "job-install-inkling", fixture.sglang, named)
+			if status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, step); status != http.StatusConflict {
+				t.Fatalf("%s naming %q was admitted: status=%d body=%#v", operation, named, status, body)
+			}
 		}
 	}
-	// A refused switch changes nothing. The model that serves keeps its rank.
+	// A refused deployment changes nothing. The model that serves keeps its rank.
 	held, err := allocator.Reservation(ctx, serveID)
 	if err != nil || held.State != "active" {
-		t.Fatalf("a refused switch disturbed the serving rank: %+v err=%v", held, err)
+		t.Fatalf("a refused deployment disturbed the serving rank: %+v err=%v", held, err)
+	}
+}
+
+// The owner's switch, from the check onward. The plan asks this node to check
+// itself before it stops the model it replaces, so a check has to be able to
+// take a slot that model holds. The head names the model, and this node hands
+// the slot over there and then.
+//
+// That is early, and the whole timeline has to be read as one thing: the CLAIM
+// moves at the check, the CONTAINER moves at the stop, and an hour of
+// downloading can sit between them. Nothing may assume the two happen together.
+// What the claim buys is admission for the arriving model; what stops the model
+// that serves is still the plan, and until it runs the old rank keeps running.
+func TestAWorkerAdmitsADeploymentThatNamesTheModelItReplaces(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	allocator := fixture.api.engine.Reservations()
+	serveID := servingRank(t, fixture, "job-serve", fixture.distributed)
+	fixture.localExec.runContainer(servingContainer(fixture.distributed))
+	fixture.localExec.fail("verify_memory", liveMemoryShortfall(t, "spark-b", 6_300_000_000))
+
+	check := map[string]any{"recipe": fixture.sglang, "job_id": "job-install-inkling", "replaces_recipe_id": fixture.distributed.ID}
+	status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, check)
+	if status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("this Spark refused a check that names the model it replaces: status=%d body=%#v", status, body)
+	}
+	replaced, err := allocator.Reservation(ctx, serveID)
+	if err != nil || replaced.State != "released" {
+		t.Fatalf("the replaced model kept its claim on this node: %+v err=%v", replaced, err)
+	}
+	arrived := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-install-inkling", fixture.sglang.ID, fixture.sglang.Version)
+	claimed, err := allocator.Reservation(ctx, arrived)
+	if err != nil || claimed.State != "active" {
+		t.Fatalf("the arriving model did not take this node's rank: %+v err=%v", claimed, err)
+	}
+	// The claim moved. The model has not: nothing stopped it here.
+	if fixture.localExec.executed("stop_container") || !fixture.localExec.isRunning() {
+		t.Fatal("a check stopped the model it replaces; only the plan may do that")
+	}
+
+	// The plan's own stop arrives later, after the staging this node was just
+	// admitted for. Its rank claim is already gone, so it adopts nothing, and it
+	// still stops the model and leaves the arriving model's rank alone.
+	status, body = fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStepReplacing("stop_container", "job-install-inkling", fixture.distributed, fixture.distributed.ID))
+	if status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("the plan could not stop the model it replaced: status=%d body=%#v", status, body)
+	}
+	if used := fixture.localExec.reservationFor("stop_container"); used != "" {
+		t.Fatalf("the stop ran under %q, but its rank claim was handed over at the check", used)
+	}
+	if !fixture.localExec.executed("stop_container") {
+		t.Fatal("the replaced model was never stopped on this node")
+	}
+	stillClaimed, err := allocator.Reservation(ctx, arrived)
+	if err != nil || stillClaimed.State != "active" {
+		t.Fatalf("stopping the replaced model disturbed the arriving model's rank: %+v err=%v", stillClaimed, err)
 	}
 }
 

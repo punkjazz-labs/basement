@@ -12,9 +12,17 @@ type Execution struct {
 	// ReservationID excludes this job's own persistent disk claim from the
 	// other-work total handed to verify_disk. It is process-local execution
 	// context and is never sent to Docker or serialized into a receipt.
-	ReservationID   string
-	Kind            string
-	RemoveArtifacts bool
+	ReservationID string
+	// ReplacesRecipeID names the model this job takes the runtime slot from,
+	// resolved once when the job was planned, exactly as the peer is. The head
+	// already names it to its own allocator; a two-Spark job has to say it on
+	// the worker's wire too, because the worker keeps an admission claim of its
+	// own and cannot see this manager's installed models. It is filled only
+	// when the plan also carries the stop for that model, so a rank is never
+	// declared free on a machine where nothing is going to stop it.
+	ReplacesRecipeID string
+	Kind             string
+	RemoveArtifacts  bool
 	// SharedArtifacts holds artifact keys (repository@revision) and artifact
 	// paths still referenced by other installed models; removal must retain
 	// them instead of deleting shared data.

@@ -69,6 +69,14 @@ func (a *apiExecutor) fail(operation string, reason error) {
 	a.failures[operation] = reason
 }
 
+// succeed lets a check that was failing pass again, which is what a retry of a
+// step that failed for a transient reason meets.
+func (a *apiExecutor) succeed(operation string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.failures, operation)
+}
+
 // runContainer puts a managed container on this node's Docker daemon.
 func (a *apiExecutor) runContainer(container operations.ManagedContainer) {
 	a.mu.Lock()

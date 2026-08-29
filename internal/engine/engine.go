@@ -1093,6 +1093,17 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 		return
 	}
 	plans, previous := planned.plans, planned.previous
+	// The worker Spark holds an admission claim of its own and knows nothing
+	// about this manager's installed models, so a job that replaces a model
+	// there has to name it on the wire. It is resolved here, once, with the
+	// plan, because the worker is asked to check itself long before the
+	// mutating phase where the head names the same predecessor to its own
+	// allocator.
+	execution.ReplacesRecipeID, err = e.workerPredecessor(ctx, r, previous)
+	if err != nil {
+		_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(err.Error()))
+		return
+	}
 	if previous != nil && rollbackWasVerified(job) {
 		if err := e.store.SetModelState(ctx, r.ID, "stopped", false); err != nil && !errors.Is(err, os.ErrNotExist) {
 			e.fail(ctx, jobID, len(plans)-1, fmt.Errorf("recover completed rollback target state: %w", err))
@@ -1306,6 +1317,21 @@ func jobActivates(job store.Job) bool {
 // version because no container switch is needed, but a fresh local job still
 // has to transfer that model's persistent reservation. A worker rank is not
 // an installed local model, so it never gains replacement authority here.
+// workerPredecessor names the model a delegated claim on the other Spark may
+// replace. It is narrower than the head's own predecessor by one case, and
+// deliberately: with no previous model in the plan there is no stop_container
+// in the plan either, and the head's answer would then be this same model
+// already active here. Sending that to the worker would let a new job declare a
+// live rank free without anything stopping its container, which is how a
+// recovery start would silently double a rank the sweep can no longer reclaim.
+// A worker may therefore free only a rank this job is going to stop.
+func (e *Engine) workerPredecessor(ctx context.Context, target recipe.Recipe, previous *recipe.Recipe) (string, error) {
+	if previous == nil {
+		return "", nil
+	}
+	return e.reservationPredecessor(ctx, target, previous)
+}
+
 func (e *Engine) reservationPredecessor(ctx context.Context, target recipe.Recipe, previous *recipe.Recipe) (string, error) {
 	if previous != nil {
 		return previous.ID, nil

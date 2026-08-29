@@ -63,6 +63,10 @@ type fleetExecutor struct {
 	peerReady    bool
 	peerAsked    int
 	renewals     []string
+	// replaces records the model each step told its node this job takes the
+	// runtime slot from. Only what reaches the other Spark can free a claim
+	// there, so it is recorded per step and per node.
+	replaces []string
 }
 
 type gatedFleetExecutor struct {
@@ -249,6 +253,7 @@ func (f *fleetExecutor) Execute(_ context.Context, execution operations.Executio
 	key := op.Type + "@" + node
 	f.events = append(f.events, key)
 	f.detail = append(f.detail, op.Type+"/"+r.ID+"@"+node)
+	f.replaces = append(f.replaces, op.Type+"/"+r.ID+"@"+node+"="+execution.ReplacesRecipeID)
 	receipt := map[string]any{"operation": op.Type, "node": execution.Placement.NodeName, "node_role": execution.Placement.Role}
 	if op.Type == "measure_throughput" {
 		receipt["tokens_per_second"] = 42.5
@@ -293,6 +298,12 @@ func (f *fleetExecutor) recordedDetail() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string{}, f.detail...)
+}
+
+func (f *fleetExecutor) recordedReplacements() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.replaces...)
 }
 
 func (f *fleetExecutor) recordedRenewals() []string {
@@ -1584,6 +1595,111 @@ func mixedFleet(t *testing.T, fake *fleetExecutor) (*Engine, *store.Store, recip
 	}
 	single, _ := recipe.Find(builtin, "qwen36-35b-a3b-nvfp4-1s")
 	return New(s, fake, []recipe.Recipe{distributed, single}), s, distributed, single
+}
+
+// twoDistributedFleet gives this manager two different two-Spark models, which
+// is what a switch from one of them to the other needs.
+func twoDistributedFleet(t *testing.T, fake *fleetExecutor) (*Engine, *store.Store, recipe.Recipe, recipe.Recipe) {
+	t.Helper()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	serving := twoSparkRecipe(t)
+	serving.ID = "two-spark-model"
+	replacement := twoSparkRecipe(t)
+	replacement.ID = "two-spark-replacement"
+	return New(s, fake, []recipe.Recipe{serving, replacement}), s, serving, replacement
+}
+
+// A worker Spark keeps no installed-model rows and takes an admission claim of
+// its own, so a job that replaces a model there has to name it. The name has to
+// travel with the check and with every staging step, because all of them reach
+// that Spark before the stop of the model being replaced does.
+//
+// A job that replaces nothing names nothing, and that matters as much: the
+// worker refuses a claim that names no model while one serves, which is the
+// only thing standing between a second deployment and a rank that is running.
+func TestASwitchTellsTheOtherSparkWhichModelItReplaces(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, serving, replacement := twoDistributedFleet(t, fake)
+
+	first, _, err := s.CreateJob(ctx, "install", serving.ID, "install-first", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(first.ID)
+	waitJob(t, s, first.ID, "ready")
+	for _, named := range fake.recordedReplacements() {
+		if !strings.HasSuffix(named, "=") {
+			t.Fatalf("an install with no model to replace named one anyway: %s", named)
+		}
+	}
+
+	fake.mu.Lock()
+	fake.events, fake.detail, fake.replaces = nil, nil, nil
+	fake.mu.Unlock()
+
+	second, _, err := s.CreateJob(ctx, "install", replacement.ID, "install-second", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(second.ID)
+	waitJob(t, s, second.ID, "ready")
+
+	named := fake.recordedReplacements()
+	for _, want := range []string{
+		operations.VerifyPeerNode + "/" + replacement.ID + "@worker=" + serving.ID,
+		"pull_image/" + replacement.ID + "@worker=" + serving.ID,
+		"create_container/" + replacement.ID + "@worker=" + serving.ID,
+		"start_container/" + replacement.ID + "@worker=" + serving.ID,
+	} {
+		if indexOf(named, want) < 0 {
+			t.Fatalf("the other Spark was not told which model this job replaces: want %s in %v", want, named)
+		}
+	}
+}
+
+// A start of the model that already serves replaces nothing, and its plan
+// carries no stop for anything. The head's own claim names that model as its
+// predecessor, because on this machine the claim and the container are the same
+// deployment; the other Spark is told nothing, because there a name would free
+// a rank that nothing in this plan is going to stop.
+func TestARestartOfTheServingModelTellsTheOtherSparkNothingToReplace(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, serving, _ := twoDistributedFleet(t, fake)
+
+	install, _, err := s.CreateJob(ctx, "install", serving.ID, "install-serving", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(install.ID)
+	waitJob(t, s, install.ID, "ready")
+
+	fake.mu.Lock()
+	fake.events, fake.detail, fake.replaces = nil, nil, nil
+	fake.mu.Unlock()
+
+	restart, _, err := s.CreateJob(ctx, "start", serving.ID, "start-serving-again", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(restart.ID)
+	waitJob(t, s, restart.ID, "ready")
+
+	named := fake.recordedReplacements()
+	if indexOf(named, operations.VerifyPeerNode+"/"+serving.ID+"@worker=") < 0 {
+		t.Fatalf("the other Spark was never checked by the restart: %v", named)
+	}
+	for _, entry := range named {
+		if strings.HasSuffix(entry, "@worker=") || !strings.Contains(entry, "@worker=") {
+			continue
+		}
+		t.Fatalf("a restart told the other Spark to free a rank nothing in its plan stops: %s", entry)
+	}
 }
 
 func TestSwitchingAwayFromADistributedModelStopsBothOfItsRanks(t *testing.T) {

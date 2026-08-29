@@ -259,6 +259,11 @@ func (s *Server) nodePreflight(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Recipe recipe.Recipe `json:"recipe"`
 		JobID  string        `json:"job_id"`
+		// ReplacesRecipeID is the model the calling head is taking this node's
+		// runtime slot from. It is an id and nothing more: an id this node
+		// holds no active claim for matches nothing, and the claim is then
+		// refused exactly as it is when no model is named at all.
+		ReplacesRecipeID string `json:"replaces_recipe_id"`
 	}
 	if err := decodeBody(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -291,7 +296,14 @@ func (s *Server) nodePreflight(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, preflight)
 		return
 	}
-	if err := s.engine.Reservations().Activate(r.Context(), reservationID, ""); err != nil {
+	// A node evaluates itself before the job that asks stages anything, and a
+	// check that passes takes this node's runtime slot for that job. The slot
+	// can belong to the model the same job is going to stop, and this node
+	// cannot know that by itself: it keeps no installed-model rows, so the head
+	// names the model it replaces. Without that name a switch was refused here,
+	// one step before the stop that would have freed the rank, and no two-Spark
+	// model could be replaced from the console.
+	if err := s.engine.Reservations().Activate(r.Context(), reservationID, request.ReplacesRecipeID); err != nil {
 		_ = s.engine.Reservations().Abort(r.Context(), reservationID)
 		writeError(w, http.StatusConflict, fmt.Errorf("this node's runtime is already reserved by another deployment: %w", err))
 		return
@@ -345,6 +357,9 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		Placement       operations.Placement `json:"placement"`
 		RemoveArtifacts bool                 `json:"remove_artifacts"`
 		JobID           string               `json:"job_id"`
+		// ReplacesRecipeID carries the same answer the check carried: the
+		// staging steps of a switch also arrive before its stop does.
+		ReplacesRecipeID string `json:"replaces_recipe_id"`
 	}
 	if err := decodeBody(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -364,6 +379,16 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reservationID := ""
+	// handedBack is set once the operation has really ended this node's part in
+	// the deployment. A rank is given back because it stopped, never because
+	// something was attempted: an adopted claim released after a FAILED stop
+	// would open this node to a second model while the first one still holds
+	// the memory, and it would also take the failed rank out of reach of
+	// ReclaimExpiredDriverReservations for good, because only an active or
+	// reclaiming row is ever swept (LegacyRanksDueForReclaim). The head's
+	// teardown retry adopts the very same row and hands it back when it
+	// succeeds, so keeping it wedges nothing.
+	handedBack := false
 	if releasingOperations[request.Operation] {
 		// A releasing step hands this node's rank back; it must never compete
 		// for the slot it exists to free. A rank identity is per job, and the
@@ -385,7 +410,11 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		}
 		if adopted != "" {
 			reservationID = adopted
-			defer s.engine.Reservations().Release(context.Background(), adopted)
+			defer func() {
+				if handedBack {
+					_ = s.engine.Reservations().Release(context.Background(), adopted)
+				}
+			}()
 		}
 		// An empty answer means this node holds no rank for that recipe, so
 		// there is nothing to hand back and nothing to claim either. A
@@ -400,7 +429,7 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err)
 			return
 		}
-		if err := s.engine.Reservations().Activate(r.Context(), prepared, ""); err != nil {
+		if err := s.engine.Reservations().Activate(r.Context(), prepared, request.ReplacesRecipeID); err != nil {
 			writeError(w, http.StatusConflict, fmt.Errorf("this node's runtime is already reserved by another deployment: %w", err))
 			return
 		}
@@ -430,6 +459,7 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 	// The recipe executed is this Spark's own copy, never the bytes the
 	// caller sent, and it runs locally rather than being forwarded onward.
 	receipt, err := s.localExecutor().Execute(r.Context(), execution, recipe.Operation{Type: request.Operation}, trusted, progress)
+	handedBack = err == nil
 	response := map[string]any{"receipt": receipt}
 	if err != nil {
 		response["error"] = redact.String(err.Error())
@@ -451,6 +481,14 @@ func (s *Server) nodeStepProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	operation, receipt, running := s.nodeProgress.snapshot(request.JobID)
 	if running {
+		// A step running under an ADOPTED rank is answered with a refusal here,
+		// on purpose: the adopted row carries the job id of the deployment that
+		// took the rank, not of the job that is handing it back, so this job
+		// owns no active rank of its own to renew. That costs nothing. A failed
+		// poll is skipped by the head (PeerClient.follow) and no releasing
+		// operation reports progress. Matching the poller to the row instead
+		// would widen who may renew a rank, which is the surface the reservation
+		// incidents of 2026-08-29 were about.
 		if _, err := s.renewActiveLegacyJob(r.Context(), request.JobID); err != nil {
 			writeError(w, http.StatusConflict, err)
 			return

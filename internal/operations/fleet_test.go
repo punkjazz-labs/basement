@@ -431,6 +431,52 @@ func TestPlacementsRefuseWhenNoWorkerIsConfigured(t *testing.T) {
 	}
 }
 
+// The other Spark takes an admission claim of its own when it checks itself,
+// and again at every step it stages, both of which happen before this job's
+// plan stops the model it replaces. That Spark keeps no installed-model rows,
+// so it cannot know which model this job replaces unless the head says so on
+// both wires.
+func TestTheOtherSparkIsToldWhichModelThisJobReplaces(t *testing.T) {
+	r := twoSparkRecipe(t)
+	var mu sync.Mutex
+	bodies := map[string]map[string]any{}
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		mu.Lock()
+		bodies[request.URL.Path] = body
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/api/v1/internal/node/preflight":
+			_, _ = io.WriteString(w, `{"ready":true,"checks":[]}`)
+		case "/api/v1/internal/node/step":
+			_, _ = io.WriteString(w, `{"receipt":{"operation":"pull_image"}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer peer.Close()
+
+	target := PeerTarget{ID: "peer_1", Name: "spark-b", BaseURL: peer.URL, APIKey: "worker-key"}
+	client := NewPeerClient(func(context.Context) (PeerTarget, error) { return target, nil })
+	execution := Execution{JobID: "job-install-b", ReplacesRecipeID: "the-model-that-serves",
+		Placement: Placement{Role: RoleWorker, NodeName: "spark-b", NodeCount: 2}}
+	if _, err := client.Preflight(context.Background(), target, execution, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Step(context.Background(), target, execution, recipe.Operation{Type: "pull_image"}, r, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range []string{"/api/v1/internal/node/preflight", "/api/v1/internal/node/step"} {
+		if bodies[path]["replaces_recipe_id"] != "the-model-that-serves" {
+			t.Fatalf("%s did not name the model this job replaces: %#v", path, bodies[path])
+		}
+	}
+}
+
 // TestWorkerStepProgressReachesTheConsole is the two-Spark half of the
 // download and image-pull progress the console shows: the worker's step call
 // only answers when the step is over, so the head has to poll for what is
