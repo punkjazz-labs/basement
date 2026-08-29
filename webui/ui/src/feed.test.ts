@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RecipeFeedHealth } from './api'
-import {
-  ageInDays, feedNote, relativeTime, revokeBody, revoked, rowRevocation,
-  STALE_FEED_TITLE, UNREACHABLE_FEED_TITLE,
-} from './feed'
+import { ageInDays, feedNote, relativeTime, revokeBody, revoked, rowRevocation } from './feed'
 
 const NOW = Date.parse('2026-08-12T12:00:00Z')
 const ago = (ms: number): string => new Date(NOW - ms).toISOString()
@@ -45,34 +42,31 @@ describe('how long ago something happened', () => {
 })
 
 describe('the line under the models table', () => {
-  // The line states the fact and stops. Nothing on this page explains itself
-  // in a sentence the eye has to read past, so the happy line carries no
-  // tooltip at all: there is nothing left to say about it.
+  // The recipes really were updated, so this line names them.
   it('says when the feed was last updated while all is well', () => {
     expect(feedNote(health(), NOW)).toEqual({ text: 'Recipes updated 3 hours ago', warn: false })
   })
 
-  // What an unreachable feed means for the models on screen is the tooltip,
-  // not the line: the last signed copy is what the table is drawn from.
+  // The feed is what cannot be reached, and the signed list this console
+  // already holds is what the table is drawn from meanwhile. Neither of those
+  // is the recipes, so neither line names them.
   it('says the last signed copy is standing in while the feed cannot be reached', () => {
     expect(feedNote(health({ state: 'unreachable', fetched_at: ago(2 * DAY) }), NOW)).toEqual({
-      text: 'Recipes unreachable since 2 days ago',
+      text: 'Recipe feed unreachable since 2 days ago, showing the last signed copy',
       warn: false,
-      title: UNREACHABLE_FEED_TITLE,
     })
   })
 
   it('warns about an old index whatever the last attempt did', () => {
     const expected = {
-      text: 'Recipes 40 days old',
+      text: 'Recipe list 40 days old; may be missing updates.',
       warn: true,
-      title: STALE_FEED_TITLE,
     }
     expect(feedNote(health({ stale: true, accepted_generated_at: ago(40 * DAY) }), NOW)).toEqual(expected)
     expect(feedNote(health({ state: 'unreachable', stale: true, accepted_generated_at: ago(40 * DAY) }), NOW))
       .toEqual(expected)
     expect(feedNote(health({ stale: true, accepted_generated_at: ago(DAY) }), NOW)?.text)
-      .toBe('Recipes 1 day old')
+      .toBe('Recipe list 1 day old; may be missing updates.')
   })
 
   it('says nothing about a feed that has never been fetched', () => {

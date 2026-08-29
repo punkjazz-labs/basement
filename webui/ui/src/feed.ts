@@ -49,37 +49,32 @@ export interface FeedNote {
   // An old index could be missing a revocation, which is worth an amber line.
   // Everything else the feed reports is ordinary and stays quiet.
   warn: boolean
-  // What the line does not say out loud. The console keeps its explanations in
-  // tooltips, so the reason a state matters sits here and not in the words the
-  // eye reads first.
-  title?: string
 }
-
-// What an old index and an unreachable feed mean, for the tooltip over the
-// line. The line itself states the fact; these state what follows from it.
-export const STALE_FEED_TITLE = 'This index can miss new recipes and withdrawals.'
-export const UNREACHABLE_FEED_TITLE = 'The last signed copy is on screen.'
 
 // The line under the models table. A feed that has never been fetched gets no
 // line at all: there is no feed running yet, and a sentence about one would be
 // noise rather than news. Every other case needs the timestamp it would quote,
 // and says nothing without it.
+//
+// Each line names the thing it speaks of. The happy line speaks of the recipes
+// themselves, which really were updated. The other two speak of the signed
+// list this console holds and of the feed it reads that list from, and neither
+// of those is the recipes.
 export function feedNote(health: RecipeFeedHealth | null | undefined, nowMs: number): FeedNote | null {
   if (!health || health.state === 'never_fetched') return null
   if (health.stale) {
     const days = ageInDays(health.accepted_generated_at, nowMs)
     if (days !== null) {
       return {
-        text: `Recipes ${days} ${days === 1 ? 'day' : 'days'} old`,
+        text: `Recipe list ${days} ${days === 1 ? 'day' : 'days'} old; may be missing updates.`,
         warn: true,
-        title: STALE_FEED_TITLE,
       }
     }
   }
   if (health.state === 'unreachable') {
     const since = relativeTime(health.fetched_at, nowMs)
     return since
-      ? { text: `Recipes unreachable since ${since}`, warn: false, title: UNREACHABLE_FEED_TITLE }
+      ? { text: `Recipe feed unreachable since ${since}, showing the last signed copy`, warn: false }
       : null
   }
   if (health.state === 'ok') {
