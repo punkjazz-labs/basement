@@ -1436,7 +1436,7 @@ func TestDistributedRenewalFailureRecoversWithOneDurableWholeGroupStart(t *testi
 	runner.Start(job.ID)
 	waitJob(t, s, job.ID, "ready")
 
-	if err := runner.RecoverDistributedServing(ctx, r.ID, "worker rank was no longer running"); err != nil {
+	if err := runner.RecoverDistributedServing(ctx, r.ID, "worker rank was no longer running", false); err != nil {
 		t.Fatal(err)
 	}
 	var recovery store.Job
@@ -1496,6 +1496,45 @@ func TestDistributedRenewalFailureRecoversWithOneDurableWholeGroupStart(t *testi
 	}
 	if len(starts) != 1 {
 		t.Fatalf("automatic recovery made %d start jobs, want one", len(starts))
+	}
+}
+
+// A failed model row is written before either rank is stopped, so it cannot
+// itself authorize recovery. Even an erroneous retry marker must not create a
+// fresh group while the original head reservation is still active because the
+// worker stop was incomplete.
+func TestIncompleteDistributedStopNeverCreatesRecoveryJob(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, r := newTwoSparkEngine(t, fake)
+	install, _, err := s.CreateJob(ctx, "install", r.ID, "serve-before-incomplete-stop", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(install.ID)
+	waitJob(t, s, install.ID, "ready")
+
+	fake.failStepNode = "stop_container@worker"
+	err = runner.RecoverDistributedServing(ctx, r.ID, "worker rank was no longer running", true)
+	if err == nil || !strings.Contains(err.Error(), "stop failed worker rank") {
+		t.Fatalf("incomplete group stop error=%v, want worker stop failure", err)
+	}
+	model, err := s.Model(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Active || model.Status != "failed" {
+		t.Fatalf("incompletely stopped model=%+v", model)
+	}
+	jobs, err := s.ListJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range jobs {
+		var payload map[string]any
+		if candidate.Kind == "start" && json.Unmarshal(candidate.Payload, &payload) == nil && payload["recovery"] == "distributed_worker_renewal" {
+			t.Fatalf("incomplete stop created recovery job %s", candidate.ID)
+		}
 	}
 }
 

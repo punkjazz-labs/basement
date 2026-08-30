@@ -1346,7 +1346,7 @@ func TestRenewalFailureToleratesABlipThenFailsAfterFreshness(t *testing.T) {
 	var renewErr error = fail
 	failed := 0
 	fixture.api.renewDistributed = func(context.Context) error { return renewErr }
-	fixture.api.recoverDistributed = func(_ context.Context, _ string, reason string) error {
+	fixture.api.recoverDistributed = func(_ context.Context, _ string, reason string, _ bool) error {
 		if !strings.Contains(reason, "no longer running") {
 			t.Fatalf("recovery reason=%q", reason)
 		}
@@ -1399,7 +1399,7 @@ func TestActiveDistributedHeadHealthFeedsTheRenewalFailureWindow(t *testing.T) {
 		}
 		return errors.New("the active model did not answer its /health check")
 	}
-	fixture.api.recoverDistributed = func(_ context.Context, recipeID, reason string) error {
+	fixture.api.recoverDistributed = func(_ context.Context, recipeID, reason string, _ bool) error {
 		if recipeID != fixture.distributed.ID || !strings.Contains(reason, "/health") {
 			t.Fatalf("recovery target=%q reason=%q", recipeID, reason)
 		}
@@ -1436,9 +1436,12 @@ func TestRecoveryJobRecordingRetriesAtABoundedHeartbeatPace(t *testing.T) {
 	fixture.api.recoveryReason = "the worker model container is no longer running"
 	fixture.api.recoveryJobAttempts = 1 // the original attempt already failed
 	calls := 0
-	fixture.api.recoverDistributed = func(_ context.Context, recipeID, reason string) error {
+	fixture.api.recoverDistributed = func(_ context.Context, recipeID, reason string, retry bool) error {
 		if recipeID != fixture.distributed.ID || !strings.Contains(reason, "no longer running") {
 			t.Fatalf("retry target=%q reason=%q", recipeID, reason)
+		}
+		if !retry {
+			t.Fatal("a recorded-job retry was not marked safe")
 		}
 		calls++
 		return fmt.Errorf("%w: database temporarily unavailable", engine.ErrDistributedRecoveryJob)

@@ -618,9 +618,11 @@ var ErrDistributedRecoveryJob = errors.New("record distributed recovery job")
 // recovery just like a console start would. There is deliberately no watcher
 // here: if that one job fails, the failed model remains closed to admission
 // until an operator starts it again or a later, distinct failure event occurs.
-func (e *Engine) RecoverDistributedServing(ctx context.Context, recipeID, reason string) error {
+// retryRecoveryJob is true only after ErrDistributedRecoveryJob: that prior
+// error proves the old group stopped and released before job recording failed.
+func (e *Engine) RecoverDistributedServing(ctx context.Context, recipeID, reason string, retryRecoveryJob bool) error {
 	recover, failErr := e.failDistributedServing(ctx)
-	if len(recover) == 0 && recipeID != "" {
+	if len(recover) == 0 && retryRecoveryJob && recipeID != "" {
 		if selected, ok := e.failedDistributedRecipe(ctx, recipeID); ok {
 			recover = append(recover, selected)
 		}
@@ -660,6 +662,21 @@ func (e *Engine) failedDistributedRecipe(ctx context.Context, recipeID string) (
 	model, err := e.store.Model(ctx, recipeID)
 	if err != nil || model.Active || model.Status != "failed" {
 		return recipe.Recipe{}, false
+	}
+	// A failed model row is not proof that its ranks stopped: failure is made
+	// durable before teardown so admission closes even if a stop cannot reach a
+	// node. A live local reservation for this exact pinned recipe is the
+	// contrary proof and keeps recovery from overlapping that still-running
+	// group, including if a caller accidentally retries with the recovery flag.
+	reservations, err := e.reservations.AllReservations(ctx)
+	if err != nil {
+		return recipe.Recipe{}, false
+	}
+	for _, reservation := range reservations {
+		if reservation.RecipeID == model.RecipeID && reservation.RecipeVersion == model.RecipeVersion &&
+			(reservation.State == "active" || reservation.State == "committed") {
+			return recipe.Recipe{}, false
+		}
 	}
 	selected, ok := e.pinnedOrEffective(model.RecipeID, model.RecipeVersion)
 	return selected, ok && selected.Distributed()

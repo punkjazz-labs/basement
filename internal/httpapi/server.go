@@ -82,7 +82,7 @@ type Server struct {
 	// a brief management-path failure, but sustained failures must revoke this
 	// head's ready claim before the worker reaches its reclaim deadline.
 	renewDistributed   func(context.Context) error
-	recoverDistributed func(context.Context, string, string) error
+	recoverDistributed func(context.Context, string, string, bool) error
 	headHealth         func(context.Context, recipe.Recipe) error
 	renewalMu          sync.Mutex
 	renewalFailures    int
@@ -206,7 +206,7 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 		server.recoverDistributed = e.RecoverDistributedServing
 	} else {
 		server.renewDistributed = func(context.Context) error { return nil }
-		server.recoverDistributed = func(context.Context, string, string) error { return nil }
+		server.recoverDistributed = func(context.Context, string, string, bool) error { return nil }
 	}
 	server.headHealth = server.proveDistributedHeadHealth
 	server.SetRecipes(recipes, recipes)

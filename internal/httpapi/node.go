@@ -643,7 +643,7 @@ func (s *Server) maintainDistributedServing(ctx context.Context, observed time.T
 			recipeID, reason := s.recoveryRecipeID, s.recoveryReason
 			s.recoveryJobAttempts++
 			s.renewalMu.Unlock()
-			s.retryDistributedRecovery(ctx, recipeID, reason)
+			s.retryDistributedRecovery(ctx, recipeID, reason, true)
 			return
 		}
 		s.resetDistributedRecoveryLocked()
@@ -671,7 +671,7 @@ func (s *Server) maintainDistributedServing(ctx context.Context, observed time.T
 	// while the engine stops the same group and records its one durable recovery
 	// job. The engine records failed before either stop, which closes inference
 	// admission even when the worker is unreachable.
-	s.retryDistributedRecovery(ctx, active.ID, redact.String(err.Error()))
+	s.retryDistributedRecovery(ctx, active.ID, redact.String(err.Error()), false)
 }
 
 // proveDistributedHeadHealth uses the same local executor capability as the
@@ -689,8 +689,8 @@ func (s *Server) proveDistributedHeadHealth(ctx context.Context, active recipe.R
 	return errors.New("the active model did not answer its /health check")
 }
 
-func (s *Server) retryDistributedRecovery(ctx context.Context, recipeID, reason string) {
-	err := s.recoverDistributed(ctx, recipeID, reason)
+func (s *Server) retryDistributedRecovery(ctx context.Context, recipeID, reason string, retryRecoveryJob bool) {
+	err := s.recoverDistributed(ctx, recipeID, reason, retryRecoveryJob)
 	s.renewalMu.Lock()
 	defer s.renewalMu.Unlock()
 	if err == nil {
