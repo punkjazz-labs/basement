@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1285,6 +1286,169 @@ func TestWorkerReservationRenewalKeepsAHealthyHeadActive(t *testing.T) {
 	active, err := allocator.Reservation(ctx, reservationID)
 	if err != nil || active.State != "active" {
 		t.Fatalf("renewed worker reservation=%+v err=%v", active, err)
+	}
+}
+
+func TestWorkerRenewalAdoptsARankStartedByThePreviousManager(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-upgrade"}); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("preflight status=%d body=%#v", status, body)
+	}
+	// The running container predates delegated_rank_liveness, so no row exists
+	// even though the exact recipe container is healthy.
+	fixture.localExec.mu.Lock()
+	fixture.localExec.running = true
+	fixture.localExec.mu.Unlock()
+	allocator := fixture.api.engine.Reservations()
+	reservationID := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-upgrade", fixture.distributed.ID, fixture.distributed.Version)
+	if _, known, err := fixture.api.store.DelegatedRankRunning(ctx, reservationID); err != nil || known {
+		t.Fatalf("pre-upgrade liveness known=%v err=%v", known, err)
+	}
+
+	status, body := fixture.post(t, "/api/v1/internal/node/reservation/renew", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-upgrade"})
+	if status != http.StatusOK || body["expires_at"] == "" {
+		t.Fatalf("upgrade adoption status=%d body=%#v", status, body)
+	}
+	if running, known, err := fixture.api.store.DelegatedRankRunning(ctx, reservationID); err != nil || !known || !running {
+		t.Fatalf("adopted liveness running=%v known=%v err=%v", running, known, err)
+	}
+}
+
+func TestWorkerRenewalRefusesARankThatStartedThenDied(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-worker-died"}); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("preflight status=%d body=%#v", status, body)
+	}
+	if status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, workerStep("start_container", "job-worker-died", fixture.distributed)); status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("start status=%d body=%#v", status, body)
+	}
+	allocator := fixture.api.engine.Reservations()
+	reservationID := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), "job-worker-died", fixture.distributed.ID, fixture.distributed.Version)
+	if running, known, err := fixture.api.store.DelegatedRankRunning(ctx, reservationID); err != nil || !known || !running {
+		t.Fatalf("persisted rank liveness=(%v,%v,%v), want running known", running, known, err)
+	}
+	fixture.localExec.mu.Lock()
+	fixture.localExec.running = false
+	fixture.localExec.mu.Unlock()
+
+	status, body := fixture.post(t, "/api/v1/internal/node/reservation/renew", fixture.key, map[string]any{"recipe": fixture.distributed, "job_id": "job-worker-died"})
+	if status != http.StatusConflict || !strings.Contains(fmt.Sprint(body["error"]), "no longer running") {
+		t.Fatalf("dead worker renewal status=%d body=%#v", status, body)
+	}
+}
+
+func TestRenewalFailureToleratesABlipThenFailsAfterFreshness(t *testing.T) {
+	fixture := newNodeFixture(t)
+	base := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	fail := errors.New("worker model container is no longer running")
+	var renewErr error = fail
+	failed := 0
+	fixture.api.renewDistributed = func(context.Context) error { return renewErr }
+	fixture.api.recoverDistributed = func(_ context.Context, _ string, reason string) error {
+		if !strings.Contains(reason, "no longer running") {
+			t.Fatalf("recovery reason=%q", reason)
+		}
+		failed++
+		return nil
+	}
+
+	fixture.api.maintainDistributedServing(context.Background(), base)
+	renewErr = nil
+	fixture.api.maintainDistributedServing(context.Background(), base.Add(fleet.HeartbeatInterval))
+	if failed != 0 || fixture.api.renewalFailures != 0 || !fixture.api.renewalFirstFailed.IsZero() {
+		t.Fatalf("one recovered renewal was not treated as a transient blip: failed=%d failures=%d first=%s", failed, fixture.api.renewalFailures, fixture.api.renewalFirstFailed)
+	}
+
+	// Three failures alone are not enough: the head waits through the normal
+	// heartbeat freshness window, still well ahead of the worker's 90s lease.
+	renewErr = fail
+	for _, at := range []time.Time{base.Add(2 * fleet.HeartbeatInterval), base.Add(3 * fleet.HeartbeatInterval), base.Add(4 * fleet.HeartbeatInterval)} {
+		fixture.api.maintainDistributedServing(context.Background(), at)
+	}
+	if failed != 0 {
+		t.Fatalf("failed before the freshness window elapsed: %d", failed)
+	}
+	fixture.api.maintainDistributedServing(context.Background(), base.Add(5*fleet.HeartbeatInterval))
+	if failed != 1 {
+		t.Fatalf("sustained renewal failures did not fail the group: %d", failed)
+	}
+}
+
+func TestActiveDistributedHeadHealthFeedsTheRenewalFailureWindow(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	if err := fixture.api.store.SetInstalled(ctx, store.InstalledModel{
+		RecipeID: fixture.distributed.ID, RecipeVersion: fixture.distributed.Version,
+		Status: "ready", ArtifactPath: "/managed/" + fixture.distributed.ID, Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	healthCalls, recovered := 0, 0
+	fixture.api.renewDistributed = func(context.Context) error { return nil }
+	fixture.api.headHealth = func(healthCtx context.Context, active recipe.Recipe) error {
+		healthCalls++
+		if active.ID != fixture.distributed.ID {
+			t.Fatalf("health checked %s, want %s", active.ID, fixture.distributed.ID)
+		}
+		deadline, ok := healthCtx.Deadline()
+		if !ok || time.Until(deadline) > distributedHeadHealthTimeout {
+			t.Fatalf("head health context is not bounded: deadline=%s ok=%v", deadline, ok)
+		}
+		return errors.New("the active model did not answer its /health check")
+	}
+	fixture.api.recoverDistributed = func(_ context.Context, recipeID, reason string) error {
+		if recipeID != fixture.distributed.ID || !strings.Contains(reason, "/health") {
+			t.Fatalf("recovery target=%q reason=%q", recipeID, reason)
+		}
+		recovered++
+		return nil
+	}
+	for _, at := range []time.Time{base, base.Add(fleet.HeartbeatInterval), base.Add(2 * fleet.HeartbeatInterval), base.Add(3 * fleet.HeartbeatInterval)} {
+		fixture.api.maintainDistributedServing(ctx, at)
+	}
+	if healthCalls != 4 || recovered != 1 {
+		t.Fatalf("head health calls=%d recoveries=%d, want 4 and 1", healthCalls, recovered)
+	}
+}
+
+func TestDistributedStagingDoesNotHealthFailTheHead(t *testing.T) {
+	fixture := newNodeFixture(t)
+	healthCalls := 0
+	fixture.api.renewDistributed = func(context.Context) error { return nil }
+	fixture.api.headHealth = func(context.Context, recipe.Recipe) error {
+		healthCalls++
+		return errors.New("must not health check staging")
+	}
+	fixture.api.maintainDistributedServing(context.Background(), time.Now())
+	if healthCalls != 0 || fixture.api.renewalFailures != 0 {
+		t.Fatalf("staging health calls=%d failures=%d", healthCalls, fixture.api.renewalFailures)
+	}
+}
+
+func TestRecoveryJobRecordingRetriesAtABoundedHeartbeatPace(t *testing.T) {
+	fixture := newNodeFixture(t)
+	fixture.api.renewDistributed = func(context.Context) error { return nil }
+	fixture.api.recoveryJobPending = true
+	fixture.api.recoveryRecipeID = fixture.distributed.ID
+	fixture.api.recoveryReason = "the worker model container is no longer running"
+	fixture.api.recoveryJobAttempts = 1 // the original attempt already failed
+	calls := 0
+	fixture.api.recoverDistributed = func(_ context.Context, recipeID, reason string) error {
+		if recipeID != fixture.distributed.ID || !strings.Contains(reason, "no longer running") {
+			t.Fatalf("retry target=%q reason=%q", recipeID, reason)
+		}
+		calls++
+		return fmt.Errorf("%w: database temporarily unavailable", engine.ErrDistributedRecoveryJob)
+	}
+	base := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	for _, at := range []time.Time{base, base.Add(fleet.HeartbeatInterval), base.Add(2 * fleet.HeartbeatInterval)} {
+		fixture.api.maintainDistributedServing(context.Background(), at)
+	}
+	if calls != distributedRecoveryJobAttemptLimit-1 || fixture.api.recoveryJobAttempts != distributedRecoveryJobAttemptLimit || !fixture.api.recoveryJobPending {
+		t.Fatalf("record retries=%d attempts=%d pending=%v", calls, fixture.api.recoveryJobAttempts, fixture.api.recoveryJobPending)
 	}
 }
 

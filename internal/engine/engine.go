@@ -589,6 +589,172 @@ func (e *Engine) RenewDistributedReservations(ctx context.Context) error {
 	return joined
 }
 
+// DegradeDistributedServing is the head-owned response when it can no longer
+// prove that a worker rank is alive. It never restarts one rank on its own:
+// tensor-parallel ranks are a group, so admission closes first and both
+// containers are then asked to stop under the runtime lock. The failed row
+// remains non-active until an explicit operator action proves a fresh start.
+//
+// A switch already holds the runtime lock and changes the active row to
+// switching/starting before it mutates containers. Re-reading under this lock
+// therefore makes this a no-op for ADR 0003's rollback path instead of
+// confusing a transient renewal failure with the model it is restoring.
+func (e *Engine) DegradeDistributedServing(ctx context.Context, reason string) error {
+	_, err := e.failDistributedServing(ctx)
+	if err != nil && reason != "" {
+		return fmt.Errorf("fail distributed serving after %s: %w", reason, err)
+	}
+	return err
+}
+
+// ErrDistributedRecoveryJob identifies the one failure a caller can safely
+// retry: the group was already stopped and its reservation released, but the
+// durable start job could not be recorded. It never means a stop failed.
+var ErrDistributedRecoveryJob = errors.New("record distributed recovery job")
+
+// RecoverDistributedServing contains a sustained worker-renewal failure and,
+// after both ranks are confirmed stopped, starts one ordinary durable start
+// job for the same exact installed recipe. The job's step receipts prove the
+// recovery just like a console start would. There is deliberately no watcher
+// here: if that one job fails, the failed model remains closed to admission
+// until an operator starts it again or a later, distinct failure event occurs.
+func (e *Engine) RecoverDistributedServing(ctx context.Context, recipeID, reason string) error {
+	recover, failErr := e.failDistributedServing(ctx)
+	if len(recover) == 0 && recipeID != "" {
+		if selected, ok := e.failedDistributedRecipe(ctx, recipeID); ok {
+			recover = append(recover, selected)
+		}
+	}
+	if len(recover) == 0 {
+		if failErr != nil {
+			e.logError("stop the distributed group before automatic recovery", failErr)
+			if reason != "" {
+				return fmt.Errorf("fail distributed serving before recovery after %s: %w", reason, failErr)
+			}
+		}
+		return failErr
+	}
+	if failErr != nil {
+		e.logError("stop the distributed group before automatic recovery", failErr)
+	}
+	var joined error
+	for _, selected := range recover {
+		job, _, err := e.store.CreateJob(ctx, "start", selected.ID,
+			fmt.Sprintf("distributed-recovery-%d", time.Now().UnixNano()),
+			map[string]any{"recovery": "distributed_worker_renewal", "reason": redact.String(reason)})
+		if err != nil {
+			failure := fmt.Errorf("%w for %s: %v", ErrDistributedRecoveryJob, selected.ID, err)
+			e.logError("record automatic distributed recovery job", failure)
+			joined = errors.Join(joined, failure)
+			continue
+		}
+		e.Start(job.ID)
+	}
+	return joined
+}
+
+// failedDistributedRecipe finds only the exact model a previous successful
+// group stop left failed. Callers use it solely after ErrDistributedRecoveryJob
+// so a manual failure can never become an unsolicited start.
+func (e *Engine) failedDistributedRecipe(ctx context.Context, recipeID string) (recipe.Recipe, bool) {
+	model, err := e.store.Model(ctx, recipeID)
+	if err != nil || model.Active || model.Status != "failed" {
+		return recipe.Recipe{}, false
+	}
+	selected, ok := e.pinnedOrEffective(model.RecipeID, model.RecipeVersion)
+	return selected, ok && selected.Distributed()
+}
+
+// failDistributedServing closes admission and stops an affected distributed
+// group. It returns only models whose whole group stopped and whose runtime
+// reservation was released, so a caller can safely start a fresh whole-group
+// recovery without overlapping an unreachable old worker rank.
+func (e *Engine) failDistributedServing(ctx context.Context) ([]recipe.Recipe, error) {
+	models, err := e.store.Models(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var joined error
+	recover := []recipe.Recipe{}
+	for _, model := range models {
+		if !model.Active || model.Status != "ready" {
+			continue
+		}
+		selected, ok := e.pinnedOrEffective(model.RecipeID, model.RecipeVersion)
+		if !ok || !selected.Distributed() {
+			continue
+		}
+		lock := e.recipeLock(selected.ID)
+		lock.Lock()
+		func() {
+			defer lock.Unlock()
+			if err := e.acquireRuntime(ctx); err != nil {
+				joined = errors.Join(joined, err)
+				return
+			}
+			defer e.releaseRuntime()
+
+			// The model may have been stopped or switched while this method was
+			// waiting for the runtime lock. Never degrade a successor by looking
+			// at the stale list read above.
+			current, err := e.store.Model(ctx, selected.ID)
+			if err != nil {
+				joined = errors.Join(joined, err)
+				return
+			}
+			if !current.Active || current.Status != "ready" || current.RecipeVersion != selected.Version {
+				return
+			}
+			if err := e.store.SetModelState(ctx, selected.ID, "failed", false); err != nil {
+				joined = errors.Join(joined, err)
+				return
+			}
+			// Once failure is durable this process must stop refreshing the worker
+			// lease. If a stop cannot reach the worker, expiry is the remaining safe
+			// cleanup path; continuing to renew would preserve the very half-dead
+			// group this method is meant to contain.
+			reservations, err := e.reservations.AllReservations(ctx)
+			if err != nil {
+				joined = errors.Join(joined, err)
+			} else {
+				for _, reservation := range reservations {
+					if reservation.Claims.Kind == fleet.ClaimKindLocalJob && reservation.RecipeID == selected.ID && reservation.RecipeVersion == selected.Version {
+						e.forgetDriving(reservation.Claims.JobID)
+					}
+				}
+			}
+			deployment, err := e.deployment(ctx, selected)
+			if err != nil {
+				joined = errors.Join(joined, err)
+				return
+			}
+
+			stopCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			peer := deployment.Peer
+			stopped := true
+			for _, placement := range []operations.Placement{deployment.Head, deployment.Worker} {
+				execution := operations.Execution{Kind: "degrade", Placement: placement, Peer: &peer}
+				if _, err := e.executor.Execute(stopCtx, execution, recipe.Operation{Type: "stop_container"}, selected, nil); err != nil {
+					stopped = false
+					joined = errors.Join(joined, fmt.Errorf("stop failed %s rank: %w", placement.Role, err))
+				}
+			}
+			// Do not release the runtime claim after an incomplete stop. Keeping
+			// admission closed is safer than allowing a new model beside an
+			// unreachable worker rank. A later explicit stop retries this path.
+			if stopped {
+				if err := e.reservations.ReleaseRecipe(context.Background(), selected.ID, ""); err != nil {
+					joined = errors.Join(joined, err)
+				} else {
+					recover = append(recover, selected)
+				}
+			}
+		}()
+	}
+	return recover, joined
+}
+
 // PrepareJob makes local API acknowledgement follow durable admission. Start
 // still repeats the same idempotent check because jobs may also be created by
 // startup recovery or package-level callers that do not use the HTTP layer.

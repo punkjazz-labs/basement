@@ -520,7 +520,7 @@ func (attempt *inviteAttempt) progress() InviteProgress {
 // every later call in the exchange goes through the pinned client, and the
 // join code carries its own fingerprint, which has to be this same one.
 func (m *Manager) firstContactClient(observe func(string)) *http.Client {
-	transport := &http.Transport{TLSClientConfig: &tls.Config{
+	transport := fleetTransport(&tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		Certificates:       []tls.Certificate{m.identity.TLSCertificate()},
 		InsecureSkipVerify: true,
@@ -540,7 +540,7 @@ func (m *Manager) firstContactClient(observe func(string)) *http.Client {
 			observe(details.Fingerprint)
 			return nil
 		},
-	}}
+	})
 	return &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 

@@ -431,10 +431,29 @@ func TestModelFieldSpanReadsOnlyTheTopLevelField(t *testing.T) {
 	}
 }
 
-// A stuck activation must not hold a client forever without an answer.
-func TestRoleActivationTimeoutIsTheAdvertisedTenMinutes(t *testing.T) {
-	if roleActivationTimeout != 10*time.Minute {
-		t.Fatalf("roleActivationTimeout=%s, but the console tells owners ten minutes", roleActivationTimeout)
+// A role activation follows the runtime's own startup budget. Qwen's first
+// boot needs 90 minutes to load weights and compile kernels; the omitted value
+// keeps the product's ordinary 20-minute default for older recipes.
+func TestRoleActivationTimeoutFollowsRecipeStartupBudget(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		minutes int
+		want    time.Duration
+	}{
+		{name: "recipe budget", minutes: 90, want: 90 * time.Minute},
+		{name: "default budget", minutes: 0, want: defaultRoleActivationTimeout},
+		{name: "negative uses default", minutes: -1, want: defaultRoleActivationTimeout},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := recipe.Recipe{Runtime: recipe.Runtime{StartTimeoutMinutes: test.minutes}}
+			if got := roleActivationTimeout(target); got != test.want {
+				t.Fatalf("roleActivationTimeout(%d)=%s, want %s", test.minutes, got, test.want)
+			}
+		})
+	}
+	timeout := activationTimedOut(recipe.Recipe{DisplayName: "Qwen", Runtime: recipe.Runtime{StartTimeoutMinutes: 90}})
+	if !strings.Contains(timeout.message, "within 90 minutes") {
+		t.Fatalf("timeout copy=%q, want the recipe's 90-minute budget", timeout.message)
 	}
 }
 

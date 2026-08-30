@@ -43,11 +43,19 @@ const (
 	rolePeekLimit = 32_000_000
 )
 
-// roleActivationTimeout is how long a request will wait for the model its
-// role names to be loaded and serving. It matches what the console tells the
-// owner about a switch: the first request after one waits while the model is
-// loaded into memory.
-const roleActivationTimeout = 10 * time.Minute
+// defaultRoleActivationTimeout matches operations' default health-wait budget
+// for recipes that do not set runtime.start_timeout_minutes. A role request
+// uses the recipe's explicit budget when it has one, so it cannot give up
+// while the engine is still within the runtime's own startup deadline.
+const defaultRoleActivationTimeout = 20 * time.Minute
+
+func roleActivationTimeout(target recipe.Recipe) time.Duration {
+	minutes := target.Runtime.StartTimeoutMinutes
+	if minutes <= 0 {
+		return defaultRoleActivationTimeout
+	}
+	return time.Duration(minutes) * time.Minute
+}
 
 const roleActivationPoll = 250 * time.Millisecond
 
@@ -465,8 +473,8 @@ func (s *Server) holdSwitch(ctx context.Context, recipeID string) func() {
 // Admission is asked for again after the model comes up rather than assumed,
 // because a switch queued behind this one can take the model away in between.
 // That is also why this loops: each turn either gets the request through or
-// leaves it waiting on a switch that is really happening, and the ten minutes
-// bound the whole thing.
+// leaves it waiting on a switch that is really happening, and the recipe's
+// startup budget bounds the whole thing.
 //
 // Two requests for the same role cost one switch, not two: whoever arrives
 // second either finds the model serving, or joins the start job already
@@ -477,7 +485,7 @@ func (s *Server) holdSwitch(ctx context.Context, recipeID string) func() {
 // hangs up mid-switch leaves the model coming up rather than half started, and
 // the next request joins that same job.
 func (s *Server) holdForServing(ctx context.Context, target recipe.Recipe) (*serveHold, *roleProblem) {
-	waitCtx, cancel := context.WithTimeout(ctx, roleActivationTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, roleActivationTimeout(target))
 	defer cancel()
 	for {
 		hold, admitted, err := s.gate.admit(waitCtx, target.ID, func() bool { return s.servingNow(waitCtx, target.ID) })
@@ -587,8 +595,9 @@ func (s *Server) servingNow(ctx context.Context, recipeID string) bool {
 }
 
 func activationTimedOut(target recipe.Recipe) *roleProblem {
+	timeout := roleActivationTimeout(target)
 	return &roleProblem{http.StatusGatewayTimeout, "model_activation_timeout",
-		fmt.Sprintf("%s did not finish loading within %d minutes, so this request was not answered. The Activity page in the basement console shows how the start is going.", target.DisplayName, int(roleActivationTimeout/time.Minute))}
+		fmt.Sprintf("%s did not finish loading within %d minutes, so this request was not answered. The Activity page in the basement console shows how the start is going.", target.DisplayName, int(timeout/time.Minute))}
 }
 
 func activationStopped(target recipe.Recipe) *roleProblem {

@@ -57,6 +57,12 @@ type Manager struct {
 	// the TLS implementation assigned by NewManager; tests replace it with an
 	// in-memory round trip so they never bind a socket or contact a machine.
 	newClient func(string) *http.Client
+	// clients are retained per certificate fingerprint so the controller's
+	// ten-second heartbeat does not allocate a new transport and abandon its
+	// connection pool on every poll. The fingerprint is part of the key: a
+	// changed member certificate must get a new pinned transport.
+	clientMu sync.Mutex
+	clients  map[string]*http.Client
 	// newFirstContactClient is the same seam for the one call that has no pin
 	// yet: the invitation that opens an addition. It reports the fingerprint
 	// the address presented, which becomes the pin for everything after it.
@@ -132,6 +138,7 @@ func NewManager(ctx context.Context, options Options) (*Manager, error) {
 		upgradeRetry:       time.Second,
 		invitations:        make(map[string]*invitation),
 		attempts:           make(map[string]*inviteAttempt),
+		clients:            make(map[string]*http.Client),
 	}
 	if len(manager.effective) == 0 {
 		manager.effective = append([]recipe.Recipe(nil), options.Recipes...)

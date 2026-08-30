@@ -445,7 +445,13 @@ type SGLangConfig struct {
 	ChatTemplateFile     string `yaml:"chat_template_file" json:"chat_template_file"`
 	ToolCallParser       string `yaml:"tool_call_parser" json:"tool_call_parser"`
 	ReasoningParser      string `yaml:"reasoning_parser" json:"reasoning_parser"`
-	AttentionBackend     string `yaml:"attention_backend" json:"attention_backend"`
+	// DefaultChatTemplateKwargs becomes --default-chat-template-kwargs. Keep
+	// this deliberately narrow: the pinned SGLang image supports this server
+	// default, and the only model-template switch this schema has evidence for
+	// is Qwen's enable_thinking. A pointer preserves the distinction between an
+	// omitted default and an explicit false.
+	DefaultChatTemplateKwargs *SGLangChatTemplateKwargs `yaml:"default_chat_template_kwargs,omitempty" json:"default_chat_template_kwargs,omitempty"`
+	AttentionBackend          string                    `yaml:"attention_backend" json:"attention_backend"`
 	// TrustRemoteCode turns on --trust-remote-code, letting SGLang import
 	// model code the checkpoint ships instead of only its own registered
 	// architectures. A hybrid Gated-DeltaNet model needs it because its
@@ -536,6 +542,14 @@ type SGLangConfig struct {
 	// max_running_requests. Empty leaves the flag off and SGLang's own
 	// default stands.
 	CUDAGraphBSDecode string `yaml:"cuda_graph_bs_decode" json:"cuda_graph_bs_decode"`
+}
+
+// SGLangChatTemplateKwargs is the typed subset of SGLang's
+// --default-chat-template-kwargs supported by a pinned recipe image. The
+// value applies when a request does not provide its own chat_template_kwargs;
+// callers can still opt into thinking explicitly when the model supports it.
+type SGLangChatTemplateKwargs struct {
+	EnableThinking *bool `yaml:"enable_thinking,omitempty" json:"enable_thinking,omitempty"`
 }
 
 // LlamaCppConfig mirrors the subset of llama-server arguments a recipe is

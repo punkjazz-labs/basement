@@ -26,6 +26,10 @@ func isPinnedRevision(s string) bool {
 	return true
 }
 
+func boolPointer(value bool) *bool {
+	return &value
+}
+
 func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	recipes, err := Builtin()
 	if err != nil {
@@ -198,6 +202,9 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if flashNext.Runtime.Reference() != "ghcr.io/punkjazz-labs/basement-sglang-qwen38-flash-next@sha256:a7da51c60dcb673c72e3769187159b08207b51cf642cd4c3990d25083d8b7a4c" {
 		t.Fatalf("Qwen 3.8 Flash Next runtime is not pinned: %#v", flashNext.Runtime)
 	}
+	if flashNext.Version < 3 {
+		t.Fatalf("Qwen 3.8 Flash Next version=%d, want at least 3 after the serving safety hold", flashNext.Version)
+	}
 	if len(flashNext.Artifacts) != 1 || flashNext.TotalArtifactBytes() != 135253622894 || !isPinnedRevision(flashNext.Artifacts[0].Revision) {
 		t.Fatalf("Qwen 3.8 Flash Next weights are not pinned: %#v", flashNext.Artifacts)
 	}
@@ -207,8 +214,9 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if flashNext.Artifacts[0].LicenceRepository != "Qwen/Qwen3.8-Flash-Next" || !isPinnedRevision(flashNext.Artifacts[0].LicenceRevision) {
 		t.Fatalf("Qwen 3.8 Flash Next licence is not pinned upstream: %#v", flashNext.Artifacts[0])
 	}
-	if s := flashNext.Service.SGLang; s.TensorParallelSize != 2 || s.SpeculativeAlgorithm != "NEXTN" || s.SpeculativeEagleTopK != 1 ||
-		s.SpeculativeNumDraftTokens != s.SpeculativeNumSteps+1 || s.SpeculativeModelRole != "" ||
+	if s := flashNext.Service.SGLang; s.TensorParallelSize != 2 || s.SpeculativeAlgorithm != "" || s.SpeculativeEagleTopK != 0 ||
+		s.SpeculativeNumDraftTokens != 0 || s.SpeculativeNumSteps != 0 || s.SpeculativeModelRole != "" ||
+		s.DefaultChatTemplateKwargs == nil || s.DefaultChatTemplateKwargs.EnableThinking == nil || *s.DefaultChatTemplateKwargs.EnableThinking ||
 		s.PageSize != 64 || s.MambaTrackInterval != 64 || !s.AllowAutoTruncate || !s.PLEOffloadEmbedding ||
 		s.CUDAGraphBSDecode == "" {
 		t.Fatalf("unexpected Qwen 3.8 Flash Next serve configuration: %#v", s)
@@ -504,6 +512,7 @@ func TestValidateAcceptsSGLangHybridAttentionFields(t *testing.T) {
 	candidate.Service.SGLang.SpeculativeNumDraftTokens = 4
 	candidate.Service.SGLang.SpeculativeNumSteps = 3
 	candidate.Service.SGLang.SpeculativeEagleTopK = 1
+	candidate.Service.SGLang.DefaultChatTemplateKwargs = &SGLangChatTemplateKwargs{EnableThinking: boolPointer(false)}
 	if err := Validate(candidate); err != nil {
 		t.Fatalf("Validate()=%v, want nil", err)
 	}
@@ -591,7 +600,8 @@ func TestSGLangSparseAttentionKeysAreTheDocumentedNames(t *testing.T) {
 		"mamba_track_interval: 64\n" +
 		"allow_auto_truncate: true\n" +
 		"ple_offload_embedding: true\n" +
-		"cuda_graph_bs_decode: \"1 2 4 8\"\n"
+		"cuda_graph_bs_decode: \"1 2 4 8\"\n" +
+		"default_chat_template_kwargs:\n  enable_thinking: false\n"
 	decoder := yaml.NewDecoder(strings.NewReader(fragment))
 	decoder.KnownFields(true)
 	var block SGLangConfig
@@ -599,7 +609,8 @@ func TestSGLangSparseAttentionKeysAreTheDocumentedNames(t *testing.T) {
 		t.Fatalf("decode sglang fragment=%v", err)
 	}
 	if block.PageSize != 64 || block.MambaTrackInterval != 64 || !block.AllowAutoTruncate ||
-		!block.PLEOffloadEmbedding || block.CUDAGraphBSDecode != "1 2 4 8" {
+		!block.PLEOffloadEmbedding || block.CUDAGraphBSDecode != "1 2 4 8" ||
+		block.DefaultChatTemplateKwargs == nil || block.DefaultChatTemplateKwargs.EnableThinking == nil || *block.DefaultChatTemplateKwargs.EnableThinking {
 		t.Fatalf("decoded block=%#v", block)
 	}
 }
@@ -649,8 +660,18 @@ func TestValidateEnforcesOneRuntimeBlockMatchingTheKind(t *testing.T) {
 		{"NEXTN drafting with more than one branch", func(r *Recipe) {
 			r.Service.SGLang.SpeculativeAlgorithm = "NEXTN"
 			r.Service.SGLang.SpeculativeNumDraftTokens = 4
+			r.Service.SGLang.SpeculativeNumSteps = 3
 			r.Service.SGLang.SpeculativeEagleTopK = 2
 		}, "speculative_eagle_topk must be 1 with speculative_algorithm NEXTN"},
+		{"NEXTN draft chain does not match its step count", func(r *Recipe) {
+			r.Service.SGLang.SpeculativeAlgorithm = "NEXTN"
+			r.Service.SGLang.SpeculativeNumSteps = 3
+			r.Service.SGLang.SpeculativeNumDraftTokens = 3
+			r.Service.SGLang.SpeculativeEagleTopK = 1
+		}, "NEXTN requires speculative_num_draft_tokens to equal speculative_num_steps plus 1"},
+		{"empty SGLang chat template defaults", func(r *Recipe) {
+			r.Service.SGLang.DefaultChatTemplateKwargs = &SGLangChatTemplateKwargs{}
+		}, "default_chat_template_kwargs must set enable_thinking"},
 		{"page size no launcher has run", func(r *Recipe) { r.Service.SGLang.PageSize = 32 }, "page_size must be unset or 64"},
 		{"mamba track interval off the page grid", func(r *Recipe) {
 			r.Service.SGLang.PageSize = 64

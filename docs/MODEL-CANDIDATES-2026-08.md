@@ -312,7 +312,8 @@ published 17:19-17:38 UTC.
   sparse full attention, 512 routed experts with top-10 routing plus a
   shared expert, PLE n-gram embedding tables, in-checkpoint MTP draft
   layer, multimodal input (text, image, video), native context 262144,
-  thinking on by default.
+  thinking on by default in the checkpoint template. The recipe overrides
+  that default to thinking off until tool calls are requalified.
 - Licence: "Qwen Community License 1.0" (LICENSE fetched verbatim
   2026-08-26). Permissive; attribution display required above 100M MAU or
   USD 20M monthly revenue; Model-as-a-Service and "AI Work Assistant"
@@ -326,8 +327,16 @@ published 17:19-17:38 UTC.
   quality in-tree: GSM8K 97.27 (reference band 97.12-97.50), AIME26
   pass@1 98.75. Not our measurements.
 - Runtime: strictly two Sparks (135 GB does not fit one), SGLang TP=2
-  over the ConnectX-7 link, NEXTN speculation (3 steps, topk 1, 4 draft
-  tokens) over the in-checkpoint MTP head, nothing extra to download.
+  over the ConnectX-7 link. The in-checkpoint MTP head needs no extra
+  download, but the recipe currently leaves NEXTN disabled until the
+  tool-call and thinking interaction is requalified.
+- Tool-call safety hold: SGLang issue [#36537](https://github.com/sgl-project/sglang/issues/36537)
+  reports a deterministic token loop for this model family when thinking,
+  OpenAI tools and the `qwen3_coder` parser are active together. The pinned
+  image supports `--default-chat-template-kwargs`; the recipe sets
+  `enable_thinking: false` as its server default. Requests can override that
+  value, so qualification must cover both the default and explicit thinking
+  paths before the candidate can be trusted for tools.
 - The SM121 blocker and its resolution: the stock
   `lmsysorg/sglang:qwen38flashnext` image (index digest `12d3392b`,
   RadixArk overlay build with self-declared provenance labels) fails on

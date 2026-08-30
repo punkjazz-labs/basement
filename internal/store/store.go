@@ -284,6 +284,9 @@ CREATE TABLE IF NOT EXISTS generations (
 	if err := s.migrateNodePowerMode(); err != nil {
 		return err
 	}
+	if err := s.migrateDelegatedRankLiveness(); err != nil {
+		return err
+	}
 	return s.ensureFleetUpgradeResolveColumns()
 }
 
@@ -338,12 +341,13 @@ const (
 	fleetSchemaVersion           = 4
 	revocationSchemaVersion      = 5
 	powerModeSchemaVersion       = 6
+	delegatedRankSchemaVersion   = 7
 	fleetMigrationStatementCount = 10
 	// currentSchemaVersion is the version an opened database reaches once
 	// every migration in this release has run. A test that means "this
 	// database is fully migrated" compares against this, so the next
 	// migration moves one line here instead of several in the tests.
-	currentSchemaVersion = powerModeSchemaVersion
+	currentSchemaVersion = delegatedRankSchemaVersion
 )
 
 // fleetMigrationStep is a failure-injection seam for the migration tests.
@@ -678,6 +682,45 @@ func (s *Store) migrateNodePowerMode() error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit node power mode migration: %w", err)
+	}
+	return nil
+}
+
+// migrateDelegatedRankLiveness adds the worker-side evidence needed to tell a
+// rank that is still staging from one that had started and then disappeared.
+// A worker rank has no installed_models row of its own because the head owns
+// the distributed job, so this fact cannot live in the ordinary model state.
+//
+// This is an additive migration of its own. Editing a migration already seen
+// by installed managers would make those databases skip the new table while
+// recording a schema version that says it exists.
+func (s *Store) migrateDelegatedRankLiveness() error {
+	var version int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_meta`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version >= delegatedRankSchemaVersion {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin delegated rank liveness migration: %w", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS delegated_rank_liveness (
+  reservation_id TEXT PRIMARY KEY,
+  running INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+)`,
+		`UPDATE schema_meta SET version=7`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return fmt.Errorf("migrate delegated rank liveness: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delegated rank liveness migration: %w", err)
 	}
 	return nil
 }
@@ -1175,6 +1218,42 @@ func (s *Store) Model(ctx context.Context, recipeID string) (InstalledModel, err
 		return InstalledModel{}, os.ErrNotExist
 	}
 	return model, err
+}
+
+// SetDelegatedRankRunning records that a worker has successfully started its
+// rank for this reservation. A missing row intentionally means that the job is
+// still staging or predates this manager, so renewal remains possible while
+// image pulls and downloads take minutes or hours.
+func (s *Store) SetDelegatedRankRunning(ctx context.Context, reservationID string, running bool) error {
+	if reservationID == "" {
+		return errors.New("delegated rank reservation id is required")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO delegated_rank_liveness(reservation_id,running,updated_at) VALUES(?,?,?)
+ON CONFLICT(reservation_id) DO UPDATE SET running=excluded.running,updated_at=excluded.updated_at`, reservationID, running, now())
+	return err
+}
+
+// DelegatedRankRunning returns known=false until this manager observed a
+// successful delegated start for the reservation. That distinction preserves
+// lease renewal through the pre-start staging phase.
+func (s *Store) DelegatedRankRunning(ctx context.Context, reservationID string) (running, known bool, err error) {
+	var value bool
+	err = s.db.QueryRowContext(ctx, `SELECT running FROM delegated_rank_liveness WHERE reservation_id=?`, reservationID).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return value, true, nil
+}
+
+func (s *Store) ClearDelegatedRankLiveness(ctx context.Context, reservationID string) error {
+	if reservationID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM delegated_rank_liveness WHERE reservation_id=?`, reservationID)
+	return err
 }
 
 func (s *Store) SetModelMetrics(ctx context.Context, recipeID string, tokensPerSecond float64, timeToFirstTokenMS int64) error {

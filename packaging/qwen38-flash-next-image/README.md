@@ -33,6 +33,14 @@ into a published, digest-pinned image, the same way
   library version as a pinned wheel. The library version equals the
   validated one; the delivery path differs. Hardware qualification
   decides whether the combination holds.
+- Disconnect cleanup: SGLang pull request 35936 at commit
+  `764f0b95c64456b67c3aa8a344aeb8308c23c24b`, Apache-2.0. The pinned base
+  removes tokenizer request state before its scheduler abort can run when an
+  HTTP stream disconnects. `patch_abort_disconnected_requests.py` applies the
+  proposed abort-before-discard ordering with exact anchors, so a cancelled
+  Codex or OpenAI request does not keep consuming the scheduler until its token
+  limit. A base that has changed or already contains the patch fails the image
+  build rather than silently applying a partial edit.
 
 ## What this image is not
 
