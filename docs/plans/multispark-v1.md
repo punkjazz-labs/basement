@@ -1,9 +1,9 @@
 # Multispark v1 — minimal two-Spark execution path
 
-Status: EXPERIMENTAL. Written and implemented without access to two DGX
-Sparks. Every claim about what the hardware does comes from the community
-recipe cited below, not from a run on our own machines. Nothing here is
-qualified; no two-Spark recipe ships with this change.
+Status: HISTORICAL IMPLEMENTATION PLAN. The minimal path described here has
+since been exercised and extended on two-Spark hardware. ADR 0016 owns the
+current fleet, reservation and recovery behavior; shipped recipe trust still
+comes only from the qualification record.
 
 ## What the community recipe actually does
 
@@ -95,8 +95,11 @@ devices and the GPU. Delegated steps also execute against the local executor
 directly, never back through the fleet executor, which would forward them
 onward instead of putting a rank on this machine.
 
-One delegated job holds a worker at a time, via a coarse single-flight lease
-that expires (45 minutes) so a head that dies cannot wedge the Spark.
+One delegated job holds a worker at a time through the persistent node
+allocator. Its preparation window is 45 minutes. Once active, the head renews
+the worker every heartbeat and the worker permits nine missed heartbeats before
+reclaiming the rank. Worker liveness is persisted after `start_container`, so
+a renewal can distinguish long staging from a rank that started and died.
 
 ## Live progress on a worker step
 
@@ -117,6 +120,14 @@ job fails. This includes failures that are not the model's fault: a state
 write that cannot be persisted goes down the same path, and the teardown
 issues both container stops even when its own receipts cannot be written. A
 database problem must never be the reason a rank keeps holding memory.
+
+Serving has the same group boundary. The head proves the worker reservation
+and, after readiness, the head runtime's bounded `/health` response on every
+maintenance pass. A failure sustained through the 30-second freshness window
+marks the model failed before either container is stopped. Once both stops and
+claim release succeed, the engine creates one durable whole-group start job.
+That job is the automatic recovery receipt; it never restarts an isolated rank,
+and a failed recovery stays failed instead of looping.
 
 Switching away from a model stops every rank THAT model runs on, read from
 its own topology rather than the incoming one, and a rollback brings every
@@ -162,8 +173,9 @@ Worker arguments add the same distributed flags with `--node-rank 1` and
   started on the worker itself can still race a delegated one. Routing
   delegated work through the worker's engine is the actual fix.
 - Signed heartbeats, staleness exclusion, controller/agent split.
-- Leases. Two concurrent two-Spark jobs from two different heads against the
-  same worker are not prevented.
+- Controller-signed group reservations. The persistent allocator prevents
+  overlapping runtime claims, but this compatibility path still authenticates
+  its head with an ordinary API key rather than a deployment-scoped grant.
 - A scheduler or placement sheet. The worker is "the one configured peer",
   not a chosen node.
 - Independent multi-model placement across four nodes.

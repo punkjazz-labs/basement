@@ -30,13 +30,20 @@
 FROM lmsysorg/sglang:qwen38flashnext@sha256:12d3392bdc8be8d35e9a95f191df6aef99c5114bdbefd41bfdc7e760e6d25ec1
 
 LABEL org.opencontainers.image.source="https://github.com/punkjazz-labs/basement" \
-      org.opencontainers.image.description="SGLang for Qwen3.8-Flash-Next-NVFP4 with the SM121 QSA Triton fallback and NCCL 2.30.7" \
+      org.opencontainers.image.description="SGLang for Qwen3.8-Flash-Next-NVFP4 with reliable disconnect cleanup, the SM121 QSA Triton fallback and NCCL 2.30.7" \
       ai.basement.base.image="lmsysorg/sglang:qwen38flashnext@sha256:12d3392bdc8be8d35e9a95f191df6aef99c5114bdbefd41bfdc7e760e6d25ec1" \
       ai.basement.patch.source="https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks" \
       ai.basement.patch.revision="dccb035c559f342fe8c0f65eb427671c6cf60730" \
-      ai.basement.patch.licence="MIT"
+      ai.basement.patch.licence="MIT" \
+      ai.basement.disconnect-patch.source="https://github.com/sgl-project/sglang/pull/35936" \
+      ai.basement.disconnect-patch.revision="764f0b95c64456b67c3aa8a344aeb8308c23c24b" \
+      ai.basement.disconnect-patch.licence="Apache-2.0"
 
 RUN pip install --no-cache-dir --no-deps nvidia-nccl-cu13==2.30.7
+
+COPY patch_abort_disconnected_requests.py /tmp/patch_abort_disconnected_requests.py
+RUN python3 /tmp/patch_abort_disconnected_requests.py \
+    && rm /tmp/patch_abort_disconnected_requests.py
 
 COPY qsa_fa_fallback.py /sgl-workspace/sglang/python/sglang/srt/layers/attention/qsa_fa_fallback.py
 RUN python3 - <<'PYEOF'

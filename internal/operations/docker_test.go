@@ -739,9 +739,10 @@ func TestQuantizationStaysOptOut(t *testing.T) {
 }
 
 // sglangRecipe is the shape an SGLang recipe will have once one is
-// qualified: no such recipe ships yet, so the command builder is pinned
-// against a hand-built recipe rather than the catalog.
+// qualified: the command builder is pinned against a hand-built fixture so
+// its complete flag coverage stays independent of any one catalog recipe.
 func sglangRecipe() recipe.Recipe {
+	thinkingOff := false
 	return recipe.Recipe{
 		Runtime: recipe.Runtime{Kind: "sglang"},
 		Artifacts: []recipe.Artifact{
@@ -755,7 +756,8 @@ func sglangRecipe() recipe.Recipe {
 				Quantization: "modelopt_fp4", KVCacheDType: "fp8_e4m3", AttentionBackend: "flashinfer",
 				SpeculativeAlgorithm: "EAGLE3", SpeculativeNumDraftTokens: 4, SpeculativeModelRole: "drafter",
 				ChatTemplateFile: "chat_template.jinja", ToolCallParser: "qwen3_coder", ReasoningParser: "qwen3",
-				TrustRemoteCode: true, ChunkedPrefillSize: 8192, DisablePrefillCUDAGraph: true,
+				DefaultChatTemplateKwargs: &recipe.SGLangChatTemplateKwargs{EnableThinking: &thinkingOff},
+				TrustRemoteCode:           true, ChunkedPrefillSize: 8192, DisablePrefillCUDAGraph: true,
 				MambaSSMDType: "bfloat16", MambaFullMemoryRatio: "4.21", MambaRadixCacheStrategy: "extra_buffer_lazy",
 				MaxMambaCacheSize: 40, SpeculativeNumSteps: 3, SpeculativeEagleTopK: 1, SamplingDefaults: "model",
 				PageSize: 64, MambaTrackInterval: 64, AllowAutoTruncate: true, PLEOffloadEmbedding: true,
@@ -790,6 +792,7 @@ func TestSGLangCommandIsPinnedAndComplete(t *testing.T) {
 		"--speculative-num-draft-tokens", "4",
 		"--speculative-draft-model-path", "/drafter",
 		"--chat-template", "/model/chat_template.jinja",
+		"--default-chat-template-kwargs", `{"enable_thinking":false}`,
 		"--tool-call-parser", "qwen3_coder",
 		"--reasoning-parser", "qwen3",
 		"--trust-remote-code",
@@ -833,10 +836,34 @@ func TestSGLangCommandOmitsUnsetFields(t *testing.T) {
 		"--max-mamba-cache-size", "--speculative-num-steps", "--speculative-eagle-topk",
 		"--sampling-defaults", "--page-size", "--mamba-track-interval", "--allow-auto-truncate",
 		"--ple-offload-embedding", "--cuda-graph-bs-decode",
+		"--default-chat-template-kwargs",
 	} {
 		if hasArgument(args, flag) {
 			t.Fatalf("sglang arguments carry %s with every hybrid-attention field unset", flag)
 		}
+	}
+}
+
+func TestQwenFlashNextCommandDisablesUnqualifiedSpeculationAndThinking(t *testing.T) {
+	recipes, err := recipe.Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := recipe.Find(recipes, "qwen38-flash-next-nvfp4-2s")
+	if !ok {
+		t.Fatal("Qwen 3.8 Flash Next recipe missing")
+	}
+	_, args, err := runtimeCommand(r, Placement{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []string{"--speculative-algorithm", "--speculative-num-steps", "--speculative-eagle-topk", "--speculative-num-draft-tokens"} {
+		if hasArgument(args, flag) {
+			t.Fatalf("Qwen Flash Next command still enables unqualified speculation: %s", strings.Join(args, " "))
+		}
+	}
+	if got, ok := argumentValue(args, "--default-chat-template-kwargs"); !ok || got != `{"enable_thinking":false}` {
+		t.Fatalf("Qwen Flash Next thinking default=%q (present=%v), want {\"enable_thinking\":false}; args=%s", got, ok, strings.Join(args, " "))
 	}
 }
 

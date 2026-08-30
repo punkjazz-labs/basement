@@ -377,6 +377,24 @@ node id, the recipe must match the worker's own exact catalogue copy, and the
 operation must remain in the rank-operation allowlist. A group head therefore
 does not gain general control of its worker.
 
+The group head also owns the serving liveness proof. It renews the worker's
+runtime reservation from committed staging through active serving. Once a
+worker rank has started, renewal verifies that exact container is still
+running; once the group is active and ready, the same maintenance pass also
+checks the head runtime's `/health` route with a bounded request. A failure
+sustained for the normal 30-second heartbeat freshness window closes
+inference admission before the worker's 90-second reclaim deadline. The head
+marks the model failed, stops both ranks, releases their runtime claims only
+after both stops succeed, and records one ordinary whole-group start job for
+automatic recovery. That job carries the trigger and the normal step receipts.
+It is attempted once; a failed recovery remains failed for an operator to
+inspect. This is recovery of the same exact group, not leader failover,
+rescheduling, rank replacement or permission to keep one rank serving alone.
+
+`/healthz` remains the manager-process health check used by installation and
+fleet management. Runtime serving health is a separate proof and must not make
+a healthy manager look down merely because its model needs recovery.
+
 The controller stores the group head's node id and remote job id and projects
 that job into the fleet Activity view. The full step receipts remain on the
 group head. The controller may cache the last observed state so an unreachable

@@ -78,6 +78,22 @@ type Server struct {
 	// nodeProgress carries the running delegated step's live receipt back to
 	// the head driving it (see node.go). In memory by design.
 	nodeProgress delegatedProgress
+	// Distributed renewal is tracked by the serving head. A worker may tolerate
+	// a brief management-path failure, but sustained failures must revoke this
+	// head's ready claim before the worker reaches its reclaim deadline.
+	renewDistributed   func(context.Context) error
+	recoverDistributed func(context.Context, string, string, bool) error
+	headHealth         func(context.Context, recipe.Recipe) error
+	renewalMu          sync.Mutex
+	renewalFailures    int
+	renewalFirstFailed time.Time
+	renewalDegrading   bool
+	// recoveryJobPending is set only when a safely stopped group could not
+	// record its start job. It is retried at a bounded heartbeat pace.
+	recoveryJobPending  bool
+	recoveryRecipeID    string
+	recoveryReason      string
+	recoveryJobAttempts int
 
 	// adoption narrates the one console-driven adoption of a second Spark
 	// this manager runs at a time (see fleet.go). In memory by design.
@@ -185,6 +201,14 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	updateKeys, _ := managerupdate.ProductionKeyRing()
 	updateContext, updateCancel := context.WithCancel(context.Background())
 	server := &Server{version: version, dataDir: dataDir, auth: authManager, store: s, inventory: provider, executor: executor, engine: e, metrics: &http.Client{Timeout: 3 * time.Second}, peerClient: &http.Client{Timeout: 3 * time.Second, CheckRedirect: refusePeerRedirect}, delegateClient: &http.Client{Timeout: peerDelegationTimeout, CheckRedirect: refusePeerRedirect}, closing: make(chan struct{}), gate: newServingGate(), adoption: newAdoptionState(), generations: newGenerationQueue(), updateResolver: &managerupdate.Resolver{Source: managerupdate.NewHTTPReleaseSource(), Keys: updateKeys}, updateStager: managerupdate.NewStager(dataDir, updateKeys), updateContext: updateContext, updateCancel: updateCancel, docredact: newDocredactSessions()}
+	if e != nil {
+		server.renewDistributed = e.RenewDistributedReservations
+		server.recoverDistributed = e.RecoverDistributedServing
+	} else {
+		server.renewDistributed = func(context.Context) error { return nil }
+		server.recoverDistributed = func(context.Context, string, string, bool) error { return nil }
+	}
+	server.headHealth = server.proveDistributedHeadHealth
 	server.SetRecipes(recipes, recipes)
 	// Every job that changes which model serves announces itself to the
 	// serving gate through this hook, whoever asked for it (see roles.go).

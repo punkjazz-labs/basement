@@ -920,6 +920,10 @@ func sglangArgs(r recipe.Recipe, placement Placement) []string {
 	if s.ChatTemplateFile != "" {
 		args = append(args, "--chat-template", artifactMountPath("primary")+"/"+s.ChatTemplateFile)
 	}
+	if s.DefaultChatTemplateKwargs != nil {
+		options, _ := json.Marshal(s.DefaultChatTemplateKwargs)
+		args = append(args, "--default-chat-template-kwargs", string(options))
+	}
 	args = appendOptional(args, "--tool-call-parser", s.ToolCallParser)
 	args = appendOptional(args, "--reasoning-parser", s.ReasoningParser)
 	if s.TrustRemoteCode {

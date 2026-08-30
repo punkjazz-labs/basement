@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/punkjazz-labs/basement/internal/engine"
 	"github.com/punkjazz-labs/basement/internal/fleet"
 	"github.com/punkjazz-labs/basement/internal/operations"
 	"github.com/punkjazz-labs/basement/internal/recipe"
@@ -44,6 +45,18 @@ const (
 	legacyRankPrepareTTL       = 45 * time.Minute
 	legacyDriverLeaseTTL       = 9 * fleet.HeartbeatInterval
 	legacyReservationSweepRate = fleet.HeartbeatInterval
+	// Three consecutive misses, sustained for the normal heartbeat freshness
+	// window, are enough evidence that this head can no longer prove its worker
+	// is alive. That is well before the worker's nine-heartbeat reclaim deadline
+	// while still tolerating a short management-path interruption.
+	distributedRenewalFailureLimit = 3
+	// Keep one health proof below the heartbeat cadence. A slow scheduler must
+	// not make maintenance pile up behind a long unbounded HTTP request.
+	distributedHeadHealthTimeout = 5 * time.Second
+	// A stopped group is safe to retry only when its start job could not be
+	// recorded. Bound those database-path retries; a failed recovery start is
+	// already a durable job and is never spun again automatically.
+	distributedRecoveryJobAttemptLimit = 3
 )
 
 // delegatedProgress holds the latest receipt of the step this node is
@@ -338,6 +351,34 @@ func (s *Server) nodeRenewReservation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, errors.New("the delegated job does not own an active worker reservation"))
 		return
 	}
+	// Renewals keep an active distributed worker from being reclaimed during a
+	// long stage, but after this worker has successfully started its rank they
+	// must also prove that the rank still exists. Without this check a dead rank
+	// can keep a fresh lease while the head's HTTP process continues to answer.
+	// A missing liveness row is deliberately tolerated while staging. When the
+	// exact container is already running, adopt it into this table as part of
+	// renewal: that is how a rank started by the previous manager version gains
+	// the new liveness evidence without requiring an outage.
+	running, known, err := s.store.DelegatedRankRunning(r.Context(), reservationID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	execution := operations.Execution{
+		ReservationID: reservationID, Kind: "worker",
+		Placement: operations.Placement{Role: operations.RoleWorker, NodeCount: trusted.Topology.SparkCount},
+	}
+	containerRunning := s.localExecutor().Completed(r.Context(), execution, recipe.Operation{Type: "start_container"}, trusted, nil)
+	if known && running && !containerRunning {
+		writeError(w, http.StatusConflict, errors.New("the worker model container is no longer running"))
+		return
+	}
+	if !known && containerRunning {
+		if err := s.store.SetDelegatedRankRunning(r.Context(), reservationID, true); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("adopt this running worker rank: %w", err))
+			return
+		}
+	}
 	expires, err := s.renewLegacyRankReservation(r.Context(), reservationID)
 	if err != nil {
 		writeError(w, http.StatusConflict, err)
@@ -460,6 +501,18 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 	// caller sent, and it runs locally rather than being forwarded onward.
 	receipt, err := s.localExecutor().Execute(r.Context(), execution, recipe.Operation{Type: request.Operation}, trusted, progress)
 	handedBack = err == nil
+	if err == nil {
+		switch request.Operation {
+		case "start_container":
+			if persistErr := s.store.SetDelegatedRankRunning(r.Context(), reservationID, true); persistErr != nil {
+				err = fmt.Errorf("record that this worker rank started: %w", persistErr)
+			}
+		case "stop_container", "remove_container", "remove_artifact_if_unshared":
+			if persistErr := s.store.ClearDelegatedRankLiveness(r.Context(), reservationID); persistErr != nil {
+				err = fmt.Errorf("clear this worker rank's liveness: %w", persistErr)
+			}
+		}
+	}
 	response := map[string]any{"receipt": receipt}
 	if err != nil {
 		response["error"] = redact.String(err.Error())
@@ -533,6 +586,10 @@ func (s *Server) ReclaimExpiredDriverReservations(ctx context.Context) error {
 			joined = errors.Join(joined, fmt.Errorf("stop expired worker rank: %w", err))
 			continue
 		}
+		if err := s.store.ClearDelegatedRankLiveness(ctx, reservation.ReservationID); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("clear expired worker rank liveness: %w", err))
+			continue
+		}
 		if err := s.engine.Reservations().FinishReclaim(ctx, reservation.ReservationID); err != nil {
 			joined = errors.Join(joined, err)
 		}
@@ -544,9 +601,7 @@ func (s *Server) RunReservationMaintenance(ctx context.Context) {
 	ticker := time.NewTicker(legacyReservationSweepRate)
 	defer ticker.Stop()
 	for {
-		if s.engine != nil {
-			_ = s.engine.RenewDistributedReservations(ctx)
-		}
+		s.maintainDistributedServing(ctx, time.Now())
 		_ = s.ReclaimExpiredDriverReservations(ctx)
 		select {
 		case <-ctx.Done():
@@ -556,6 +611,109 @@ func (s *Server) RunReservationMaintenance(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// maintainDistributedServing turns renewal failure into a bounded group
+// reaction. A worker lease is a liveness proof only while it is renewed; once
+// that proof is stale the head must stop presenting its model as ready and
+// must not wait for the worker's later reclaim to leave rank 0 serving alone.
+func (s *Server) maintainDistributedServing(ctx context.Context, observed time.Time) {
+	if s.renewDistributed == nil || s.recoverDistributed == nil {
+		return
+	}
+	err := s.renewDistributed(ctx)
+	active, activeDistributed := s.activeReadyRecipe(ctx)
+	if err == nil && activeDistributed && active.Distributed() && s.headHealth != nil {
+		healthCtx, cancel := context.WithTimeout(ctx, distributedHeadHealthTimeout)
+		err = s.headHealth(healthCtx, active)
+		cancel()
+	}
+	s.renewalMu.Lock()
+	if err == nil {
+		if activeDistributed && active.Distributed() {
+			s.resetDistributedRecoveryLocked()
+			s.renewalMu.Unlock()
+			return
+		}
+		if s.recoveryJobPending {
+			if s.recoveryJobAttempts >= distributedRecoveryJobAttemptLimit {
+				s.renewalMu.Unlock()
+				return
+			}
+			recipeID, reason := s.recoveryRecipeID, s.recoveryReason
+			s.recoveryJobAttempts++
+			s.renewalMu.Unlock()
+			s.retryDistributedRecovery(ctx, recipeID, reason, true)
+			return
+		}
+		s.resetDistributedRecoveryLocked()
+		s.renewalMu.Unlock()
+		return
+	}
+	if s.renewalFirstFailed.IsZero() {
+		s.renewalFirstFailed = observed
+	}
+	s.renewalFailures++
+	due := !s.renewalDegrading &&
+		s.renewalFailures >= distributedRenewalFailureLimit &&
+		observed.Sub(s.renewalFirstFailed) >= fleet.HeartbeatFreshness
+	if due {
+		s.renewalDegrading = true
+		s.recoveryRecipeID = active.ID
+		s.recoveryReason = redact.String(err.Error())
+		s.recoveryJobAttempts = 1
+	}
+	s.renewalMu.Unlock()
+	if !due {
+		return
+	}
+	// Recover synchronously so this loop cannot continue renewing a worker
+	// while the engine stops the same group and records its one durable recovery
+	// job. The engine records failed before either stop, which closes inference
+	// admission even when the worker is unreachable.
+	s.retryDistributedRecovery(ctx, active.ID, redact.String(err.Error()), false)
+}
+
+// proveDistributedHeadHealth uses the same local executor capability as the
+// readiness step. For text runtimes that is an exact loopback /health request;
+// the deadline makes a wedged scheduler evidence rather than a wedged manager.
+func (s *Server) proveDistributedHeadHealth(ctx context.Context, active recipe.Recipe) error {
+	healthCtx, cancel := context.WithTimeout(ctx, distributedHeadHealthTimeout)
+	defer cancel()
+	execution := operations.Execution{Kind: "health", Placement: operations.Placement{
+		Role: operations.RoleHead, NodeCount: active.Topology.SparkCount,
+	}}
+	if s.localExecutor().Completed(healthCtx, execution, recipe.Operation{Type: "wait_http"}, active, nil) {
+		return nil
+	}
+	return errors.New("the active model did not answer its /health check")
+}
+
+func (s *Server) retryDistributedRecovery(ctx context.Context, recipeID, reason string, retryRecoveryJob bool) {
+	err := s.recoverDistributed(ctx, recipeID, reason, retryRecoveryJob)
+	s.renewalMu.Lock()
+	defer s.renewalMu.Unlock()
+	if err == nil {
+		s.resetDistributedRecoveryLocked()
+		return
+	}
+	if errors.Is(err, engine.ErrDistributedRecoveryJob) {
+		s.recoveryJobPending = true
+		return
+	}
+	// A failed stop has no safe automatic retry. The engine logs the error and
+	// leaves the model failed, rather than risking a second group beside it.
+	s.recoveryJobPending = false
+}
+
+func (s *Server) resetDistributedRecoveryLocked() {
+	s.renewalFailures = 0
+	s.renewalFirstFailed = time.Time{}
+	s.renewalDegrading = false
+	s.recoveryJobPending = false
+	s.recoveryRecipeID = ""
+	s.recoveryReason = ""
+	s.recoveryJobAttempts = 0
 }
 
 // trustedWorkerRecipe resolves what this node will actually run. The caller

@@ -206,6 +206,29 @@ func TestMutualTLSHandshakeWithWrongCertificateFailsClosed(t *testing.T) {
 	}
 }
 
+func TestPinnedFleetClientReusesBoundedTransport(t *testing.T) {
+	manager, _ := newTestManager(t, "controller", "192.168.99.10")
+
+	first := manager.clientForFingerprint("member-fingerprint")
+	second := manager.clientForFingerprint("member-fingerprint")
+	if first != second {
+		t.Fatal("pinned fleet calls did not reuse their HTTP client")
+	}
+	transport, ok := first.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("pinned fleet client transport is %T, want *http.Transport", first.Transport)
+	}
+	if transport.TLSHandshakeTimeout != fleetTLSHandshakeTimeout {
+		t.Fatalf("TLS handshake timeout=%s, want %s", transport.TLSHandshakeTimeout, fleetTLSHandshakeTimeout)
+	}
+	if transport.IdleConnTimeout != fleetIdleConnectionTimeout {
+		t.Fatalf("idle connection timeout=%s, want %s", transport.IdleConnTimeout, fleetIdleConnectionTimeout)
+	}
+	if transport.MaxIdleConnsPerHost != 1 {
+		t.Fatalf("idle connections per host=%d, want 1", transport.MaxIdleConnsPerHost)
+	}
+}
+
 func TestHeartbeatRejectsWrongFleetAndAlteredPayload(t *testing.T) {
 	member, _ := newTestManager(t, "member", "192.168.99.20")
 	envelope, err := SignHeartbeat(member.identity, testHeartbeatPayload("fleet_one", member.identity.NodeID, 1))

@@ -7,8 +7,12 @@ id: qwen38-flash-next-nvfp4-2s
 # linear-attention (Gated DeltaNet) layers to one full-attention layer, 512
 # routed experts with top-10 routing plus a shared expert, native context
 # 262144, and a vision tower, so it takes text, image and video in and answers
-# in text. Thinking is on in its chat template. All of that was read live from
-# the checkpoint on 2026-08-28.
+# in text. The checkpoint's chat template enables thinking by default, but this
+# recipe disables it at the server boundary until tool calls are requalified.
+# SGLang issue 36537 reports a deterministic loop when this model combines
+# thinking with OpenAI tools and the qwen3_coder parser:
+# https://github.com/sgl-project/sglang/issues/36537. Callers may opt into
+# thinking per request with chat_template_kwargs once that path is qualified.
 #
 # Parameter count, with both published figures, because they do not agree and
 # this recipe does not adjudicate. The launcher header states 176B total with
@@ -33,11 +37,12 @@ id: qwen38-flash-next-nvfp4-2s
 # BF16 dense weights (attention, GDN, routers, shared expert, vision, MTP and
 # the output head).
 #
-# Speculative decoding needs nothing extra to download. The multi-token
-# prediction draft layer ships inside this checkpoint, so NEXTN drafts from the
-# weights the install already fetched. The launcher pins top-k 1 and refuses to
-# start at any other value, because the qwen4_exp PLE implementation supports
-# only top-k 1; the schema now holds a recipe to the same rule.
+# The checkpoint carries an MTP draft layer, but NEXTN is disabled in this
+# shipped candidate. The launcher ran it in its benchmark, yet this recipe has
+# no qualification covering the interaction between NEXTN, tool calls and the
+# thinking parser. Requalification can restore NEXTN after that matrix passes;
+# the schema still validates its launcher-specific draft-token invariant for
+# other recipes.
 #
 # Why the image is basement's own build. The stock image for this model,
 # lmsysorg/sglang:qwen38flashnext, cannot serve it on a GB10: QSA resolves its
@@ -155,7 +160,7 @@ id: qwen38-flash-next-nvfp4-2s
 # memory_model is omitted, for the reason the other two-Spark recipes omit it:
 # TP=2 shards the weights across nodes, and the schema's flat single-node
 # formula would be wrong by construction.
-version: 2
+version: 3
 display_name: Qwen 3.8 Flash Next
 publisher: MiaAI Lab + RadixArk
 model_by: Qwen team, Alibaba
@@ -192,23 +197,24 @@ runtime:
   kind: sglang
   # basement's own CI-published image, not a third-party one. See
   # packaging/qwen38-flash-next-image/README.md for the whole provenance
-  # story. Read back from the registry at this digest on 2026-08-28: a single
+  # story. Read back from the registry at this digest on 2026-08-30: a single
   # linux/arm64 manifest whose labels name the base image
   # lmsysorg/sglang:qwen38flashnext@sha256:12d3392b..., the patch source
   # MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks at dccb035c under MIT, and
-  # the SGLang commit d91c3682 the base was built from. image_bytes is that
-  # manifest's compressed layer sum, the same measure every other recipe in
-  # the pack states.
+  # SGLang disconnect-cleanup PR 35936 at 764f0b95 under Apache-2.0. The base
+  # labels name SGLang commit d91c3682. image_bytes is this manifest's
+  # compressed layer sum, the same measure every other recipe in the pack
+  # states.
   image: ghcr.io/punkjazz-labs/basement-sglang-qwen38-flash-next
-  digest: sha256:a7da51c60dcb673c72e3769187159b08207b51cf642cd4c3990d25083d8b7a4c
-  image_bytes: 14411614427
+  digest: sha256:7caec6b0df2dbcae8c95c95e45e6c36e2582c4e0612ed5d6bc056400f563fe52
+  image_bytes: 14411651826
   # Measured rather than modelled, which is the exception in this pack: this
   # is the CI runner's own docker image inspect .Size for the image it had
-  # just pushed (workflow run 33154132937). It is an arm64 Linux measurement
+  # just pushed (workflow run 33306584475). It is an arm64 Linux measurement
   # from a GitHub runner, not from a GB10, so qualification on hardware still
   # corrects it. It is also well below the three times compressed size that
   # unmeasured recipes use as their disk guardrail.
-  image_disk_bytes: 30453388032
+  image_disk_bytes: 30453551861
   # The two arch lists are the launcher's, and they matter on GB10: an image
   # built before this part defaults them to the previous Blackwell generation,
   # so anything compiled at start would target the wrong device.
@@ -292,22 +298,26 @@ service:
     # Left unset, so the runtime's own default applies (bf16). The launcher
     # calls fp8 here experimental and ships with it empty.
     kv_cache_dtype: ""
-    # NEXTN drafts with the checkpoint's own MTP layer: 3 steps, top-k 1, and
-    # 4 draft tokens, which is steps plus one, the relation the launcher
-    # enforces before it starts.
-    speculative_algorithm: NEXTN
-    speculative_num_steps: 3
-    speculative_eagle_topk: 1
-    speculative_num_draft_tokens: 4
-    # No second artifact: the draft weights are inside the primary checkpoint.
+    # NEXTN uses the in-checkpoint MTP layer, but remains disabled until the
+    # candidate is requalified with OpenAI tool calls and both parser paths.
+    speculative_algorithm: ""
+    speculative_num_steps: 0
+    speculative_eagle_topk: 0
+    speculative_num_draft_tokens: 0
+    # No second artifact would be needed if NEXTN is restored: its draft
+    # weights are inside the primary checkpoint.
     speculative_model_role: ""
     # No chat template override: the pinned snapshot ships its own
     # chat_template.jinja, which the runtime reads as a tokenizer asset.
     chat_template_file: ""
     # auto means the runtime derives both parsers from that chat template,
-    # which is what the launcher asks for.
+    # which is what the launcher asks for. Thinking is disabled by default to
+    # avoid SGLang issue 36537's tool-call loop; a request can override this
+    # with chat_template_kwargs when it has been tested for the workload.
     tool_call_parser: auto
     reasoning_parser: auto
+    default_chat_template_kwargs:
+      enable_thinking: false
     # flashinfer is required on SM121; the trtllm backend is SM100 only.
     attention_backend: flashinfer
     # The launcher passes --trust-remote-code on every start, and this recipe

@@ -16,7 +16,12 @@ import (
 	"github.com/punkjazz-labs/basement/internal/store"
 )
 
-const maxFleetBody = 1 << 20
+const (
+	maxFleetBody               = 1 << 20
+	fleetTLSAdmissionTimeout   = 2 * time.Second
+	fleetTLSHandshakeTimeout   = 5 * time.Second
+	fleetIdleConnectionTimeout = 90 * time.Second
+)
 
 type joinPrepareRequest struct {
 	Version               int    `json:"version"`
@@ -60,7 +65,13 @@ func (m *Manager) TLSConfig() *tls.Config {
 			if len(state.PeerCertificates) != 1 {
 				return errors.New("fleet TLS requires one client certificate")
 			}
-			return m.allowPeerCertificate(context.Background(), state.PeerCertificates[0])
+			// VerifyConnection has no request context. Keep a busy SQLite
+			// connection from holding a TLS handshake until the peer gives up.
+			// A failed admission is safer than an unbounded handshake, and the
+			// next heartbeat retries with the same pinned identity.
+			ctx, cancel := context.WithTimeout(context.Background(), fleetTLSAdmissionTimeout)
+			defer cancel()
+			return m.allowPeerCertificate(ctx, state.PeerCertificates[0])
 		},
 	}
 }
@@ -272,7 +283,12 @@ var (
 )
 
 func (m *Manager) clientForFingerprint(expectedFingerprint string) *http.Client {
-	transport := &http.Transport{TLSClientConfig: &tls.Config{
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
+	if client := m.clients[expectedFingerprint]; client != nil {
+		return client
+	}
+	transport := fleetTransport(&tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		Certificates:       []tls.Certificate{m.identity.TLSCertificate()},
 		InsecureSkipVerify: true,
@@ -294,8 +310,26 @@ func (m *Manager) clientForFingerprint(expectedFingerprint string) *http.Client 
 			}
 			return nil
 		},
-	}}
-	return &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	})
+	client := &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	if m.clients == nil {
+		m.clients = make(map[string]*http.Client)
+	}
+	m.clients[expectedFingerprint] = client
+	return client
+}
+
+// fleetTransport supplies bounds that apply before HTTP can see a request and
+// keeps a small idle pool for repeated calls to one member. The caller owns
+// the TLS config and transport; the manager retains one per certificate pin.
+func fleetTransport(config *tls.Config) *http.Transport {
+	return &http.Transport{
+		TLSClientConfig:     config,
+		TLSHandshakeTimeout: fleetTLSHandshakeTimeout,
+		IdleConnTimeout:     fleetIdleConnectionTimeout,
+		MaxIdleConns:        2,
+		MaxIdleConnsPerHost: 1,
+	}
 }
 
 func (m *Manager) Run(ctx context.Context) {

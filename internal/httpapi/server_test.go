@@ -133,6 +133,39 @@ func (a *apiExecutor) Completed(_ context.Context, _ operations.Execution, op re
 	return a.done[op.Type]
 }
 
+func TestFailedModelIsListedHonestlyAndCannotServe(t *testing.T) {
+	fixture := newNodeFixture(t)
+	if err := fixture.api.store.SetInstalled(context.Background(), store.InstalledModel{
+		RecipeID: fixture.distributed.ID, RecipeVersion: fixture.distributed.Version,
+		Status: "failed", ArtifactPath: "/managed/" + fixture.distributed.ID, Active: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	list := httptest.NewRecorder()
+	listRequest := httptest.NewRequest(http.MethodGet, "http://manager.test/api/v1/models", nil)
+	listRequest.Header.Set("Authorization", "Bearer "+fixture.key)
+	fixture.api.Handler().ServeHTTP(list, listRequest)
+	if list.Code != http.StatusOK {
+		t.Fatalf("models status=%d body=%s", list.Code, list.Body.String())
+	}
+	var models []store.InstalledModel
+	if err := json.Unmarshal(list.Body.Bytes(), &models); err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].Status != "failed" || models[0].Active {
+		t.Fatalf("models=%+v", models)
+	}
+
+	serve := httptest.NewRecorder()
+	serveRequest := httptest.NewRequest(http.MethodPost, "http://manager.test/v1/chat/completions", strings.NewReader(`{"model":"anything","messages":[{"role":"user","content":"ready"}]}`))
+	serveRequest.Header.Set("Authorization", "Bearer "+fixture.key)
+	fixture.api.Handler().ServeHTTP(serve, serveRequest)
+	if serve.Code != http.StatusServiceUnavailable || !strings.Contains(serve.Body.String(), "no model is active and ready") {
+		t.Fatalf("failed model served status=%d body=%s", serve.Code, serve.Body.String())
+	}
+}
+
 func TestAuthenticatedQwenInstallAPI(t *testing.T) {
 	dataDir := t.TempDir()
 	database, err := store.Open(filepath.Join(dataDir, "manager.db"))

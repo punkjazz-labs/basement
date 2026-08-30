@@ -122,9 +122,11 @@ request is held while the manager starts it, and then answered. The start
 is the same job the console's Start button creates, so there is one
 activation path and one place where a switch can go wrong.
 
-The bound is ten minutes, which is what the console tells the owner about
-a first start. Failure and timeout are answered in the OpenAI error shape,
-naming the model and pointing at the Activity page, where the job is.
+The bound is the recipe's `runtime.start_timeout_minutes`, with the same
+20-minute default used by the engine when that field is omitted. A role
+request must not give up while the runtime's own verified startup window is
+still open. Failure and timeout are answered in the OpenAI error shape, naming
+the model, the actual bound and the Activity page, where the job is.
 
 The switch runs in the engine on its own context, so a client that hangs
 up mid-switch leaves the model coming up rather than half started.
@@ -179,7 +181,8 @@ create one. The store is what says a start is already running, so this
 holds across a client that hung up, an owner who pressed Start a moment
 ago, and a manager restart. After the model comes up, admission is asked
 for again rather than assumed, because a switch queued behind this one can
-take the model away in between; the ten minutes bound the whole thing.
+take the model away in between; the recipe's startup budget bounds the whole
+thing.
 
 A job also re-reads its own premise. Everything a plan does follows from
 one reading of the live active model, taken when the plan was made, and

@@ -1387,6 +1387,157 @@ func TestTwoSparkInstallStopsBothNodesWhenTheHeadNeverBecomesHealthy(t *testing.
 	assertBothNodesTornDown(t, s, job.ID, fake.recorded())
 }
 
+// A worker lease failure after readiness is not an invitation to restart one
+// tensor-parallel rank. The head withdraws readiness first, stops both ranks,
+// and stops renewing the worker so an unreachable worker can still reclaim
+// itself on its own deadline.
+func TestFailedDistributedServingStopsBothRanksAndClosesAdmission(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, r := newTwoSparkEngine(t, fake)
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "serve-before-failure", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	waitJob(t, s, job.ID, "ready")
+	beforeRenewals := len(fake.recordedRenewals())
+
+	if err := runner.DegradeDistributedServing(ctx, "worker renewal failed"); err != nil {
+		t.Fatal(err)
+	}
+	model, err := s.Model(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Active || model.Status != "failed" {
+		t.Fatalf("failed model=%+v", model)
+	}
+	events := fake.recorded()
+	if indexOf(events, "stop_container@head") < 0 || indexOf(events, "stop_container@worker") < 0 {
+		t.Fatalf("failure handling did not stop both ranks: %v", events)
+	}
+	if err := runner.RenewDistributedReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(fake.recordedRenewals()); got != beforeRenewals {
+		t.Fatalf("failed group kept renewing worker lease: before=%d after=%d", beforeRenewals, got)
+	}
+}
+
+func TestDistributedRenewalFailureRecoversWithOneDurableWholeGroupStart(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, r := newTwoSparkEngine(t, fake)
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "serve-before-automatic-recovery", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	waitJob(t, s, job.ID, "ready")
+
+	if err := runner.RecoverDistributedServing(ctx, r.ID, "worker rank was no longer running", false); err != nil {
+		t.Fatal(err)
+	}
+	var recovery store.Job
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		jobs, err := s.ListJobs(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, candidate := range jobs {
+			if candidate.Kind != "start" {
+				continue
+			}
+			var payload map[string]any
+			if json.Unmarshal(candidate.Payload, &payload) == nil && payload["recovery"] == "distributed_worker_renewal" {
+				recovery = candidate
+				break
+			}
+		}
+		if recovery.ID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if recovery.ID == "" {
+		t.Fatal("automatic recovery did not create a durable start job")
+	}
+	recovery = waitJob(t, s, recovery.ID, "ready")
+	if len(recovery.Steps) == 0 {
+		t.Fatal("automatic recovery has no durable step receipts")
+	}
+	model, err := s.Model(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !model.Active || model.Status != "ready" {
+		t.Fatalf("automatic recovery model=%+v", model)
+	}
+	starts := map[string]int{}
+	for _, event := range fake.recorded() {
+		if event == "start_container@head" || event == "start_container@worker" {
+			starts[event]++
+		}
+	}
+	if starts["start_container@head"] != 2 || starts["start_container@worker"] != 2 {
+		t.Fatalf("recovery did not start the whole group exactly once: starts=%v", starts)
+	}
+	jobs, err := s.ListJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts = map[string]int{}
+	for _, candidate := range jobs {
+		if candidate.Kind == "start" {
+			starts[candidate.ID]++
+		}
+	}
+	if len(starts) != 1 {
+		t.Fatalf("automatic recovery made %d start jobs, want one", len(starts))
+	}
+}
+
+// A failed model row is written before either rank is stopped, so it cannot
+// itself authorize recovery. Even an erroneous retry marker must not create a
+// fresh group while the original head reservation is still active because the
+// worker stop was incomplete.
+func TestIncompleteDistributedStopNeverCreatesRecoveryJob(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, r := newTwoSparkEngine(t, fake)
+	install, _, err := s.CreateJob(ctx, "install", r.ID, "serve-before-incomplete-stop", map[string]any{"confirmed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(install.ID)
+	waitJob(t, s, install.ID, "ready")
+
+	fake.failStepNode = "stop_container@worker"
+	err = runner.RecoverDistributedServing(ctx, r.ID, "worker rank was no longer running", true)
+	if err == nil || !strings.Contains(err.Error(), "stop failed worker rank") {
+		t.Fatalf("incomplete group stop error=%v, want worker stop failure", err)
+	}
+	model, err := s.Model(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Active || model.Status != "failed" {
+		t.Fatalf("incompletely stopped model=%+v", model)
+	}
+	jobs, err := s.ListJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range jobs {
+		var payload map[string]any
+		if candidate.Kind == "start" && json.Unmarshal(candidate.Payload, &payload) == nil && payload["recovery"] == "distributed_worker_renewal" {
+			t.Fatalf("incomplete stop created recovery job %s", candidate.ID)
+		}
+	}
+}
+
 func TestTwoSparkInstallRefusesWhenTheWorkerIsNotReady(t *testing.T) {
 	ctx := context.Background()
 	fake := newFleetExecutor()

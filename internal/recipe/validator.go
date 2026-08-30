@@ -855,6 +855,9 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 	if !parserNamePattern.MatchString(s.ToolCallParser) || !parserNamePattern.MatchString(s.ReasoningParser) {
 		return errors.New("sglang parser names must be plain lowercase identifiers")
 	}
+	if s.DefaultChatTemplateKwargs != nil && s.DefaultChatTemplateKwargs.EnableThinking == nil {
+		return errors.New("sglang default_chat_template_kwargs must set enable_thinking")
+	}
 	fraction, err := strconv.ParseFloat(s.MemFractionStatic, 64)
 	if err != nil || fraction <= 0 || fraction > 0.95 {
 		return errors.New("sglang mem_fraction_static must be a decimal above 0 and no greater than 0.95")
@@ -945,6 +948,9 @@ func validateSGLang(s SGLangConfig, roles map[string]bool, sparkCount int) error
 	// and it widens when a second NEXTN launcher qualifies another value.
 	if s.SpeculativeAlgorithm == "NEXTN" && s.SpeculativeEagleTopK > 1 {
 		return errors.New("sglang speculative_eagle_topk must be 1 with speculative_algorithm NEXTN")
+	}
+	if s.SpeculativeAlgorithm == "NEXTN" && (s.SpeculativeNumSteps <= 0 || s.SpeculativeNumDraftTokens != s.SpeculativeNumSteps+1) {
+		return errors.New("sglang NEXTN requires speculative_num_draft_tokens to equal speculative_num_steps plus 1")
 	}
 	return validateChatTemplateFile(s.ChatTemplateFile)
 }

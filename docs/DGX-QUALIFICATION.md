@@ -83,6 +83,19 @@ above is specific to the stock vLLM stack. Recipe version 2 pins the fork
 image by digest and mirrors the observed serve configuration; it stays
 candidate until it passes this same qualification on our hardware.
 
+## Qwen3.8-Flash-Next remains a candidate
+
+`qwen38-flash-next-nvfp4-2s` has no completed two-Spark qualification receipt
+in this document. Its recipe therefore keeps candidate trust and verification.
+The in-checkpoint MTP layer and NEXTN launch path are not enabled by default:
+the recipe must first be tested with OpenAI tool calls and SGLang's reasoning
+and tool-call parsers together. SGLang issue [#36537](https://github.com/sgl-project/sglang/issues/36537)
+reports a deterministic loop for that combination on this model family. The
+recipe also defaults the model's `enable_thinking` chat-template argument to
+false until that matrix is requalified. A future qualification must cover
+both the thinking-off tool path and explicit thinking requests before either
+setting is restored as a default.
+
 ## 2026-08-04: DeepSeek V4 Flash two-Spark qualification, second run: PASS
 
 Recipe version 2 (Anemll GB10 vLLM fork, nvfp4_ds_mla KV cache, dspark
