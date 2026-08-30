@@ -197,23 +197,24 @@ runtime:
   kind: sglang
   # basement's own CI-published image, not a third-party one. See
   # packaging/qwen38-flash-next-image/README.md for the whole provenance
-  # story. Read back from the registry at this digest on 2026-08-28: a single
+  # story. Read back from the registry at this digest on 2026-08-30: a single
   # linux/arm64 manifest whose labels name the base image
   # lmsysorg/sglang:qwen38flashnext@sha256:12d3392b..., the patch source
   # MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks at dccb035c under MIT, and
-  # the SGLang commit d91c3682 the base was built from. image_bytes is that
-  # manifest's compressed layer sum, the same measure every other recipe in
-  # the pack states.
+  # SGLang disconnect-cleanup PR 35936 at 764f0b95 under Apache-2.0. The base
+  # labels name SGLang commit d91c3682. image_bytes is this manifest's
+  # compressed layer sum, the same measure every other recipe in the pack
+  # states.
   image: ghcr.io/punkjazz-labs/basement-sglang-qwen38-flash-next
-  digest: sha256:a7da51c60dcb673c72e3769187159b08207b51cf642cd4c3990d25083d8b7a4c
-  image_bytes: 14411614427
+  digest: sha256:7caec6b0df2dbcae8c95c95e45e6c36e2582c4e0612ed5d6bc056400f563fe52
+  image_bytes: 14411651826
   # Measured rather than modelled, which is the exception in this pack: this
   # is the CI runner's own docker image inspect .Size for the image it had
-  # just pushed (workflow run 33154132937). It is an arm64 Linux measurement
+  # just pushed (workflow run 33306584475). It is an arm64 Linux measurement
   # from a GitHub runner, not from a GB10, so qualification on hardware still
   # corrects it. It is also well below the three times compressed size that
   # unmeasured recipes use as their disk guardrail.
-  image_disk_bytes: 30453388032
+  image_disk_bytes: 30453551861
   # The two arch lists are the launcher's, and they matter on GB10: an image
   # built before this part defaults them to the previous Blackwell generation,
   # so anything compiled at start would target the wrong device.

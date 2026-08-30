@@ -199,7 +199,7 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if !ok || flashNext.Runtime.Kind != "sglang" || !flashNext.Distributed() || flashNext.Topology.SparkCount != 2 {
 		t.Fatalf("unexpected Qwen 3.8 Flash Next recipe: %#v", flashNext)
 	}
-	if flashNext.Runtime.Reference() != "ghcr.io/punkjazz-labs/basement-sglang-qwen38-flash-next@sha256:a7da51c60dcb673c72e3769187159b08207b51cf642cd4c3990d25083d8b7a4c" {
+	if flashNext.Runtime.Reference() != "ghcr.io/punkjazz-labs/basement-sglang-qwen38-flash-next@sha256:7caec6b0df2dbcae8c95c95e45e6c36e2582c4e0612ed5d6bc056400f563fe52" {
 		t.Fatalf("Qwen 3.8 Flash Next runtime is not pinned: %#v", flashNext.Runtime)
 	}
 	if flashNext.Version < 3 {
