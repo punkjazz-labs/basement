@@ -816,7 +816,6 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                 }}
               />
             </div>
-            {imageMode && <p className="gen-prompt-hint">The image sets the look. The prompt sets the motion.</p>}
             {/*
               Shown from three quarters of the way, not always: a counter on
               an empty field is noise, and one that appears only at the
@@ -831,7 +830,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
             )}
             {filledNote && (
               <div className="filled-note" role="status">
-                <p>Filled from the staged result. Seed cleared for a new take.</p>
+                <p>Prompt reused · Seed cleared</p>
               </div>
             )}
 
@@ -978,7 +977,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                 {submitting ? 'Starting' : <>Generate <span className="kbd" aria-hidden="true">{shortcutGlyph()}</span></>}
               </button>
               <p className="faint">
-                Up to {config.concurrent_generations} run at a time; extra runs queue. Keeps generating if you leave.
+                {config.concurrent_generations} concurrent · Extras queue · Continues after leaving
               </p>
             </div>
           </form>
@@ -993,7 +992,6 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
             Sound when a run finishes
           </button>
           <span className="spacer" />
-          <span className="muted gen-results-note">Played from local disk only</span>
         </div>
 
         {loading && <div className="stage-empty">Reading generations…</div>}
@@ -1031,7 +1029,7 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
                   <span className={`gen-state ${staged.status}`}>{generationState(staged.status)}</span>
                 </div>
               ) : generations.length === 0 ? (
-                <div className="stage-empty">No generations yet. Describe a clip and generate it.</div>
+                <div className="stage-empty">No generations yet</div>
               ) : null}
 
               {staged && (
@@ -1070,7 +1068,6 @@ export default function Generate({ recipe, recipes }: GenerateProps) {
             {generations.length > 0 && (
               <>
                 <div className="section-head strip-head">
-                  <span className="muted">All runs · newest first</span>
                 </div>
                 <div className="strip">
                   {generations.map(generation => (

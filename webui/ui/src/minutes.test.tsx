@@ -134,7 +134,7 @@ describe('the page while it waits for the first request', () => {
 
   it('draws the three steps', () => {
     expect(markup).toContain('Install Minutes on your Mac')
-    expect(markup).toContain('Point Minutes at this Spark')
+    expect(markup).toContain('Connect Minutes')
     expect(markup).toContain('Record a meeting')
   })
 
@@ -222,7 +222,7 @@ describe('the Setup link on a page that is set up', () => {
 
   it('brings the steps back', () => {
     expect(markup).toContain('Install Minutes on your Mac')
-    expect(markup).toContain('Point Minutes at this Spark')
+    expect(markup).toContain('Connect Minutes')
     expect(markup).toContain('aria-pressed="true"')
   })
 

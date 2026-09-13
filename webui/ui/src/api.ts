@@ -886,9 +886,9 @@ export function territoryEligibilityLabel(recipe: Recipe): string | undefined {
 // makes about every recipe it ships.
 export function trustLine(recipe: Recipe): string {
   if (recipe.verification === 'verified') {
-    return 'Verified on our own Spark and pinned for a single Spark.'
+    return 'Verified on hardware · Pinned version'
   }
-  return 'Pinned for a single Spark. Still a candidate on our hardware.'
+  return 'Candidate · Pinned version'
 }
 
 export function installConfirmationsComplete(

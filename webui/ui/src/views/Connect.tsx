@@ -125,7 +125,6 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
       <section className="card">
         <div className="section-head" style={{ marginBottom: 6 }}>
           <h2 style={{ fontSize: 16 }}>API keys</h2>
-          <span className="muted">Needed by every client except this console.</span>
         </div>
         {freshSecret && (
           <SecretReveal
@@ -154,7 +153,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
         {/* A lone text field sitting next to a freshly revealed secret is
             close enough to a login form for a manager to guess at. It names
             a key, it is not a credential, so it says so. */}
-        <form onSubmit={create} style={{ display: 'flex', gap: 8, marginTop: 12 }} {...FORM_IGNORED_BY_MANAGERS}>
+        <form onSubmit={create} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }} {...FORM_IGNORED_BY_MANAGERS}>
           <input
             name="new-key-label"
             id="new-key-label"
@@ -165,7 +164,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
             required
             maxLength={64}
             {...IGNORED_BY_MANAGERS}
-            style={{ flex: 1, background: 'var(--surface-2)', color: 'var(--ink)', border: '1px solid var(--line-strong)', borderRadius: 8, padding: '8px 12px' }}
+            style={{ flex: '1 1 160px', minWidth: 0, background: 'var(--surface-2)', color: 'var(--ink)', border: '1px solid var(--line-strong)', borderRadius: 8, padding: '8px 12px' }}
           />
           <button className="primary">Create key</button>
         </form>
@@ -173,7 +172,7 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
 
       <section className="card">
         <div className="section-head" style={{ marginBottom: 10 }}>
-          <h2 style={{ fontSize: 16 }}>Use it anywhere</h2>
+          <h2 style={{ fontSize: 16 }}>Code examples</h2>
         </div>
         <div className="snippet-tabs" role="tablist" aria-label="Integration examples">
           {SNIPPETS.map(name => (
@@ -188,9 +187,6 @@ export default function Connect({ activeModelID }: { activeModelID?: string }) {
           </button>
           <pre><code>{snippetFor(snippet, base, model)}</code></pre>
         </div>
-        <p className="muted" style={{ fontSize: 12.5 }}>
-          Follows whatever model is serving. Change this on the Roles page.
-        </p>
         <p className="faint" style={{ fontSize: 12.5, marginBottom: 0 }}>
           Set <code>BASEMENT_API_KEY</code> to a key from above.
         </p>

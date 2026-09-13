@@ -49,7 +49,6 @@ export default function Storage({ recipes, models, openDeployment, refreshModels
       danger: true,
       checkbox: {
         label: `Also delete ${formatBytes(selected.artifact_bytes)} of downloaded model files`,
-        note: 'Faster reinstall later.',
       },
     })
     if (!ok) return

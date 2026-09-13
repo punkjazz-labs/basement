@@ -32,14 +32,6 @@ import { LOCAL_MACHINE, forgetMachines, monitorMachines, recordSilence, recordTe
 // seconds: the samples cross the network.
 const PEER_TELEMETRY_MS = 10_000
 
-// Redactor has no line here on purpose: its own bar names the open document,
-// and nothing above it needs to repeat what the screen already shows.
-const DESC: Partial<Record<Tab, string>> = {
-  Roles: 'Endpoints that stay the same while you change the model.',
-  Connect: 'Endpoint, keys and snippets.',
-  Monitor: 'Live GPU health and serving metrics.',
-}
-
 // What a screen is, for the screens that answer it in a sentence rather than
 // with a line of their own. It hangs on the title, because the title is the
 // name it explains, and it stays a tooltip because a page is a product and not
@@ -506,7 +498,6 @@ export default function App() {
             {headTip && <Tip text={headTip.text} label={headTip.label} />}
             {!connected && !updateDialog.reconnecting && <span className="offline" role="status">Disconnected</span>}
           </div>
-          {DESC[tab] && <p className="desc">{DESC[tab]}</p>}
         </header>
         {/* The Playground fills the window, so the transcript inside it can
             own the scrollbar and the composer can stay at the bottom. Every

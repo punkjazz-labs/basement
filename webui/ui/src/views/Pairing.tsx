@@ -55,7 +55,7 @@ export default function Pairing({ onPaired }: { onPaired: () => void }) {
       </form>
       {error && <p className="error-text" role="alert">{error}</p>}
       <p className="hint">
-        Lost it? On the Spark, run <code>basement pairing-url</code> to print it again.
+        Get a token: <code>basement pairing-url</code> on the Spark.
       </p>
     </main>
   )
