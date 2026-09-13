@@ -1353,7 +1353,7 @@ func TestStartContainerRebuildsWhenTheEnvironmentChanged(t *testing.T) {
 	// built when Triton still went to its own default on the read-only root
 	// filesystem. One variable differs, so one is what the receipt must name.
 	previousEnvironment := []string{"PATH=/usr/bin"}
-	for _, entry := range containerEnvironment(r, Placement{}) {
+	for _, entry := range mustContainerEnvironment(t, r, Placement{}) {
 		if strings.HasPrefix(entry, "TRITON_CACHE_DIR=") {
 			entry = "TRITON_CACHE_DIR=/root/.triton"
 		}
@@ -1386,7 +1386,7 @@ func TestStartContainerRebuildsWhenTheEnvironmentChanged(t *testing.T) {
 			current := containerFixture{
 				ID: "rebuilt-id", Running: started, Labels: labels, Mounts: executor.expectedMounts(r),
 				Tmpfs: containerTmpfs(r), Image: r.Runtime.Reference(), Command: vllmArgs(r, Placement{}),
-				Environment: append([]string{"PATH=/usr/bin"}, containerEnvironment(r, Placement{})...),
+				Environment: append([]string{"PATH=/usr/bin"}, mustContainerEnvironment(t, r, Placement{})...),
 			}
 			return dockerFixtureResponse(http.StatusOK, current.JSON()), nil
 		default:
@@ -1542,6 +1542,7 @@ func TestStartContainerLeavesAContainerWithNoReportedImageAlone(t *testing.T) {
 // The generic command comparison leaves the rendezvous flags to staleLaunch,
 // whose established behavior is to rebuild on this positive disagreement.
 func TestStartContainerRebuildsWhenTheFabricAddressChanged(t *testing.T) {
+	withFabric(t, FabricLink{NetDev: "fabric0", HCA: "rdma0"}, nil, "192.0.2.11", nil)
 	r := twoSparkRecipe(t)
 	executor := &HostExecutor{dataDir: t.TempDir()}
 	for index := range r.Artifacts {
@@ -1603,6 +1604,7 @@ func TestStartContainerRebuildsWhenTheFabricAddressChanged(t *testing.T) {
 // left exactly as it is. Re-resolving live must not mean rebuilding every
 // start, including when reconciliation repeats for the same placement.
 func TestStartContainerLeavesAnUnchangedFabricAddressAlone(t *testing.T) {
+	withFabric(t, FabricLink{NetDev: "fabric0", HCA: "rdma0"}, nil, "192.0.2.11", nil)
 	r := twoSparkRecipe(t)
 	executor := &HostExecutor{dataDir: t.TempDir()}
 	for index := range r.Artifacts {

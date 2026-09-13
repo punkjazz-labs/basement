@@ -642,6 +642,7 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 		return true
 	case "create_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
+		environment, environmentErr := containerEnvironment(r, execution.Placement)
 		// Labels alone say the container is ours and for this recipe version;
 		// they say nothing about where it reads the model from, what it is
 		// allowed to write, which image it runs, or which serve arguments it
@@ -653,12 +654,12 @@ func (h *HostExecutor) Completed(ctx context.Context, execution Execution, opera
 		// staleLaunch). This list has to stay in step with the one
 		// replaceStaleContainer builds, because a container this call accepts
 		// is never offered to that one.
-		return err == nil && containerLabelsMatch(state.Labels, r) &&
+		return err == nil && environmentErr == nil && containerLabelsMatch(state.Labels, r) &&
 			len(staleMounts(state, h.expectedMounts(r))) == 0 &&
 			len(staleTmpfs(state, containerTmpfs(r))) == 0 &&
 			staleImage(state, r) == nil &&
 			len(staleCommand(state, r, execution.Placement)) == 0 &&
-			len(staleEnvironment(state, containerEnvironment(r, execution.Placement))) == 0 &&
+			len(staleEnvironment(state, environment)) == 0 &&
 			len(staleLaunch(state, r, execution.Placement)) == 0
 	case "start_container":
 		state, err := h.docker.Container(ctx, h.resolveContainerName(ctx, r))
@@ -1283,12 +1284,16 @@ func (h *HostExecutor) replaceStaleContainer(ctx context.Context, r recipe.Recip
 	if err != nil || !containerLabelsMatch(state.Labels, r) {
 		return containerDrift{}, nil
 	}
+	environment, err := containerEnvironment(r, placement)
+	if err != nil {
+		return containerDrift{}, err
+	}
 	drift := containerDrift{
 		Mounts:      staleMounts(state, h.expectedMounts(r)),
 		Writable:    staleTmpfs(state, containerTmpfs(r)),
 		Command:     staleCommand(state, r, placement),
 		Launch:      staleLaunch(state, r, placement),
-		Environment: staleEnvironment(state, containerEnvironment(r, placement)),
+		Environment: staleEnvironment(state, environment),
 		Image:       staleImage(state, r),
 	}
 	if !drift.found() {

@@ -293,7 +293,7 @@ func (d *DockerClient) Container(ctx context.Context, name string) (ContainerSta
 //
 // The image's own ENV is not in here. Docker merges it underneath, and only
 // the names below are basement's to decide.
-func containerEnvironment(r recipe.Recipe, placement Placement) []string {
+func containerEnvironment(r recipe.Recipe, placement Placement) ([]string, error) {
 	values := make(map[string]string, len(r.Runtime.Environment)+1)
 	for name, value := range r.Runtime.Environment {
 		values[name] = value
@@ -322,11 +322,21 @@ func containerEnvironment(r recipe.Recipe, placement Placement) []string {
 			values[name] = value
 		}
 	}
+	if placement.Distributed() && r.Runtime.Kind == "vllm" {
+		// vLLM's message queues choose their address independently of NCCL.
+		// Without this pin, a rank can advertise an unreachable Wi-Fi address
+		// even after the fabric rendezvous and NCCL initialization succeed.
+		_, address, err := fabricEndpoint(r, fabricAddress)
+		if err != nil {
+			return nil, fmt.Errorf("resolve this rank's vLLM message queue address: %w", err)
+		}
+		values["VLLM_HOST_IP"] = address
+	}
 	environment := make([]string, 0, len(values))
 	for _, name := range sortedKeys(values) {
 		environment = append(environment, name+"="+values[name])
 	}
-	return environment
+	return environment, nil
 }
 
 // Create builds the container for r. writablePaths are extra read-write bind
@@ -348,7 +358,10 @@ func (d *DockerClient) Create(ctx context.Context, name, image string, artifactP
 	for _, mountPoint := range sortedKeys(writablePaths) {
 		binds = append(binds, writablePaths[mountPoint]+":"+mountPoint+":rw")
 	}
-	environment := containerEnvironment(r, placement)
+	environment, err := containerEnvironment(r, placement)
+	if err != nil {
+		return "", err
+	}
 	// The model endpoint is loopback-only; the manager's authenticated /v1
 	// proxy is the sole network path to it (ADR 0007).
 	hostConfig := map[string]any{

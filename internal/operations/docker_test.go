@@ -125,13 +125,13 @@ func TestContainerEnvironmentSteersTileLangCacheForSGLang(t *testing.T) {
 		t.Fatal("fixture recipe already sets TILELANG_CACHE_DIR, so it cannot prove the default")
 	}
 	tileLangSteered := false
-	for _, entry := range containerEnvironment(r, Placement{}) {
+	for _, entry := range mustContainerEnvironment(t, r, Placement{}) {
 		if entry == "TILELANG_CACHE_DIR=/root/.cache/tilelang" {
 			tileLangSteered = true
 		}
 	}
 	if !tileLangSteered {
-		t.Fatalf("tilelang cache is not steered into the writable mount (read-only rootfs would crash the engine): %#v", containerEnvironment(r, Placement{}))
+		t.Fatalf("tilelang cache is not steered into the writable mount (read-only rootfs would crash the engine): %#v", mustContainerEnvironment(t, r, Placement{}))
 	}
 }
 
@@ -149,7 +149,7 @@ func TestContainerEnvironmentTileLangCacheOverrideWins(t *testing.T) {
 	}
 	r.Runtime.Environment["TILELANG_CACHE_DIR"] = "/root/.cache/custom-tilelang"
 	overridden, defaulted := false, false
-	for _, entry := range containerEnvironment(r, Placement{}) {
+	for _, entry := range mustContainerEnvironment(t, r, Placement{}) {
 		switch entry {
 		case "TILELANG_CACHE_DIR=/root/.cache/custom-tilelang":
 			overridden = true
@@ -158,10 +158,10 @@ func TestContainerEnvironmentTileLangCacheOverrideWins(t *testing.T) {
 		}
 	}
 	if !overridden {
-		t.Fatalf("recipe override lost to the default: %#v", containerEnvironment(r, Placement{}))
+		t.Fatalf("recipe override lost to the default: %#v", mustContainerEnvironment(t, r, Placement{}))
 	}
 	if defaulted {
-		t.Fatalf("both the override and the default are present: %#v", containerEnvironment(r, Placement{}))
+		t.Fatalf("both the override and the default are present: %#v", mustContainerEnvironment(t, r, Placement{}))
 	}
 }
 

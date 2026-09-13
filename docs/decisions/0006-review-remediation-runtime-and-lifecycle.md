@@ -33,6 +33,12 @@ removal logic that never actually checked artifact sharing.
    added for two-Spark serving briefly reintroduced `IpcMode: host`; it was
    removed again and both two-Spark recipes were version-bumped, so ranks share
    the fabric through host networking and RDMA only.
+   Amendment 2026-09-13: distributed vLLM ranks also set `VLLM_HOST_IP` to
+   their own detected fabric IPv4 address. NCCL interface selection does not
+   govern vLLM message queues, whose default address can follow Wi-Fi instead.
+   An unresolved fabric address refuses container creation or replacement;
+   it never falls back to an unrelated interface. Restart reconciliation
+   rebuilds containers missing this pin or holding an old fabric address.
 4. **Cancellation**: `Cancel` no longer writes the terminal `cancelled` state
    while the job goroutine is running. It records a non-terminal `cancelling`
    state (guarded so it can never overwrite a terminal state) and the running
