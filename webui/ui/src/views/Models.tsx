@@ -31,50 +31,7 @@ import {
   type PlacementTarget, type PowerRow,
 } from '../fleetModels'
 
-// What each model is, not what it is worth. Every line states the same class
-// of fact the model catalogs state: dense or mixture of experts, the parameter
-// count with the active count where the two differ, what the model reads, and
-// the work it is for. Every claim traces to the recipe, to
-// docs/MODEL-CANDIDATES-2026-08.md, or to the publisher's own model card.
-//
-// What a model reads is read from the recipe, never from the card: a card can
-// describe a multimodal model that this recipe serves with images off, and the
-// line has to state what the install actually serves. So a recipe with
-// multimodal_image_limit 0 says it serves text today, and one with a limit
-// above 0 says it reads images.
-const USE: Record<string, string> = {
-  'qwen36-35b-a3b-nvfp4-1s':
-    'Mixture of experts, 35B total with 3B active for each token. Reads text and images. The quick daily model for chat, coding help and tool use.',
-  'qwen36-27b-nvfp4-1s':
-    'Dense 27B tuned for coding and agent work. Reads text and images. Serves with speculative decoding for faster answers.',
-  'qwen35-122b-a10b-nvfp4-1s':
-    'Mixture of experts, 122B total with 10B active. Serves text today, with a built-in speculative head for faster decoding. 262K context.',
-  'qwen38-27b-nvfp4-1s':
-    'Dense 27.8B with hybrid attention and built-in vision. Thinks before it answers by default. 262K context.',
-  'qwen38-27b-obliterated-q8-0-1s':
-    'A community build of Qwen 3.8 27B with the refusal behaviour removed by weight ablation. You own what you make with it.',
-  'qwen38-flash-next-nvfp4-2s':
-    'Mixture of experts, 176B total with 6B active. Reads text, images and video. 262K context. Runs across both Sparks.',
-  'laguna-s-2-1-nvfp4-dflash-1s':
-    "poolside's coding model with its DFlash draft companion for faster decoding. Built for long agent runs.",
-  'deepseek-v4-flash-0731-2s':
-    "DeepSeek's official V4 Flash release in its own weights, FP8 attention with FP4 experts. Runs across both Sparks.",
-  'deepseek-v4-flash-0731-ud-iq3-xxs-1s':
-    'The same DeepSeek V4 Flash compressed to a 3-bit GGUF so one Spark can hold it alone.',
-  'minimax-h3-comfyui-1s':
-    'A 33B video model. Makes short clips with sound from a prompt or a source image, through ComfyUI.',
-  'nemotron-omni-30b-a3b-nvfp4-1s':
-    'Mixture of experts, 31B total with 3B active, built for reasoning. Serves text today. 131K context.',
-  'inkling-small-nvfp4-2s':
-    'Mixture of experts, 276B total with 12B active. Reads text, images and audio. Runs across both Sparks.',
-  'glm53-flash-exl3-2s':
-    'Mixture of experts, 320B total with 18B active. Reads text, images and video. Thinks before it answers and calls tools. Serves 900K of its native 1M context. Runs across both Sparks.',
-}
-// The same model, in the one line a row has room for. Every segment restates a
-// fact the USE line above already states, in the words a model card uses: the
-// shape and the size, what the model reads, and the one figure that decides
-// whether it suits the work. Nothing new is claimed here, and the full
-// sentence is not lost: it opens the row's own expansion.
+// Model summaries trace to the recipes and docs/MODEL-CANDIDATES-2026-08.md.
 const SPEC: Record<string, string> = {
   'qwen36-35b-a3b-nvfp4-1s': '35B MoE, 3B active · vision · chat, coding, tools',
   'qwen36-27b-nvfp4-1s': '27B dense · vision · coding and agents',
@@ -97,8 +54,8 @@ const SPEC: Record<string, string> = {
 // the owner has to plan for: how many machines it needs.
 const fallbackUse = (recipe: Recipe): string =>
   recipe.topology.spark_count > 1
-    ? `Local model that runs across ${recipe.topology.spark_count} Sparks.`
-    : 'Local model for your Spark.'
+    ? `Requires ${recipe.topology.spark_count} Sparks`
+    : 'Requires one Spark'
 
 // Community-reported typical speeds on a DGX Spark, shown until this device
 // measures its own number. Each figure traces to a corroborated measurement
@@ -125,7 +82,7 @@ const SPEED_UNIT = 'tok/s'
 
 // The note under the table, shown only while a "~" number is on screen. It is
 // about the tilde and nothing else, so it names it.
-const TYPICAL_NOTE = '~ speeds are community reports. Basement measures after install.'
+const TYPICAL_NOTE = '~ Community-reported speeds'
 
 // Where the token totals came from, in the tooltip over the line. The figures
 // speak for themselves; this is the part that would make the line a sentence.
@@ -887,7 +844,6 @@ export default function Models({
       danger: true,
       checkbox: {
         label: `Also delete ${formatBytes(recipe.artifact_bytes)} of downloaded model files`,
-        note: 'Faster reinstall later.',
       },
     })
     if (!ok) return
@@ -1268,7 +1224,7 @@ export default function Models({
         })()}
         {/* What this model is, in full. The line above it says the same
             thing in one line; the sentence belongs to the depth. */}
-        <div className="use">{USE[recipe.id] ?? fallbackUse(recipe)}</div>
+        <div className="use">{SPEC[recipe.id] ?? fallbackUse(recipe)}</div>
         <div className="board">
           <div className="cell">
             <div className="l">Speed</div>
@@ -1512,8 +1468,8 @@ export default function Models({
             </div>
           </div>
           <p className="hero-line">
-            {USE[featured.id]}{' '}
-            <span>{trustLine(featured)} Basement measures its real speed after install.</span>
+            {SPEC[featured.id]}{' '}
+            <span>{trustLine(featured)}</span>
           </p>
           <div className="hero-score">
             <div className="cell"><div className="l">Speed</div><div className="v">~{REFERENCE_TPS[featured.id]}</div><div className="u">tok/s · typical</div></div>
@@ -1877,28 +1833,28 @@ export default function Models({
                       that machine actually reported both numbers. */}
                   {target && target.storage_available_bytes > 0 && target.memory_available_bytes > 0 && (
                     <p className="muted" style={{ fontSize: 12.5 }}>
-                      {machine} has {formatBytes(target.storage_available_bytes)} free on disk and{' '}
-                      {formatBytes(target.memory_available_bytes)} memory free right now.
+                      {machine}: {formatBytes(target.storage_available_bytes)} disk free ·{' '}
+                      {formatBytes(target.memory_available_bytes)} memory free
                     </p>
                   )}
                   {onPeer ? (
                     <p className="muted" style={{ fontSize: 12.5 }}>
-                      Progress shows on {machine}'s own console. First start can take up to {startTimeoutMinutes(recipe)} minutes.
+                      Progress on {machine}'s console · First start: up to {startTimeoutMinutes(recipe)} min
                     </p>
                   ) : nothingToFetch ? (
                     <p className="muted" style={{ fontSize: 12.5 }}>
-                      Nothing to download; starting the model can take up to {startTimeoutMinutes(recipe)} minutes.
+                      Already downloaded · Start: up to {startTimeoutMinutes(recipe)} min
                     </p>
                   ) : (
                     <p className="muted" style={{ fontSize: 12.5 }}>
-                      After downloading, the first start can take up to {startTimeoutMinutes(recipe)} minutes. Cancelling is safe; downloads resume later.
+                      First start: up to {startTimeoutMinutes(recipe)} min · Downloads resume after cancellation
                     </p>
                   )}
                   {/* Both downloads run on this Spark and share its
                       bandwidth. An install on another Spark shares nothing
                       with them. */}
                   {!onPeer && !remote && anotherInstallRunning && (
-                    <p className="muted" style={{ fontSize: 12.5 }}>Another download is running. Both continue, sharing bandwidth.</p>
+                    <p className="muted" style={{ fontSize: 12.5 }}>Downloads share bandwidth.</p>
                   )}
                   {switchFrom && (
                     <div className="install-choice" role="radiogroup" aria-label="After the download finishes">
@@ -1915,7 +1871,7 @@ export default function Models({
                           {switchFrom === recipe.id ? 'Update and switch now' : 'Download and switch now'}
                           <small>
                             {switchFrom === recipe.id
-                              ? `Restarts ${recipe.display_name} on the new version. Basement restores it if this fails.`
+                              ? `Restarts ${recipe.display_name}; restores it if the update fails.`
                               : `This stops ${nameOf(switchFrom)} while ${recipe.display_name} starts.`}
                           </small>
                         </span>
@@ -1932,20 +1888,13 @@ export default function Models({
                           {switchFrom === recipe.id ? 'Update only' : 'Download only'}
                           <small>
                             {switchFrom === recipe.id
-                              ? `${recipe.display_name} keeps serving. Switch later from the Models tab.`
-                              : `${nameOf(switchFrom)} keeps serving. Start ${recipe.display_name} later from the Models tab.`}
+                              ? `${recipe.display_name} keeps serving.`
+                              : `${nameOf(switchFrom)} keeps serving.`}
                           </small>
                         </span>
                         <span className="row-check" />
                       </label>
                     </div>
-                  )}
-                  {onPeer && (
-                    <p className="muted" style={{ fontSize: 12.5 }}>
-                      {switchFrom
-                        ? `Switching happens on ${machine}, not here.`
-                        : `${machine} downloads and serves this. This Spark is unaffected.`}
-                    </p>
                   )}
                   {licences.length > 0 && (
                     <div className="licence-details">

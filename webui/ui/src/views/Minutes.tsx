@@ -16,10 +16,10 @@ import { Tip } from '../tip'
 // The sentence beside the page title. App draws it, because that is where the
 // title is.
 export const MINUTES_HEAD_TIP =
-  'Minutes records and transcribes on your Mac. Only the transcript comes to this Spark, to write the notes.'
+  'Transcribes on your Mac; sends the transcript to this Spark for notes.'
 
 const SETTINGS_TIP = 'In Minutes: Settings, Endpoint. Paste all three values.'
-const MODEL_TIP = 'standard follows whatever model is serving. Assign a fixed model on the Roles page.'
+const MODEL_TIP = 'Uses the active model unless assigned in Roles.'
 
 // How often the keys are read again while the page waits for the first
 // request. It is the pace the other live reads in the console keep, and it
@@ -142,7 +142,7 @@ export function MinutesPage(props: MinutesPageProps) {
             <span className="num">2</span>
             <div className="body">
               <div className="hrow">
-                <span className="h">Point Minutes at this Spark</span>
+                <span className="h">Connect Minutes</span>
                 <Tip text={SETTINGS_TIP} label="Where these values go in Minutes" />
               </div>
               {settings}

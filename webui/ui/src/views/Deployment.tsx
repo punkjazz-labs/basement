@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, benchmarkReceipt, formatBytes, runtimeLabel, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepElapsedSeconds, stepOperation, type Job, type Recipe, type Step } from '../api'
+import { api, benchmarkReceipt, formatBytes, terminal, startTimeoutMinutes, stateCopy, stepCopy, stepElapsedSeconds, stepOperation, type Job, type Recipe, type Step } from '../api'
 import { confirmBox, noticeBox } from '../confirm'
 
 // verify_fabric is the two Sparks meeting over the cable and verify_peer_node
@@ -13,47 +13,43 @@ const CHECKS = [
 
 interface Phase {
   title: string
-  note: string
-  // activeNote replaces note while the phase runs — the honest time
-  // expectation, so a long wait reads as normal instead of stuck.
+  // Long startup waits need a time expectation.
   activeNote?: string
   states: string[]
   operations: string[]
 }
 
 function firstStartNote(recipe?: Recipe): string {
-  return `Loading into memory. The first start can take up to ${startTimeoutMinutes(recipe)} minutes.`
+  return `First start: up to ${startTimeoutMinutes(recipe)} min`
 }
 
 function phasePlan(job: Job, recipe?: Recipe): Phase[] {
   const mediaVerification: Phase = recipe?.media_generation
     ? {
         title: 'Verify generation',
-        note: 'Health and a real generation',
         states: ['verifying_health', 'verifying_generation'],
         operations: ['wait_http', 'verify_media_generation'],
       }
     : {
         title: 'Verify endpoint',
-        note: 'Health and real inference',
         states: ['verifying_health', 'verifying_inference'],
         operations: ['wait_http', 'verify_openai_inference'],
       }
   if (job.kind === 'install') {
     const firstStart = firstStartNote(recipe)
     return [
-      { title: 'Check system', note: 'Hardware, memory, disk and access', states: ['queued', 'preflighting'], operations: CHECKS },
-      { title: 'Prepare runtime', note: `Pinned ${runtimeLabel(recipe?.runtime.kind)} image`, states: ['downloading_runtime'], operations: ['pull_image'] },
-      { title: 'Download model', note: 'Resumable model files', states: ['downloading_models'], operations: ['download_artifact'] },
-      { title: 'Configure service', note: 'Owned configuration and container', states: ['configuring'], operations: ['write_generated_config', 'create_container'] },
-      { title: 'Start model', note: 'Safe memory reservation', activeNote: firstStart, states: ['checking_memory', 'starting', 'stopping'], operations: ['stop_container', 'verify_memory', 'start_container'] },
+      { title: 'Check system', states: ['queued', 'preflighting'], operations: CHECKS },
+      { title: 'Prepare runtime', states: ['downloading_runtime'], operations: ['pull_image'] },
+      { title: 'Download model', states: ['downloading_models'], operations: ['download_artifact'] },
+      { title: 'Configure service', states: ['configuring'], operations: ['write_generated_config', 'create_container'] },
+      { title: 'Start model', activeNote: firstStart, states: ['checking_memory', 'starting', 'stopping'], operations: ['stop_container', 'verify_memory', 'start_container'] },
       { ...mediaVerification, activeNote: firstStart },
     ]
   }
   if (job.kind === 'start') {
     return [
-      { title: 'Reserve hardware', note: 'Stop the active model, check memory', states: ['queued', 'stopping', 'checking_memory'], operations: ['stop_container', 'verify_memory'] },
-      { title: 'Start model', note: 'Launch the pinned runtime', states: ['starting'], operations: ['start_container'] },
+      { title: 'Reserve hardware', states: ['queued', 'stopping', 'checking_memory'], operations: ['stop_container', 'verify_memory'] },
+      { title: 'Start model', states: ['starting'], operations: ['start_container'] },
       {
         ...mediaVerification,
         activeNote: recipe?.media_generation
@@ -64,26 +60,26 @@ function phasePlan(job: Job, recipe?: Recipe): Phase[] {
   }
   if (job.kind === 'remove') {
     return [
-      { title: 'Stop model', note: 'End the running service', states: ['queued', 'stopping'], operations: ['stop_container'] },
-      { title: 'Remove runtime', note: 'Delete owned container state', states: ['removing'], operations: ['remove_container'] },
-      { title: 'Reclaim storage', note: 'Delete only unshared model files', states: ['removing'], operations: ['remove_artifact_if_unshared'] },
+      { title: 'Stop model', states: ['queued', 'stopping'], operations: ['stop_container'] },
+      { title: 'Remove runtime', states: ['removing'], operations: ['remove_container'] },
+      { title: 'Reclaim storage', states: ['removing'], operations: ['remove_artifact_if_unshared'] },
     ]
   }
   if (job.kind === 'smoke-test') {
     return [
-      { title: 'Check endpoint', note: 'Wait for a healthy response', states: ['queued', 'verifying_health'], operations: ['wait_http'] },
+      { title: 'Check endpoint', states: ['queued', 'verifying_health'], operations: ['wait_http'] },
       recipe?.media_generation
-        ? { title: 'Run generation', note: 'Require a completed media file', states: ['verifying_generation'], operations: ['verify_media_generation'] }
-        : { title: 'Run inference', note: 'Require a non-empty model response', states: ['verifying_inference'], operations: ['verify_openai_inference'] },
+        ? { title: 'Run generation', states: ['verifying_generation'], operations: ['verify_media_generation'] }
+        : { title: 'Run inference', states: ['verifying_inference'], operations: ['verify_openai_inference'] },
     ]
   }
   if (job.kind === 'benchmark') {
     return [
-      { title: 'Check endpoint', note: 'Wait for a healthy response', states: ['queued', 'verifying_health'], operations: ['wait_http'] },
-      { title: 'Measure speed', note: 'Timed generation on this Spark', states: ['benchmarking'], operations: ['measure_throughput'] },
+      { title: 'Check endpoint', states: ['queued', 'verifying_health'], operations: ['wait_http'] },
+      { title: 'Measure speed', states: ['benchmarking'], operations: ['measure_throughput'] },
     ]
   }
-  return [{ title: 'Stop model', note: 'End the running service', states: ['queued', 'stopping'], operations: ['stop_container'] }]
+  return [{ title: 'Stop model', states: ['queued', 'stopping'], operations: ['stop_container'] }]
 }
 
 // LiveProgress renders the running step's receipt as human progress. The
@@ -351,7 +347,7 @@ export default function DeploymentDialog({ job, recipes, onClose, onCancel, onOp
                 <i aria-hidden="true" />
                 <div>
                   <strong>{phase.title}</strong>
-                  <span>{status === 'active' && phase.activeNote ? phase.activeNote : phase.note}</span>
+                  {status === 'active' && phase.activeNote && <span>{phase.activeNote}</span>}
                   {showsProgress && <LiveProgress step={current} />}
                 </div>
                 <b>

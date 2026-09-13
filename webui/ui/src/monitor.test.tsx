@@ -15,7 +15,7 @@ const MACHINES = [
   { id: 'node-msi-b', key: '', name: 'edgexpert-37c4' },
 ]
 
-const NO_METERS = 'This console cannot read the meters of this Spark yet.'
+const NO_METERS = 'Telemetry unavailable from this console'
 
 const sample = (at: string, over: Partial<Telemetry> = {}): Telemetry => ({
   sampled_at: at,
@@ -83,14 +83,14 @@ describe('the live meters', () => {
   it('claims nothing about a Spark that has not answered yet', () => {
     const markup = draw()
     expect(markup).not.toContain('No model serving')
-    expect(markup).toContain('Waiting for the first telemetry sample')
+    expect(markup).toContain('Waiting for telemetry')
     expect(markup).toContain('sdot busy')
   })
 
   it('says a Spark serves nothing only once that Spark has said so', () => {
     recordTelemetry(LOCAL_MACHINE, sample('2026-08-28T10:00:00Z'))
     const markup = draw()
-    expect(markup).toContain('No model serving. System metrics only.')
+    expect(markup).toContain('No model running')
   })
 
   // A Spark that stopped answering keeps its samples and takes the failed
@@ -99,7 +99,7 @@ describe('the live meters', () => {
     recordTelemetry('peer-1', sample('2026-08-28T10:00:00Z'))
     recordSilence('peer-1')
     const markup = draw()
-    expect(markup).toContain('No answer now. The last samples stay on screen.')
+    expect(markup).toContain('Disconnected · Last recorded samples')
     expect(markup).toContain('sdot fail')
     expect(markup).toContain('Power draw')
   })

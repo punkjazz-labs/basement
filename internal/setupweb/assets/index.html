@@ -240,14 +240,14 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--ac
     var children = [
       el("h2", { text: "Choose a machine" }),
       el("div", { class: "sub", text: noneLikely
-        ? "None of these look GB10-class by name. Setup checks the hardware after you connect."
-        : "These look like GB10-class machines. Setup checks the hardware after you connect." }),
+        ? "No GB10 detected by name · Hardware check after connection"
+        : "Possible GB10 machines · Hardware check after connection" }),
       el("div", { class: "machine-list" }, likely)
     ];
     if (others.length > 0) {
       var label = others.length === 1
-        ? "Don't see your Spark? Show 1 more device"
-        : "Don't see your Spark? Show " + others.length + " more devices";
+        ? "Show 1 more device"
+        : "Show " + others.length + " more devices";
       children.push(el("details", { class: "others" }, [
         el("summary", { text: label }),
         el("div", { class: "machine-list" }, others)
@@ -260,7 +260,7 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--ac
   function renderNonGB10(state) {
     app.replaceChildren(el("div", { class: "card" }, [
       el("h2", { text: state.name + " does not look like a GB10 machine" }),
-      el("div", { class: "sub", text: "The GB10-class entries do. Connect anyway to check its hardware?" }),
+      el("div", { class: "sub", text: "Connect to verify its hardware." }),
       el("div", { class: "row" }, [
         el("button", { class: "ghost", text: "Connect anyway", onclick: function () { answer("nongb10", { proceed: true }); } }),
         el("button", { class: "quiet", text: "Cancel", onclick: function () { answer("nongb10", { proceed: false }); } })
@@ -317,10 +317,10 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--ac
 
   function renderListen(state) {
     var options = [
-      { value: "loopback", title: "Only this machine itself", sub: "Other devices would need an SSH tunnel." },
-      { value: "tailscale", title: "Your Tailscale devices", sub: "Reachable from anywhere via your tailnet." },
-      { value: "lan", title: "Any device on your local network", sub: "Phones and laptops. Opens in your browser when done." },
-      { value: "lan+tailscale", title: "Local network and Tailscale", sub: "Both addresses at once." }
+      { value: "loopback", title: "Only this machine itself", sub: "SSH tunnel required for remote access" },
+      { value: "tailscale", title: "Your Tailscale devices", sub: "Tailnet access" },
+      { value: "lan", title: "Any device on your local network", sub: "LAN access" },
+      { value: "lan+tailscale", title: "Local network and Tailscale", sub: "LAN and tailnet access" }
     ];
     var recommended = state.remote ? "lan" : "loopback";
     var chosen = recommended;
@@ -369,11 +369,10 @@ input[type=text]:focus, input[type=password]:focus { outline: 2px solid var(--ac
       ]);
     });
     var note = summary.loopback
-      ? el("div", { class: "note", text: "Loopback only — from another device use an SSH tunnel, or rerun setup and pick the Tailscale or local network option." })
+      ? el("div", { class: "note", text: "Local access only. For remote access, use an SSH tunnel or change access in setup." })
       : null;
     return el("div", { class: "card" }, [
       el("h2", { text: "basement is running" }),
-      el("div", { class: "sub" }, []),
       el("div", {}, rowEls),
       note
     ]);

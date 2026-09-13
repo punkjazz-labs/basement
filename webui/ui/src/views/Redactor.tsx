@@ -315,7 +315,7 @@ export default function Redactor() {
               }}
             >
               <b>Drop the mapping file here</b>
-              <span className="sub">the .mapping.json next to your redacted copy · never leaves this machine</span>
+              <span className="sub">.mapping.json · Processed locally</span>
               <input
                 type="file"
                 accept=".json"
@@ -331,7 +331,7 @@ export default function Redactor() {
 
         <div className="restore-cols">
           <section className="restore-col">
-            <div className="restore-col-head"><h2>The cloud&apos;s reply</h2><span className="hint">Paste it here</span></div>
+            <div className="restore-col-head"><h2>Reply</h2></div>
             <textarea
               className="restore-in"
               value={reply}
@@ -341,14 +341,14 @@ export default function Redactor() {
           </section>
           <section className="restore-col">
             <div className="restore-col-head">
-              <h2>What it really says</h2>
+              <h2>Restored text</h2>
               {restored !== null && <span className="hint">{restoredHint(restored.tokens)}</span>}
             </div>
             {restored !== null && restored.unknown.length > 0 && (
               <div className="passline"><span className="claims">{strayLine(restored.unknown.length)}</span></div>
             )}
             {restored === null
-              ? <div className="restore-out faint">Restored text stays on this screen. It is never saved to a file.</div>
+              ? <div className="restore-out faint">Not saved automatically</div>
               : colorable
                 ? <div className="restore-out">{segments.map((segment, index) =>
                     segment.kind === 'restored' ? <span key={index} className="back">{segment.text}</span>
@@ -416,7 +416,7 @@ export default function Redactor() {
           )}
           {!asking && pass && pass.degraded && (
             <div className="passline degraded">
-              <span className="dot" />the model&apos;s answers were unusable; findings are from patterns only
+              <span className="dot" />Model review failed · Pattern matches only
             </div>
           )}
           {!asking && pass && !pass.degraded && (() => {

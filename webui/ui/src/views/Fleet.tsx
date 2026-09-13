@@ -676,7 +676,6 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
   const targetName = inviteName(attempt, addTarget?.name ?? '')
   const inviteState = attempt?.state ?? 'waiting'
   // Only claimed when the catalog actually carries a two-Spark recipe.
-  const hasTwoSparkRecipe = recipes.some(recipe => recipe.topology.spark_count === 2)
 
   return (
     <div className="stack">
@@ -684,7 +683,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
         // One peer is what basement supports today, so both ways in live
         // here and both disappear once a second Spark exists.
         <div className="empty">
-          <p>One Spark here. Add another to see your fleet.</p>
+          <p>No other Sparks added</p>
           <div className="empty-actions">
             <button className="primary" onClick={openFind}>Find a second Spark</button>
             <button className="quiet" onClick={() => openAdd()}>Add by address</button>
@@ -1056,9 +1055,6 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                   {...IGNORED_BY_MANAGERS}
                 />
               </label>
-              <p className="faint" style={{ fontSize: 12.5, margin: 0 }}>
-                Basement checks that Spark before saving anything.
-              </p>
             </li>
           </ol>
           {formError && <p className="error-text" role="alert" style={{ margin: 0 }}>{formError}</p>}
@@ -1088,8 +1084,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
 
           {stage === 'scanning' && (
             <>
-              <p className="thinking">Looking for Sparks on your network</p>
-              <p className="faint dialog-note">This takes up to ten seconds.</p>
+              <p className="thinking">Scanning the network…</p>
               <div className="dialog-foot">
                 <button type="button" className="ghost" onClick={() => findRef.current?.close()}>Cancel</button>
               </div>
@@ -1104,20 +1099,16 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                     <strong>The scan did not finish</strong>
                     <p>{scanError}</p>
                   </div>
-                  <p className="faint dialog-note">You can scan again, or add a Spark by address.</p>
                 </>
               ) : candidates.length === 0 ? (
                 <>
                   <div className="empty">Nothing answered on this network.</div>
                   <p className="faint dialog-note">
-                    Sparks that are off or on another network will not show up. Add one by address instead.
+                    For another network, use Add by address.
                   </p>
                 </>
               ) : (
                 <>
-                  <p className="muted dialog-note">
-                    These machines answered on your network.
-                  </p>
                   <div className="cand-list">
                     {candidates.map(candidate => (
                       <div key={candidate.address} className={`cand-row ${!candidate.basement && !candidate.gb10_hint ? 'plain' : ''}`}>
@@ -1177,7 +1168,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
           {stage === 'credentials' && (
             <form className="dialog-form" onSubmit={startAdopt} {...FORM_IGNORED_BY_MANAGERS}>
               <p className="muted dialog-note">
-                Basement installs itself over SSH. Your password goes only to that machine and is never stored here.
+                SSH credentials for installation. Password is not stored.
               </p>
               <label className="field">
                 <span>Address</span>
@@ -1189,7 +1180,6 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                   value={target ? bareHost(target.address) : ''}
                   {...IGNORED_BY_MANAGERS}
                 />
-                <small className="faint">Just the host. Basement brings its own port.</small>
               </label>
               <label className="field">
                 <span>Username on that Spark</span>
@@ -1257,7 +1247,7 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                 </div>
               )}
               <div className="dialog-foot">
-                {stage === 'progress' && <span className="note">This keeps running if you close the dialog.</span>}
+                {stage === 'progress' && <span className="note">Setup continues after closing.</span>}
                 <button type="button" className="ghost" onClick={() => findRef.current?.close()}>Close</button>
                 {stage === 'failed' && target && (
                   <button type="button" className="primary" onClick={() => setStage('credentials')}>Retry</button>
@@ -1268,11 +1258,11 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
 
           {stage === 'done' && (
             <>
-              <p className="done-line">{newName} is part of your basement now.</p>
+              <p className="done-line">{newName} added</p>
               {result?.owner_pairing_token && (
                 <>
                   <p className="muted dialog-note">
-                    Its console will ask for this pairing token the first time you open it.
+                    Pairing token for its console
                   </p>
                   <div className="snippet token">
                     <button type="button" className="ghost copy" onClick={copyToken}>
@@ -1280,12 +1270,8 @@ export default function Fleet({ system, recipes, models, peers, refreshPeers, li
                     </button>
                     <pre><code>{result.owner_pairing_token}</code></pre>
                   </div>
-                  <p className="faint dialog-note">It stays valid, so keep it like a password.</p>
+                  <p className="faint dialog-note">Keep this token private. It remains valid.</p>
                 </>
-              )}
-              <p className="muted dialog-note">The fleet table shows what it is serving.</p>
-              {hasTwoSparkRecipe && (
-                <p className="faint dialog-note">Two-Spark models can now be installed, from the Models tab.</p>
               )}
               <div className="dialog-foot">
                 <button type="button" className="ghost" onClick={() => findRef.current?.close()}>Done</button>

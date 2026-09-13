@@ -3,23 +3,12 @@ import { api, copyText, formatBytes, idempotency, type Recipe, type Role } from 
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { readableWeights, sortCatalog } from '../catalog'
-import { Tip } from '../tip'
-import { BUILTIN_ROLES, DEFAULT_ROLE, combinedFit, distinctModelsAfter, isValidRoleName, normalizeRoleName, roleRows } from '../roles'
+import { DEFAULT_ROLE, combinedFit, distinctModelsAfter, isValidRoleName, normalizeRoleName, roleRows } from '../roles'
 
 // The swap warning, in the words the design settled on. This Spark serves one
 // model at a time, so it is shown whenever a choice would leave roles pointing
 // at more than one model, which is exactly when models swap in and out.
-const SWAP_NOTE = 'These will swap. The first request after is slower.'
-
-// What this page used to teach in paragraphs. The two facts an owner needs
-// are still here, on the thing each one is about: the endpoint is the part
-// that does not move, and a switch is the part that costs something.
-const ROLE_NOTE =
-  'The endpoint and the model name stay the same while you change the model behind them. ' +
-  'One model runs at a time, so the first request after a switch waits for it to load.'
-const UNASSIGNED_NOTE =
-  'Apps that ask for a role with no model get an error. The error names this page. ' +
-  `role/${DEFAULT_ROLE} is the one exception: it answers from whatever is serving.`
+const SWAP_NOTE = 'Switching models delays the first response.'
 
 export default function Roles({ system, recipes, models }: AppState) {
   const [roles, setRoles] = useState<Role[]>([])
@@ -158,7 +147,7 @@ export default function Roles({ system, recipes, models }: AppState) {
     if (!recipeID) {
       if (roleName !== DEFAULT_ROLE) return { word: 'Not assigned', dot: '' }
       return servingModel
-        ? { word: 'Follows what is serving', dot: 'on' }
+        ? { word: 'Uses active model', dot: 'on' }
         : { word: 'Nothing is serving', dot: '' }
     }
     const model = installed.get(recipeID)
@@ -236,7 +225,7 @@ export default function Roles({ system, recipes, models }: AppState) {
     )
   }
 
-  const rowFor = ({ name, label, use }: { name: string; label: string; use: string }) => {
+  const rowFor = ({ name, label }: { name: string; label: string; use: string }) => {
     const expanded = open === name
     const recipeID = assignment.get(name)
     const recipe = recipeID ? catalog.get(recipeID) : undefined
@@ -265,7 +254,6 @@ export default function Roles({ system, recipes, models }: AppState) {
             <div className="glyph" aria-hidden="true">{label.slice(0, 1).toUpperCase()}</div>
             <div>
               <div className="nm">{label}</div>
-              <div className="use">{use}</div>
             </div>
           </div>
           <div className="r-endpoint">
@@ -288,7 +276,6 @@ export default function Roles({ system, recipes, models }: AppState) {
             ) : name === DEFAULT_ROLE && servingRecipe ? (
               <>
                 <div className="nm">{servingRecipe.display_name}</div>
-                <div className="fp">whatever is serving</div>
               </>
             ) : (
               <div className="nm faint">No model yet</div>
@@ -334,41 +321,15 @@ export default function Roles({ system, recipes, models }: AppState) {
     )
   }
 
-  const firstRun = roles.length === 0
 
   return (
     <div className="stack">
       {readProblem && (
         <div className="error-note" role="alert">
-          <strong>Could not read which models your roles point at</strong>
+          <strong>Could not load roles</strong>
           <p>{readProblem}</p>
         </div>
       )}
-      {firstRun && (
-        <section className="hero about-roles" aria-label="About roles">
-          <div className="hero-top">
-            <div className="glyph" aria-hidden="true">
-              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 10h18" /><path d="M8 15h2" /></svg>
-            </div>
-            <div className="hero-name">
-              <p className="kicker">Before your first role</p>
-              <h2>A role is a job, not a model</h2>
-              <p className="pub">
-                Point your apps at <code>role/{DEFAULT_ROLE}</code>. It answers from whatever is
-                serving until you assign a model.
-              </p>
-            </div>
-          </div>
-          <div className="hero-note">
-            <Tip text={ROLE_NOTE}>What a role changes</Tip>
-            <span className="spacer" />
-            <button type="button" className="brand" onClick={() => openPicker(BUILTIN_ROLES[0].name)}>
-              Set up your first role
-            </button>
-          </div>
-        </section>
-      )}
-
       <div className="section-head">
         <h2>Your roles</h2>
         <span className="spacer" />
@@ -390,7 +351,6 @@ export default function Roles({ system, recipes, models }: AppState) {
           <div className="add-role">
             <div className="txt">
               <strong>Add a custom role</strong>
-              <span>Name it, pick a model, get a fixed endpoint.</span>
             </div>
             <button type="button" className="ghost" onClick={toggleAddRole}>+ Add custom role</button>
           </div>
@@ -401,7 +361,7 @@ export default function Roles({ system, recipes, models }: AppState) {
               <h3>Name the role</h3>
             </div>
             <label className="field" style={{ marginBottom: 14, maxWidth: 320 }}>
-              <span>Apps will address it as role/{isValidRoleName(newName) ? normalizeRoleName(newName) : 'name'}</span>
+              <span>role/{isValidRoleName(newName) ? normalizeRoleName(newName) : 'name'}</span>
               <input
                 value={newName}
                 onChange={event => setNewName(event.target.value)}
@@ -419,9 +379,6 @@ export default function Roles({ system, recipes, models }: AppState) {
         )}
       </div>
 
-      <p className="table-note">
-        Click a role to change its model. <Tip text={UNASSIGNED_NOTE}>A role with no model gives an error.</Tip>
-      </p>
     </div>
   )
 }

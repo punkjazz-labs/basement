@@ -648,8 +648,8 @@ export default function Playground({ ready, modelID, modelName, recipe, recipeID
   if (!ready) {
     return (
       <div className="empty">
-        <p><strong>No model is serving right now.</strong></p>
-        <p className="muted">Start a model from the Models tab, then talk to it here.</p>
+        <p><strong>No model running</strong></p>
+        <p className="muted">Start a model in Models.</p>
       </div>
     )
   }
@@ -743,11 +743,6 @@ export default function Playground({ ready, modelID, modelName, recipe, recipeID
           onKeyDown={endJump}
         >
           <div className="thread">
-            {messages.length === 0 && (
-              <p className="chat-hint">
-                {council ? 'Send a message to the council.' : `Send a message to ${targetName ?? 'your model'}.`}
-              </p>
-            )}
             {messages.map((message, index) => {
               const last = index === messages.length - 1
               if (message.role === 'user') {
@@ -880,7 +875,7 @@ export default function Playground({ ready, modelID, modelName, recipe, recipeID
               )}
             </div>
             <p className="composer-hint">
-              <b>Enter</b> sends. <b>Shift</b> and <b>Enter</b> add a line. <b>Esc</b> stops the answer.
+              <b>Enter</b> send · <b>Shift + Enter</b> new line · <b>Esc</b> stop
             </p>
           </div>
         </div>

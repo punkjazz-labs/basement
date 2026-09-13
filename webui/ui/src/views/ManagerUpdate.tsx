@@ -327,7 +327,6 @@ function ManagerUpdateBody({
             tone="warn"
             title={generation ? 'Finish the current generation before updating' : 'Finish the current job before updating'}
           >
-            <p>{generation ? 'Basement will not interrupt a generation in progress.' : 'Basement will not interrupt work in progress.'}</p>
           </StateHead>
           <div className="update-blocker">
             <p><code>{refusal.message}</code></p>
@@ -345,7 +344,7 @@ function ManagerUpdateBody({
       <div className="update-view">
         <section className="card update-card">
           <StateHead mark="!" tone="fail" title="Basement did not reconnect">
-            <p>The three-minute reconnect window ended.</p>
+            <p>No response after 3 minutes.</p>
           </StateHead>
           <div className="update-notice fail">
             <strong>Check the manager service before trying again</strong>
@@ -364,8 +363,7 @@ function ManagerUpdateBody({
     return (
       <div className="update-view">
         <section className="card update-card">
-          <StateHead mark="..." tone="warn" title="Waiting for basement to come back">
-            <p>Restarting the manager and checking that it is ready.</p>
+          <StateHead mark="..." tone="warn" title="Reconnecting">
           </StateHead>
           {observedVersion && observedVersion !== info?.current_version && (
             <span className="update-version-returned">Manager {displayVersion(observedVersion)} answered</span>
@@ -465,7 +463,7 @@ function ManagerUpdateBody({
     return (
       <div className="update-view">
         <section className="card update-card">
-          <p className="update-member-copy">Updates with the fleet. Start it from the fleet console.</p>
+          <p className="update-member-copy">Update from the fleet console.</p>
         </section>
       </div>
     )
@@ -556,7 +554,7 @@ function ManagerUpdateBody({
         <div className="update-view">
           <section className="card update-card">
             <StateHead mark="OK" tone="complete" title="Fleet update resolved">
-              <p>Every Spark released its lock. Ready for a new update.</p>
+              <p>Ready to update.</p>
             </StateHead>
             {error && <div className="error-note"><p>{error}</p></div>}
             <div className="update-actions">
@@ -620,7 +618,7 @@ function ManagerUpdateBody({
         <div className="update-view">
           <section className="card update-card">
             <StateHead mark="UP" tone="complete" title={<>Update basement to <span className="mono">{target}</span></>} signed>
-              <p>All {count} Sparks update one at a time. Models keep serving.</p>
+              <p>{count} Sparks · Sequential update · Models keep serving</p>
             </StateHead>
             {error && <div className="error-note"><p>{error}</p></div>}
             <div className="update-actions">
@@ -636,7 +634,7 @@ function ManagerUpdateBody({
       <div className="update-view">
         <section className="card update-card">
           <StateHead mark="UP" tone="complete" title={<>Update basement to <span className="mono">{target}</span></>} signed>
-            <p>The console reconnects after basement restarts. Model serving continues.</p>
+            <p>Models keep serving during the restart.</p>
           </StateHead>
           <dl className="update-facts">
             <dt>Running</dt><dd>{displayVersion(info.current_version)}</dd>
