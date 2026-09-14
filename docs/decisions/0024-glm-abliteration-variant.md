@@ -4,16 +4,19 @@ Status: accepted for implementation; hardware qualification recorded separately
 
 ## Decision
 
-Expose the stock and abliterated GLM configurations as separate curated recipe IDs.
+Represent the stock and abliterated GLM configurations internally as separate curated recipe IDs.
 They share the exact primary artifact and runtime image. Only the abliterated recipe
 sets `runtime.abliteration` and declares the pinned donor artifact. No stock checkpoint
 file is modified, converted or re-quantized.
 
-The console offers Download without activation, Enable through the existing start/switch
-job, and Disable by starting the installed stock recipe on the same machine. Both
-recipes remain visible, making the active configuration explicit. Disable is unavailable
-until stock GLM is installed. A model switch reloads both ranks and interrupts requests
-on that pair. The stable manager endpoint does not change.
+The console presents one GLM model entry with an Abliteration switch in its expanded
+settings. Download appears there when the extra files are missing and never activates
+them. Turning the switch on uses the existing start/switch job; turning it off starts
+the installed stock recipe on the same machine. The row reflects the effective recipe,
+including its active state, jobs and tools, while its displayed model name stays GLM.
+Turning ablation off is unavailable until stock GLM is installed. A model switch reloads
+both ranks and interrupts requests on that pair. The stable manager endpoint does not
+change. The internal recipe identities are not separate model choices in this list.
 
 Artifact ranges follow ADR 0023. The manager embeds a narrowly scoped GLM load hook,
 its manifest, and an additive Python import bootstrap. Generated files are mounted

@@ -411,12 +411,12 @@ renderer.
 
 ### Optional GLM abliteration
 
-The two-Spark catalog includes **GLM 5.3 Flash · Abliterated** alongside stock GLM.
-Expand its row to review the source and licences. **Download** fetches the additional
-2.5 GiB of pinned tensors per Spark and reuses installed base weights. It leaves the
-current model serving. **Enable** switches both ranks to the abliterated configuration;
-**Disable** switches back to installed stock GLM. Switching reloads the model and
-interrupts requests on that pair. The two rows show which configuration is active.
+Expand **GLM 5.3 Flash** in Models to find the **Abliteration** switch.
+If its extra files are missing, **Download** fetches 2.5 GiB of pinned tensors
+per Spark while the current model keeps serving. Turn the switch on to enable
+ablation on both ranks, or off to return to installed stock GLM. The model stays
+in one row, which reflects the current mode. Switching reloads the model and
+interrupts requests on that pair.
 
 The base checkpoint remains unchanged. The setting survives manager restarts through
 Basement's ordinary installed-model state and recovery. Abliteration can change answer
