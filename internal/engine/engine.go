@@ -533,18 +533,14 @@ func (e *Engine) releaseAbandonedJobReservations(ctx context.Context) error {
 // come from the durable local reservation, so restart does not depend on an
 // in-memory lease or whichever recipe is currently effective.
 //
-// A committed local-job reservation renews as well as an active one, because
-// a committed reservation for a distributed recipe is a deployment in
-// staging. The worker's rank goes active at its own preflight, before any
-// byte is staged, and its lease is only nine heartbeats; the image pull and
-// the weight download that follow run for minutes to hours. Renewing only
-// from the head's own runtime claim left that lease unrenewed for the whole
-// staging phase, so the worker reclaimed its rank and refused the first step
-// the head sent it (hardware, 2026-08-28). The head therefore renews from
-// commit onward, through staging and serving alike. Engine.run releases the
-// local reservation in a defer on every job end that does not keep it, so a
-// released row fails this gate, renewals stop, and the worker reclaims on
-// its ordinary deadline.
+// A committed runtime local-job reservation renews as well as an active one,
+// because a distributed activation stages before it claims the runtime slot.
+// The worker's rank goes active at its own preflight, before any byte is
+// staged, and its lease is only nine heartbeats; the image pull and weight
+// download that follow run for minutes to hours. A download-only install has
+// a disk-only reservation and no worker runtime lease, so renewing it would
+// turn the worker's intentional no-runtime response into a false liveness
+// failure for the model that is actually serving.
 //
 // The row alone is still not proof that anything is alive. A manager upgrade
 // restarted the head under a serving two-Spark model, and the old serve job's
@@ -567,7 +563,7 @@ func (e *Engine) RenewDistributedReservations(ctx context.Context) error {
 	}
 	var joined error
 	for _, reservation := range reservations {
-		if (reservation.State != "committed" && reservation.State != "active") || reservation.Claims.Kind != fleet.ClaimKindLocalJob || reservation.Claims.JobID == "" {
+		if (reservation.State != "committed" && reservation.State != "active") || reservation.Claims.Kind != fleet.ClaimKindLocalJob || !reservation.Claims.Runtime || reservation.Claims.JobID == "" {
 			continue
 		}
 		if !e.isDriving(reservation.Claims.JobID) {
