@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import logging
+import io
 import pathlib
 import subprocess
 import sys
@@ -69,6 +71,14 @@ class ManifestTest(unittest.TestCase):
         ablit._tensor_parallel = lambda: (1, 2)
         ablit._donor = lambda layer, entry: Donor()
         sys.modules["torch"] = types.SimpleNamespace(no_grad=NoGrad)
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        parent = logging.getLogger("vllm")
+        previous_logging = (parent.level, parent.handlers[:], parent.propagate, logging.root.level)
+        parent.setLevel(logging.INFO)
+        parent.handlers = [handler]
+        parent.propagate = False
+        logging.root.setLevel(logging.WARNING)
         try:
             base = types.SimpleNamespace(layers={layer: Block() for layer in range(15, 45)})
             ablit._apply(base, False)
@@ -77,7 +87,15 @@ class ManifestTest(unittest.TestCase):
             mtp = types.SimpleNamespace(model=types.SimpleNamespace(layers={"45": types.SimpleNamespace(mtp_block=mtp_block)}))
             ablit._apply(mtp, True)
             self.assertEqual(mtp_block.self_attn.o_proj.weight.copies, 1)
+            records = stream.getvalue().splitlines()
+            self.assertEqual(len(records), 31)
+            for layer in range(15, 46):
+                self.assertTrue(any("layer=%d tp_rank=1 " % layer in record for record in records))
         finally:
+            parent.setLevel(previous_logging[0])
+            parent.handlers = previous_logging[1]
+            parent.propagate = previous_logging[2]
+            logging.root.setLevel(previous_logging[3])
             ablit._manifest, ablit._tensor_parallel, ablit._donor = original[:3]
             if original[3] is None:
                 del sys.modules["torch"]

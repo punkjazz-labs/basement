@@ -452,6 +452,55 @@ func TestActiveTwoSparkInstallRenewsItsWorkerDriverLease(t *testing.T) {
 	}
 }
 
+// A disk-only install can run for hours beside a serving distributed model.
+// It has no worker runtime lease: renewing it would receive the worker's
+// intentional no-runtime refusal and falsely degrade the serving group.
+func TestDownloadOnlyReservationDoesNotRenewOrDegradeServingWorkerLease(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	s, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	stock := twoSparkRecipe(t)
+	stock.ID = "stock-serving-2s"
+	download := stock
+	download.ID = "ablit-download-2s"
+	runner := New(s, fake, []recipe.Recipe{stock, download})
+
+	stockJob, _, err := s.CreateJob(ctx, "start", stock.ID, "stock-serving", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stockReservation, _, err := runner.prepareJobReservation(ctx, stockJob, stock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Reservations().Activate(ctx, stockReservation, ""); err != nil {
+		t.Fatal(err)
+	}
+	downloadJob, _, err := s.CreateJob(ctx, "install", download.ID, "ablit-download", map[string]any{"confirmed": true, "activate": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadReservation, _, err := runner.prepareJobReservation(ctx, downloadJob, download)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := runner.Reservations().Reservation(ctx, downloadReservation)
+	if err != nil || staged.Claims.Runtime || staged.State != "committed" {
+		t.Fatalf("download reservation=%+v err=%v", staged, err)
+	}
+
+	if err := runner.RenewDistributedReservations(ctx); err != nil {
+		t.Fatalf("disk-only download caused worker liveness failure: %v", err)
+	}
+	if renewals := fake.recordedRenewals(); len(renewals) != 1 || renewals[0] != stockJob.ID+"@"+stock.ID {
+		t.Fatalf("worker lease renewals=%v, want only stock serving job", renewals)
+	}
+}
+
 // The worker's rank goes active at its own preflight, before the head stages
 // a byte, and its lease is only nine heartbeats. Pulling a 20 GB image and
 // downloading the weights takes far longer than that, while the head's own

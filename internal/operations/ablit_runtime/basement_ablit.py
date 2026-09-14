@@ -10,7 +10,7 @@ from pathlib import Path
 ABLIT_DIR = Path("/abliteration")
 MANIFEST_PATH = Path(__file__).with_name("manifest.json")
 LAYERS = tuple(range(15, 46))
-LOGGER = logging.getLogger("basement.abliteration")
+LOGGER = logging.getLogger("vllm.basement.abliteration")
 
 
 class AbliterationError(RuntimeError):
