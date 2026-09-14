@@ -11,7 +11,10 @@ import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
 import { RECOMMENDED_ID, readableWeights, sortCatalog } from '../catalog'
 import { Mark } from '../mark'
-import { ABLIT_RECIPE_ID, STOCK_GLM_RECIPE_ID, ablitAction, isAblitRecipe } from '../modelVariants'
+import {
+  ABLIT_RECIPE_ID, STOCK_GLM_RECIPE_ID, ablitAction, canonicalModelRecipeIDs, glmActionRecipeID,
+  isAblitRecipe, variantTransitioning, visibleModelRecipes,
+} from '../modelVariants'
 import {
   CHECK_HOLD_MS, REVOKE_TITLE, checkFoundNothingNew, checkLabel, feedNote, revokeBody, revoked, rowRevocation,
 } from '../feed'
@@ -406,7 +409,7 @@ export default function Models({
   // fleet, so no fleet row speaks for it and only this summary knows what
   // lives there. The rows already read it, so the tabs have to read it too.
   const peerRecipeIDs = useMemo(
-    () => new Set(peerModels.map(model => model.recipe_id)),
+    () => canonicalModelRecipeIDs(peerModels.map(model => model.recipe_id)),
     [peerSummary], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
@@ -500,7 +503,9 @@ export default function Models({
   const placementTarget = placedTarget(
     placementChoice, placementList, placementPlan?.recommended_node_id)
   const usage = useMemo(() => new Map((tokens?.models ?? []).map(item => [item.recipe_id, item])), [tokens])
-  const sorted = useMemo(() => sortCatalog(recipes), [recipes])
+  // Ablit is a lifecycle variant of GLM, not another model a person should
+  // have to find and operate separately.
+  const sorted = useMemo(() => visibleModelRecipes(sortCatalog(recipes)), [recipes])
   const detected = system?.hardware_scope.detected_spark_count ?? 0
   // Every Spark this console can install on: the one it runs on, plus the
   // ones paired on the Fleet tab. Pairing a second Spark is what makes a
@@ -617,7 +622,7 @@ export default function Models({
     }
   }
 
-  const startInstall = (recipe: Recipe, activateAfter = true) =>
+  const startInstall = (recipe: Recipe, activateAfter = true, preferredNodeID = '') =>
     run(recipe.id, async () => {
       const preflight = await api<Preflight>(`/api/v1/preflight?recipe_id=${encodeURIComponent(recipe.id)}`)
       // switchFrom drives the "switch now vs later" choice below. It is
@@ -628,10 +633,11 @@ export default function Models({
       const switchFrom = activeOther(recipe.id)?.recipe_id ?? (own?.active ? recipe.id : undefined)
       const plan = await placementPlanFor(recipe)
       setPlacementPlan(plan)
-      setPlacementChoice(initialPlacement(
-        placementTargets(plan, fleet, sparks, fleet?.controller_node_id ?? '',
-          workingNodes(placements, startedOnPlacement, recipe.id, DISRUPTIVE_KINDS)),
-        plan?.recommended_node_id))
+      const targets = placementTargets(plan, fleet, sparks, fleet?.controller_node_id ?? '',
+        workingNodes(placements, startedOnPlacement, recipe.id, DISRUPTIVE_KINDS))
+      setPlacementChoice(targets.some(target => target.nodeID === preferredNodeID)
+        ? preferredNodeID
+        : initialPlacement(targets, plan?.recommended_node_id))
       setConfirm({ recipe, preflight, switchFrom })
       setLicence(false)
       setTerritoryEligibility(false)
@@ -938,8 +944,14 @@ export default function Models({
   // The two tabs over the table: the models the owner already has, and the
   // models the owner can still get. Both keep the curated order they arrive
   // in, and every row below renders the same way whichever tab holds it.
-  const localRecipeIDs = useMemo(() => new Set(installed.keys()), [installed])
-  const split = splitModels(sorted, localRecipeIDs, peerRecipeIDs, sparks)
+  const localRecipeIDs = useMemo(() => canonicalModelRecipeIDs(installed.keys()), [installed])
+  const splitSparks = useMemo(() => sparks.map(spark => {
+    const ablit = spark.installedModels.find(model => model.recipe_id === ABLIT_RECIPE_ID)
+    return ablit
+      ? { ...spark, installedModels: [...spark.installedModels, { ...ablit, recipe_id: STOCK_GLM_RECIPE_ID }] }
+      : spark
+  }), [sparks])
+  const split = splitModels(sorted, localRecipeIDs, peerRecipeIDs, splitSparks)
   // Nothing is installed on any machine this console speaks for. That, and
   // only that, is the first run: it keeps the hero and the one plain table it
   // has always had, and it shows no tabs. The hero and the tabs read the same
@@ -961,24 +973,59 @@ export default function Models({
   // serve before it draws either shape, which is the other reason the read
   // stands on its own.
   const readModel = (recipe: Recipe) => {
-    const model = installed.get(recipe.id)
+    const ablitRecipe = recipe.id === STOCK_GLM_RECIPE_ID
+      ? recipes.find(item => item.id === ABLIT_RECIPE_ID)
+      : undefined
+    const stockModel = installed.get(recipe.id)
+    const ablitModel = ablitRecipe ? installed.get(ablitRecipe.id) : undefined
+    const stockHost = hostOf(recipe)
+    const ablitHost = ablitRecipe ? hostOf(ablitRecipe) : undefined
+    // The remote row has one owner. Pick it first, then inspect both variants
+    // on that same Spark; records from a different Spark cannot choose mode.
+    const remoteOwner = ablitHost?.installedModels.some(item => item.recipe_id === ABLIT_RECIPE_ID && item.active)
+      ? ablitHost
+      : stockHost ?? ablitHost
+    const ownerStockModel = remoteOwner?.installedModels.find(item => item.recipe_id === STOCK_GLM_RECIPE_ID)
+    const ownerAblitModel = remoteOwner?.installedModels.find(item => item.recipe_id === ABLIT_RECIPE_ID)
+    const ablitRemote = Boolean(ownerAblitModel)
+    const ablitLocalActive = Boolean(ablitModel?.active)
+    const ablitRemotePreferred = Boolean(ownerAblitModel && (ownerAblitModel.active || !ownerStockModel))
+    const ablitLocalWorking = Boolean(ablitRecipe && (
+      pending.has(ablitRecipe.id) ||
+      jobs.some(job => job.recipe_id === ablitRecipe.id && !terminal(job.state) && DISRUPTIVE_KINDS.has(job.kind))
+    ))
+    const ablitRemoteWorking = Boolean(ablitRecipe &&
+      workingPlacement(placements, startedOnPlacement, ablitRecipe.id, DISRUPTIVE_KINDS)
+    )
+    const ablitWorking = stockModel ? ablitLocalWorking
+      : ablitLocalWorking || (ablitRemoteWorking && ablitRemotePreferred)
+    const ablitInstalling = Boolean(ablitRecipe && jobs.some(job =>
+      job.recipe_id === ablitRecipe.id && job.kind === 'install' && !terminal(job.state)))
+    const actionRecipe = ablitRecipe && glmActionRecipeID({
+      stockLocal: stockModel !== undefined,
+      ablitLocal: ablitModel !== undefined,
+      ablitLocalActive,
+      ablitRemotePreferred,
+      ablitWorking,
+    }) === ABLIT_RECIPE_ID ? ablitRecipe : recipe
+    const model = installed.get(actionRecipe.id)
     // Which of the two revocation surfaces this row is in, if either: a
     // withdrawn version nobody here installed, or a withdrawn version that is
     // installed and carries on exactly as before.
-    const revocation = rowRevocation(recipe, model)
-    const isMedia = Boolean(recipe.media_generation)
+    const revocation = rowRevocation(actionRecipe, model)
+    const isMedia = Boolean(actionRecipe.media_generation)
     // Only jobs that change what is running should lock the row. Smoke tests
     // and benchmarks run against a serving model — Open must stay available.
     const running = (kinds: (kind: string) => boolean) =>
-      jobs.some(job => job.recipe_id === recipe.id && !terminal(job.state) && kinds(job.kind))
+      jobs.some(job => job.recipe_id === actionRecipe.id && !terminal(job.state) && kinds(job.kind))
     // A placement anywhere in the fleet that is still working on this model.
     // It is the only thing that knows a remote install started: the Spark
     // running it names the model in a heartbeat only once the install has
     // finished, so without this a row with no model here would keep a live
     // Install button for the whole download, and a second click would start a
     // second install.
-    const working = workingPlacement(placements, startedOnPlacement, recipe.id, DISRUPTIVE_KINDS)
-    const otherVariantID = recipe.id === ABLIT_RECIPE_ID ? STOCK_GLM_RECIPE_ID
+    const working = workingPlacement(placements, startedOnPlacement, actionRecipe.id, DISRUPTIVE_KINDS)
+    const otherVariantID = actionRecipe.id === ABLIT_RECIPE_ID ? STOCK_GLM_RECIPE_ID
       : recipe.id === STOCK_GLM_RECIPE_ID ? ABLIT_RECIPE_ID : undefined
     const otherVariantWorking = otherVariantID
       ? workingPlacement(placements, startedOnPlacement, otherVariantID, DISRUPTIVE_KINDS)
@@ -991,7 +1038,7 @@ export default function Models({
       ? jobs.some(job => (job.recipe_id === ABLIT_RECIPE_ID || job.recipe_id === STOCK_GLM_RECIPE_ID) &&
         !terminal(job.state) && DISRUPTIVE_KINDS.has(job.kind))
       : false
-    const localBusy = pending.has(recipe.id) || variantBusy || running(kind => DISRUPTIVE_KINDS.has(kind))
+    const localBusy = pending.has(actionRecipe.id) || variantBusy || running(kind => DISRUPTIVE_KINDS.has(kind))
     const busy = recipeBusy(localBusy, model !== undefined, working)
     const measuring = running(kind => kind === 'benchmark' || kind === 'smoke-test')
     const isActive = Boolean(model?.active && model.status === 'ready')
@@ -1000,15 +1047,36 @@ export default function Models({
     // The Spark in the fleet that holds this model when this one does not, the
     // placement this console acts on it through, and what that Spark last
     // reported about it.
-    const host = hostOf(recipe)
-    const hostModel = host?.installedModels.find(item => item.recipe_id === recipe.id)
+    const host = hostOf(actionRecipe)
+    const hostModel = host?.installedModels.find(item => item.recipe_id === actionRecipe.id)
+    const variantTransitioningHere = host
+      ? variantTransitioning(host.installedModels
+        .filter(item => item.recipe_id === STOCK_GLM_RECIPE_ID || item.recipe_id === ABLIT_RECIPE_ID)
+        .map(item => item.status))
+      : variantTransitioning([stockModel?.status, ablitModel?.status])
     const hostServing = Boolean(hostModel?.active && hostModel.status === 'ready')
     const stockAvailable = host
       ? host.installedModels.some(item => item.recipe_id === STOCK_GLM_RECIPE_ID)
       : installed.has(STOCK_GLM_RECIPE_ID)
-    const ablitActionLabel = ablitAction(recipe, model !== undefined || hostModel !== undefined,
-      host ? hostServing : isActive, stockAvailable)
-    const placement = host ? rowPlacement(targetOf(recipe, host), placements) : undefined
+    const ablitRemoteActive = Boolean(ownerAblitModel?.active)
+    // The switch belongs to the same Spark as its stock row. A remote ablit
+    // instance is still rendered through its remote GLM row, but cannot turn
+    // this Spark's local controls into remote controls.
+    const ablitInstalled = stockModel ? Boolean(ablitModel) : Boolean(ablitModel || ablitRemote)
+    const ablitActive = stockModel ? ablitLocalActive : ablitLocalActive || ablitRemoteActive
+    const ablitActionLabel = ablitRecipe ? ablitAction(ablitInstalled, ablitActive) : undefined
+    const ablitRevocation = ablitRecipe ? rowRevocation(ablitRecipe, ablitModel) : undefined
+    const stockRevocation = rowRevocation(recipe, stockModel)
+    // The Jobs view remains the full receipt, but a collapsed variant must
+    // not make a failed ablit download disappear from the one GLM row.
+    const latestAblitJob = ablitRecipe
+      ? jobs.filter(job => job.recipe_id === ablitRecipe.id)
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0]
+      : undefined
+    const ablitError = !host && latestAblitJob && terminal(latestAblitJob.state)
+      ? latestAblitJob.error
+      : undefined
+    const placement = host ? rowPlacement(targetOf(actionRecipe, host), placements) : undefined
     // That Spark has stopped answering, so every state below is only the last
     // one this console was told. A placement carries the fresher answer: the
     // controller read that Spark for it moments ago. Without one, the Spark's
@@ -1019,8 +1087,8 @@ export default function Models({
     // What the paired Spark says about this same model. Its own word for its
     // own state, plus the one thing this console knows that it cannot see
     // yet: an install this session asked it to run.
-    const peerModel: InstalledModel | undefined = peerInstalled.get(recipe.id)
-    const peerWord = peerModel ? modelStateWord(peerModel) : delegated.has(recipe.id) ? 'Installing' : ''
+    const peerModel: InstalledModel | undefined = peerInstalled.get(actionRecipe.id)
+    const peerWord = peerModel ? modelStateWord(peerModel) : delegated.has(actionRecipe.id) ? 'Installing' : ''
     // What another Spark says about this same model, and how to reach it. The
     // fleet speaks for one of its own members, because it also knows whether
     // that member still answers; a Spark added by address only still speaks
@@ -1047,7 +1115,10 @@ export default function Models({
     const hostLocked = busy || otherBusy || noAnswer ||
       Boolean(otherVariantWorking && host && otherVariantWorking.owner_node_id === host.nodeID) ||
       placementBusy(placement, placement && startedOnPlacement.get(placement.deployment_id))
-    const localStatus = busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
+    const stockServingDuringAblitDownload = actionRecipe.id === STOCK_GLM_RECIPE_ID &&
+      Boolean(stockModel?.active) && ablitInstalling
+    const localStatus = stockServingDuringAblitDownload ? 'Serving · downloading ablit'
+      : busy ? 'Working' : isActive ? (measuring ? 'Serving · measuring' : 'Serving') : model ? 'Installed' : 'Not installed'
     // Nothing of this recipe runs anywhere in the fleet and its version has
     // been withdrawn, so the row's whole state is the revocation. A Spark
     // that is running it keeps its own word instead: what a machine is doing
@@ -1060,10 +1131,10 @@ export default function Models({
     const measured = model?.tokens_per_second
     // Counting happens only while basement serves the model on this Spark,
     // so a model without a reading yet says so instead of showing zeros.
-    const served = usage.get(recipe.id)
+    const served = usage.get(actionRecipe.id)
     const servedTotal = served ? served.prompt_tokens + served.generation_tokens : 0
-    const updateAvailable = Boolean(model && model.recipe_version < recipe.version)
-    const chips = nodeChips(recipe)
+    const updateAvailable = Boolean(model && model.recipe_version < actionRecipe.version)
+    const chips = nodeChips(actionRecipe)
     // The one line under the name. A state worth saying takes the line;
     // otherwise the line says what the model is. "Installed" and "Not
     // installed" say nothing at all: the tab and the chips already did.
@@ -1074,11 +1145,14 @@ export default function Models({
     const servingSpark = servingSparkName(
       { onHost: host !== undefined, here: isActive, elsewhere: otherServing }, selfName, otherName)
     return {
-      recipe, model, revocation, isMedia, busy, isActive, fits, canPair, measuring,
+      recipe, actionRecipe, ablitRecipe, ablitInstalled, ablitActive, ablitWorking, ablitInstalling, ablitError,
+      variantTransitioningHere,
+      ablitRevocation, stockRevocation,
+      modeHost: host, model, revocation, isMedia, busy, isActive, fits, canPair, measuring,
       host, hostServing, hostLocked, otherURL, otherWord, otherName, otherServing,
       stockAvailable, ablitActionLabel,
       measured, served, servedTotal, updateAvailable, chips, placement,
-      state, spec: SPEC[recipe.id] ?? fallbackUse(recipe),
+      state, spec: SPEC[actionRecipe.id] ?? fallbackUse(actionRecipe),
       speed: speedOf(recipe, measured),
       place: servingPlace(recipe.topology.spark_count, servingSpark),
       // What the band above the table is built from: this Spark serves the
@@ -1092,7 +1166,9 @@ export default function Models({
   // orange button on the page, which is the band's own Open.
   const modelLine = (read: ReturnType<typeof readModel>, asBand = false) => {
     const {
-      recipe, model, revocation, isMedia, busy, isActive, fits, canPair, measuring,
+      recipe, actionRecipe, ablitRecipe, ablitInstalled, ablitActive, ablitWorking, ablitError,
+      ablitRevocation, stockRevocation, variantTransitioningHere, modeHost,
+      model, revocation, isMedia, busy, isActive, fits, canPair, measuring,
       host, hostServing, hostLocked, otherURL, otherWord, otherName, otherServing,
       measured, served, servedTotal, updateAvailable, chips, placement, stockAvailable, ablitActionLabel,
       state, spec, speed, place,
@@ -1138,23 +1214,18 @@ export default function Models({
             {hostServing ? (
               <button
                 className="ghost"
-                disabled={hostLocked || (isAblitRecipe(recipe) && !recipes.some(item => item.id === STOCK_GLM_RECIPE_ID))}
-                onClick={act(() => isAblitRecipe(recipe)
-                  ? (() => {
-                    const stock = recipes.find(item => item.id === STOCK_GLM_RECIPE_ID)
-                    if (stock) startOrSwitch(stock, host)
-                  })()
-                  : simpleAction(recipe, host, 'stop'))}
+                disabled={hostLocked}
+                onClick={act(() => simpleAction(actionRecipe, host, 'stop'))}
               >
-                {ablitActionLabel ?? 'Stop'}
+                Stop
               </button>
             ) : (
               <button
                 className="ghost"
                 disabled={hostLocked}
-                onClick={act(() => startOrSwitch(recipe, host))}
+                onClick={act(() => startOrSwitch(actionRecipe, host))}
               >
-                {ablitActionLabel ?? (host.serving && host.serving.recipe_id !== recipe.id ? 'Switch to' : 'Start')}
+                {host.serving && host.serving.recipe_id !== actionRecipe.id ? 'Switch to' : 'Start'}
               </button>
             )}
             {/* The playground and the generate tab only reach the model
@@ -1178,9 +1249,9 @@ export default function Models({
               <button
                 className="ghost"
                 disabled={busy || !fits || revocation.installBlocked}
-                onClick={act(() => startInstall(recipe, !isAblitRecipe(recipe)))}
+                onClick={act(() => startInstall(recipe))}
               >
-                {busy ? 'Working' : ablitActionLabel ?? (fits || revocation.installBlocked ? installVerb(recipe) : 'Needs a Spark')}
+                {busy ? 'Working' : (fits || revocation.installBlocked ? installVerb(recipe) : 'Needs a Spark')}
               </button>
             )}
             {!model && !fits && canPair && !revocation.installBlocked && (
@@ -1190,19 +1261,14 @@ export default function Models({
               <>
                 <button
                   className="ghost"
-                  disabled={busy || (isAblitRecipe(recipe) && !stockAvailable)}
-                  title={isAblitRecipe(recipe) && !stockAvailable ? 'Install stock GLM before disabling' : undefined}
-                  onClick={act(() => {
-                    if (!isAblitRecipe(recipe)) return simpleAction(recipe, undefined, 'stop')
-                    const stock = recipes.find(item => item.id === STOCK_GLM_RECIPE_ID)
-                    if (stock) startOrSwitch(stock)
-                  })}
-                >{ablitActionLabel ?? 'Stop'}</button>
+                  disabled={busy}
+                  onClick={act(() => simpleAction(actionRecipe, undefined, 'stop'))}
+                >Stop</button>
                 {updateAvailable && (
                   <button
                     className="ghost"
                     disabled={busy || revocation.installBlocked}
-                    onClick={act(() => startInstall(recipe))}
+                    onClick={act(() => startInstall(actionRecipe))}
                   >
                     Update
                   </button>
@@ -1226,9 +1292,9 @@ export default function Models({
                 <button
                   className="ghost"
                   disabled={busy}
-                  onClick={act(() => startOrSwitch(recipe))}
+                  onClick={act(() => startOrSwitch(actionRecipe))}
                 >
-                  {ablitActionLabel ?? (activeOther(recipe.id) ? 'Switch to' : 'Start')}
+                  {activeOther(actionRecipe.id) ? 'Switch to' : 'Start'}
                 </button>
               </>
             )}
@@ -1261,7 +1327,50 @@ export default function Models({
         })()}
         {/* What this model is, in full. The line above it says the same
             thing in one line; the sentence belongs to the depth. */}
-        <div className="use">{SPEC[recipe.id] ?? fallbackUse(recipe)}</div>
+        <div className="use">{SPEC[actionRecipe.id] ?? fallbackUse(actionRecipe)}</div>
+        {ablitRecipe && (
+          <div className="ablit-control">
+            <div>
+              <strong>Abliteration</strong>
+              <p>{!ablitInstalled
+                ? 'Download 2.5 GiB per node before turning this on.'
+                : ablitWorking ? 'Changing mode.'
+                  : 'Reloads GLM on both Sparks when changed.'}</p>
+              {ablitError && <p className="error-text" role="alert">{ablitError}</p>}
+              {(ablitActionLabel === 'Download' || ablitActionLabel === 'Enable') && ablitRevocation?.installBlocked && (
+                <p className="error-text" role="alert">{ablitRevocation.reason || 'This ablit version is revoked.'}</p>
+              )}
+              {ablitActionLabel === 'Disable' && stockRevocation.installBlocked && (
+                <p className="error-text" role="alert">{stockRevocation.reason || 'This stock version is revoked.'}</p>
+              )}
+            </div>
+            <div className="ablit-actions">
+              <label className="think-toggle">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  aria-label="Abliteration"
+                  checked={ablitActive}
+                  disabled={busy || hostLocked || variantTransitioningHere || !ablitInstalled ||
+                    (ablitActionLabel === 'Enable' && ablitRevocation?.installBlocked) ||
+                    (ablitActionLabel === 'Disable' && (!stockAvailable || stockRevocation.installBlocked))}
+                  onChange={() => {
+                    if (ablitActionLabel === 'Enable') startOrSwitch(ablitRecipe, modeHost)
+                    else startOrSwitch(recipe, modeHost)
+                  }}
+                />
+                <span>{ablitActive ? 'On' : 'Off'}</span>
+              </label>
+              {!ablitInstalled && (
+                <button
+                  className="ghost"
+                  disabled={busy || hostLocked || variantTransitioningHere || ablitRevocation?.installBlocked}
+                  onClick={() => startInstall(ablitRecipe, false, modeHost?.nodeID)}
+                >Download</button>
+              )}
+            </div>
+          </div>
+        )}
         <div className="board">
           <div className="cell">
             <div className="l">Speed</div>
@@ -1286,24 +1395,24 @@ export default function Models({
           </div>
           <div className="cell">
             <div className="l">Download</div>
-            <div className="v">{formatBytes(recipe.artifact_bytes)}</div>
+            <div className="v">{formatBytes(actionRecipe.artifact_bytes)}</div>
           </div>
           <div className="cell">
             <div className="l">Space needed</div>
-            <div className="v">{formatBytes(recipe.required_bytes)}</div>
+            <div className="v">{formatBytes(actionRecipe.required_bytes)}</div>
           </div>
         </div>
         <dl className="facts">
-          <dt>Model by</dt><dd>{recipe.model_by || recipe.publisher}</dd>
-          <dt>Released</dt><dd>{recipe.model_released || 'n/a'}</dd>
+          <dt>Model by</dt><dd>{actionRecipe.model_by || actionRecipe.publisher}</dd>
+          <dt>Released</dt><dd>{actionRecipe.model_released || 'n/a'}</dd>
           <dt>Quantization</dt>
-          <dd>{recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
-          <dt>Recipe by</dt><dd>{recipe.recipe_by || 'n/a'}</dd>
-          <dt>Recipe version</dt><dd>v{recipe.version}</dd>
+          <dd>{actionRecipe.artifacts[0] ? readableWeights(actionRecipe.artifacts[0].repository).quant ?? 'Original weights' : 'n/a'}</dd>
+          <dt>Recipe by</dt><dd>{actionRecipe.recipe_by || 'n/a'}</dd>
+          <dt>Recipe version</dt><dd>v{actionRecipe.version}</dd>
           {updateAvailable && model && (
             <>
               <dt>Update</dt>
-              <dd className="update-line">v{model.recipe_version} installed, v{recipe.version} available</dd>
+              <dd className="update-line">v{model.recipe_version} installed, v{actionRecipe.version} available</dd>
             </>
           )}
           {served && (
@@ -1314,10 +1423,10 @@ export default function Models({
               <dd title={served.generation_tokens.toLocaleString()}>{formatTokens(served.generation_tokens)}</dd>
             </>
           )}
-          <dt>Model ID</dt><dd><code>{recipe.service.served_model_id}</code></dd>
-          <dt>Runtime</dt><dd><code>{runtimeLabel(recipe.runtime.kind)} · pinned digest</code></dd>
-          <dt>Source</dt><dd><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.source.url} ↗</a></dd>
-          {recipe.artifacts.map(artifact => (
+          <dt>Model ID</dt><dd><code>{actionRecipe.service.served_model_id}</code></dd>
+          <dt>Runtime</dt><dd><code>{runtimeLabel(actionRecipe.runtime.kind)} · pinned digest</code></dd>
+          <dt>Source</dt><dd><a href={actionRecipe.source.url} target="_blank" rel="noreferrer">{actionRecipe.source.url} ↗</a></dd>
+          {actionRecipe.artifacts.map(artifact => (
             <Fragment key={artifact.role}>
               <dt>{artifact.role === 'primary' ? 'Weights' : artifact.role === 'drafter' ? 'Draft weights' : artifact.role}</dt>
               <dd>
@@ -1340,9 +1449,9 @@ export default function Models({
               {(host ? hostServing : isActive) && (
                 <>
                   {!isMedia && (
-                    <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(recipe, host, 'benchmark')}>Measure speed</button>
+                    <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(actionRecipe, host, 'benchmark')}>Measure speed</button>
                   )}
-                  <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(recipe, host, 'smoke-test')}>Check health</button>
+                  <button className="ghost" disabled={toolsLocked} onClick={() => simpleAction(actionRecipe, host, 'smoke-test')}>Check health</button>
                 </>
               )}
               {/* The fleet holds a record it can no longer read, so every
@@ -1351,13 +1460,13 @@ export default function Models({
               {host && placement && placement.stale === true && (
                 <button
                   className="danger"
-                  disabled={pending.has(recipe.id)}
-                  onClick={() => clearRecord(recipe, host, placement)}
+                  disabled={pending.has(actionRecipe.id)}
+                  onClick={() => clearRecord(actionRecipe, host, placement)}
                 >
                   {CLEAR_RECORD}
                 </button>
               )}
-              <button className="danger" disabled={toolsLocked} onClick={() => remove(recipe, host)}>Uninstall</button>
+              <button className="danger" disabled={toolsLocked} onClick={() => remove(actionRecipe, host)}>Uninstall</button>
             </div>
           )
         })()}
