@@ -1,0 +1,1 @@
+import os,sys; sys.path.insert(0, '/opt/basement/ablit'); exec("try:\n import basement_ablit; basement_ablit.install()\nexcept BaseException:\n os._exit(72)")

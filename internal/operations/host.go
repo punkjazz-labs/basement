@@ -1118,7 +1118,7 @@ func (h *HostExecutor) expectedMounts(r recipe.Recipe) map[string]string {
 	for index := range r.Artifacts {
 		paths[index] = h.artifactPath(r, index)
 	}
-	return containerMounts(r, paths, h.cachePath(r), h.mediaMounts(r))
+	return containerMounts(r, paths, h.cachePath(r), h.mediaMounts(r), h.ablitRuntimeMounts(r))
 }
 
 // GenerationRoot is where a media model's generations live under a data
@@ -1179,7 +1179,14 @@ func (h *HostExecutor) writeGeneratedConfig(execution Execution, r recipe.Recipe
 	if err != nil {
 		return nil, err
 	}
+	ablit, err := h.writeAblitRuntime(r)
+	if err != nil {
+		return nil, err
+	}
 	config := map[string]any{"recipe_id": r.ID, "recipe_version": r.Version, "image": r.Runtime.Reference(), "model_revisions": modelRevisions, "container_name": containerName(r), "runtime_kind": r.Runtime.Kind, "entrypoint": entrypoint, "arguments": arguments}
+	if ablit != nil {
+		config["abliteration"] = ablit
+	}
 	if execution.Placement.Distributed() {
 		config["node_role"] = execution.Placement.Role
 		config["node_count"] = execution.Placement.NodeCount
@@ -1187,7 +1194,11 @@ func (h *HostExecutor) writeGeneratedConfig(execution Execution, r recipe.Recipe
 	if err := atomicJSON(path, config, 0o640); err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": path, "contains_secrets": false}, nil
+	receipt := map[string]any{"path": path, "contains_secrets": false}
+	if ablit != nil {
+		receipt["abliteration"] = ablit
+	}
+	return receipt, nil
 }
 
 // ensureGeneratedConfig writes that record when it is not on disk. Docker
@@ -1226,7 +1237,7 @@ func (h *HostExecutor) createContainer(ctx context.Context, execution Execution,
 	if err := h.writeComfyUIRuntimeState(r, cachePath); err != nil {
 		return "", err
 	}
-	return h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, writable, r, execution.Placement)
+	return h.docker.Create(ctx, containerName(r), r.Runtime.Reference(), artifactPaths, cachePath, writable, r, execution.Placement, h.ablitRuntimeMounts(r))
 }
 
 // writeComfyUIRuntimeState puts the two things a media runtime needs before
@@ -1343,6 +1354,9 @@ func (h *HostExecutor) verifyRuntimeInputs(r recipe.Recipe) error {
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			return fmt.Errorf("%s is missing from the downloaded model files at %s, and the recipe tells the runtime to read it, so the model cannot start; install it again to download the missing file", reference.Name, path)
 		}
+	}
+	if err := h.verifyAblitRuntimeFiles(r); err != nil {
+		return err
 	}
 	return nil
 }

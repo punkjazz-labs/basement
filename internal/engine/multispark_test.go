@@ -67,6 +67,10 @@ type fleetExecutor struct {
 	// runtime slot from. Only what reaches the other Spark can free a claim
 	// there, so it is recorded per step and per node.
 	replaces []string
+	// downloadOnly records the admission intent received by each node. It
+	// proves a download-only install remains distinguishable at the worker
+	// boundary rather than being inferred from an operation name there.
+	downloadOnly []string
 }
 
 type gatedFleetExecutor struct {
@@ -254,6 +258,7 @@ func (f *fleetExecutor) Execute(_ context.Context, execution operations.Executio
 	f.events = append(f.events, key)
 	f.detail = append(f.detail, op.Type+"/"+r.ID+"@"+node)
 	f.replaces = append(f.replaces, op.Type+"/"+r.ID+"@"+node+"="+execution.ReplacesRecipeID)
+	f.downloadOnly = append(f.downloadOnly, op.Type+"/"+r.ID+"@"+node+"="+fmt.Sprint(execution.DownloadOnly))
 	receipt := map[string]any{"operation": op.Type, "node": execution.Placement.NodeName, "node_role": execution.Placement.Role}
 	if op.Type == "measure_throughput" {
 		receipt["tokens_per_second"] = 42.5
@@ -304,6 +309,12 @@ func (f *fleetExecutor) recordedReplacements() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.replaces...)
+}
+
+func (f *fleetExecutor) recordedDownloadOnly() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.downloadOnly...)
 }
 
 func (f *fleetExecutor) recordedRenewals() []string {
@@ -391,6 +402,34 @@ func TestTwoSparkInstallStagesBothNodesAndStartsTheWorkerFirst(t *testing.T) {
 	}
 	if nodes["spark-a"] == 0 || nodes["spark-b"] == 0 {
 		t.Fatalf("receipts do not cover both Sparks: %v", nodes)
+	}
+}
+
+func TestTwoSparkDownloadOnlyInstallCarriesWorkerStagingIntent(t *testing.T) {
+	ctx := context.Background()
+	fake := newFleetExecutor()
+	runner, s, r := newTwoSparkEngine(t, fake)
+	job, _, err := s.CreateJob(ctx, "install", r.ID, "two-spark-download-only", map[string]any{"confirmed": true, "activate": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Start(job.ID)
+	waitJob(t, s, job.ID, "ready")
+
+	intent := fake.recordedDownloadOnly()
+	for _, staged := range []string{
+		operations.VerifyPeerNode + "/" + r.ID + "@worker=true",
+		"pull_image/" + r.ID + "@worker=true",
+		"download_artifact/" + r.ID + "@worker=true",
+	} {
+		if indexOf(intent, staged) < 0 {
+			t.Fatalf("download-only intent did not reach %s: %v", staged, intent)
+		}
+	}
+	for _, event := range fake.recorded() {
+		if strings.HasPrefix(event, "start_container@") || strings.HasPrefix(event, "stop_container@") {
+			t.Fatalf("download-only distributed install mutated serving containers: %v", fake.recorded())
+		}
 	}
 }
 

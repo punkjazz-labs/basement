@@ -343,16 +343,23 @@ func containerEnvironment(r recipe.Recipe, placement Placement) ([]string, error
 // mounts keyed by container path — a media runtime's output and input
 // directories, and nothing else today; every other kind passes none and gets
 // exactly the filesystem it always had.
-func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, writablePaths map[string]string, r recipe.Recipe, placement Placement) (string, error) {
+func (d *DockerClient) Create(ctx context.Context, name, image string, artifactPaths []string, cachePath string, writablePaths map[string]string, r recipe.Recipe, placement Placement, runtimeReadonly ...map[string]string) (string, error) {
 	if len(artifactPaths) != len(r.Artifacts) || cachePath == "" {
 		return "", errors.New("container artifact and cache paths are incomplete")
 	}
 	port := fmt.Sprintf("%d/tcp", r.Service.InternalPort)
-	binds := make([]string, 0, len(artifactPaths)+1+len(writablePaths))
+	readonly := map[string]string(nil)
+	if len(runtimeReadonly) > 0 {
+		readonly = runtimeReadonly[0]
+	}
+	binds := make([]string, 0, len(artifactPaths)+1+len(writablePaths)+len(readonly))
 	for index, artifactPath := range artifactPaths {
 		binds = append(binds, artifactPath+":"+artifactMountPath(r.Artifacts[index].Role)+":ro")
 	}
 	binds = append(binds, cachePath+":"+cacheMountPath+":rw")
+	for _, mountPoint := range sortedKeys(readonly) {
+		binds = append(binds, readonly[mountPoint]+":"+mountPoint+":ro")
+	}
 	// Sorted so the same recipe on the same machine always produces the same
 	// container definition; Docker records binds in the order they are given.
 	for _, mountPoint := range sortedKeys(writablePaths) {
@@ -1104,8 +1111,12 @@ func containerTmpfs(r recipe.Recipe) map[string]string {
 // compilation cache, and any extra read-write directory the runtime needs
 // (a media runtime's output and input directories). Keyed by mount point,
 // which is what Docker reports back on an existing container.
-func containerMounts(r recipe.Recipe, artifactPaths []string, cachePath string, writablePaths map[string]string) map[string]string {
-	mounts := make(map[string]string, len(artifactPaths)+1+len(writablePaths))
+func containerMounts(r recipe.Recipe, artifactPaths []string, cachePath string, writablePaths map[string]string, runtimeReadonly ...map[string]string) map[string]string {
+	readonly := map[string]string(nil)
+	if len(runtimeReadonly) > 0 {
+		readonly = runtimeReadonly[0]
+	}
+	mounts := make(map[string]string, len(artifactPaths)+1+len(writablePaths)+len(readonly))
 	for index, path := range artifactPaths {
 		if index < len(r.Artifacts) {
 			mounts[artifactMountPath(r.Artifacts[index].Role)] = path
@@ -1115,6 +1126,9 @@ func containerMounts(r recipe.Recipe, artifactPaths []string, cachePath string, 
 		mounts[cacheMountPath] = cachePath
 	}
 	for mountPoint, host := range writablePaths {
+		mounts[mountPoint] = host
+	}
+	for mountPoint, host := range readonly {
 		mounts[mountPoint] = host
 	}
 	return mounts

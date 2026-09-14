@@ -794,6 +794,54 @@ func servingRank(t *testing.T, fixture nodeFixture, jobID string, r recipe.Recip
 	return reservationID
 }
 
+// A download-only install is allowed to reserve disk while another rank
+// serves, but it must never transfer that rank's runtime claim. This uses the
+// real node handler, store, and allocator rather than a peer stub because the
+// failure was an admission-state transition on the worker itself.
+func TestDownloadOnlyWorkerStagingPreservesServingRankClaim(t *testing.T) {
+	ctx := context.Background()
+	fixture := newNodeFixture(t)
+	allocator := fixture.api.engine.Reservations()
+	stockID := servingRank(t, fixture, "job-stock", fixture.distributed)
+
+	downloadJob := "job-download-ablit"
+	preflight := map[string]any{"recipe": fixture.sglang, "job_id": downloadJob, "replaces_recipe_id": fixture.distributed.ID, "download_only": true}
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, preflight); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("download-only preflight status=%d body=%#v", status, body)
+	}
+	stock, err := allocator.Reservation(ctx, stockID)
+	if err != nil || stock.State != "active" || !stock.Claims.Runtime {
+		t.Fatalf("download-only preflight changed stock claim: %+v err=%v", stock, err)
+	}
+
+	step := workerStep("download_artifact", downloadJob, fixture.sglang)
+	step["download_only"] = true
+	step["replaces_recipe_id"] = fixture.distributed.ID
+	if status, body := fixture.post(t, "/api/v1/internal/node/step", fixture.key, step); status != http.StatusOK || body["error"] != nil {
+		t.Fatalf("download-only worker step status=%d body=%#v", status, body)
+	}
+	stock, err = allocator.Reservation(ctx, stockID)
+	if err != nil || stock.State != "active" || !stock.Claims.Runtime || !fixture.localExec.isRunning() {
+		t.Fatalf("download-only step changed stock serving state: claim=%+v err=%v running=%v", stock, err, fixture.localExec.isRunning())
+	}
+	stagedID := fleet.ExactRecipeReservationID(fleet.ClaimKindLegacyRank, allocator.NodeID(), downloadJob, fixture.sglang.ID, fixture.sglang.Version)
+	staged, err := allocator.Reservation(ctx, stagedID)
+	if err != nil || staged.State != "released" || staged.Claims.Runtime {
+		t.Fatalf("download-only disk reservation was not released without runtime claim: %+v err=%v", staged, err)
+	}
+
+	// The same target later activates through the existing switch path. It is
+	// allowed to take the slot only when explicitly non-download-only.
+	activate := map[string]any{"recipe": fixture.sglang, "job_id": "job-enable-ablit", "replaces_recipe_id": fixture.distributed.ID}
+	if status, body := fixture.post(t, "/api/v1/internal/node/preflight", fixture.key, activate); status != http.StatusOK || body["ready"] != true {
+		t.Fatalf("activation preflight status=%d body=%#v", status, body)
+	}
+	stock, err = allocator.Reservation(ctx, stockID)
+	if err != nil || stock.State != "released" {
+		t.Fatalf("explicit activation did not transfer stock claim: %+v err=%v", stock, err)
+	}
+}
+
 // The two-Spark stop of 2026-08-29. GLM 5.3 Flash served across both Sparks.
 // The owner clicked Stop, the head stopped its own rank cleanly, and the
 // delegated stop died on this node: "this node's runtime is already reserved by

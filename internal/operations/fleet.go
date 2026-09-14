@@ -345,16 +345,13 @@ func (p *PeerClient) Preflight(ctx context.Context, target PeerTarget, execution
 		Checks []map[string]any `json:"checks"`
 		Error  string           `json:"error"`
 	}
-	// The predecessor travels with the check, not with the stop. A worker
-	// evaluates itself before this job stages a byte, and its own admission
-	// claim has to be taken then, so the model this job replaces has to be
-	// named now or the worker refuses its own head for as long as that model
-	// serves. The cost is that the worker marks the old rank's claim free at
-	// the check, which can be an hour before the plan stops its container. The
-	// container is untouched by that, the plan carries the stop, and the head
-	// holds the runtime lock for the whole window.
+	// The predecessor travels with an activating check, not with its stop. A
+	// worker evaluates itself before this job stages a byte, and an activating
+	// claim has to be taken then, so the model this job replaces is named before
+	// its later stop. An explicit download-only install is different: it stages
+	// disk only and must leave the serving rank's runtime claim untouched.
 	if err := p.post(callCtx, target, "/api/v1/internal/node/preflight", map[string]any{
-		"recipe": r, "job_id": execution.JobID, "replaces_recipe_id": execution.ReplacesRecipeID,
+		"recipe": r, "job_id": execution.JobID, "replaces_recipe_id": execution.ReplacesRecipeID, "download_only": execution.DownloadOnly,
 	}, &response); err != nil {
 		return nil, fmt.Errorf("the other Spark could not be asked to check itself: %w", err)
 	}
@@ -434,6 +431,7 @@ func (p *PeerClient) Step(ctx context.Context, target PeerTarget, execution Exec
 		"placement":        execution.Placement,
 		"remove_artifacts": execution.RemoveArtifacts,
 		"job_id":           execution.JobID,
+		"download_only":    execution.DownloadOnly,
 		// The staging steps of a switch reach the worker before its stop does,
 		// so they carry the predecessor for the same reason the check does.
 		"replaces_recipe_id": execution.ReplacesRecipeID,

@@ -20,6 +20,7 @@ var (
 	recipeIDPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,79}$`)
 	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	revisionPattern   = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	sha256Pattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	imagePattern      = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$`)
 	// parserNamePattern admits an empty value and otherwise a plain token: the
@@ -273,6 +274,20 @@ func Validate(r Recipe) error {
 	if !roles["primary"] {
 		problems = append(problems, "artifacts must contain one primary role")
 	}
+	if r.Runtime.Abliteration {
+		primary, primaryOK := r.ArtifactIndex("primary")
+		if r.Runtime.Kind != "vllm" || !primaryOK || r.Artifacts[primary].Repository != "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw" || r.Runtime.Image != "ghcr.io/punkjazz-labs/basement-vllm-glm53-flash-exl3" {
+			problems = append(problems, "runtime abliteration requires the pinned GLM-5.3 Flash EXL3 vLLM image and primary artifact")
+		}
+		if !roles["abliteration"] {
+			problems = append(problems, "runtime abliteration requires an abliteration artifact")
+		}
+		if r.Topology.SparkCount != 2 || r.Service.VLLM == nil || r.Service.VLLM.TensorParallelSize != 2 || r.Service.VLLM.SpeculativeMethod != "mtp" {
+			problems = append(problems, "runtime abliteration requires the pinned two-Spark TP2 MTP layout")
+		}
+	} else if roles["abliteration"] {
+		problems = append(problems, "abliteration artifact requires runtime abliteration")
+	}
 	if r.Requirements.Architecture != "aarch64" {
 		problems = append(problems, "architecture must be aarch64")
 	}
@@ -371,6 +386,21 @@ func artifactFileProblems(artifact Artifact, prefix string) []string {
 		if file.ExpectedBytes <= 0 {
 			problems = append(problems, prefix+" file "+file.Name+" must declare positive expected_bytes")
 			continue
+		}
+		if file.Range != nil {
+			r := file.Range
+			if err := validateArtifactFileName(r.Source); err != nil {
+				problems = append(problems, prefix+" file "+file.Name+" range source is unsafe")
+			}
+			if r.Source == file.Name {
+				problems = append(problems, prefix+" file "+file.Name+" range destination must differ from source")
+			}
+			if r.Offset < 0 || r.SourceBytes <= 0 || r.Offset >= r.SourceBytes || file.ExpectedBytes > r.SourceBytes-r.Offset {
+				problems = append(problems, prefix+" file "+file.Name+" range is outside source_bytes")
+			}
+			if !sha256Pattern.MatchString(r.SHA256) {
+				problems = append(problems, prefix+" file "+file.Name+" range sha256 must be 64 lowercase hex characters")
+			}
 		}
 		total += file.ExpectedBytes
 	}

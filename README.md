@@ -408,3 +408,17 @@ The app icon is `packaging/macos/basement.icns`, built from
 the website. `packaging/macos/make-icon.sh` regenerates it; the release
 scripts only copy the committed `.icns`, so cutting a release needs no SVG
 renderer.
+
+### Optional GLM abliteration
+
+The two-Spark catalog includes **GLM 5.3 Flash · Abliterated** alongside stock GLM.
+Expand its row to review the source and licences. **Download** fetches the additional
+2.5 GiB of pinned tensors per Spark and reuses installed base weights. It leaves the
+current model serving. **Enable** switches both ranks to the abliterated configuration;
+**Disable** switches back to installed stock GLM. Switching reloads the model and
+interrupts requests on that pair. The two rows show which configuration is active.
+
+The base checkpoint remains unchanged. The setting survives manager restarts through
+Basement's ordinary installed-model state and recovery. Abliteration can change answer
+quality and speculative decoding behavior; the option is not a claim of better coding.
+Implementation and provenance are described in [ADR 0024](docs/decisions/0024-glm-abliteration-variant.md).
