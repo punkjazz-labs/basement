@@ -1251,7 +1251,7 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 	}()
 	switchHeld := func() {}
 	defer func() { switchHeld() }()
-	execution := operations.Execution{JobID: job.ID, ReservationID: reservationID, Kind: job.Kind}
+	execution := operations.Execution{JobID: job.ID, ReservationID: reservationID, Kind: job.Kind, DownloadOnly: job.Kind == "install" && !jobActivates(job)}
 	if job.Kind == "remove" {
 		var payload RemovePayload
 		_ = json.Unmarshal(job.Payload, &payload)

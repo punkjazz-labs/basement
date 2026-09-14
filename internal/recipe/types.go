@@ -113,6 +113,11 @@ type Runtime struct {
 	// so a recipe names the paths and the manager bounds them. Absent means
 	// the container gets exactly the filesystem it always had.
 	WritablePaths []string `yaml:"writable_paths,omitempty" json:"writable_paths,omitempty"`
+	// Abliteration enables the explicit GLM-5.3 Flash o_proj donor transplant.
+	// It is intentionally a boolean rather than a free-form runtime hook: the
+	// manager installs only its embedded, reviewed importer and the recipe must
+	// also pin the donor artifact mounted at /abliteration.
+	Abliteration bool `yaml:"abliteration,omitempty" json:"abliteration,omitempty"`
 }
 
 // The container filesystem layout every recipe is served under. It is declared
@@ -173,12 +178,24 @@ type Artifact struct {
 	Files []ArtifactFile `yaml:"files,omitempty" json:"files,omitempty"`
 }
 
-// ArtifactFile pins one file inside an artifact's repository revision. Name
-// is the repository-relative path exactly as the revision lists it, and
-// ExpectedBytes is that file's own size, not a share of a total.
+// ArtifactFile pins one managed file inside an artifact's repository revision.
+// Without Range, Name is the repository-relative upstream path. With Range,
+// Name is the managed destination path and Range.Source names the upstream
+// file. ExpectedBytes is always the managed file size, not a share of a total.
 type ArtifactFile struct {
-	Name          string `yaml:"name" json:"name"`
-	ExpectedBytes int64  `yaml:"expected_bytes" json:"expected_bytes"`
+	Name          string         `yaml:"name" json:"name"`
+	ExpectedBytes int64          `yaml:"expected_bytes" json:"expected_bytes"`
+	Range         *ArtifactRange `yaml:"range,omitempty" json:"range,omitempty"`
+}
+
+// ArtifactRange pins a byte slice of a named file at the artifact's immutable
+// repository revision. Source is the upstream file; Name remains the safe
+// destination path in the managed artifact directory.
+type ArtifactRange struct {
+	Source      string `yaml:"source" json:"source"`
+	Offset      int64  `yaml:"offset" json:"offset"`
+	SourceBytes int64  `yaml:"source_bytes" json:"source_bytes"`
+	SHA256      string `yaml:"sha256" json:"sha256"`
 }
 
 type Requirements struct {

@@ -39,6 +39,7 @@ type hfFile struct {
 		SHA256 string `json:"sha256"`
 		Size   int64  `json:"size"`
 	} `json:"lfs"`
+	Range *recipe.ArtifactRange `json:"range,omitempty"`
 }
 
 type completionMarker struct {
@@ -141,7 +142,7 @@ func (h *HFClient) Complete(artifact recipe.Artifact, target string) bool {
 			return false
 		}
 		for index, pinned := range artifact.Files {
-			if marker.Files[index].Name != pinned.Name || marker.Files[index].Size != pinned.ExpectedBytes {
+			if !matchesPinnedFile(marker.Files[index], pinned) {
 				return false
 			}
 		}
@@ -234,15 +235,30 @@ func selectFiles(artifact recipe.Artifact, manifest hfManifest) ([]hfFile, int64
 	}
 	selected := make([]hfFile, 0, len(artifact.Files))
 	for _, pinned := range artifact.Files {
-		file, ok := available[pinned.Name]
-		if !ok {
-			return nil, 0, fmt.Errorf("pinned file %s is not in revision %s", pinned.Name, artifact.Revision)
+		if pinned.Range == nil {
+			file, ok := available[pinned.Name]
+			if !ok {
+				return nil, 0, fmt.Errorf("pinned file %s is not in revision %s", pinned.Name, artifact.Revision)
+			}
+			if file.Size != pinned.ExpectedBytes {
+				return nil, 0, fmt.Errorf("pinned file %s is %d bytes, expected %d", pinned.Name, file.Size, pinned.ExpectedBytes)
+			}
+			selected = append(selected, file)
+		} else {
+			r := pinned.Range
+			source, ok := available[r.Source]
+			if !ok {
+				return nil, 0, fmt.Errorf("range source %s is not in revision %s", r.Source, artifact.Revision)
+			}
+			if source.Size != r.SourceBytes {
+				return nil, 0, fmt.Errorf("range source %s is %d bytes, expected %d", r.Source, source.Size, r.SourceBytes)
+			}
+			selected = append(selected, hfFile{Name: pinned.Name, Size: pinned.ExpectedBytes, Range: r, LFS: &struct {
+				SHA256 string `json:"sha256"`
+				Size   int64  `json:"size"`
+			}{SHA256: r.SHA256, Size: pinned.ExpectedBytes}})
 		}
-		if file.Size != pinned.ExpectedBytes {
-			return nil, 0, fmt.Errorf("pinned file %s is %d bytes, expected %d", pinned.Name, file.Size, pinned.ExpectedBytes)
-		}
-		selected = append(selected, file)
-		total += file.Size
+		total += pinned.ExpectedBytes
 	}
 	if total != artifact.ExpectedBytes {
 		return nil, 0, fmt.Errorf("pinned files total %d bytes, expected %d", total, artifact.ExpectedBytes)
@@ -268,20 +284,34 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 			}
 			return true, progress(offset, true)
 		}
-		if offset > file.Size {
-			_ = os.Remove(tempPath)
+		// A full-sized range partial with the wrong digest cannot be resumed:
+		// adding one byte would make its requested window invalid. Discard that
+		// corrupt partial so a retry starts at the pinned range offset. A short
+		// partial remains intact and is safely resumed after hashPrefix.
+		if offset > file.Size || (file.Range != nil && offset == file.Size) {
+			if err := os.Remove(tempPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return false, fmt.Errorf("discard invalid range partial: %w", err)
+			}
 			offset = 0
 		}
 	}
 	if err := progress(offset, true); err != nil {
 		return false, fmt.Errorf("check download capacity: %w", err)
 	}
-	endpoint := h.baseURL + "/" + escapeRepository(artifact.Repository) + "/resolve/" + url.PathEscape(artifact.Revision) + "/" + escapeFilePath(file.Name) + "?download=true"
+	sourceName := file.Name
+	if file.Range != nil {
+		sourceName = file.Range.Source
+	}
+	endpoint := h.baseURL + "/" + escapeRepository(artifact.Repository) + "/resolve/" + url.PathEscape(artifact.Revision) + "/" + escapeFilePath(sourceName) + "?download=true"
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if token := os.Getenv("HF_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	if offset > 0 {
+	if file.Range != nil {
+		start := file.Range.Offset + offset
+		end := file.Range.Offset + file.Size - 1
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	} else if offset > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 	resp, err := h.client.Do(req)
@@ -290,7 +320,19 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 	}
 	defer resp.Body.Close()
 	flags := os.O_CREATE | os.O_WRONLY
-	if offset > 0 && resp.StatusCode == http.StatusPartialContent {
+	if file.Range != nil {
+		if resp.StatusCode != http.StatusPartialContent {
+			return false, fmt.Errorf("range server returned %s, expected 206", resp.Status)
+		}
+		if err := verifyContentRange(resp.Header.Get("Content-Range"), file.Range.Offset+offset, file.Range.Offset+file.Size-1, file.Range.SourceBytes); err != nil {
+			return false, err
+		}
+		if offset > 0 {
+			flags |= os.O_APPEND
+		} else {
+			flags |= os.O_TRUNC
+		}
+	} else if offset > 0 && resp.StatusCode == http.StatusPartialContent {
 		flags |= os.O_APPEND
 	} else {
 		offset = 0
@@ -319,6 +361,12 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 	for {
 		n, readErr := resp.Body.Read(buffer)
 		if n > 0 {
+			// A range response is a fixed, pinned byte window.  Do not let a
+			// non-conforming peer extend the partial file beyond that window;
+			// in particular, reject it before those extra bytes reach disk.
+			if file.Range != nil && written+int64(n) > file.Size {
+				return false, fmt.Errorf("range response exceeded requested bytes")
+			}
 			if _, err := out.Write(buffer[:n]); err != nil {
 				return false, err
 			}
@@ -354,11 +402,38 @@ func (h *HFClient) downloadFile(ctx context.Context, artifact recipe.Artifact, f
 	if err := progress(written, false); err != nil {
 		return false, err
 	}
+	verified := streaming && written == file.Size && strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), expected)
+	// A ranged file has an explicit slice digest, so a short or corrupted
+	// response is known before promotion. Leave it resumable as .part rather
+	// than exposing an unverified destination.
+	if file.Range != nil && !verified {
+		return false, fmt.Errorf("range response failed size or sha256 verification")
+	}
 	if err := os.Rename(tempPath, finalPath); err != nil {
 		return false, err
 	}
-	verified := streaming && written == file.Size && strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), expected)
 	return verified, nil
+}
+
+func matchesPinnedFile(file hfFile, pinned recipe.ArtifactFile) bool {
+	if file.Name != pinned.Name || file.Size != pinned.ExpectedBytes {
+		return false
+	}
+	if (file.Range == nil) != (pinned.Range == nil) {
+		return false
+	}
+	if file.Range == nil {
+		return true
+	}
+	return *file.Range == *pinned.Range
+}
+
+func verifyContentRange(value string, start, end, total int64) error {
+	expected := fmt.Sprintf("bytes %d-%d/%d", start, end, total)
+	if value != expected {
+		return fmt.Errorf("range Content-Range %q does not match %q", value, expected)
+	}
+	return nil
 }
 
 // fileDigest returns the hash to run over a file's content and the

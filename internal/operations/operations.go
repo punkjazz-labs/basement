@@ -22,7 +22,12 @@ type Execution struct {
 	// declared free on a machine where nothing is going to stop it.
 	ReplacesRecipeID string
 	Kind             string
-	RemoveArtifacts  bool
+	// DownloadOnly is explicit only for an install whose caller chose not to
+	// activate it. A worker uses it to reserve staging disk without taking the
+	// runtime claim held by the model that is still serving. Its zero value is
+	// deliberately false for compatibility with older heads.
+	DownloadOnly    bool
+	RemoveArtifacts bool
 	// SharedArtifacts holds artifact keys (repository@revision) and artifact
 	// paths still referenced by other installed models; removal must retain
 	// them instead of deleting shared data.

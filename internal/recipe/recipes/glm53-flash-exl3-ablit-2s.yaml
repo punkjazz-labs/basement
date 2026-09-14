@@ -1,0 +1,366 @@
+# Optional in-memory GLM ablation. Base checkpoint files remain immutable.
+# Same pinned runtime, primary artifact and MTP settings as stock recipe v2.
+# The manager mounts its reviewed load hook read-only; only this recipe enables it.
+# Donor revision and all 31 unmodified BF16 tensor ranges were verified directly
+# from safetensors headers over HTTPS on 2026-09-14; offsets include file header.
+# Tensors L15-L44 cover the target and L45 is the native MTP block.
+# Downloading via the ablation row does not activate it. Enabling switches both
+# ranks transactionally; disabling starts stock. Shared primary artifact storage.
+# The 2.5 GiB donor subset has independent checksums.
+# Upstream behavior claims are not Basement quality measurements.
+schema_version: 1
+id: glm53-flash-exl3-ablit-2s
+version: 1
+display_name: GLM 5.3 Flash · Abliterated
+publisher: MiaAI Lab + Mia-AiLab
+model_by: Z.ai
+recipe_by: MiaAI-Lab / Basement
+model_released: August 2026
+trust: basement-candidate
+verification: candidate
+source:
+  url: https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
+  revision: f906ee990596486e10ddbe381efa6f0e496f77e3
+topology:
+  spark_count: 2
+  interconnect:
+    kind: connectx7
+    master_port: 29521
+    shared_environment:
+      NCCL_IB_DISABLE: '0'
+      NCCL_IB_HCA: rocep1s0f0
+      NCCL_IB_GID_INDEX: '3'
+      NCCL_SOCKET_IFNAME: enp1s0f0np0
+      GLOO_SOCKET_IFNAME: enp1s0f0np0
+      TP_SOCKET_IFNAME: enp1s0f0np0
+      NCCL_CROSS_NIC: '0'
+      NCCL_IGNORE_CPU_AFFINITY: '1'
+      NCCL_DEBUG: WARN
+    head_environment: {}
+    worker_environment: {}
+runtime:
+  kind: vllm
+  image: ghcr.io/punkjazz-labs/basement-vllm-glm53-flash-exl3
+  digest: sha256:5c7a0f538f7aa05647ae0c97bc5333330c6441043f7e00defa14fc2cff6ee343
+  image_bytes: 9789175176
+  image_disk_bytes: 20859301069
+  environment:
+    TORCH_CUDA_ARCH_LIST: 12.1a
+    FLASHINFER_CUDA_ARCH_LIST: 12.1a
+    EXL3_FUSED_MOE: '1'
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '1800'
+    GLM53_SUPPRESS_STOPS_IN_REASONING: '1'
+    GLM53_MIXED_PREFILL_CHUNK: skip
+    TMPDIR: /root/tmp
+  writable_paths:
+  - /root/.tilelang
+  - /root/.triton
+  - /root/tmp
+  shm_bytes: 34359738368
+  memory_lock: true
+  ipc_lock: true
+  start_timeout_minutes: 120
+  abliteration: true
+artifacts:
+- role: primary
+  repository: Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+  revision: 25a44fdbf16862a46b7cc9921142c6c81350af2f
+  expected_bytes: 175715854754
+  licence: ShapleyMCG License 1.0
+  licence_url: https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw/blob/25a44fdbf16862a46b7cc9921142c6c81350af2f/LICENSE
+- role: abliteration
+  repository: dealignai/GLM-5.3-Flash-UNCENSORED-NVFP4
+  revision: f75389c0919bd6d3abd4f08c7a0f22545edc95d7
+  expected_bytes: 2684354560
+  licence: MIT
+  licence_url: https://huggingface.co/dealignai/GLM-5.3-Flash-UNCENSORED-NVFP4/blob/f75389c0919bd6d3abd4f08c7a0f22545edc95d7/LICENSE
+  files:
+  - name: L15.bin
+    expected_bytes: 134217728
+    range:
+      source: model-00018-of-00120.safetensors
+      offset: 105522572
+      source_bytes: 1724535180
+      sha256: 115fdf1807dc90c29d36c3bfdc6a972226d5b92becff587d2cc24db21832116a
+  - name: L16.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00020-of-00120.safetensors
+      offset: 126852732
+      source_bytes: 1642634876
+      sha256: 6c3f0e7914963251cd7d0b39f171269d8e439cee769d2ce0dcd52eaf5c9622bc
+  - name: L17.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00023-of-00120.safetensors
+      offset: 126851392
+      source_bytes: 1745467712
+      sha256: 6f46b0af59d7e7e80c238a48c21595c0f2674897e0eb80d48f2db0756ddace4d
+  - name: L18.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00026-of-00120.safetensors
+      offset: 126851920
+      source_bytes: 1745468240
+      sha256: 60489af098011df23d313e48eb1b9d4c72c3a4356004f7523468f13970f33968
+  - name: L19.bin
+    expected_bytes: 134217728
+    range:
+      source: model-00029-of-00120.safetensors
+      offset: 105545420
+      source_bytes: 2143153100
+      sha256: e68835e86a6b945b1d38b0d086af7a0bbd6d9a670ea2cce0e49e07f4a55b637b
+  - name: L20.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00032-of-00120.safetensors
+      offset: 126852752
+      source_bytes: 1745469072
+      sha256: 864000907df731bf9d0f83c10926361b3194d999fd368ba784bf63417fb85692
+  - name: L21.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00034-of-00120.safetensors
+      offset: 126851256
+      source_bytes: 1745467576
+      sha256: 94b5e17e13fe936e13e76b1a7df5a9e5082c51ac93fb89deaa226fae31d8a618
+  - name: L22.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00037-of-00120.safetensors
+      offset: 126851576
+      source_bytes: 1745467896
+      sha256: 669734616d63a913a791d35ab8ec73aeebe758de70f3cf29568ac7888cfbb32f
+  - name: L23.bin
+    expected_bytes: 134217728
+    range:
+      source: model-00040-of-00120.safetensors
+      offset: 105522244
+      source_bytes: 1724534852
+      sha256: b1e0ba4aeb30baa9b1a8f20bc64e7dc37cd69fac36f66008a13e585e6aaa896f
+  - name: L24.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00043-of-00120.safetensors
+      offset: 126852648
+      source_bytes: 1745468968
+      sha256: 1b5c63e304949adb06b2495a5be6734112a205d3f4e313bb903a76e83da8a021
+  - name: L25.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00045-of-00120.safetensors
+      offset: 126851248
+      source_bytes: 1745467568
+      sha256: ed6a47722d53477d8ab9b58645e86a2abcf03a83e035f6d3fc6700ac58eb9f6b
+  - name: L26.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00048-of-00120.safetensors
+      offset: 126851472
+      source_bytes: 1745467792
+      sha256: 59ef61616332898a0e931342c0fb025498e9ea5dd89cf255b5fc59a86a765e3f
+  - name: L27.bin
+    expected_bytes: 134217728
+    range:
+      source: model-00051-of-00120.safetensors
+      offset: 105522164
+      source_bytes: 1724534772
+      sha256: 77352bb5c08aabdb0130d427d55ccf2d843c7d50a4db3d6a135b92c86b6edc0a
+  - name: L28.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00054-of-00120.safetensors
+      offset: 126852544
+      source_bytes: 1745468864
+      sha256: c38dea5d689dd46204669a8f258527bc2e177d4755c94d397d4e0ab37297650c
+  - name: L29.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00057-of-00120.safetensors
+      offset: 128236
+      source_bytes: 1651774700
+      sha256: 9094f7d291cd44518cc760744e5f0b06a574acd9fa4da88e84577003b82e1cb3
+  - name: L30.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00062-of-00120.safetensors
+      offset: 126851904
+      source_bytes: 1745468224
+      sha256: 02bff7507e8086658c997e158ed90b10697a5f171be37cd1ea59b067766a6efc
+  - name: L31.bin
+    expected_bytes: 134217728
+    range:
+      source: model-00065-of-00120.safetensors
+      offset: 105522476
+      source_bytes: 1724535084
+      sha256: dc7933297c68636f60419e32f61ad1821652e1af6784e57756c8bfafccabc4c1
+  - name: L32.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00068-of-00120.safetensors
+      offset: 126853008
+      source_bytes: 1745469328
+      sha256: 5a1adec6e13fd238ecc598f76762b830edebb3c85473162e752da0c15c36281b
+  - name: L33.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00070-of-00120.safetensors
+      offset: 126851320
+      source_bytes: 1745467640
+      sha256: f62bd38a770fe9cb935ab1d19eef1b9c0eb4e04ed4a43366ceb16e25acbc426f
+  - name: L34.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00073-of-00120.safetensors
+      offset: 126851800
+      source_bytes: 1745468120
+      sha256: a7aa702dd14a19ef1bbead6b83bb088968bb9dbc5071aa52302cd7f1d1afaa5c
+  - name: L35.bin
+    expected_bytes: 134217728
+    range:
+      source: model-00076-of-00120.safetensors
+      offset: 105522396
+      source_bytes: 1724535004
+      sha256: 4c9a2ae39a3b14fc3fa72679e6925f9cb4c939d9d22c87e8b3fa1516683abd33
+  - name: L36.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00079-of-00120.safetensors
+      offset: 126852872
+      source_bytes: 1745469192
+      sha256: 6a4cf41245edf171ce7a6f6c483b114c31027e87570cc61b1a0973c199e51f56
+  - name: L37.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00081-of-00120.safetensors
+      offset: 126851288
+      source_bytes: 1745467608
+      sha256: 83f8ed0955918ea3be4e52a0b1a3a62e460711839035b9b55e6a1c41bf5584f1
+  - name: L38.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00084-of-00120.safetensors
+      offset: 126851688
+      source_bytes: 1745468008
+      sha256: 1857299b73104aa186e058019296edc506ffff995a4e10ad051fa2ad771e1ae8
+  - name: L39.bin
+    expected_bytes: 134217728
+    range:
+      source: model-00087-of-00120.safetensors
+      offset: 105521756
+      source_bytes: 1724534364
+      sha256: 7fe26fc2c6a3fb3c7f4d258d3277226ba25933153d835ddaa6bdae68100d550a
+  - name: L40.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00092-of-00120.safetensors
+      offset: 126851256
+      source_bytes: 1745467576
+      sha256: b96f55d772e77e34f98e0fe225c48792948bc588735798c49cb11e5cf7f60b43
+  - name: L41.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00095-of-00120.safetensors
+      offset: 126851584
+      source_bytes: 1745467904
+      sha256: 7d5a04cd143b8c57ec2492c2b5810e09d0c3acde1c968a5fc6666b48a4a6df63
+  - name: L42.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00098-of-00120.safetensors
+      offset: 126852128
+      source_bytes: 1745468448
+      sha256: 3964e5dd6cd6a34a3e8bd3ce80fe9f2d7086385e53e84c62e2ce1964911be1f5
+  - name: L43.bin
+    expected_bytes: 134217728
+    range:
+      source: model-00101-of-00120.safetensors
+      offset: 105522628
+      source_bytes: 1724535236
+      sha256: 01c19850ef06013489f2b1ed81bef1b960861214a8a44237c5081edff29dad34
+  - name: L44.bin
+    expected_bytes: 67108864
+    range:
+      source: model-00103-of-00120.safetensors
+      offset: 126849104
+      source_bytes: 1792143440
+      sha256: c7b8dae706801fe2c375636981d8422348b0ab0e49038b7446c814f11aa91378
+  - name: L45.bin
+    expected_bytes: 134217728
+    range:
+      source: model-00106-of-00120.safetensors
+      offset: 105521660
+      source_bytes: 1724542460
+      sha256: 0727357b45f70869a1b119330c2a99abf824780ea795cd93a6fc45b72da7e024
+requirements:
+  architecture: aarch64
+  dgx_spark: true
+  docker: true
+  nvidia_container_runtime: true
+  per_node_minimum_memory_bytes: 120000000000
+  per_node_memory_reserve_bytes: 10000000000
+  safety_margin_bytes: 20000000000
+  secrets: []
+  required_licence_acceptance: true
+service:
+  internal_port: 8000
+  default_host_port: 8000
+  served_model_id: Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+  vllm:
+    tensor_parallel_size: 2
+    kv_cache_dtype: fp8
+    attention_backend: ''
+    moe_backend: ''
+    linear_backend: ''
+    gpu_memory_utilization: '0.87'
+    max_model_len: 900000
+    max_num_seqs: 4
+    max_num_batched_tokens: 1024
+    max_cudagraph_capture_size: 12
+    multimodal_image_limit: 4
+    multimodal_video_limit: 1
+    skip_mm_profiling: true
+    quantization: exl3
+    speculative_method: mtp
+    speculative_tokens: 2
+    speculative_moe_backend: ''
+    speculative_model_role: ''
+    speculative_draft_sample_method: ''
+    reasoning_parser: glm45
+    tool_call_parser: glm47
+    load_format: ''
+    chat_template_file: ''
+    chat_template_image_path: /opt/glm53/chat_template.jinja
+    chat_template:
+      enable_thinking: true
+      preserve_thinking: true
+    generation:
+      temperature: 1.0
+      top_p: 0.95
+    trust_remote_code: false
+    chunked_prefill: false
+    async_scheduling: false
+    prefix_caching: true
+    auto_tool_choice: true
+operations:
+- type: verify_architecture
+- type: verify_dgx_spark
+- type: verify_memory_capacity
+- type: verify_disk
+- type: verify_port
+- type: verify_docker
+- type: verify_nvidia_runtime
+- type: verify_artifact_access
+- type: pull_image
+- type: download_artifact
+- type: write_generated_config
+- type: create_container
+- type: verify_memory
+- type: start_container
+- type: wait_http
+- type: verify_openai_inference
+uninstall:
+- type: stop_container
+- type: remove_container
+- type: remove_artifact_if_unshared

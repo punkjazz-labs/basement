@@ -608,3 +608,191 @@ func TestVLLMArgumentsAreStructuredAndPinned(t *testing.T) {
 		}
 	}
 }
+
+func TestHuggingFaceDownloadsPinnedByteRangeAndRejectsUnprovenResponses(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	source := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	slice := source[10:20]
+	sum := sha256.Sum256(slice)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/models/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "weights/full.safetensors", "size": len(source), "blobId": strings.Repeat("b", 40)}}})
+		case strings.Contains(r.URL.Path, "/resolve/"):
+			requests++
+			if got := r.Header.Get("Range"); got != "bytes=10-19" {
+				t.Fatalf("Range=%q", got)
+			}
+			w.Header().Set("Content-Range", "bytes 10-19/36")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(slice)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	artifact := recipe.Artifact{Repository: "owner/model", Revision: revision, ExpectedBytes: int64(len(slice)), Files: []recipe.ArtifactFile{{Name: "donor/o_proj.bin", ExpectedBytes: int64(len(slice)), Range: &recipe.ArtifactRange{Source: "weights/full.safetensors", Offset: 10, SourceBytes: int64(len(source)), SHA256: hex.EncodeToString(sum[:])}}}}
+	client := &HFClient{client: server.Client(), baseURL: server.URL}
+	target := filepath.Join(t.TempDir(), "artifact")
+	if _, err := client.Download(context.Background(), artifact, target, nil); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 || !client.Complete(artifact, target) {
+		t.Fatalf("requests=%d complete=%v", requests, client.Complete(artifact, target))
+	}
+	got, err := os.ReadFile(filepath.Join(target, "donor/o_proj.bin"))
+	if err != nil || !bytes.Equal(got, slice) {
+		t.Fatalf("slice=%q err=%v", got, err)
+	}
+
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/models/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "weights/full.safetensors", "size": len(source)}}})
+			return
+		}
+		_, _ = w.Write(source) // A full response to a range request must never be accepted.
+	}))
+	defer bad.Close()
+	client = &HFClient{client: bad.Client(), baseURL: bad.URL}
+	if _, err := client.Download(context.Background(), artifact, filepath.Join(t.TempDir(), "bad"), nil); err == nil || !strings.Contains(err.Error(), "expected 206") {
+		t.Fatalf("Download()=%v, want rejected full response", err)
+	}
+
+	overlong := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/models/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "weights/full.safetensors", "size": len(source)}}})
+			return
+		}
+		w.Header().Set("Content-Range", "bytes 10-19/36")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(append(append([]byte(nil), slice...), '!'))
+	}))
+	defer overlong.Close()
+	client = &HFClient{client: overlong.Client(), baseURL: overlong.URL}
+	overlongTarget := filepath.Join(t.TempDir(), "overlong")
+	if _, err := client.Download(context.Background(), artifact, overlongTarget, nil); err == nil || !strings.Contains(err.Error(), "exceeded requested bytes") {
+		t.Fatalf("Download()=%v, want rejected overlong range response", err)
+	}
+	if _, err := os.Stat(filepath.Join(overlongTarget, "donor/o_proj.bin")); !os.IsNotExist(err) {
+		t.Fatalf("overlong range response wrote final artifact: %v", err)
+	}
+
+	malformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/models/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "weights/full.safetensors", "size": len(source)}}})
+			return
+		}
+		w.Header().Set("Content-Range", "bytes 10-19/37")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(slice)
+	}))
+	defer malformed.Close()
+	client = &HFClient{client: malformed.Client(), baseURL: malformed.URL}
+	if _, err := client.Download(context.Background(), artifact, filepath.Join(t.TempDir(), "malformed"), nil); err == nil || !strings.Contains(err.Error(), "Content-Range") {
+		t.Fatalf("Download()=%v, want rejected malformed Content-Range", err)
+	}
+
+	corrupt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/models/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "weights/full.safetensors", "size": len(source)}}})
+			return
+		}
+		w.Header().Set("Content-Range", "bytes 10-19/36")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(bytes.Repeat([]byte{'x'}, len(slice)))
+	}))
+	defer corrupt.Close()
+	client = &HFClient{client: corrupt.Client(), baseURL: corrupt.URL}
+	corruptTarget := filepath.Join(t.TempDir(), "corrupt")
+	if _, err := client.Download(context.Background(), artifact, corruptTarget, nil); err == nil || !strings.Contains(err.Error(), "sha256") {
+		t.Fatalf("Download()=%v, want rejected corrupt range response", err)
+	}
+	if _, err := os.Stat(filepath.Join(corruptTarget, "donor/o_proj.bin")); !os.IsNotExist(err) {
+		t.Fatalf("corrupt range response wrote final artifact: %v", err)
+	}
+}
+
+func TestHuggingFaceRetriesPinnedByteRanges(t *testing.T) {
+	revision := strings.Repeat("c", 40)
+	source := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	slice := source[10:20]
+	sum := sha256.Sum256(slice)
+	artifact := recipe.Artifact{Repository: "owner/model", Revision: revision, ExpectedBytes: int64(len(slice)), Files: []recipe.ArtifactFile{{Name: "donor/o_proj.bin", ExpectedBytes: int64(len(slice)), Range: &recipe.ArtifactRange{Source: "weights/full.safetensors", Offset: 10, SourceBytes: int64(len(source)), SHA256: hex.EncodeToString(sum[:])}}}}
+
+	t.Run("discard corrupt complete partial", func(t *testing.T) {
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/models/") {
+				_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "weights/full.safetensors", "size": len(source)}}})
+				return
+			}
+			requests++
+			if got := r.Header.Get("Range"); got != "bytes=10-19" {
+				t.Fatalf("request %d Range=%q", requests, got)
+			}
+			w.Header().Set("Content-Range", "bytes 10-19/36")
+			w.WriteHeader(http.StatusPartialContent)
+			if requests == 1 {
+				_, _ = w.Write(bytes.Repeat([]byte{'x'}, len(slice)))
+				return
+			}
+			_, _ = w.Write(slice)
+		}))
+		defer server.Close()
+		client := &HFClient{client: server.Client(), baseURL: server.URL}
+		target := filepath.Join(t.TempDir(), "corrupt")
+		if _, err := client.Download(context.Background(), artifact, target, nil); err == nil {
+			t.Fatal("corrupt complete range accepted")
+		}
+		if _, err := os.Stat(filepath.Join(target, "donor/o_proj.bin.part")); err != nil {
+			t.Fatalf("corrupt partial not retained: %v", err)
+		}
+		if _, err := client.Download(context.Background(), artifact, target, nil); err != nil {
+			t.Fatalf("retry failed: %v", err)
+		}
+		if requests != 2 || !client.Complete(artifact, target) {
+			t.Fatalf("requests=%d complete=%v", requests, client.Complete(artifact, target))
+		}
+	})
+
+	t.Run("resume interrupted partial", func(t *testing.T) {
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/models/") {
+				_ = json.NewEncoder(w).Encode(map[string]any{"sha": revision, "siblings": []map[string]any{{"rfilename": "weights/full.safetensors", "size": len(source)}}})
+				return
+			}
+			requests++
+			wantRange := "bytes=10-19"
+			body := slice[:5]
+			contentRange := "bytes 10-19/36"
+			if requests == 2 {
+				wantRange = "bytes=15-19"
+				body = slice[5:]
+				contentRange = "bytes 15-19/36"
+			}
+			if got := r.Header.Get("Range"); got != wantRange {
+				t.Fatalf("request %d Range=%q want %q", requests, got, wantRange)
+			}
+			w.Header().Set("Content-Range", contentRange)
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(body)
+		}))
+		defer server.Close()
+		client := &HFClient{client: server.Client(), baseURL: server.URL}
+		target := filepath.Join(t.TempDir(), "interrupted")
+		if _, err := client.Download(context.Background(), artifact, target, nil); err == nil {
+			t.Fatal("short range accepted")
+		}
+		if stat, err := os.Stat(filepath.Join(target, "donor/o_proj.bin.part")); err != nil || stat.Size() != 5 {
+			t.Fatalf("partial=%v stat=%v", stat, err)
+		}
+		if _, err := client.Download(context.Background(), artifact, target, nil); err != nil {
+			t.Fatalf("resume failed: %v", err)
+		}
+		if requests != 2 || !client.Complete(artifact, target) {
+			t.Fatalf("requests=%d complete=%v", requests, client.Complete(artifact, target))
+		}
+	})
+}

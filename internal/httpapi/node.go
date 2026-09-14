@@ -142,7 +142,7 @@ func (s *Server) localExecutor() operations.Executor {
 	return s.executor
 }
 
-func (s *Server) prepareLegacyRankReservation(ctx context.Context, jobID string, selected recipe.Recipe) (string, error) {
+func (s *Server) prepareLegacyRankReservation(ctx context.Context, jobID string, selected recipe.Recipe, runtime bool) (string, error) {
 	if strings.TrimSpace(jobID) == "" {
 		return "", errors.New("the worker job id is required")
 	}
@@ -171,7 +171,7 @@ func (s *Server) prepareLegacyRankReservation(ctx context.Context, jobID string,
 		DriverNodeID: "legacy-head", RecipeID: selected.ID, RecipeVersion: selected.Version,
 		RecipeFingerprint: fingerprint,
 		Claims: fleet.ClaimsForRecipe(selected, fleet.RecipeClaimOptions{
-			Kind: fleet.ClaimKindLegacyRank, JobID: jobID, ReserveDisk: true, Runtime: true, Placement: placement,
+			Kind: fleet.ClaimKindLegacyRank, JobID: jobID, ReserveDisk: true, Runtime: runtime, Placement: placement,
 		}),
 		PrepareToken: fleet.LocalPrepareToken(reservationID), ExpiresAt: time.Now().Add(legacyRankPrepareTTL),
 	})
@@ -277,6 +277,10 @@ func (s *Server) nodePreflight(w http.ResponseWriter, r *http.Request) {
 		// holds no active claim for matches nothing, and the claim is then
 		// refused exactly as it is when no model is named at all.
 		ReplacesRecipeID string `json:"replaces_recipe_id"`
+		// DownloadOnly is explicit so an older head that omits it retains the
+		// historical runtime admission path. A false value is never inferred
+		// from the operation because ordinary staging still belongs to a switch.
+		DownloadOnly bool `json:"download_only"`
 	}
 	if err := decodeBody(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -287,10 +291,15 @@ func (s *Server) nodePreflight(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	reservationID, err := s.prepareLegacyRankReservation(r.Context(), request.JobID, trusted)
+	reservationID, err := s.prepareLegacyRankReservation(r.Context(), request.JobID, trusted, !request.DownloadOnly)
 	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
+	}
+	if request.DownloadOnly {
+		// This is a short-lived disk admission for a staged artifact. It must
+		// never adopt, replace, or outlive the serving rank's runtime claim.
+		defer s.engine.Reservations().Release(context.Background(), reservationID)
 	}
 	// Whether the host port matters here is the runtime's answer, not a rule
 	// written down twice: a vLLM worker is launched --headless and binds
@@ -309,22 +318,22 @@ func (s *Server) nodePreflight(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, preflight)
 		return
 	}
-	// A node evaluates itself before the job that asks stages anything, and a
-	// check that passes takes this node's runtime slot for that job. The slot
+	// An activating check takes this node's runtime slot for the job. The slot
 	// can belong to the model the same job is going to stop, and this node
 	// cannot know that by itself: it keeps no installed-model rows, so the head
-	// names the model it replaces. Without that name a switch was refused here,
-	// one step before the stop that would have freed the rank, and no two-Spark
-	// model could be replaced from the console.
-	if err := s.engine.Reservations().Activate(r.Context(), reservationID, request.ReplacesRecipeID); err != nil {
-		_ = s.engine.Reservations().Abort(r.Context(), reservationID)
-		writeError(w, http.StatusConflict, fmt.Errorf("this node's runtime is already reserved by another deployment: %w", err))
-		return
-	}
-	if _, err := s.renewLegacyRankReservation(r.Context(), reservationID); err != nil {
-		_ = s.engine.Reservations().Release(r.Context(), reservationID)
-		writeError(w, http.StatusConflict, fmt.Errorf("renew this node's delegated runtime reservation: %w", err))
-		return
+	// names the model it replaces. Download-only checks intentionally stop at
+	// disk admission and leave that serving claim alone.
+	if !request.DownloadOnly {
+		if err := s.engine.Reservations().Activate(r.Context(), reservationID, request.ReplacesRecipeID); err != nil {
+			_ = s.engine.Reservations().Abort(r.Context(), reservationID)
+			writeError(w, http.StatusConflict, fmt.Errorf("this node's runtime is already reserved by another deployment: %w", err))
+			return
+		}
+		if _, err := s.renewLegacyRankReservation(r.Context(), reservationID); err != nil {
+			_ = s.engine.Reservations().Release(r.Context(), reservationID)
+			writeError(w, http.StatusConflict, fmt.Errorf("renew this node's delegated runtime reservation: %w", err))
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, preflight)
 }
@@ -401,6 +410,7 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		// ReplacesRecipeID carries the same answer the check carried: the
 		// staging steps of a switch also arrive before its stop does.
 		ReplacesRecipeID string `json:"replaces_recipe_id"`
+		DownloadOnly     bool   `json:"download_only"`
 	}
 	if err := decodeBody(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -413,6 +423,10 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 	}
 	if !workerOperations[request.Operation] {
 		writeError(w, http.StatusBadRequest, errors.New("operation "+request.Operation+" cannot be run on behalf of another Spark"))
+		return
+	}
+	if request.DownloadOnly && request.Operation != "pull_image" && request.Operation != "download_artifact" {
+		writeError(w, http.StatusBadRequest, errors.New("a download-only worker request may only pull an image or download artifacts"))
 		return
 	}
 	if request.Placement.Role != operations.RoleWorker {
@@ -465,18 +479,22 @@ func (s *Server) nodeStep(w http.ResponseWriter, r *http.Request) {
 		// step runs unreserved instead of taking the slot in order to free it,
 		// and an unrelated model serving here cannot block it.
 	} else {
-		prepared, err := s.prepareLegacyRankReservation(r.Context(), request.JobID, trusted)
+		prepared, err := s.prepareLegacyRankReservation(r.Context(), request.JobID, trusted, !request.DownloadOnly)
 		if err != nil {
 			writeError(w, http.StatusConflict, err)
 			return
 		}
-		if err := s.engine.Reservations().Activate(r.Context(), prepared, request.ReplacesRecipeID); err != nil {
+		if request.DownloadOnly {
+			defer s.engine.Reservations().Release(context.Background(), prepared)
+		} else if err := s.engine.Reservations().Activate(r.Context(), prepared, request.ReplacesRecipeID); err != nil {
 			writeError(w, http.StatusConflict, fmt.Errorf("this node's runtime is already reserved by another deployment: %w", err))
 			return
 		}
-		if _, err := s.renewLegacyRankReservation(r.Context(), prepared); err != nil {
-			writeError(w, http.StatusConflict, fmt.Errorf("renew this node's delegated runtime reservation: %w", err))
-			return
+		if !request.DownloadOnly {
+			if _, err := s.renewLegacyRankReservation(r.Context(), prepared); err != nil {
+				writeError(w, http.StatusConflict, fmt.Errorf("renew this node's delegated runtime reservation: %w", err))
+				return
+			}
 		}
 		reservationID = prepared
 	}

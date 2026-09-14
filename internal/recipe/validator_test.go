@@ -30,13 +30,47 @@ func boolPointer(value bool) *bool {
 	return &value
 }
 
+func TestArtifactFileRangeValidation(t *testing.T) {
+	valid := Artifact{ExpectedBytes: 4, Files: []ArtifactFile{{
+		Name:          "abliteration/o_proj.bin",
+		ExpectedBytes: 4,
+		Range: &ArtifactRange{
+			Source:      "model-00001-of-00016.safetensors",
+			Offset:      3,
+			SourceBytes: 8,
+			SHA256:      strings.Repeat("a", 64),
+		},
+	}}}
+	if got := artifactFileProblems(valid, "artifact"); len(got) != 0 {
+		t.Fatalf("valid range problems: %v", got)
+	}
+
+	for name, mutate := range map[string]func(*ArtifactRange, *ArtifactFile){
+		"destination equals source": func(r *ArtifactRange, f *ArtifactFile) { f.Name = r.Source },
+		"slice extends past source": func(r *ArtifactRange, f *ArtifactFile) { f.ExpectedBytes = 6 },
+		"invalid digest":            func(r *ArtifactRange, _ *ArtifactFile) { r.SHA256 = "ABC" },
+		"negative offset":           func(r *ArtifactRange, _ *ArtifactFile) { r.Offset = -1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			file := valid.Files[0]
+			rangeCopy := *file.Range
+			file.Range = &rangeCopy
+			mutate(file.Range, &file)
+			candidate := Artifact{ExpectedBytes: file.ExpectedBytes, Files: []ArtifactFile{file}}
+			if got := artifactFileProblems(candidate, "artifact"); len(got) == 0 {
+				t.Fatal("invalid range accepted")
+			}
+		})
+	}
+}
+
 func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	recipes, err := Builtin()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recipes) != 13 {
-		t.Fatalf("got %d recipes, want 13", len(recipes))
+	if len(recipes) != 14 {
+		t.Fatalf("got %d recipes, want 14", len(recipes))
 	}
 	for _, r := range recipes {
 		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
@@ -877,7 +911,7 @@ func TestWholeSnapshotArtifactsStayValidWithoutFilePinning(t *testing.T) {
 	}
 	for _, r := range recipes {
 		for _, artifact := range r.Artifacts {
-			if r.Runtime.Kind == "llamacpp" || r.Runtime.Kind == "comfyui" {
+			if r.Runtime.Kind == "llamacpp" || r.Runtime.Kind == "comfyui" || artifact.Role == "abliteration" {
 				continue
 			}
 			if len(artifact.Files) != 0 {
@@ -987,6 +1021,7 @@ func TestOnlyTheKernelCompilingRecipesDeclareWritablePaths(t *testing.T) {
 	want := map[string][]string{
 		"deepseek-v4-flash-0731-2s":  {"/root/.tilelang", "/root/tmp"},
 		"glm53-flash-exl3-2s":        {"/root/.tilelang", "/root/.triton", "/root/tmp"},
+		"glm53-flash-exl3-ablit-2s":  {"/root/.tilelang", "/root/.triton", "/root/tmp"},
 		"qwen38-flash-next-nvfp4-2s": {"/root/tmp"},
 	}
 	seen := map[string]bool{}
