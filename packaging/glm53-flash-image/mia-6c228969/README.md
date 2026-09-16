@@ -40,10 +40,13 @@ The CPU EXL3 registration, sharding and native-architecture self-check runs
 at build time. GPU and real serving qualification are separate requirements.
 Do not treat a successful build as a production qualification.
 
-The stock and ablated recipes still pin the previous image. This directory
-alone does not update installed models. Promotion requires a published image
-digest, new recipe versions with retained rollback history, and verified
-Basement activation. The pinned source archive carries the GNU Affero General Public License
+Stock recipe v3 and ablated recipe v2 pin the published image built from this
+source. The old recipe definitions remain embedded for exact installed-version
+resolution and rollback. A manager update advertises the new catalog; an explicit
+Basement install/update activates it. See the parent README for the immutable
+image identity. Successful build checks alone do not qualify live inference.
+
+The pinned source archive carries the GNU Affero General Public License
 version 3 text, reproduced in UPSTREAM-LICENSE. This differs from the
 older Basement image's MIT-labelled patch snapshot; preserve the current
 upstream license and notices when distributing this candidate.

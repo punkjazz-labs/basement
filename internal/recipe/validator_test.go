@@ -69,8 +69,8 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recipes) != 14 {
-		t.Fatalf("got %d recipes, want 14", len(recipes))
+	if len(recipes) != 16 {
+		t.Fatalf("got %d recipes, want 16", len(recipes))
 	}
 	for _, r := range recipes {
 		if r.Verification != "candidate" || r.Trust != "basement-candidate" {
@@ -265,7 +265,7 @@ func TestBuiltinRecipePackIsPinnedCandidate(t *testing.T) {
 	if !ok || glm.Runtime.Kind != "vllm" || !glm.Distributed() || glm.Topology.SparkCount != 2 {
 		t.Fatalf("unexpected GLM-5.3-Flash EXL3 recipe: %#v", glm)
 	}
-	if glm.Runtime.Reference() != "ghcr.io/punkjazz-labs/basement-vllm-glm53-flash-exl3@sha256:5c7a0f538f7aa05647ae0c97bc5333330c6441043f7e00defa14fc2cff6ee343" {
+	if glm.Runtime.Reference() != "ghcr.io/punkjazz-labs/basement-vllm-glm53-flash-exl3@sha256:66b3ccba74ccdc6dcd7c27cfa14cfd22dd30f62ae0dacc84ee12fb74495185ac" {
 		t.Fatalf("GLM-5.3-Flash runtime is not pinned: %#v", glm.Runtime)
 	}
 	// One artifact, and that is the licence ruling in the schema. The

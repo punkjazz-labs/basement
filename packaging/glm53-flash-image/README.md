@@ -33,3 +33,19 @@ Push an annotated or lightweight tag named `glm53-flash-image-v*` after main
 is green. The existing `glm53-flash-image` GitHub workflow builds on an arm64
 runner and prints the immutable GHCR digest and image size. Pin that digest in
 the recipe; never use the tag as a runtime image reference.
+
+## Published refresh
+
+Tag `glm53-flash-image-v2`, built from Basement commit
+`79f6e9fd2a78669ad8b6efaec136db50da047c9c`, published:
+
+`ghcr.io/punkjazz-labs/basement-vllm-glm53-flash-exl3@sha256:66b3ccba74ccdc6dcd7c27cfa14cfd22dd30f62ae0dacc84ee12fb74495185ac`
+
+[Image workflow](https://github.com/punkjazz-labs/basement/actions/runs/35071315260)
+passed the build and EXL3 self-check. Compressed layers total 9,790,496,643 bytes;
+Docker reports 20,864,775,901 bytes unpacked. Stock v3 and ablated v2 retain the
+existing checkpoint, MTP k=2, serving configuration and optional donor hook.
+They refresh runtime code, without downloading a separate drafter or enabling
+additional performance settings. Historical recipes are retained for installed
+model resolution and failed-update rollback. These remain candidate recipes;
+publication and source tests do not establish long-soak qualification.
