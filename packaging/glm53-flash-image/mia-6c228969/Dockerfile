@@ -22,3 +22,7 @@ RUN python3 /opt/glm53/patch_indexer_workspace.py
 RUN python3 /opt/glm53/patch_cache_reset.py
 RUN python3 /opt/glm53/patch_ablit.py
 RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/source-tests/test_exl3_overlay.py
+COPY LICENSE LICENSE.MIT /opt/glm53/
+LABEL org.opencontainers.image.source="https://github.com/punkjazz-labs/basement" \
+      ai.basement.patch.source="https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks" \
+      ai.basement.patch.licence="AGPL-3.0"
