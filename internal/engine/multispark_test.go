@@ -1602,7 +1602,9 @@ func TestIncompleteDistributedStopNeverCreatesRecoveryJob(t *testing.T) {
 	runner.Start(install.ID)
 	waitJob(t, s, install.ID, "ready")
 
+	fake.mu.Lock()
 	fake.failStepNode = "stop_container@worker"
+	fake.mu.Unlock()
 	err = runner.RecoverDistributedServing(ctx, r.ID, "worker rank was no longer running", true)
 	if err == nil || !strings.Contains(err.Error(), "stop failed worker rank") {
 		t.Fatalf("incomplete group stop error=%v, want worker stop failure", err)
@@ -2121,7 +2123,9 @@ func TestRollbackRestoresADistributedPredecessorOnBothItsNodes(t *testing.T) {
 
 	// The single-node model comes up and fails its health check, so the
 	// distributed model it displaced has to come back on both of its nodes.
+	fake.mu.Lock()
 	fake.failRecipeOp = "wait_http/" + single.ID
+	fake.mu.Unlock()
 	second, _, err := s.CreateJob(ctx, "install", single.ID, "install-single", map[string]any{"confirmed": true})
 	if err != nil {
 		t.Fatal(err)
@@ -2241,7 +2245,9 @@ func TestWorkerStopFailureDuringSwitchFailsTheJob(t *testing.T) {
 	runner.Start(first.ID)
 	waitJob(t, s, first.ID, "ready")
 
+	fake.mu.Lock()
 	fake.failStepNode = "stop_container@worker"
+	fake.mu.Unlock()
 
 	second, _, err := s.CreateJob(ctx, "install", single.ID, "install-single-worker-stop-fails", map[string]any{"confirmed": true})
 	if err != nil {
