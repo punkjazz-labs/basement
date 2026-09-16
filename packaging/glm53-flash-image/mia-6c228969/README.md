@@ -43,5 +43,7 @@ Do not treat a successful build as a production qualification.
 The stock and ablated recipes still pin the previous image. This directory
 alone does not update installed models. Promotion requires a published image
 digest, new recipe versions with retained rollback history, and verified
-Basement activation. The source archive carries Mia's MIT license, reproduced
-in UPSTREAM-LICENSE.
+Basement activation. The pinned source archive carries the GNU Affero General Public License
+version 3 text, reproduced in UPSTREAM-LICENSE. This differs from the
+older Basement image's MIT-labelled patch snapshot; preserve the current
+upstream license and notices when distributing this candidate.
