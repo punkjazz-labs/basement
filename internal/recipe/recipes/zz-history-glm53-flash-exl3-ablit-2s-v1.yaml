@@ -1,5 +1,5 @@
 # Optional in-memory GLM ablation. Base checkpoint files remain immutable.
-# Same pinned runtime, primary artifact and MTP settings as stock recipe v3.
+# Same pinned runtime, primary artifact and MTP settings as stock recipe v2.
 # The manager mounts its reviewed load hook read-only; only this recipe enables it.
 # Donor revision and all 31 unmodified BF16 tensor ranges were verified directly
 # from safetensors headers over HTTPS on 2026-09-14; offsets include file header.
@@ -10,7 +10,7 @@
 # Upstream behavior claims are not Basement quality measurements.
 schema_version: 1
 id: glm53-flash-exl3-ablit-2s
-version: 2
+version: 1
 display_name: GLM 5.3 Flash · Abliterated
 publisher: MiaAI Lab + Mia-AiLab
 model_by: Z.ai
@@ -20,7 +20,7 @@ trust: basement-candidate
 verification: candidate
 source:
   url: https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
-  revision: 6c228969a81d48372173bee55e5ad1b4753e656e
+  revision: f906ee990596486e10ddbe381efa6f0e496f77e3
 topology:
   spark_count: 2
   interconnect:
@@ -41,9 +41,9 @@ topology:
 runtime:
   kind: vllm
   image: ghcr.io/punkjazz-labs/basement-vllm-glm53-flash-exl3
-  digest: sha256:66b3ccba74ccdc6dcd7c27cfa14cfd22dd30f62ae0dacc84ee12fb74495185ac
-  image_bytes: 9790496643
-  image_disk_bytes: 20864775901
+  digest: sha256:5c7a0f538f7aa05647ae0c97bc5333330c6441043f7e00defa14fc2cff6ee343
+  image_bytes: 9789175176
+  image_disk_bytes: 20859301069
   environment:
     TORCH_CUDA_ARCH_LIST: 12.1a
     FLASHINFER_CUDA_ARCH_LIST: 12.1a

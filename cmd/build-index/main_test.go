@@ -71,12 +71,10 @@ func TestRoundTripSurvivesTheClientDecodePath(t *testing.T) {
 		t.Fatalf("got %d recipes back, want %d embedded", len(idx.Recipes), len(embedded))
 	}
 
-	fetchedByID := make(map[string]recipe.Recipe, len(idx.Recipes))
-	for _, r := range idx.Recipes {
-		fetchedByID[r.ID] = r
-	}
+	// Embedded history can contain several versions of one ID. Verify every
+	// exact version survives instead of letting an ID-only map hide one.
 	for _, want := range embedded {
-		got, ok := fetchedByID[want.ID]
+		got, ok := recipe.FindVersion(idx.Recipes, want.ID, want.Version)
 		if !ok {
 			t.Fatalf("recipe %s did not survive the round trip", want.ID)
 		}
