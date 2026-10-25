@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react'
 import {
-  api, idempotency, setCSRF, terminal, formatBytes, OfflineError,
+  api, fetchFleetDeployments, idempotency, setCSRF, terminal, formatBytes, OfflineError,
   type FleetDeploymentView, type FleetSummary, type PeerSummary, type SystemInfo, type Recipe,
   type InstalledModel, type Job, type Peer, type Telemetry, type UpdateInfo,
 } from './api'
@@ -14,6 +14,16 @@ import Minutes, { MINUTES_HEAD_TIP } from './views/Minutes'
 import Connect from './views/Connect'
 import Monitor from './views/Monitor'
 import Fleet, { FleetInvitationPrompt } from './views/Fleet'
+import { BoxDrawerBody } from './components/BoxDrawer'
+import { Drawer } from './components/Drawer'
+import { Icon, type IconName } from './components/Icon'
+import { PowerFanOut } from './components/Power'
+import { UnitDrawerBody } from './components/UnitDrawer'
+import { readDrawer, writeDrawer, type DrawerTarget } from './drawerLink'
+import { recordHealth } from './fleetEvents'
+import { buildFleetView, type FleetView } from './fleetView'
+import { fleetMemory } from './loadFit'
+import { usePowerControl, type PowerControl } from './powerControl'
 import Storage from './views/Storage'
 import Activity from './views/Activity'
 import ManagerUpdateDialog, { ManagerUpdateSidebar } from './views/ManagerUpdate'
@@ -24,8 +34,12 @@ import { initialManagerUpdateDialogState, managerUpdateDialogReducer } from './m
 import { servingChatModels } from './council'
 import { TABS, railGroups, tabLabel, type Tab } from './rail'
 import { fleetSummary, MEMBERSHIP_POLL_MS } from './fleetInvite'
-import { fleetRows } from './fleetModels'
-import { LOCAL_MACHINE, forgetMachines, monitorMachines, recordSilence, recordTelemetry } from './telemetry'
+import { fleetRows, POWER_MODE_NOTE } from './fleetModels'
+import {
+  LOCAL_MACHINE, forgetMachines, heartbeatKey, isHeartbeatKey, machineSeries, monitorMachines, recordHeartbeats,
+  recordSilence, recordTelemetry, subscribeTelemetry, telemetryRevision, withHeartbeatKeys,
+} from './telemetry'
+import { withLocalModels } from './units'
 
 // How often a paired Spark's meters are read. It is the pace every other peer
 // read in the console keeps, which is slower than this Spark's own five
@@ -40,6 +54,38 @@ const HEAD_TIP: Partial<Record<Tab, { text: string; label: string }>> = {
   Minutes: { text: MINUTES_HEAD_TIP, label: 'What Minutes is' },
 }
 
+// One glyph per screen on the rail, from the console's one icon set.
+const RAIL_ICON: Record<Tab, IconName> = {
+  Models: 'models',
+  Roles: 'roles',
+  Playground: 'chat',
+  Generate: 'generate',
+  Redactor: 'redactor',
+  Minutes: 'minutes',
+  Connect: 'api',
+  Monitor: 'monitor',
+  Fleet: 'sparks',
+  Storage: 'storage',
+  Activity: 'activity',
+}
+
+// The product's own mark, as the basement website draws it (and as
+// packaging/macos/icon.svg copies it): the orange "b." on a forest tile. It
+// leads the lowercase word, which stays the name.
+function BrandMark() {
+  return (
+    <svg className="brand-mark" width="22" height="22" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+      <rect width="64" height="64" rx="14" fill="#1d4733" />
+      <text
+        x="32" y="47" fontFamily="Arial Rounded MT Bold, Arial, Helvetica, sans-serif" fontSize="40" fontWeight="bold"
+        fill="#dd3c10" textAnchor="middle"
+      >
+        b.
+      </text>
+    </svg>
+  )
+}
+
 export interface AppState {
   system: SystemInfo | null
   recipes: Recipe[]
@@ -49,6 +95,11 @@ export interface AppState {
   // how many Sparks are available decides which recipes can be installed at
   // all, and a paired Spark is a place a one-Spark model can run.
   peers: Peer[]
+  // The fleet as the Spark that answers here reports it, and every placement
+  // it holds. Both stay empty on a console that leads no fleet: only the
+  // controller holds rows for the other boxes and the placements across them.
+  fleet: FleetSummary | null
+  deployments: FleetDeploymentView[]
   refresh: () => Promise<void>
   refreshModelsAndJobs: () => Promise<void>
   refreshPeers: () => Promise<void>
@@ -60,6 +111,15 @@ export interface AppState {
   openPlayground: () => void
   openGenerate: () => void
   openFleet: () => void
+  // The fleet as every screen reads it: boxes in drawing order, their health,
+  // the units they form. Built once here, so the health line on Models,
+  // Sparks and Monitor and the detail drawer can never disagree.
+  view: FleetView
+  // The detail drawer, opened from anywhere a box or a unit is named.
+  openBox: (nodeID: string) => void
+  openUnit: (deploymentID: string) => void
+  // The power-mode switches, shared by the Sparks table and the box drawer.
+  power: PowerControl
 }
 
 export default function App() {
@@ -71,10 +131,16 @@ export default function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [peers, setPeers] = useState<Peer[]>([])
   // Every Spark in this fleet, as the Spark that answers here reports them.
-  // Only the live meters read it from up here, and only to know which
-  // machines they have to draw. null is a console that leads no fleet, and a
-  // summary this console could not read.
+  // The meters, the Roles page and the Sparks overview read it from up here.
+  // null is a console that has not read a summary yet; a read that fails
+  // keeps the last one that answered.
   const [fleet, setFleet] = useState<FleetSummary | null>(null)
+  // Whether the first read of that summary has come back, either way. Until
+  // it has, the console does not know whose power switches it holds.
+  const [fleetAnswered, setFleetAnswered] = useState(false)
+  // Every placement the fleet holds, which is what joins boxes into units.
+  // Only the console that leads the fleet has any to read.
+  const [deployments, setDeployments] = useState<FleetDeploymentView[]>([])
   const [connected, setConnected] = useState(true)
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [updateDialog, dispatchUpdateDialog] = useReducer(
@@ -326,10 +392,21 @@ export default function App() {
         const summary = fleetSummary(await api<unknown>('/api/v1/fleet'))
         if (cancelled) return
         setFleet(summary)
+        // Each box's heartbeat carries its own meters, so every read of the
+        // summary is also a sample for the boxes this console holds no key
+        // for. A box that left the fleet loses its history here.
+        const rows = fleetRows(summary, peers, window.location.origin, Date.now())
+        const received = new Map((summary?.nodes ?? []).map(node => [node.node_id, node.last_heartbeat_at ?? '']))
+        recordHeartbeats(rows.map(row => ({ ...row, heartbeatAt: received.get(row.nodeID) })))
+        forgetMachines(rows.map(row => heartbeatKey(row.nodeID)), key => !isHeartbeatKey(key))
         const inFleet = summary !== null && summary.role !== 'standalone'
         if (inFleet && timer === undefined) timer = setInterval(read, MEMBERSHIP_POLL_MS)
       } catch {
-        if (!cancelled) setFleet(null)
+        // One read that failed is not a fleet that went away: the last good
+        // read stands until the next one answers, so the units and the memory
+        // rule built on it do not shrink to this box alone for a poll.
+      } finally {
+        if (!cancelled) setFleetAnswered(true)
       }
     }
     void read(true)
@@ -339,13 +416,40 @@ export default function App() {
     }
   }, [authed, peers])
 
+  // The placements across the fleet, on the console that leads it. They
+  // change only when a model is placed, started or removed, so they are read
+  // at the pace of the membership summary.
+  const leadsFleet = fleet?.role === 'controller'
+  useEffect(() => {
+    if (!authed || !leadsFleet) {
+      setDeployments([])
+      return
+    }
+    let cancelled = false
+    const read = async (first = false) => {
+      if (!first && document.hidden) return
+      try {
+        const next = await fetchFleetDeployments()
+        if (!cancelled) setDeployments(next)
+      } catch {
+        /* the next read tries again */
+      }
+    }
+    void read(true)
+    const timer = setInterval(read, MEMBERSHIP_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [authed, leadsFleet])
+
   // The same meters from every paired Spark, read one by one through this
   // manager. A Spark that does not answer keeps the samples it already sent;
   // a Spark this console no longer holds loses them, because nothing can show
   // them any more.
   useEffect(() => {
     if (!authed) return
-    forgetMachines([LOCAL_MACHINE, ...peers.map(peer => peer.id)])
+    forgetMachines([LOCAL_MACHINE, ...peers.map(peer => peer.id)], isHeartbeatKey)
     if (peers.length === 0) return
     let cancelled = false
     const sample = async () => {
@@ -392,15 +496,63 @@ export default function App() {
   )
   // Every Spark the live meters are drawn for: this one first, then every
   // other machine the fleet reports, whether or not this console can read its
-  // meters. A Spark with a row on the Sparks page has a section here.
-  const machines = useMemo(
-    () => monitorMachines(
-      fleetRows(fleet, peers, window.location.origin, Date.now()),
-      peers,
-      system?.hostname || 'This Spark',
-    ),
-    [fleet, peers, system],
+  // meters. A Spark with a row on the Sparks page has a section here, and a
+  // box this console holds no key for is read from its heartbeat.
+  const sparkRows = useMemo(
+    () => withLocalModels(fleetRows(fleet, peers, window.location.origin, Date.now()), models),
+    [fleet, peers, models],
   )
+  const machines = useMemo(
+    () => withHeartbeatKeys(monitorMachines(sparkRows, peers, system?.hostname || 'This Spark'), sparkRows),
+    [sparkRows, peers, system],
+  )
+  // The fleet as every screen reads it. This Spark's own meter is the
+  // freshest reading of it, so the view follows every sample.
+  useSyncExternalStore(subscribeTelemetry, telemetryRevision, telemetryRevision)
+  const selfLatest = machineSeries(LOCAL_MACHINE).latest
+  const memory = fleetMemory({ sparks: sparkRows, models, recipes, deployments, jobs, system, latest: selfLatest })
+  const view = buildFleetView({ memory, summary: fleet, recipes, machines, selfLatest, nowMs: Date.now() })
+  // Every change in a box's health is an event on Monitor. Only once the
+  // fleet has answered: before that this console knows one box, and every
+  // other box would arrive as news.
+  const healthKey = view.health.map(box => `${box.id}:${box.issues.map(issue => issue.kind).join(',')}`).join('|')
+  useEffect(() => {
+    if (fleetAnswered) recordHealth(view.health)
+  }, [fleetAnswered, healthKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const power = usePowerControl(fleetAnswered ? fleet : undefined, peers)
+
+  // Which drawer is open, as the address bar says it. Opening one adds a
+  // history entry, so Back closes it; moving from one drawer to another
+  // replaces it, so Back does not walk through every box looked at.
+  const [drawer, setDrawer] = useState<DrawerTarget | null>(() => readDrawer(window.location.search))
+  const pushedDrawer = useRef(false)
+  useEffect(() => {
+    const onPop = () => {
+      pushedDrawer.current = false
+      setDrawer(readDrawer(window.location.search))
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+  const showDrawer = useCallback((target: DrawerTarget | null) => {
+    const { pathname, search, hash } = window.location
+    const url = `${pathname}${writeDrawer(search, target)}${hash}`
+    if (target === null) {
+      if (pushedDrawer.current) {
+        window.history.back()
+        return
+      }
+      window.history.replaceState(window.history.state, '', url)
+    } else if (readDrawer(search) === null) {
+      window.history.pushState(window.history.state, '', url)
+      pushedDrawer.current = true
+    } else {
+      window.history.replaceState(window.history.state, '', url)
+    }
+    setDrawer(target)
+  }, [])
+  const closeDrawer = useCallback(() => showDrawer(null), [showDrawer])
   const visibleTabs = TABS.filter(name =>
     name === 'Generate' ? activeMedia : name === 'Playground' ? !activeMedia : true,
   )
@@ -426,8 +578,17 @@ export default function App() {
   if (authed === null) return null
   if (!authed) return <Pairing onPaired={() => setAuthed(true)} />
 
+  const openBox = (nodeID: string) => {
+    const row = view.rowOf(nodeID)
+    if (row) showDrawer({ kind: 'box', name: row.displayName })
+  }
+  const openUnit = (deploymentID: string) => showDrawer({ kind: 'unit', id: deploymentID })
+  const drawerBox = drawer?.kind === 'box' ? view.findBox(drawer.name) : undefined
+  const drawerUnit = drawer?.kind === 'unit' ? view.findUnit(drawer.id) : undefined
+
   const state: AppState = {
-    system, recipes, models, jobs, peers, refresh, refreshModelsAndJobs, refreshPeers,
+    system, recipes, models, jobs, peers, fleet, deployments, refresh, refreshModelsAndJobs, refreshPeers,
+    view, openBox, openUnit, power,
     openDeployment: id => {
       setRemoteJob(null)
       setSelectedJobID(id)
@@ -452,6 +613,7 @@ export default function App() {
       <a className="skip-link" href="#main">Skip to content</a>
       <aside className="side">
         <a className="side-mark" href="/" aria-label="basement">
+          <BrandMark />
           <strong>basement</strong>
         </a>
         <nav aria-label="Console sections">
@@ -470,25 +632,33 @@ export default function App() {
               )}
               {group.tabs.map(name => (
                 <button key={name} aria-current={tab === name} onClick={() => setTab(name)}>
-                  {tabLabel(name)}
+                  <Icon name={RAIL_ICON[name]} />
+                  <span className="rail-label">{tabLabel(name)}</span>
                   {name === 'Activity' && runningJobs > 0 && <span className="badge">{runningJobs}</span>}
                 </button>
               ))}
             </div>
           ))}
         </nav>
+        {/* What this Spark is doing, in one small card: the model it serves,
+            the box itself, and the manager's own version line. */}
         <div className="side-foot">
           <div className={`foot-live ${railClass}`} role="status" aria-live="polite">
             <i className="led" aria-hidden="true" />
-            <span>{railLabel}</span>
+            <span className="foot-model">{railLabel}</span>
             {liveTPS !== null && activeModel?.status === 'ready' && !activeMedia && (
               <span className="tps">{liveTPS.toFixed(1)} tok/s</span>
             )}
           </div>
-          <span>{system?.hostname ?? '…'}
-            {system && system.memory_available_bytes > 0 && ` · ${formatBytes(system.memory_available_bytes)} free`}
-          </span>
-          <ManagerUpdateSidebar info={update} managerVersion={system?.manager_version} onOpen={openManagerUpdate} />
+          <div className="foot-box">
+            <span className="foot-host">{system?.hostname ?? '…'}</span>
+            {system && system.memory_available_bytes > 0 && (
+              <span className="foot-free">{formatBytes(system.memory_available_bytes)} free</span>
+            )}
+          </div>
+          <div className="foot-manager">
+            <ManagerUpdateSidebar info={update} managerVersion={system?.manager_version} onOpen={openManagerUpdate} />
+          </div>
         </div>
       </aside>
       <div className="content">
@@ -497,6 +667,15 @@ export default function App() {
             <h1>{tabLabel(tab)}</h1>
             {headTip && <Tip text={headTip.text} label={headTip.label} />}
             {!connected && !updateDialog.reconnecting && <span className="offline" role="status">Disconnected</span>}
+            {/* The one power change that reaches every Spark sits with the
+                page title, where a fleet-wide setting belongs; each box keeps
+                its own switch in its row. */}
+            {tab === 'Fleet' && power.fanOut && (
+              <div className="head-power">
+                <PowerFanOut busy={power.fanOut.busy} mode={power.fanOut.mode} onSet={power.fanOut.set} />
+                <Tip text={POWER_MODE_NOTE} label="What the power modes do" />
+              </div>
+            )}
           </div>
         </header>
         {/* The Playground fills the window, so the transcript inside it can
@@ -534,8 +713,21 @@ export default function App() {
               screen nobody is looking at must ask nothing. */}
           {tab === 'Minutes' && <Minutes servingModel={servingModel} />}
           {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
-          {tab === 'Monitor' && <Monitor machines={machines} recipes={recipes} />}
-          {tab === 'Fleet' && <Fleet {...state} liveTPS={liveTPS} />}
+          {tab === 'Monitor' && (
+            <Monitor
+              machines={machines}
+              recipes={recipes}
+              view={view}
+              models={models}
+              jobs={jobs}
+              deployments={deployments}
+              onOpenBox={openBox}
+              onOpenUnit={openUnit}
+              openDeployment={state.openDeployment}
+              openFleetDeployment={state.openFleetDeployment}
+            />
+          )}
+          {tab === 'Fleet' && <Fleet {...state} />}
           {tab === 'Storage' && <Storage {...state} />}
           {tab === 'Activity' && <Activity {...state} />}
         </main>
@@ -578,6 +770,41 @@ export default function App() {
           refreshModelsAndJobs().then(() => setTab('Generate'))
         }}
       />
+      {drawerBox && (
+        <Drawer label={drawerBox.displayName} onClose={closeDrawer}>
+          <BoxDrawerBody
+            key={drawerBox.nodeID}
+            view={view}
+            row={drawerBox}
+            system={system}
+            power={power.switchFor(drawerBox)}
+            onOpenUnit={openUnit}
+          />
+        </Drawer>
+      )}
+      {drawerUnit && (
+        <Drawer label={recipes.find(recipe => recipe.id === drawerUnit.recipeID)?.display_name ?? drawerUnit.recipeID} onClose={closeDrawer}>
+          <UnitDrawerBody
+            key={drawerUnit.key}
+            view={view}
+            unit={drawerUnit}
+            recipes={recipes}
+            models={models}
+            onOpenBox={openBox}
+            openPlayground={() => {
+              closeDrawer()
+              setTab('Playground')
+            }}
+            openGenerate={() => {
+              closeDrawer()
+              setTab('Generate')
+            }}
+            openDeployment={state.openDeployment}
+            openFleetDeployment={state.openFleetDeployment}
+            refresh={() => void refreshModelsAndJobs()}
+          />
+        </Drawer>
+      )}
       {/* A Spark asking to adopt this one is answered wherever the owner
           happens to be in the console, not only on the Fleet tab. */}
       <FleetInvitationPrompt onAnswered={refresh} />

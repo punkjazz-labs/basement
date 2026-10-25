@@ -21,7 +21,21 @@ export function Mark({ recipe, recipeIDs = [], name, size }: {
   size: number
 }) {
   const logo = logoFor(recipeIDs, recipe)
-  if (logo) return <img src={logo} alt="" width={size} height={size} />
+  // Every mark sits in the same tile: one size, one corner radius, a quiet
+  // ground and a hairline ring, so a logo drawn on white and one drawn on
+  // black line up as one row of marks.
+  const tile = { width: size, height: size, borderRadius: Math.round(size * 0.26), fontSize: Math.round(size * 0.42) }
+  if (logo) {
+    return (
+      <span className="logo" style={tile}>
+        <img src={logo} alt="" width={size} height={size} />
+      </span>
+    )
+  }
   const letter = recipe ? labFor(recipe) : name ?? ''
-  return <span className="mark" aria-hidden="true">{letter.trim().charAt(0)}</span>
+  return (
+    <span className="logo" style={tile}>
+      <span className="mark" aria-hidden="true">{letter.trim().charAt(0)}</span>
+    </span>
+  )
 }

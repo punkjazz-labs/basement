@@ -90,13 +90,17 @@ keeps its own models off that Spark (see below). A name it cannot match is
 reported unprotected, so a misspelt node name shows up on the card instead of
 failing silently.
 
-The Models view shows one card per service beside the serving bands, built
-from existing pieces: the Spark card frame, the facts list of an opened row,
-the status dot and the node chip, lit while the service answers. It names the
-service, says "Attached service · managed outside Basement", the topology
-and Sparks, health and how long ago it was checked, endpoint, managed-by line,
-attribution, kind, served name and licence, and the licence's territory
-exclusions in the wording the install dialog already uses. It has no button.
+The Models view shows one card per service among the serving cards, built
+from their pieces: the same frame, mark and box chips, a status chip (green
+while the service answers, red when it does not, plain before the first
+check), and the thin green edge only while it answers. The card names the
+service, says "Attached service · managed outside Basement", and gives the
+topology, each named Spark with its role, and a live line with how long ago
+it was checked and how fast it answered, or why the check failed. Opened, as
+a serving card opens, it lists the endpoint, managed-by line, attribution,
+kind, served name and licence, and the licence's territory exclusions in the
+wording the install dialog already uses. It opens by itself when a named
+Spark cannot be matched. It has no button.
 
 ### Safety: a declared node is occupied
 

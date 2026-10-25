@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
-  attachedServices, checkedAgo, guardLine, healthRead, kindLabel, licenceHref, territoryLine, topologyLine,
+  answeredIn, attachedServices, checkedAgo, guardLine, healthRead, kindLabel, licenceHref, territoryLine, topologyLine,
   type AttachedService,
 } from './attached'
 import { AttachedCard, AttachedProblems } from './attachedCard'
@@ -78,11 +78,18 @@ describe('attached service copy', () => {
     expect(checkedAgo(undefined, NOW)).toBe('')
   })
 
-  it('says healthy, unhealthy, or not checked yet', () => {
-    expect(healthRead(fastH3().health, NOW)).toEqual({ dot: 'on', text: 'Healthy · checked 12 s ago' })
+  it('says healthy, unhealthy, or not checked yet, with a live line only after a check', () => {
+    expect(healthRead(fastH3().health, NOW))
+      .toEqual({ tone: 'live', word: 'Healthy', parts: ['checked 12 s ago', 'answered in 3 ms'] })
     expect(healthRead({ status: 'unhealthy', last_checked_at: ago(40), latency_ms: 5000, last_error: 'no answer within 5s' }, NOW))
-      .toEqual({ dot: 'fail', text: 'Unhealthy · checked 40 s ago' })
-    expect(healthRead({ status: 'unknown', latency_ms: 0 }, NOW)).toEqual({ dot: 'wait', text: 'Not checked yet' })
+      .toEqual({ tone: 'fail', word: 'Unhealthy', parts: ['checked 40 s ago', 'no answer within 5s'] })
+    expect(healthRead({ status: 'unknown', latency_ms: 0 }, NOW)).toEqual({ tone: '', word: 'Not checked yet', parts: [] })
+  })
+
+  it('states how fast the check answered in ms, then in seconds', () => {
+    expect(answeredIn(3)).toBe('answered in 3 ms')
+    expect(answeredIn(999)).toBe('answered in 999 ms')
+    expect(answeredIn(1240)).toBe('answered in 1.2 s')
   })
 
   it('carries the licence territory exclusions in the install dialog wording', () => {
@@ -116,13 +123,15 @@ describe('attached service copy', () => {
 })
 
 describe('AttachedCard', () => {
-  it('shows the service as one card, managed outside Basement, with no controls', () => {
+  it('shows the service as one serving card, managed outside Basement, with no controls', () => {
     const markup = renderToStaticMarkup(<AttachedCard service={fastH3()} nowMs={NOW} />)
     const text = textOf(markup)
     for (const expected of [
       'FastH3 (MiniMax H3 Omni, FastVideo)',
       'Attached service · managed outside Basement',
-      'Healthy · checked 12 s ago',
+      'Healthy',
+      'checked 12 s ago',
+      'answered in 3 ms',
       '2 Sparks · TP1 x SP2 pair (Ray)',
       'head-box head/rank0',
       'worker-box worker/rank1',
@@ -139,16 +148,44 @@ describe('AttachedCard', () => {
     expect(markup).not.toContain('<button')
     expect(markup).not.toContain('<a ')
     expect(markup).not.toContain('—')
-    expect(markup).toContain('class="sdot on"')
-    expect(markup).toContain('class="node-chip live"')
+    // The serving card's own pieces: its frame with the green edge, the
+    // green chip, and both Sparks lit while the service answers.
+    expect(markup).toContain('class="mband attached-band live"')
+    expect(markup).toContain('class="state-chip live"')
+    expect(markup.match(/class="hdot ok"/g)).toHaveLength(2)
+    // Closed, like any serving card, while there is nothing to fix.
+    expect(markup).not.toMatch(/<details[^>]* open/)
   })
 
   it('shows the reason a check failed, and stops lighting the Sparks', () => {
     const service = fastH3({ health: { status: 'unhealthy', last_checked_at: ago(5), latency_ms: 1, last_error: 'the health check answered HTTP 503' } })
     const markup = renderToStaticMarkup(<AttachedCard service={service} nowMs={NOW} />)
-    expect(textOf(markup)).toContain('Last check the health check answered HTTP 503')
-    expect(markup).toContain('class="sdot fail"')
-    expect(markup).not.toContain('node-chip live')
+    expect(textOf(markup)).toContain('Unhealthy checked 5 s ago the health check answered HTTP 503')
+    expect(markup).toContain('class="state-chip fail"')
+    expect(markup).toContain('class="mband attached-band "')
+    expect(markup).not.toContain('hdot ok')
+  })
+
+  it('says nothing live before the first check', () => {
+    const service = fastH3({ health: { status: 'unknown', latency_ms: 0 } })
+    const markup = renderToStaticMarkup(<AttachedCard service={service} nowMs={NOW} />)
+    expect(textOf(markup)).toContain('Not checked yet')
+    expect(markup).toContain('class="state-chip "')
+    expect(markup).not.toContain('mb-live')
+    expect(markup).not.toContain('hdot ok')
+  })
+
+  it('opens by itself, and marks the Spark, when a name cannot be matched', () => {
+    const service = fastH3({
+      nodes: [
+        { name: 'head-box', role: 'head/rank0', this_spark: true, protected: true },
+        { name: 'wroker-box', role: 'worker/rank1', this_spark: false, protected: false },
+      ],
+    })
+    const markup = renderToStaticMarkup(<AttachedCard service={service} nowMs={NOW} />)
+    expect(markup).toMatch(/<details[^>]* open/)
+    expect(markup).toContain('class="hdot warn"')
+    expect(textOf(markup)).toContain('This console cannot match wroker-box to a Spark it places models on')
   })
 
   it('writes n/a for what the declaration leaves out', () => {

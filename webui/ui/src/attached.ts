@@ -119,9 +119,6 @@ export const topologyLine = (declaration: AttachedDeclaration): string => {
     : sparks(declaration.topology.spark_count)
 }
 
-// One Spark, with the role the declaration gives it.
-export const nodeLabel = (node: AttachedNode): string => (node.role ? `${node.name} ${node.role}` : node.name)
-
 // When the last check ran. Under a minute this counts seconds, because a
 // check runs every half minute and "just now" would cover both of the last
 // two; beyond that it reads like every other age on the console.
@@ -135,17 +132,27 @@ export function checkedAgo(iso: string | undefined, nowMs: number): string {
   return `checked ${relativeTime(iso, nowMs)}`
 }
 
+// How long the last check took to answer, in the units a reader expects.
+export const answeredIn = (ms: number): string =>
+  ms < 1000 ? `answered in ${Math.max(Math.round(ms), 0)} ms` : `answered in ${(ms / 1000).toFixed(1)} s`
+
 export interface HealthRead {
-  // The status dot's class, from the same set every status cell uses.
-  dot: 'on' | 'fail' | 'wait'
-  text: string
+  // The status chip's tone, from the set every serving card uses: live while
+  // the service answers, fail when it does not, plain before the first check.
+  tone: 'live' | 'fail' | ''
+  word: string
+  // The card's live line: when the check ran, then how fast it answered or
+  // why it failed. Empty until there has been a check to speak of.
+  parts: string[]
 }
 
 export function healthRead(health: AttachedHealth, nowMs: number): HealthRead {
-  if (health.status === 'unknown' || !health.last_checked_at) return { dot: 'wait', text: 'Not checked yet' }
-  const word = health.status === 'healthy' ? 'Healthy' : 'Unhealthy'
+  if (health.status === 'unknown' || !health.last_checked_at) return { tone: '', word: 'Not checked yet', parts: [] }
   const when = checkedAgo(health.last_checked_at, nowMs)
-  return { dot: health.status === 'healthy' ? 'on' : 'fail', text: when ? `${word} · ${when}` : word }
+  if (health.status === 'healthy') {
+    return { tone: 'live', word: 'Healthy', parts: [when, answeredIn(health.latency_ms)].filter(Boolean) }
+  }
+  return { tone: 'fail', word: 'Unhealthy', parts: [when, health.last_error ?? ''].filter(Boolean) }
 }
 
 const joined = (items: string[]): string => {
