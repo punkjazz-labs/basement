@@ -458,6 +458,19 @@ input[type='text'], input[type='password'], textarea {
 .node-card .row .k { color: var(--muted); }
 .node-card .row .v { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
 
+/* A model service run outside basement on these Sparks (ADR 0025): the Spark
+   card's frame around an opened row's facts list. It carries no button,
+   because basement does not control the service. */
+.attached-card { max-width: 720px; }
+.attached-card header { align-items: center; }
+.attached-card header .who { display: grid; gap: 1px; min-width: 0; }
+.attached-health { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.attached-body { padding: 12px 16px 14px; display: grid; gap: 10px; }
+.attached-body .table-note { margin: 0; }
+.attached-nodes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.attached-notes { margin: 0; color: var(--muted); font-size: 12.5px; max-width: 62ch; }
+.alert .attached-fix { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
+
 /* A choice between two states, in one control. */
 .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; }
 .seg button { background: none; border: 0; color: var(--muted); padding: 5px 12px; font: inherit; font-size: 12.5px; }

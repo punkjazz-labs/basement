@@ -82,7 +82,14 @@ func (m *Manager) PlanIndependent(ctx context.Context, recipeID string) (Placeme
 				break
 			}
 		}
+		holder, held := m.runtimeHolder(node.NodeID, node.DisplayName)
 		switch {
+		case held:
+			// First, because it is the operator's own word and holds however
+			// fresh the heartbeat is. The Spark's own allocator would refuse
+			// this too, but only if the declaration is on that Spark as well;
+			// the one on this controller is enough to keep it off the list.
+			candidate.Eligible, candidate.Reason = false, heldNodeReason(holder)
 		case node.Status != "fresh":
 			// Every reason here is read in two places: under the name of this
 			// Spark in the install dialog, and after "<name> could not do

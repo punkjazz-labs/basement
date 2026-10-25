@@ -81,6 +81,46 @@ type Engine struct {
 	recoveryRetryDelay time.Duration
 	// recovering guards one recovery loop per recipe under mu.
 	recovering map[string]bool
+	// holder names an attached service that holds a Spark from outside this
+	// manager (ADR 0025); see SetRuntimeHolder. This node's own claims are
+	// refused by its allocator, so the engine only asks about the worker of a
+	// two-Spark job, which is another machine's allocator to judge and one
+	// that may never have been given the declaration.
+	holder atomic.Pointer[fleet.RuntimeHolder]
+}
+
+// SetRuntimeHolder installs the attached-service source the engine checks a
+// two-Spark job's worker against before that job may start serving. Safe to
+// call from any goroutine; with none installed nothing is checked.
+func (e *Engine) SetRuntimeHolder(holder fleet.RuntimeHolder) {
+	if holder == nil {
+		e.holder.Store(nil)
+		return
+	}
+	e.holder.Store(&holder)
+}
+
+// refuseHeldWorker refuses a job that would start a two-Spark model whose
+// worker Spark an attached service holds. Stop, remove and every other job
+// pass, so a model that was serving before the declaration can still be
+// taken down.
+func (e *Engine) refuseHeldWorker(job store.Job, deployment operations.Deployment) error {
+	if !deployment.Distributed() || !jobActivates(job) {
+		return nil
+	}
+	holder := e.holder.Load()
+	if holder == nil {
+		return nil
+	}
+	name, held := (*holder)(deployment.Peer.ID, deployment.Peer.Name)
+	if !held {
+		return nil
+	}
+	worker := deployment.Peer.Name
+	if worker == "" {
+		worker = "the other Spark"
+	}
+	return fmt.Errorf("the attached service %s has %s reserved outside Basement, so this two-Spark model cannot start; stop that service where it is managed and remove its declaration first", name, worker)
 }
 
 // TokenSampler takes a reading of a model's runtime token counters.
@@ -780,6 +820,16 @@ func (e *Engine) PrepareJob(ctx context.Context, jobID string) error {
 	if !ok {
 		return errors.New("recipe is no longer available")
 	}
+	// The worker is judged here as well as in run, so the console is refused
+	// with the reason instead of being handed a job that fails a moment later.
+	// A deployment that cannot be resolved is left for run to report.
+	if selected.Distributed() && jobActivates(job) {
+		if deployment, err := e.deployment(ctx, selected); err == nil {
+			if err := e.refuseHeldWorker(job, deployment); err != nil {
+				return err
+			}
+		}
+	}
 	_, _, err = e.prepareJobReservation(ctx, job, selected)
 	return err
 }
@@ -1263,6 +1313,10 @@ func (e *Engine) run(ctx context.Context, jobID string) {
 	}
 	deployment, err := e.deployment(ctx, r)
 	if err != nil {
+		_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(err.Error()))
+		return
+	}
+	if err := e.refuseHeldWorker(job, deployment); err != nil {
 		_ = e.store.UpdateJobState(ctx, jobID, "failed", redact.String(err.Error()))
 		return
 	}

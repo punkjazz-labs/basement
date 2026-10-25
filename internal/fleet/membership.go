@@ -82,6 +82,7 @@ type Manager struct {
 	effective       []recipe.Recipe
 	runtime         IndependentRuntime
 	power           PowerRuntime
+	holder          RuntimeHolder
 	placementMu     sync.Mutex
 	placementLocks  map[string]*sync.Mutex
 	// The pair locks sit one level above the id locks. See placementPairLock
@@ -206,6 +207,9 @@ func (m *Manager) initializeLegacyState(ctx context.Context, recipes []recipe.Re
 }
 
 func (m *Manager) Identity() *Identity { return m.identity }
+
+// DisplayName is the name this node reports for itself to its fleet.
+func (m *Manager) DisplayName() string { return m.displayName }
 
 func (m *Manager) Allocator() *Allocator { return m.allocator }
 
