@@ -1,4 +1,4 @@
-import type { Peer, Telemetry } from './api'
+import type { NodeInventory, Peer, Telemetry } from './api'
 import { consoleKey } from './fleetInvite'
 import type { FleetRow } from './fleetModels'
 
@@ -21,10 +21,11 @@ export interface Series {
   power: number[]
   clock: number[]
   temperature: number[]
+  memFree: number[]
 }
 
 export const EMPTY_SERIES: Series = {
-  tps: [], running: [], waiting: [], kv: [], gpuFree: [], power: [], clock: [], temperature: [],
+  tps: [], running: [], waiting: [], kv: [], gpuFree: [], power: [], clock: [], temperature: [], memFree: [],
 }
 
 // One machine's history: every series, the last sample whole, and whether
@@ -91,6 +92,7 @@ export function foldSample(previous: MachineSeries, sample: Telemetry): MachineS
       power: sample.gpu_power_draw_watts > 0 ? push(held.power, sample.gpu_power_draw_watts) : held.power,
       clock: sample.gpu_clock_mhz > 0 ? push(held.clock, sample.gpu_clock_mhz) : held.clock,
       temperature: sample.gpu_temperature_c > 0 ? push(held.temperature, sample.gpu_temperature_c) : held.temperature,
+      memFree: sample.memory_total > 0 ? push(held.memFree, sample.memory_available) : held.memFree,
     },
     latest: sample,
     answering: true,
@@ -138,15 +140,72 @@ export const machineSeries = (key: string): MachineSeries => machines.get(key) ?
 
 // Every machine that is no longer on the fleet's list loses its history: a
 // Spark that was removed from this console has nothing left to draw.
-export function forgetMachines(keep: readonly string[]): void {
+// spare names the keys a caller does not speak for: the peers poll knows
+// nothing of heartbeat keys, and the fleet poll nothing of peer keys, so each
+// prunes only its own.
+export function forgetMachines(keep: readonly string[], spare: (key: string) => boolean = () => false): void {
   const kept = new Set(keep)
   let dropped = false
   for (const key of [...machines.keys()]) {
-    if (kept.has(key)) continue
+    if (kept.has(key) || spare(key)) continue
     machines.delete(key)
     dropped = true
   }
   if (dropped) announce()
+}
+
+// ---- Boxes read from their heartbeat --------------------------------------
+
+// A box this console holds no key for still tells the fleet about itself:
+// every heartbeat carries its memory, its disk and its GPU meters. App reads
+// the fleet summary on its own poll anyway, so each read is folded into the
+// same history the meters draw from, and the sparkline grows one point per
+// new heartbeat. The key is the box's node id, which never collides with a
+// peer id or with this machine's own key.
+export const heartbeatKey = (nodeID: string): string => `node:${nodeID}`
+
+export const isHeartbeatKey = (key: string): boolean => key.startsWith('node:')
+
+// One heartbeat as a telemetry sample. The stamp is when the controller took
+// that heartbeat in, or else the box's own reading time: every heartbeat
+// carries a fresh reading of the box (BuildHeartbeat inspects it each time),
+// so a new stamp is a new reading, and a poll that catches the same heartbeat
+// twice adds nothing. A heartbeat with neither stamp cannot be told from the
+// last one, and is not used.
+export function inventorySample(inventory: NodeInventory, receivedAt = ''): Telemetry | null {
+  const stamp = receivedAt || inventory.observed_at
+  if (!stamp) return null
+  return {
+    sampled_at: stamp,
+    memory_total: inventory.memory_total_bytes,
+    memory_available: inventory.memory_available_bytes,
+    gpu_memory_total: inventory.gpu_memory_total_bytes ?? 0,
+    gpu_memory_free: inventory.gpu_memory_free_bytes ?? 0,
+    gpu_power_draw_watts: inventory.gpu_power_draw_watts ?? 0,
+    gpu_clock_mhz: inventory.gpu_clock_mhz ?? 0,
+    gpu_temperature_c: inventory.gpu_temperature_c ?? 0,
+    storage_total: inventory.storage_total_bytes,
+    storage_available: inventory.storage_available_bytes,
+  }
+}
+
+// Every box the fleet summary carries a heartbeat for, folded in. A box that
+// has stopped answering keeps its samples and is marked quiet, exactly as a
+// peer that stopped answering is.
+export function recordHeartbeats(
+  rows: readonly {
+    nodeID: string; isSelf: boolean; answering: boolean; inventory?: NodeInventory; heartbeatAt?: string
+  }[],
+): void {
+  for (const row of rows) {
+    if (row.isSelf || row.nodeID === '') continue
+    const key = heartbeatKey(row.nodeID)
+    const sample = row.inventory ? inventorySample(row.inventory, row.heartbeatAt) : null
+    // A box already quiet when the console opened still has a last reading,
+    // and it is shown as exactly that rather than as one still to come.
+    if (sample && (row.answering || machineSeries(key) === EMPTY_MACHINE)) recordTelemetry(key, sample)
+    if (!row.answering) recordSilence(key)
+  }
 }
 
 // ---- Which Sparks the meters are drawn for ------------------------------
@@ -206,6 +265,17 @@ export function monitorMachines(
     })
   }
   return machines
+}
+
+// The same list, with every fleet box this console holds no key for read from
+// its heartbeat instead. Only a box the fleet names by node id has a
+// heartbeat here; any other keeps its empty key and says it cannot be read.
+export function withHeartbeatKeys(machines: MonitorMachine[], sparks: readonly FleetRow[]): MonitorMachine[] {
+  const members = new Set(sparks
+    .filter(spark => spark.legacyPeerOnly !== true && spark.nodeID !== '')
+    .map(spark => spark.nodeID))
+  return machines.map(machine =>
+    machine.key === '' && members.has(machine.id) ? { ...machine, key: heartbeatKey(machine.id) } : machine)
 }
 
 export function subscribeTelemetry(listener: () => void): () => void {

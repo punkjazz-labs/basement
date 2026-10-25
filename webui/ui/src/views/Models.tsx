@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
   api, fetchFleetDeployments, idempotency, terminal, formatBytes, formatTokens, runtimeLabel, startTimeoutMinutes,
   modelStateWord, peerModelList,
@@ -31,9 +31,16 @@ import {
   ACTION_REFUSAL, ADOPT_PATH, CATALOG_EMPTY, CATALOG_TAB, CLEAR_RECORD, CLEAR_RECORD_CONFIRM,
   COOL_TAG, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH,
   NO_PLACEMENT_BACK, NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
-  type ActionTarget, type FleetDeploymentAction, type FleetRow, type ModelsTab,
+  type ActionTarget, type FleetDeploymentAction, type FleetRow, type ModelsTab, type NodeChip,
   type PlacementTarget, type PowerRow,
 } from '../fleetModels'
+import { boxHeadroom, fitWord, tightestBox, type BoxHeadroom, type FitResult } from '../headroom'
+import { HeadroomBar, freeText } from '../headroomBar'
+import { boxOfRow, fleetMemory, loadFit, loadTargets, variantFamily } from '../loadFit'
+import { LOCAL_MACHINE, machineSeries, subscribeTelemetry, telemetryRevision } from '../telemetry'
+import {
+  boxesWord, fleetDisk, unitFor, unitHealth, unitPlacement, HEALTH_WORD, type FleetUnit,
+} from '../units'
 
 // Model summaries trace to the recipes and docs/MODEL-CANDIDATES-2026-08.md.
 const SPEC: Record<string, string> = {
@@ -109,42 +116,71 @@ const NODE_CARD_ID = 'fleet-node-card'
 // this is the empty run list that read is made against.
 const NO_POWER_RUNS: ReadonlySet<string> = new Set()
 
-// The fleet in one line above the table: every Spark, whether it serves
-// something, and how much memory and disk it has free. Every number is one
-// that Spark reported about itself, and n/a means it has reported none yet.
-// Each chip opens that Spark's own card below the line. A Spark in the cool
-// mode carries the small "cool" tag: the mode the row shows, which is what
-// that Spark reported, or what this console has just set on it while the read
-// catches up. A Spark that has reported no mode carries no tag.
-function FleetStrip({ sparks, power, open, onOpen }: {
+// The dot a box wears wherever this page names it: lit while it serves a
+// model, and otherwise the word its own membership state gives it.
+const boxDot = (spark: FleetRow): string =>
+  spark.serving ? 'on' : spark.status.dot === 'on' ? '' : spark.status.dot
+
+// One group of the fleet strip: a unit, or the boxes that run on their own.
+interface StripGroup {
+  key: string
+  label: string
+  model: string
   sparks: FleetRow[]
+}
+
+// The fleet over the table, one compact cell per box, grouped by the units
+// the boxes form. Each cell is the box's dot, its short name, a headroom bar
+// and what it has free. The groups wrap onto a second line rather than run
+// into each other, and on a phone the strip scrolls sideways. Every number is
+// one that box reported about itself, and n/a means it has reported none yet.
+// Each cell opens that box's own card below the strip. A box in the cool mode
+// carries the small "cool" tag: the mode its row shows, which is what that box
+// reported. A box that has reported no mode carries no tag.
+function FleetStrip({ groups, names, power, headroom, open, onOpen }: {
+  groups: StripGroup[]
+  names: string[]
   power: Map<string, PowerRow>
+  headroom: (spark: FleetRow) => BoxHeadroom
   open: string
   onOpen: (nodeID: string) => void
 }) {
   return (
-    <div className="fleet-strip" role="status">
-      <span className="fs-label">Sparks</span>
-      {sparks.map(spark => (
-        <button
-          type="button"
-          className="fs-node"
-          key={spark.nodeID}
-          aria-expanded={open === spark.nodeID}
-          // Named only while the card is really there: a control that points
-          // at nothing is worse than one that points at nothing named.
-          aria-controls={open === spark.nodeID ? NODE_CARD_ID : undefined}
-          onClick={() => onOpen(spark.nodeID)}
-        >
-          <i className={`sdot ${spark.status.dot}`} aria-hidden="true" />
-          <span className="fs-name">{spark.displayName}</span>
-          <span className="fs-sep" aria-hidden="true">·</span>
-          <b>
-            {formatBytes(spark.inventory?.memory_available_bytes)} memory ·{' '}
-            {formatBytes(spark.inventory?.storage_available_bytes)} disk
-          </b>
-          {power.get(spark.nodeID)?.tag && <span className="fs-cool">{COOL_TAG}</span>}
-        </button>
+    <div className="fleet-strip" role="group" aria-label="Boxes in this fleet">
+      {groups.map(group => (
+        <div className="fs-group" key={group.key}>
+          <div className="fs-group-label">
+            <b>{group.label}</b>
+            {group.model && <span>{group.model}</span>}
+          </div>
+          <div className="fs-cells">
+            {group.sparks.map(spark => {
+              const room = headroom(spark)
+              return (
+                <button
+                  type="button"
+                  className="fs-node"
+                  key={spark.nodeID}
+                  aria-expanded={open === spark.nodeID}
+                  // Named only while the card is really there: a control that
+                  // points at nothing is worse than one that points at nothing
+                  // named.
+                  aria-controls={open === spark.nodeID ? NODE_CARD_ID : undefined}
+                  title={spark.displayName}
+                  onClick={() => onOpen(spark.nodeID)}
+                >
+                  <span className="fs-top">
+                    <i className={`sdot ${boxDot(spark)}`} aria-hidden="true" />
+                    <span className="fs-name">{shortSparkName(spark.displayName, names)}</span>
+                    {power.get(spark.nodeID)?.tag && <span className="fs-cool">{COOL_TAG}</span>}
+                  </span>
+                  <HeadroomBar headroom={room} />
+                  <span className={`fs-free ${room.state}`}>{freeText(room)}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
       ))}
     </div>
   )
@@ -159,29 +195,83 @@ const sizeLine = (free?: number, total?: number): string =>
 // is set on the Sparks page, where every Spark has a switch of its own; this
 // screen is about models, and it only reads the mode for the "cool" tag on
 // the strip above.
-function NodeCard({ spark }: { spark: FleetRow }) {
+function NodeCard({ spark, headroom, unit }: { spark: FleetRow; headroom: BoxHeadroom; unit?: string }) {
+  const inventory = spark.inventory
   return (
     <div className="node-card" id={NODE_CARD_ID}>
       <header>
         <strong>{spark.displayName}</strong>
-        {spark.role && <span className="role">{spark.role}</span>}
+        <span className="role">{[unit, spark.role].filter(Boolean).join(' · ')}</span>
       </header>
       <div className="rows">
         <div className="row">
           <span className="k">Memory</span>
-          <span className="v">
-            {sizeLine(spark.inventory?.memory_available_bytes, spark.inventory?.memory_total_bytes)}
+          <span className="v room">
+            <HeadroomBar headroom={headroom} />
+            {sizeLine(inventory?.memory_available_bytes, inventory?.memory_total_bytes)}
           </span>
         </div>
         <div className="row">
           <span className="k">Disk</span>
-          <span className="v">
-            {sizeLine(spark.inventory?.storage_available_bytes, spark.inventory?.storage_total_bytes)}
-          </span>
+          <span className="v">{sizeLine(inventory?.storage_available_bytes, inventory?.storage_total_bytes)}</span>
         </div>
+        {inventory?.gpu_temperature_c ? (
+          <div className="row">
+            <span className="k">GPU</span>
+            <span className="v">
+              {[
+                `${inventory.gpu_temperature_c} °C`,
+                inventory.gpu_power_draw_watts ? `${inventory.gpu_power_draw_watts.toFixed(0)} W` : '',
+                inventory.gpu_clock_mhz ? `${inventory.gpu_clock_mhz} MHz` : '',
+              ].filter(Boolean).join(' · ')}
+            </span>
+          </div>
+        ) : null}
       </div>
     </div>
   )
+}
+
+// One figure of the strip under the title: a tiny label, a big number in the
+// monospace face, its unit in faint text, and one quiet line under it.
+interface Kpi {
+  label: string
+  value: string
+  unit?: string
+  sub?: ReactNode
+  tone?: '' | 'tight' | 'full'
+  title?: string
+}
+
+// "7.2 GB" as a number and a unit, so the unit can stand faint beside it.
+const splitUnit = (text: string): { value: string; unit?: string } => {
+  const at = text.indexOf(' ')
+  return at === -1 ? { value: text } : { value: text.slice(0, at), unit: text.slice(at + 1) }
+}
+
+function KpiStrip({ items }: { items: Kpi[] }) {
+  return (
+    <div className="kpis" role="group" aria-label="At a glance">
+      {items.map(item => (
+        <div className={`kpi ${item.tone ?? ''}`} key={item.label} title={item.title}>
+          <span className="label">{item.label}</span>
+          <span className="value">
+            {item.value}
+            {item.unit && <small>{item.unit}</small>}
+          </span>
+          {item.sub && <span className="sub">{item.sub}</span>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// A load button the memory rule holds dead, with the sentence that says why
+// on the button and around it. A disabled button takes no pointer events in
+// every browser, so the sentence hangs on the wrapper as well.
+function Held({ reason, children }: { reason: string; children: ReactNode }) {
+  if (!reason) return <>{children}</>
+  return <span className="held" title={reason}>{children}</span>
 }
 
 // The banner a member console shows above its table instead of the fleet
@@ -262,7 +352,8 @@ export default function Models({
   const dialogRef = useRef<HTMLDialogElement>(null)
   // Every Spark in the fleet, as the Spark that leads it reports them. null
   // means this console has no fleet to show: a standalone Spark, a member, or
-  // a summary this console could not read.
+  // a console that has not read a summary yet. A read that fails keeps the
+  // last one that answered.
   const [fleet, setFleet] = useState<FleetSummary | null>(null)
   // The same read, kept whatever the role, only for the member banner. fleet
   // above stays controller-only because every row and every poll beneath it
@@ -286,6 +377,9 @@ export default function Models({
   // Which Spark's card is open under the fleet line. One at a time, and empty
   // for none: it is state of this screen alone.
   const [openSpark, setOpenSpark] = useState('')
+  // This box's own meters, which are fresher than anything the fleet relays
+  // about it. The memory rule reads them, so the page follows them.
+  useSyncExternalStore(subscribeTelemetry, telemetryRevision, telemetryRevision)
 
   // Storage tells us which recipes already have model files on disk, so a
   // partially downloaded model can offer to resume instead of start over.
@@ -365,10 +459,9 @@ export default function Models({
         setFleet(controller ? summary : null)
         if (controller && timer === undefined) timer = setInterval(read, MEMBERSHIP_POLL_MS)
       } catch {
-        if (!cancelled) {
-          setFleet(null)
-          setFleetRoleSummary(null)
-        }
+        // One read that failed is not a fleet that went away. The last good
+        // read stands until the next one answers, so the rows, the units and
+        // the memory rule never shrink to this box alone for a poll.
       }
     }
     void read(true)
@@ -452,23 +545,56 @@ export default function Models({
   const openRow = sparks.find(spark => spark.nodeID === openSpark)
   const showMemberBanner = shouldShowMemberBanner(fleetRoleSummary)
 
-  // Which Sparks hold this model, and which one serves it now. The Spark this
-  // console runs on is named only while another Spark is on screen beside it.
-  const nodeChips = (recipe: Recipe) =>
-    showFleet ? modelChips(sparks, recipe.id, recipe.topology.spark_count) : []
+  // ---- The fleet as units, and the memory of every box ----------------------
+
+  // Every box, with this one read from its own model list, every placement
+  // once, and the units they form: four boxes running one model on TP4 are
+  // one unit, never "both Sparks". The memory rule reads the same picture.
+  const deploymentList = useMemo(() => [...placements.values()], [placements])
+  const { rows: localRows, grouping, self: selfTarget, view: memory } = fleetMemory({
+    sparks, models, recipes, deployments: deploymentList, jobs, system, latest: machineSeries(LOCAL_MACHINE).latest,
+  })
+  const headroomOf = (spark: FleetRow): BoxHeadroom => boxHeadroom(boxOfRow(spark, memory))
+  // Where a model starting from this row would load, and whether it fits
+  // there now. The whole unit loads together, so the whole unit is checked.
+  const startFit = (recipe: Recipe, host?: FleetRow): FitResult =>
+    loadFit(recipe, loadTargets(recipe, host ?? selfTarget, grouping), memory)
 
   const installed = useMemo(() => new Map(models.map(model => [model.recipe_id, model])), [models])
   // The Spark that holds this model, when the Spark this console runs on does
   // not. A model on both machines keeps this Spark in front, exactly as the
   // status line already reads it. A Spark added by address only is never one
   // of these: the fleet holds no placement for it, so nothing here can act on
-  // it. A model that needs more than one Spark is not one of these either: it
-  // runs across the fleet rather than on a machine that could be named.
+  // it. A model that needs more than one box is reached through the unit the
+  // fleet placed it on, by its head; without such a placement it runs across
+  // the fleet rather than on a machine that could be named.
   const hostOf = (recipe: Recipe): FleetRow | undefined => {
-    if (!showFleet || installed.has(recipe.id) || recipe.topology.spark_count !== 1) return undefined
-    return sparks.find(spark =>
+    if (!showFleet || installed.has(recipe.id)) return undefined
+    if (recipe.topology.spark_count !== 1) {
+      const head = unitFor(grouping, [recipe.id])?.members[0]?.row
+      return head && !head.isSelf && !head.legacyPeerOnly ? head : undefined
+    }
+    // The box that serves the model leads: with many boxes holding one model,
+    // the row speaks for the one actually answering with it.
+    const holders = sparks.filter(spark =>
       !spark.isSelf && !spark.legacyPeerOnly &&
       spark.installedModels.some(model => model.recipe_id === recipe.id))
+    return holders.find(spark => spark.serving?.recipe_id === recipe.id) ?? holders[0]
+  }
+
+  // Where a model sits, in the Where column and on its Serving card: the unit
+  // that runs it, or the boxes that hold it. Only shown while another box is
+  // on screen beside this one.
+  const whereOf = (recipe: Recipe, unit: FleetUnit | undefined): { text: string; chips: NodeChip[] } => {
+    if (!showFleet) return { text: '', chips: [] }
+    if (unit) return { text: unitPlacement(unit), chips: [] }
+    const holders = localRows.filter(spark => spark.installedModels.some(model => model.recipe_id === recipe.id))
+    if (holders.length === 0) return { text: '', chips: [] }
+    if (recipe.topology.spark_count > 1) {
+      // No placement joins these boxes, so the count is all that is certain.
+      return { text: boxesWord(holders), chips: [] }
+    }
+    return { text: '', chips: modelChips(localRows, recipe.id, 1) }
   }
   // The model and the machine one row acts on. Without a host the row acts on
   // this Spark, which is what it has always done. The host row travels with
@@ -510,8 +636,11 @@ export default function Models({
   // Every Spark this console can install on: the one it runs on, plus the
   // ones paired on the Fleet tab. Pairing a second Spark is what makes a
   // two-Spark recipe installable; the distributed preflight still runs when
-  // the install starts and can still refuse.
-  const available = detected + peers.length
+  // the install starts and can still refuse. A console that leads a fleet
+  // counts every box in it, so a model split across two other boxes never
+  // reads as one Spark short.
+  const fleetBoxes = showFleet ? sparks.filter(spark => !spark.legacyPeerOnly).length : 0
+  const available = Math.max(detected + peers.length, fleetBoxes)
   const fitsOn = (recipe: Recipe) => available >= recipe.topology.spark_count
   // Short of exactly one machine, with none paired yet: something the user
   // can fix right now rather than a dead end.
@@ -674,6 +803,17 @@ export default function Models({
     return peerInstalled.get(confirm.recipe.id)?.active ? confirm.recipe.id : undefined
   }
 
+  // Whether an install that switches to its model once downloaded could load
+  // it there. The download itself is never held: when the model would not
+  // fit, the install still runs, as a download only, and says so. A Spark
+  // added by address reports its memory to no one here, so it is not judged.
+  const installLoadFit = (recipe: Recipe, remote?: PlacementTarget, onPeer = false): FitResult | null => {
+    if (onPeer) return null
+    const from = remote ? localRows.find(spark => spark.nodeID === remote.nodeID) : selfTarget
+    if (!from) return null
+    return loadFit(recipe, loadTargets(recipe, from, grouping), memory)
+  }
+
   // An install the fleet carries to another Spark. The controller plans it,
   // reserves that machine, starts the job there and answers with the
   // placement it made, so the progress window follows that Spark's own job
@@ -685,7 +825,9 @@ export default function Models({
       body: JSON.stringify(fleetInstallRequest(recipe.id, spark.nodeID, installRequest(
         licence,
         territoryEligibility,
-        isAblitRecipe(recipe) ? false : placementSwitchFrom(spark) ? activate : true,
+        isAblitRecipe(recipe) || installLoadFit(recipe, spark)?.fits === false
+          ? false
+          : placementSwitchFrom(spark) ? activate : true,
       ))),
     })
     const deployment = answer.deployment
@@ -729,7 +871,9 @@ export default function Models({
       const body = JSON.stringify(installRequest(
         licence,
         territoryEligibility,
-        isAblitRecipe(recipe) ? false : switchFromFor(placement) ? activate : true,
+        isAblitRecipe(recipe) || installLoadFit(recipe, undefined, placement === 'peer')?.fits === false
+          ? false
+          : switchFromFor(placement) ? activate : true,
       ))
       if (placement === 'peer' && peer) {
         await api<{ job?: Job }>(
@@ -826,6 +970,14 @@ export default function Models({
         })))
 
   const startOrSwitch = async (recipe: Recipe, host?: FleetRow) => {
+    // The owner's rule: nothing is loaded into a box without room for it. The
+    // button is already dead when the rule says no; this holds for any other
+    // way in, and for a box that changed between the render and the click.
+    const fit = startFit(recipe, host)
+    if (fit.fits === false) {
+      noticeBox('Not enough memory', fit.reason)
+      return
+    }
     // Which model has to give way, on the machine this start runs on.
     const active = host
       ? (host.serving && host.serving.recipe_id !== recipe.id ? host.serving.recipe_id : '')
@@ -1134,7 +1286,17 @@ export default function Models({
     const served = usage.get(actionRecipe.id)
     const servedTotal = served ? served.prompt_tokens + served.generation_tokens : 0
     const updateAvailable = Boolean(model && model.recipe_version < actionRecipe.version)
-    const chips = nodeChips(actionRecipe)
+    // The unit that runs this model where this row acts on it. Only a unit
+    // the acting box is part of counts: a model this box holds runs here, not
+    // on some other unit that happens to run the same recipe.
+    const variantIDs = [...new Set([recipe.id, ...variantFamily(actionRecipe.id)])]
+    const whereRow = host ?? (model ? selfTarget : undefined)
+    const unitHere = whereRow ? unitFor(grouping, variantIDs, whereRow.nodeID) : undefined
+    const unit = unitHere?.members.some(member => member.row.nodeID === whereRow?.nodeID) ? unitHere : undefined
+    const where = whereOf(actionRecipe, unit)
+    // Whether starting this model would fit, on every box it would load onto,
+    // once the model each of them serves now has stopped.
+    const fit = startFit(actionRecipe, host)
     // The one line under the name. A state worth saying takes the line;
     // otherwise the line says what the model is. "Installed" and "Not
     // installed" say nothing at all: the tab and the chips already did.
@@ -1151,14 +1313,33 @@ export default function Models({
       modeHost: host, model, revocation, isMedia, busy, isActive, fits, canPair, measuring,
       host, hostServing, hostLocked, otherURL, otherWord, otherName, otherServing,
       stockAvailable, ablitActionLabel,
-      measured, served, servedTotal, updateAvailable, chips, placement,
+      measured, served, servedTotal, updateAvailable, placement, unit, where, fit,
       state, spec: SPEC[actionRecipe.id] ?? fallbackUse(actionRecipe),
       speed: speedOf(recipe, measured),
-      place: servingPlace(recipe.topology.spark_count, servingSpark),
+      place: unit ? unitPlacement(unit) : servingPlace(recipe.topology.spark_count, servingSpark),
       // What the band above the table is built from: this Spark serves the
       // model, or another one does.
       serving: { here: isActive, elsewhere: otherServing },
     }
+  }
+
+  // The boxes a Serving card names: the unit that runs the model, head first,
+  // or the one box that serves it, and any other box serving the same model
+  // on its own. A console with one box names none: the card is about that box.
+  const bandMembers = (read: ReturnType<typeof readModel>): { spark: FleetRow; head: boolean }[] => {
+    if (!showFleet) return []
+    const members = read.unit
+      ? read.unit.members.map(member => ({ spark: member.row, head: member.head }))
+      : [read.host ?? (read.isActive ? selfTarget : undefined)]
+        .filter((spark): spark is FleetRow => spark !== undefined)
+        .map(spark => ({ spark, head: false }))
+    const named = new Set(members.map(member => member.spark.nodeID))
+    for (const spark of grouping.independent) {
+      if (!named.has(spark.nodeID) && spark.serving?.recipe_id === read.actionRecipe.id) {
+        members.push({ spark, head: false })
+      }
+    }
+    return members
   }
 
   // One model, drawn as a row in the table or as the band over it. The band is
@@ -1170,8 +1351,8 @@ export default function Models({
       ablitRevocation, stockRevocation, variantTransitioningHere, modeHost,
       model, revocation, isMedia, busy, isActive, fits, canPair, measuring,
       host, hostServing, hostLocked, otherURL, otherWord, otherName, otherServing,
-      measured, served, servedTotal, updateAvailable, chips, placement, stockAvailable, ablitActionLabel,
-      state, spec, speed, place,
+      measured, served, servedTotal, updateAvailable, placement, stockAvailable, ablitActionLabel,
+      state, spec, speed, place, unit, where, fit,
     } = read
     const open = expanded === recipe.id
     const toggle = () => setExpanded(open ? '' : recipe.id)
@@ -1184,6 +1365,14 @@ export default function Models({
     // The band's Open is the only orange button on this screen. Every other
     // action, on the band and in the table alike, is a ghost.
     const openClass = openPillClass(asBand)
+    // The sentence that holds every load button on this row dead, or nothing
+    // while the model would fit. A serving model loads nothing more.
+    const loadHeld = fit.fits === false ? fit.reason : ''
+    // The variant switch loads the other variant, so it answers to that
+    // variant's own fit.
+    const variantFit = ablitRecipe
+      ? startFit(ablitActionLabel === 'Enable' ? ablitRecipe : recipe, modeHost)
+      : undefined
     const expand = {
       role: 'button' as const,
       tabIndex: 0,
@@ -1220,13 +1409,15 @@ export default function Models({
                 Stop
               </button>
             ) : (
-              <button
-                className="ghost"
-                disabled={hostLocked}
-                onClick={act(() => startOrSwitch(actionRecipe, host))}
-              >
-                {host.serving && host.serving.recipe_id !== actionRecipe.id ? 'Switch to' : 'Start'}
-              </button>
+              <Held reason={loadHeld}>
+                <button
+                  className="ghost"
+                  disabled={hostLocked || loadHeld !== ''}
+                  onClick={act(() => startOrSwitch(actionRecipe, host))}
+                >
+                  {host.serving && host.serving.recipe_id !== actionRecipe.id ? 'Switch to' : 'Start'}
+                </button>
+              </Held>
             )}
             {/* The playground and the generate tab only reach the model
                 this Spark serves, so a live model on another Spark is
@@ -1289,13 +1480,15 @@ export default function Models({
                     Update
                   </button>
                 )}
-                <button
-                  className="ghost"
-                  disabled={busy}
-                  onClick={act(() => startOrSwitch(actionRecipe))}
-                >
-                  {activeOther(actionRecipe.id) ? 'Switch to' : 'Start'}
-                </button>
+                <Held reason={loadHeld}>
+                  <button
+                    className="ghost"
+                    disabled={busy || loadHeld !== ''}
+                    onClick={act(() => startOrSwitch(actionRecipe))}
+                  >
+                    {activeOther(actionRecipe.id) ? 'Switch to' : 'Start'}
+                  </button>
+                </Held>
               </>
             )}
             {model?.status === 'recovering' && <button className="ghost" disabled onClick={act(() => {})}>Recovering</button>}
@@ -1328,6 +1521,9 @@ export default function Models({
         {/* What this model is, in full. The line above it says the same
             thing in one line; the sentence belongs to the depth. */}
         <div className="use">{SPEC[actionRecipe.id] ?? fallbackUse(actionRecipe)}</div>
+        {/* Why a start is held, said once in words. Downloading is never
+            held, only loading into memory. */}
+        {!asBand && loadHeld && <p className="room-note">{loadHeld}</p>}
         {ablitRecipe && (
           <div className="ablit-control">
             <div>
@@ -1337,6 +1533,7 @@ export default function Models({
                 : ablitWorking ? 'Changing mode.'
                   : 'Reloads GLM on both Sparks when changed.'}</p>
               {ablitError && <p className="error-text" role="alert">{ablitError}</p>}
+              {ablitInstalled && variantFit?.fits === false && <p className="room-note">{variantFit.reason}</p>}
               {(ablitActionLabel === 'Download' || ablitActionLabel === 'Enable') && ablitRevocation?.installBlocked && (
                 <p className="error-text" role="alert">{ablitRevocation.reason || 'This ablit version is revoked.'}</p>
               )}
@@ -1352,6 +1549,7 @@ export default function Models({
                   aria-label="Abliteration"
                   checked={ablitActive}
                   disabled={busy || hostLocked || variantTransitioningHere || !ablitInstalled ||
+                    variantFit?.fits === false ||
                     (ablitActionLabel === 'Enable' && ablitRevocation?.installBlocked) ||
                     (ablitActionLabel === 'Disable' && (!stockAvailable || stockRevocation.installBlocked))}
                   onChange={() => {
@@ -1493,7 +1691,28 @@ export default function Models({
                     place,
                     measuring ? 'measuring' : '',
                   ].filter(Boolean).join(' · ')}
+                  {unit && unitHealth(unit) !== 'healthy' && (
+                    <span className={`health ${unitHealth(unit)}`}>{HEALTH_WORD[unitHealth(unit)]}</span>
+                  )}
                 </div>
+                {/* Every box the model runs on, head first, each with its own
+                    memory. The unit stands or falls together, so a box that
+                    is tight shows here as well as on the strip. */}
+                {bandMembers(read).length > 0 && (
+                  <div className="members">
+                    {bandMembers(read).map(({ spark, head }) => {
+                      const room = headroomOf(spark)
+                      return (
+                        <span className="member-chip" key={spark.nodeID} title={`${spark.displayName} · ${freeText(room)}`}>
+                          <i className={`sdot ${boxDot(spark)}`} aria-hidden="true" />
+                          <span className="mc-name">{shortSparkName(spark.displayName, sparkNames)}</span>
+                          {head && <small>head</small>}
+                          <HeadroomBar headroom={room} size="mini" />
+                        </span>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             </div>
             {actions}
@@ -1508,17 +1727,7 @@ export default function Models({
           <div className="m-id">
             <Mark recipe={recipe} recipeIDs={[recipe.id]} size={28} />
             <div>
-              <div className="nm">
-                {nameLine}
-                {/* Which Sparks in the fleet hold this model. The lit chip is
-                    the one serving it now. */}
-                {chips.map(chip => (
-                  <span key={chip.key} className={`node-chip ${chip.live ? 'live' : ''}`}>
-                    <i aria-hidden="true" />
-                    {chip.name}
-                  </span>
-                ))}
-              </div>
+              <div className="nm">{nameLine}</div>
               {/* One line, whatever it has to say: the state while the model is
                   in one worth a word, and what the model is the rest of the
                   time. The line is cut to one line, so what it says is also
@@ -1527,6 +1736,17 @@ export default function Models({
                 {state ? state.text : spec}
               </div>
             </div>
+          </div>
+          {/* Where the model sits: the unit that runs it, or the boxes that
+              hold it, the lit one serving it now. */}
+          <div className="m-where">
+            {where.text && <span className="where-text">{where.text}</span>}
+            {where.chips.map(chip => (
+              <span key={chip.key} className={`node-chip ${chip.live ? 'live' : ''}`}>
+                <i aria-hidden="true" />
+                {chip.name}
+              </span>
+            ))}
           </div>
           <div className="m-num">
             {/* The unit lives in the header over this column. A screen narrow
@@ -1539,6 +1759,14 @@ export default function Models({
           </div>
           <div className="m-num">
             <span className="n">{formatBytes(recipe.artifact_bytes)}</span>
+          </div>
+          {/* Whether the model would fit in memory where it would load. An
+              estimate, and the sentence behind it is the tooltip. */}
+          <div className="m-fit">
+            {(() => {
+              const word = fitWord(fit)
+              return <span className={`fit ${word.tone}`} title={word.title}>{word.word}</span>
+            })()}
           </div>
           {actions}
           <span className={`m-caret ${open ? 'open' : ''}`} aria-hidden="true">
@@ -1553,7 +1781,15 @@ export default function Models({
   // The models on the owner's own Sparks, read once. The bands over the table
   // and the rows inside it come out of that one read, so no model can stand in
   // both places or in neither.
-  const { bands, rows: tableRows } = splitServing(split.held.map(readModel))
+  const { bands: servingReads, rows: tableRows } = splitServing(split.held.map(readModel))
+  // The unit this console runs in leads, then the widest unit, so the cards
+  // read in the same order as the fleet strip over them. Sort is stable, so
+  // the catalog order holds among equals.
+  const bands = [...servingReads].sort((left, right) => {
+    const here = (read: typeof left) => (read.isActive ? 0 : 1)
+    if (here(left) !== here(right)) return here(left) - here(right)
+    return (right.unit?.size ?? 1) - (left.unit?.size ?? 1)
+  })
   // The note under the table speaks for the "~" numbers on screen, so it is
   // shown only while one of them is: the rows of the tab in front, and the
   // bands, which stand over both tabs.
@@ -1564,8 +1800,78 @@ export default function Models({
     bands.some(read => isTypical(read.speed)) ||
     onScreen.some(recipe => isTypical(speedOf(recipe, installed.get(recipe.id)?.tokens_per_second)))
 
+  // ---- The strip under the title ---------------------------------------------
+
+  // Each Serving card is one unit, so the count of cards is the count of
+  // units serving. Speed adds only what was measured here: a community
+  // figure is not a measurement, and a model on another box carries none.
+  const tokenBands = bands.filter(read => !read.isMedia)
+  const measuredBands = tokenBands.filter(read => read.measured)
+  const totalSpeed = measuredBands.reduce((sum, read) => sum + (read.measured ?? 0), 0)
+  // Memory is never pooled, so the fleet's headroom is its tightest box.
+  const rooms = (showFleet ? localRows : [selfTarget]).map(headroomOf)
+  const tightest = tightestBox(rooms)
+  const disk = showFleet ? fleetDisk(localRows) : undefined
+  const tokenTotal = tokens ? tokens.totals.prompt_tokens + tokens.totals.generation_tokens : 0
+  const kpis: Kpi[] = [
+    { label: 'Serving', value: String(bands.length), sub: bands.length === 1 ? 'unit' : 'units' },
+    measuredBands.length > 0
+      ? {
+        label: 'Total tok/s',
+        value: totalSpeed.toFixed(1),
+        unit: 'tok/s',
+        sub: measuredBands.length < tokenBands.length
+          ? `${measuredBands.length} of ${tokenBands.length} measured`
+          : 'measured on this Spark',
+      }
+      : { label: 'Total tok/s', value: 'n/a', sub: tokenBands.length > 0 ? 'not measured yet' : 'nothing serving' },
+    tightest
+      ? {
+        label: 'Memory headroom',
+        ...splitUnit(formatBytes(tightest.box.availableBytes)),
+        sub: [showFleet ? tightest.box.name : 'free on this Spark', tightest.state === 'tight' ? 'tight' : '']
+          .filter(Boolean).join(' · '),
+        tone: tightest.state === 'tight' ? 'tight' : tightest.state === 'full' ? 'full' : '',
+        title: showFleet ? 'Free memory on the box with the least of it' : undefined,
+      }
+      : { label: 'Memory headroom', value: 'n/a', sub: 'not reported yet' },
+    disk
+      ? {
+        label: 'Free disk',
+        ...splitUnit(formatBytes(disk.bytes)),
+        sub: disk.reported < disk.boxes ? `${disk.reported} of ${disk.boxes} boxes reported` : `across ${disk.boxes} boxes`,
+      }
+      : { label: 'Free disk', ...splitUnit(formatBytes(system?.storage_available_bytes)), sub: 'this Spark' },
+    tokens && tokenTotal > 0
+      ? {
+        label: 'Tokens served',
+        value: formatTokens(tokenTotal),
+        sub: `${formatTokens(tokens.totals.prompt_tokens)} prompt · ${formatTokens(tokens.totals.generation_tokens)} generated`,
+        title: `${tokenTotal.toLocaleString()} tokens. ${TOKENS_COUNTED}`,
+      }
+      : { label: 'Tokens served', value: 'n/a', sub: 'none counted yet' },
+  ]
+
+  // The fleet strip, unit by unit, then the boxes that run on their own.
+  const stripGroups: StripGroup[] = [
+    ...grouping.units.map(unit => ({
+      key: unit.key, label: `TP${unit.size}`, model: nameOf(unit.recipeID), sparks: unit.members.map(member => member.row),
+    })),
+    ...(grouping.independent.length > 0
+      ? [{
+        key: 'independent',
+        label: grouping.units.length > 0 ? 'Independent' : boxesWord(grouping.independent),
+        model: '',
+        sparks: grouping.independent,
+      }]
+      : []),
+  ]
+  const openLocal = localRows.find(spark => spark.nodeID === openRow?.nodeID)
+  const openUnit = openLocal ? grouping.units.find(unit => unit.members.some(member => member.row === openLocal)) : undefined
+
   return (
     <div className="stack">
+      <KpiStrip items={kpis} />
       {blockers.length > 0 && (
         <div className="alert" role="alert">
           <strong>Setup needed before models can run</strong>
@@ -1628,13 +1934,21 @@ export default function Models({
 
       {showFleet && (
         <FleetStrip
-          sparks={sparks}
+          groups={stripGroups}
+          names={sparkNames}
           power={powerRows}
+          headroom={headroomOf}
           open={openSpark}
           onOpen={nodeID => setOpenSpark(openSpark === nodeID ? '' : nodeID)}
         />
       )}
-      {showFleet && openRow && <NodeCard spark={openRow} />}
+      {showFleet && openLocal && (
+        <NodeCard
+          spark={openLocal}
+          headroom={headroomOf(openLocal)}
+          unit={openUnit ? `${unitPlacement(openUnit)} · ${nameOf(openUnit.recipeID)}` : ''}
+        />
+      )}
       {showMemberBanner && (
         <MemberBanner controllerConsoleURL={fleetRoleSummary?.controller_console_url ?? ''} />
       )}
@@ -1673,7 +1987,8 @@ export default function Models({
 
       <div className="mtable">
         <div className="mthead" aria-hidden="true">
-          <span>Model</span><span className="r">Tok/s</span><span className="r">Disk</span><span /><span />
+          <span>Model</span><span>Where</span><span className="r">Tok/s</span><span className="r">Disk</span>
+          <span className="f">Fits</span><span /><span />
         </div>
         {showTabs ? (
           <>
@@ -1724,29 +2039,6 @@ export default function Models({
           </div>
         )
       })()}
-      {/* Only shown once something has actually been counted. Basement
-          counts a model's tokens while it serves it here, so an empty total
-          means no serving has been sampled yet, not that nothing ran. Where
-          and since when it counted is the tooltip over the line. */}
-      {tokens && tokens.totals.prompt_tokens + tokens.totals.generation_tokens > 0 && (
-        <div className="token-total" title={TOKENS_COUNTED}>
-          <span
-            className="n"
-            title={(tokens.totals.prompt_tokens + tokens.totals.generation_tokens).toLocaleString()}
-          >
-            {formatTokens(tokens.totals.prompt_tokens + tokens.totals.generation_tokens)}
-          </span>
-          <span>
-            tokens served
-            <small title={tokens.totals.prompt_tokens.toLocaleString()}>
-              · {formatTokens(tokens.totals.prompt_tokens)} prompt
-            </small>
-            <small title={tokens.totals.generation_tokens.toLocaleString()}>
-              · {formatTokens(tokens.totals.generation_tokens)} generated
-            </small>
-          </span>
-        </div>
-      )}
       {anyTypical && <p className="table-note">{TYPICAL_NOTE}</p>}
 
       <dialog ref={dialogRef} onClose={() => setConfirm(null)} aria-label="Confirm installation">
@@ -1814,6 +2106,10 @@ export default function Models({
             recipe.service.sglang?.quantization ??
             (recipe.artifacts[0] ? readableWeights(recipe.artifacts[0].repository).quant : undefined)
           const reclaim = shown ? reclaimFrom(shown) : undefined
+          // The memory rule, for the box this install would start on. A model
+          // that would not fit there is downloaded only.
+          const loadCheck = installLoadFit(recipe, remote, onPeer)
+          const downloadOnly = loadCheck?.fits === false && !isAblitRecipe(recipe)
           const close = () => dialogRef.current?.close()
           const foot = (confirmable: boolean) => (
             <div className="dialog-foot">
@@ -2002,6 +2298,9 @@ export default function Models({
                   {!onPeer && !remote && anotherInstallRunning && (
                     <p className="muted" style={{ fontSize: 12.5 }}>Downloads share bandwidth.</p>
                   )}
+                  {downloadOnly && (
+                    <p className="room-note">{loadCheck?.reason}. This install downloads only.</p>
+                  )}
                   {switchFrom && !isAblitRecipe(recipe) && (
                     <div className="install-choice" role="radiogroup" aria-label="After the download finishes">
                       {(fleetChoice || (peer && recipe.topology.spark_count === 1)) &&
@@ -2010,7 +2309,8 @@ export default function Models({
                         <input
                           type="radio"
                           name="install-activate"
-                          checked={activate}
+                          checked={activate && !downloadOnly}
+                          disabled={downloadOnly}
                           onChange={() => setActivate(true)}
                         />
                         <span>
@@ -2027,7 +2327,7 @@ export default function Models({
                         <input
                           type="radio"
                           name="install-activate"
-                          checked={!activate}
+                          checked={!activate || downloadOnly}
                           onChange={() => setActivate(false)}
                         />
                         <span>

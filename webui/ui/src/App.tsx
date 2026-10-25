@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
-  api, idempotency, setCSRF, terminal, formatBytes, OfflineError,
+  api, fetchFleetDeployments, idempotency, setCSRF, terminal, formatBytes, OfflineError,
   type FleetDeploymentView, type FleetSummary, type PeerSummary, type SystemInfo, type Recipe,
   type InstalledModel, type Job, type Peer, type Telemetry, type UpdateInfo,
 } from './api'
@@ -25,7 +25,11 @@ import { servingChatModels } from './council'
 import { TABS, railGroups, tabLabel, type Tab } from './rail'
 import { fleetSummary, MEMBERSHIP_POLL_MS } from './fleetInvite'
 import { fleetRows } from './fleetModels'
-import { LOCAL_MACHINE, forgetMachines, monitorMachines, recordSilence, recordTelemetry } from './telemetry'
+import {
+  LOCAL_MACHINE, forgetMachines, heartbeatKey, isHeartbeatKey, monitorMachines, recordHeartbeats, recordSilence,
+  recordTelemetry, withHeartbeatKeys,
+} from './telemetry'
+import { fleetUnits, withLocalModels } from './units'
 
 // How often a paired Spark's meters are read. It is the pace every other peer
 // read in the console keeps, which is slower than this Spark's own five
@@ -49,6 +53,11 @@ export interface AppState {
   // how many Sparks are available decides which recipes can be installed at
   // all, and a paired Spark is a place a one-Spark model can run.
   peers: Peer[]
+  // The fleet as the Spark that answers here reports it, and every placement
+  // it holds. Both stay empty on a console that leads no fleet: only the
+  // controller holds rows for the other boxes and the placements across them.
+  fleet: FleetSummary | null
+  deployments: FleetDeploymentView[]
   refresh: () => Promise<void>
   refreshModelsAndJobs: () => Promise<void>
   refreshPeers: () => Promise<void>
@@ -71,10 +80,13 @@ export default function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [peers, setPeers] = useState<Peer[]>([])
   // Every Spark in this fleet, as the Spark that answers here reports them.
-  // Only the live meters read it from up here, and only to know which
-  // machines they have to draw. null is a console that leads no fleet, and a
-  // summary this console could not read.
+  // The meters, the Roles page and the Sparks overview read it from up here.
+  // null is a console that has not read a summary yet; a read that fails
+  // keeps the last one that answered.
   const [fleet, setFleet] = useState<FleetSummary | null>(null)
+  // Every placement the fleet holds, which is what joins boxes into units.
+  // Only the console that leads the fleet has any to read.
+  const [deployments, setDeployments] = useState<FleetDeploymentView[]>([])
   const [connected, setConnected] = useState(true)
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [updateDialog, dispatchUpdateDialog] = useReducer(
@@ -326,10 +338,19 @@ export default function App() {
         const summary = fleetSummary(await api<unknown>('/api/v1/fleet'))
         if (cancelled) return
         setFleet(summary)
+        // Each box's heartbeat carries its own meters, so every read of the
+        // summary is also a sample for the boxes this console holds no key
+        // for. A box that left the fleet loses its history here.
+        const rows = fleetRows(summary, peers, window.location.origin, Date.now())
+        const received = new Map((summary?.nodes ?? []).map(node => [node.node_id, node.last_heartbeat_at ?? '']))
+        recordHeartbeats(rows.map(row => ({ ...row, heartbeatAt: received.get(row.nodeID) })))
+        forgetMachines(rows.map(row => heartbeatKey(row.nodeID)), key => !isHeartbeatKey(key))
         const inFleet = summary !== null && summary.role !== 'standalone'
         if (inFleet && timer === undefined) timer = setInterval(read, MEMBERSHIP_POLL_MS)
       } catch {
-        if (!cancelled) setFleet(null)
+        // One read that failed is not a fleet that went away: the last good
+        // read stands until the next one answers, so the units and the memory
+        // rule built on it do not shrink to this box alone for a poll.
       }
     }
     void read(true)
@@ -339,13 +360,40 @@ export default function App() {
     }
   }, [authed, peers])
 
+  // The placements across the fleet, on the console that leads it. They
+  // change only when a model is placed, started or removed, so they are read
+  // at the pace of the membership summary.
+  const leadsFleet = fleet?.role === 'controller'
+  useEffect(() => {
+    if (!authed || !leadsFleet) {
+      setDeployments([])
+      return
+    }
+    let cancelled = false
+    const read = async (first = false) => {
+      if (!first && document.hidden) return
+      try {
+        const next = await fetchFleetDeployments()
+        if (!cancelled) setDeployments(next)
+      } catch {
+        /* the next read tries again */
+      }
+    }
+    void read(true)
+    const timer = setInterval(read, MEMBERSHIP_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [authed, leadsFleet])
+
   // The same meters from every paired Spark, read one by one through this
   // manager. A Spark that does not answer keeps the samples it already sent;
   // a Spark this console no longer holds loses them, because nothing can show
   // them any more.
   useEffect(() => {
     if (!authed) return
-    forgetMachines([LOCAL_MACHINE, ...peers.map(peer => peer.id)])
+    forgetMachines([LOCAL_MACHINE, ...peers.map(peer => peer.id)], isHeartbeatKey)
     if (peers.length === 0) return
     let cancelled = false
     const sample = async () => {
@@ -392,15 +440,19 @@ export default function App() {
   )
   // Every Spark the live meters are drawn for: this one first, then every
   // other machine the fleet reports, whether or not this console can read its
-  // meters. A Spark with a row on the Sparks page has a section here.
-  const machines = useMemo(
-    () => monitorMachines(
-      fleetRows(fleet, peers, window.location.origin, Date.now()),
-      peers,
-      system?.hostname || 'This Spark',
-    ),
-    [fleet, peers, system],
+  // meters. A Spark with a row on the Sparks page has a section here, and a
+  // box this console holds no key for is read from its heartbeat.
+  const sparkRows = useMemo(
+    () => withLocalModels(fleetRows(fleet, peers, window.location.origin, Date.now()), models),
+    [fleet, peers, models],
   )
+  const machines = useMemo(
+    () => withHeartbeatKeys(monitorMachines(sparkRows, peers, system?.hostname || 'This Spark'), sparkRows),
+    [sparkRows, peers, system],
+  )
+  // The same machines, joined into the units they form. The meters are drawn
+  // unit by unit, exactly as the Sparks page draws them.
+  const grouping = useMemo(() => fleetUnits(sparkRows, deployments), [sparkRows, deployments])
   const visibleTabs = TABS.filter(name =>
     name === 'Generate' ? activeMedia : name === 'Playground' ? !activeMedia : true,
   )
@@ -427,7 +479,7 @@ export default function App() {
   if (!authed) return <Pairing onPaired={() => setAuthed(true)} />
 
   const state: AppState = {
-    system, recipes, models, jobs, peers, refresh, refreshModelsAndJobs, refreshPeers,
+    system, recipes, models, jobs, peers, fleet, deployments, refresh, refreshModelsAndJobs, refreshPeers,
     openDeployment: id => {
       setRemoteJob(null)
       setSelectedJobID(id)
@@ -534,7 +586,9 @@ export default function App() {
               screen nobody is looking at must ask nothing. */}
           {tab === 'Minutes' && <Minutes servingModel={servingModel} />}
           {tab === 'Connect' && <Connect activeModelID={activeRecipe?.service.served_model_id} />}
-          {tab === 'Monitor' && <Monitor machines={machines} recipes={recipes} />}
+          {tab === 'Monitor' && (
+            <Monitor machines={machines} recipes={recipes} sparks={sparkRows} grouping={grouping} />
+          )}
           {tab === 'Fleet' && <Fleet {...state} liveTPS={liveTPS} />}
           {tab === 'Storage' && <Storage {...state} />}
           {tab === 'Activity' && <Activity {...state} />}

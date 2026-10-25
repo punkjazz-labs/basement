@@ -135,7 +135,7 @@ a { color: var(--ink); }
 }
 
 .content { min-width: 0; display: flex; flex-direction: column; }
-.content-head { padding: 26px 36px 0; max-width: 1032px; }
+.content-head { padding: 26px 36px 0; max-width: 1280px; }
 .content-head .head-row { display: flex; align-items: center; gap: 12px; }
 .content-head h1 { font-size: 16px; }
 .content-head .desc { color: var(--muted); font-size: 12.5px; margin: 3px 0 0; }
@@ -145,8 +145,9 @@ a { color: var(--ink); }
   border-radius: 999px; padding: 3px 10px;
 }
 
-main { flex: 1; width: 100%; max-width: 1032px; padding: 18px 36px 80px; }
-main.wide-generate { max-width: 1220px; }
+/* The dashboards use the width: about 1280px of column beside the rail. */
+main { flex: 1; width: 100%; max-width: 1280px; padding: 18px 36px 80px; }
+main.wide-generate { max-width: 1280px; }
 /* The chat is the one tab that fills the window: the transcript owns the
    scrollbar, and the composer never leaves the bottom of the screen. Every
    other tab keeps the page scroll it has. */
@@ -301,8 +302,9 @@ input[type='text'], input[type='password'], textarea {
 
 .mtable { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
 .mthead, .mrow {
-  display: grid; grid-template-columns: minmax(240px, 1.5fr) 92px 92px minmax(196px, auto) 18px;
-  align-items: center; padding: 0 16px; column-gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(230px, 1.6fr) minmax(120px, 0.9fr) 72px 80px 72px minmax(190px, auto) 18px;
+  align-items: center; padding: 0 16px; column-gap: 10px;
 }
 .m-caret { display: flex; justify-content: flex-end; color: var(--faint); transition: transform 0.15s ease; }
 .m-caret.open { transform: rotate(90deg); }
@@ -326,7 +328,7 @@ input[type='text'], input[type='password'], textarea {
 .mgroup::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .mgroup + .mgroup, .mrow + .mgroup, .mdetail + .mgroup { border-top: 1px solid var(--line); margin-top: 0; }
 .mthead .r { text-align: right; }
-.mrow { min-height: 62px; border-bottom: 1px solid var(--line); padding-block: 10px; cursor: pointer; }
+.mrow { min-height: 50px; border-bottom: 1px solid var(--line); padding-block: 6px; cursor: pointer; }
 .mrow:hover { background: var(--hover); }
 .mrow.open { background: var(--hover); }
 .mrow:last-child, .mdetail:last-child { border-bottom: 0; }
@@ -370,6 +372,9 @@ input[type='text'], input[type='password'], textarea {
 .sdot.on { background: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 15%, transparent); }
 .sdot.busy { background: var(--warn); animation: breathe 1.2s ease-in-out infinite; }
 .sdot.fail { background: var(--fail); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fail) 15%, transparent); }
+/* A warning that is not work under way: a box gone quiet, a model not
+   installed. Amber, and still. */
+.sdot.warn { background: var(--warn); }
 .m-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 /* A model that lives on another Spark in the fleet says so under its status,
    in the same quiet voice the rest of the row uses. */
@@ -391,6 +396,57 @@ input[type='text'], input[type='password'], textarea {
 .node-chip.live { color: var(--ink); border-color: color-mix(in srgb, var(--live) 40%, var(--line-strong)); }
 .node-chip.live i { background: var(--live); }
 
+/* Where a model sits, and whether it would fit in memory where it would load.
+   A fit is an estimate; the sentence behind it is the cell's tooltip. */
+.m-where { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+.m-where .where-text { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.m-fit, .mthead .f { padding-left: 14px; }
+.m-fit .fit { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 550; white-space: nowrap; cursor: default; }
+.m-fit .fit::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: none; }
+.m-fit .fit.ok { color: var(--muted); }
+.m-fit .fit.warn { color: var(--warn); }
+.m-fit .fit.unknown { color: var(--faint); }
+.m-fit .fit.unknown::before { background: var(--line-strong); }
+/* A load button the memory rule holds dead. The wrapper carries the reason,
+   because a disabled button takes no pointer and shows no tooltip. */
+.held { display: inline-flex; cursor: not-allowed; }
+.room-note { margin: 0 0 12px; color: var(--warn); font-size: 12px; max-width: 70ch; }
+
+/* The page's figures, under the title: Monitor's tile language, smaller. */
+.kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+  padding: 10px 14px 11px; display: grid; gap: 2px; align-content: start; min-width: 0;
+}
+.kpi .label { font-size: 10.5px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; white-space: nowrap; }
+.kpi .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 600; line-height: 1.3; white-space: nowrap; }
+.kpi .value small { font-size: 11.5px; color: var(--faint); font-weight: 400; font-family: var(--sans); margin-left: 5px; }
+.kpi .sub { font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi.tight { border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
+.kpi.tight .value { color: var(--warn); }
+.kpi.full { border-color: color-mix(in srgb, var(--fail) 40%, var(--line)); }
+.kpi.full .value { color: var(--fail); }
+
+/* How a unit is doing. Healthy is plain: green is kept for serving. */
+.health {
+  display: inline-block; font-family: var(--sans); font-size: 10.5px; font-weight: 600; line-height: 1.5;
+  border: 1px solid var(--line-strong); border-radius: 999px; padding: 0 8px; color: var(--muted); white-space: nowrap;
+}
+.health.degraded { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.health.failed { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 45%, var(--line)); background: color-mix(in srgb, var(--fail) 7%, transparent); }
+.mband .meta .health { margin-left: 10px; }
+
+/* The boxes a serving unit runs on, head first, each with its memory. */
+.mband .members { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.member-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 7px;
+  border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface);
+  font-family: var(--mono); font-size: 10.5px; color: var(--ink); white-space: nowrap;
+}
+.member-chip .sdot { width: 5px; height: 5px; box-shadow: none; }
+.member-chip .mc-name { font-weight: 600; }
+.member-chip small { color: var(--faint); font-size: 10px; }
+
 /* The model that serves, over the table rather than inside it. Green says one
    thing on this console and says it here: this model is serving. The band
    carries the page's one orange button, and opens the same depth a row opens. */
@@ -398,7 +454,7 @@ input[type='text'], input[type='password'], textarea {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center;
   border: 1px solid color-mix(in srgb, var(--live) 25%, var(--line));
   border-radius: 10px; background: color-mix(in srgb, var(--live) 4%, var(--surface));
-  box-shadow: inset 2px 0 0 var(--live); padding: 13px 16px; cursor: pointer;
+  box-shadow: inset 2px 0 0 var(--live); padding: 11px 16px; cursor: pointer;
 }
 .mband.open { border-radius: 10px 10px 0 0; }
 .mband-group .mdetail {
@@ -416,26 +472,59 @@ input[type='text'], input[type='password'], textarea {
   color: var(--faint); margin-top: 3px;
 }
 
-/* The whole fleet in one line over the table: each Spark, what it has free,
-   and how many Sparks that is. It uses the same dot as every status cell. */
+/* The fleet over the table. The member banner uses the plain strip; the
+   fleet itself is drawn grouped, one bordered region per unit holding one
+   fixed-width cell per box, so nothing can ever run into its neighbour: the
+   groups wrap onto a second line instead, and scroll sideways on a phone. */
 .fleet-strip {
-  display: flex; align-items: center; gap: 20px;
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   padding: 8px 14px; font-size: 12px; color: var(--muted);
-  overflow: hidden; white-space: nowrap;
 }
-.fleet-strip .fs-label { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
-.fleet-strip .fs-node { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.fleet-strip .fs-node b { font-weight: 500; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--faint); font-size: 11.5px; }
-.fleet-strip .fs-name { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
-.fleet-strip .fs-sep { color: var(--faint); }
-/* Each chip opens that Spark's own card below the line. */
+.fleet-strip:has(.fs-group) { align-items: stretch; gap: 8px; padding: 8px; }
+.fs-group {
+  display: grid; gap: 6px; align-content: start; min-width: 0;
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 6px 6px;
+}
+.fs-group-label {
+  display: flex; align-items: baseline; gap: 7px; padding: 0 3px; min-width: 0;
+  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
+}
+.fs-group-label b { font-family: var(--mono); font-weight: 650; color: var(--muted); }
+.fs-group-label span {
+  text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 11.5px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fs-cells { display: flex; gap: 4px; flex-wrap: wrap; }
+/* Each cell opens that box's own card below the strip. */
 .fleet-strip button.fs-node {
-  background: none; border: 0; color: inherit; font: inherit; text-align: left;
-  padding: 3px 7px; margin: -3px -1px; border-radius: 6px;
+  display: grid; gap: 5px; width: 108px; padding: 6px 8px 7px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+  color: inherit; font: inherit; text-align: left;
 }
-.fleet-strip button.fs-node:hover { background: var(--hover); }
-.fleet-strip button.fs-node[aria-expanded="true"] { background: var(--surface-2); }
+.fleet-strip button.fs-node:hover { border-color: var(--line-strong); background: var(--hover); }
+.fleet-strip button.fs-node[aria-expanded="true"] { border-color: var(--faint); background: var(--surface-2); }
+.fs-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.fs-name { font-family: var(--mono); font-size: 11.5px; color: var(--ink); font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fs-top .fs-cool { margin-left: auto; }
+.fs-free { font-family: var(--mono); font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--faint); white-space: nowrap; }
+.fs-free.tight { color: var(--warn); }
+.fs-free.full { color: var(--fail); }
+
+/* One box's memory: what is in use, and a tick where the reserve begins.
+   Cream while there is room, amber when tight, red only when the box is out
+   of memory. Green is the serving light and never appears here. */
+.hbar {
+  position: relative; display: block; height: 4px; min-width: 24px; border-radius: 999px; overflow: hidden;
+  background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line);
+}
+.hbar.mini { height: 3px; width: 34px; }
+.hbar .fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: color-mix(in srgb, var(--ink) 48%, var(--surface-2)); }
+.hbar .tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--muted); }
+.hbar.tight .fill { background: var(--warn); }
+.hbar.full .fill { background: var(--fail); }
+.hbar.unknown { opacity: 0.5; }
+
 /* The one place --cool is used: a Spark running at the lower clock. */
 .fs-cool {
   font-family: var(--mono); font-size: 11px; color: var(--cool-ink);
@@ -457,6 +546,8 @@ input[type='text'], input[type='password'], textarea {
 .node-card .row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 16px; }
 .node-card .row .k { color: var(--muted); }
 .node-card .row .v { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+.node-card .row .v.room { display: inline-flex; align-items: center; gap: 10px; }
+.node-card .room .hbar { width: 72px; }
 
 /* A choice between two states, in one control. */
 .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; }
@@ -465,29 +556,63 @@ input[type='text'], input[type='password'], textarea {
 .seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); font-weight: 550; }
 .seg button:disabled { color: var(--faint); cursor: default; }
 
-/* How hard each Spark runs its chip, on the Sparks page: one row per machine,
-   and the sentence that explains the choice in the tooltip over the list. */
-.power-list {
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-  box-shadow: var(--shadow); max-width: 620px;
+/* How hard each Spark runs its chip, on the Sparks page. Each machine's
+   switch sits in its own table row; the line under the table carries the
+   sentence that explains the choice and the one change that reaches every
+   Spark. The rows below are shared by both shapes of the switch. */
+.prow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.prow .nm { font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 132px; }
+.prow .busy, .pcell .busy { color: var(--warn); font-family: var(--mono); font-size: 11px; }
+.powerfail { flex-basis: 100%; margin: 0; color: var(--warn); font-size: 12px; max-width: 62ch; }
+.pcell { display: grid; gap: 3px; justify-items: start; min-width: 0; }
+.pcell .seg button { padding: 3px 10px; font-size: 11.5px; }
+.pcell .powerfail { font-size: 11px; max-width: 28ch; }
+.power-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 0 4px; }
+.power-foot h2 { font-size: 13px; }
+/* The sentence opens upward, over the table it explains. */
+.power-foot .tip-text { top: auto; bottom: calc(100% + 7px); }
+.power-foot .prow.every { margin-left: auto; gap: 8px; }
+.power-foot .prow.every .nm { min-width: 0; font-family: var(--sans); color: var(--muted); font-size: 12.5px; }
+
+/* The fleet at the top of the Sparks page: one card per unit, the members of
+   each in a grid, and the boxes that run on their own in a group of their
+   own. Every card has the same anatomy, so six boxes read as two shapes. */
+.fleet-overview .section-head { margin-bottom: 10px; }
+.unit-cards { display: grid; gap: 12px; }
+.unit-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
+.unit-card header {
+  display: flex; align-items: center; gap: 12px; padding: 9px 14px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
 }
-.power-list header {
-  display: flex; align-items: center; gap: 8px;
-  padding: 11px 16px; border-bottom: 1px solid var(--line);
+.unit-card header img, .unit-card header .mark { width: 26px; height: 26px; border-radius: 6px; }
+.unit-title { display: grid; min-width: 0; flex: 1; }
+.unit-title strong { font-size: 13.5px; font-weight: 600; }
+.unit-title span { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.unit-speed { font-family: var(--mono); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.unit-speed small { font-family: var(--sans); font-size: 11px; font-weight: 400; color: var(--faint); margin-left: 4px; }
+.member-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; padding: 10px; }
+.member {
+  display: grid; gap: 7px; min-width: 0; padding: 9px 11px 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
 }
-.power-list header h2 { font-size: 13px; }
-.power-list .prow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; }
-.power-list .prow + .prow { border-top: 1px solid var(--line); }
-.power-list .prow .nm { font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 132px; }
-.power-list .prow .busy { color: var(--warn); font-family: var(--mono); font-size: 11.5px; }
-/* The one change that reaches every Spark. It sits under the machines it acts
-   on, and each button is an action rather than a state. */
-.power-list .prow.every { border-top: 1px solid var(--line-strong); }
-.power-list .prow.every .nm { font-family: var(--sans); color: var(--muted); }
-/* The sentence over the list opens upward: dropping it downward covered the
-   first Spark's own switch, which is the control it explains. */
-.power-list header .tip-text { top: auto; bottom: calc(100% + 7px); }
-.power-list .powerfail { flex-basis: 100%; margin: 0; color: var(--warn); font-size: 12px; max-width: 62ch; }
+.member-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.member-head strong { font-family: var(--mono); font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.role-tag {
+  font-family: var(--mono); font-size: 10px; color: var(--muted); white-space: nowrap;
+  border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 5px;
+  overflow: hidden; text-overflow: ellipsis; max-width: 16ch;
+}
+.member-head .role-tag { margin-left: auto; }
+.member-room { display: grid; gap: 4px; }
+.member-room span { font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.member-room .tight { color: var(--warn); }
+.member-room .full { color: var(--fail); }
+.member-facts { display: flex; gap: 16px; margin: 0; }
+.member-facts div { display: grid; }
+.member-facts dt { font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+.member-facts dd { margin: 0; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--ink); }
+/* Memory in the table: the figure, and the bar under it. */
+.room-cell { display: grid; justify-items: end; gap: 4px; }
 
 /* expanded detail — the "A depth" inside a row */
 .mdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }
@@ -550,9 +675,6 @@ input[type='text'], input[type='password'], textarea {
 .revoke-line span { display: block; color: var(--muted); margin-top: 3px; }
 
 /* Lifetime token usage, read at the same density as the table above it. */
-.token-total { display: flex; align-items: baseline; gap: 9px; margin: 10px 4px 0; font-size: 12px; color: var(--muted); }
-.token-total .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; color: var(--ink); }
-.token-total small { color: var(--faint); font-size: 11.5px; margin-left: 9px; }
 
 /* ---- Roles: the same row idiom as Models, plus the explainer that runs
    before the first role is assigned. --------------------------------------- */
@@ -577,14 +699,15 @@ input[type='text'], input[type='password'], textarea {
 
 .rtable { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
 .rthead, .rrow {
-  display: grid; grid-template-columns: minmax(120px, 1fr) minmax(180px, 1.4fr) minmax(120px, 1fr) 120px minmax(140px, auto) 18px;
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(170px, 1.3fr) minmax(130px, 1fr) minmax(110px, 0.9fr) 172px minmax(140px, auto) 18px;
   align-items: center; padding: 0 16px; column-gap: 14px;
 }
 .rthead {
   height: 32px; background: var(--panel); border-bottom: 1px solid var(--line);
   font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
 }
-.rrow { min-height: 64px; border-bottom: 1px solid var(--line); padding-block: 11px; cursor: pointer; }
+.rrow { min-height: 52px; border-bottom: 1px solid var(--line); padding-block: 7px; cursor: pointer; }
 .rrow:hover, .rrow.open { background: var(--hover); }
 .rrow:last-child, .rdetail:last-child { border-bottom: 0; }
 .r-caret { display: flex; justify-content: flex-end; color: var(--faint); transition: transform 0.15s ease; }
@@ -615,6 +738,11 @@ input[type='text'], input[type='password'], textarea {
 .r-model .nm { font-weight: 550; font-size: 12.5px; }
 .r-model .fp { color: var(--faint); font-size: 11px; font-family: var(--mono); margin-top: 1px; }
 .r-status { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+/* Where the role's model runs, in the placement words every screen uses. */
+.r-runs { font-family: var(--mono); font-size: 11.5px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+/* The first request would have to load the model, and there is no room. */
+.room-flag { display: block; color: var(--warn); font-size: 11px; margin-top: 1px; cursor: help; }
+.room-line { color: var(--warn); }
 .sdot.wait { background: var(--faint); }
 .r-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 .r-actions button { white-space: nowrap; }
@@ -639,8 +767,9 @@ input[type='text'], input[type='password'], textarea {
 /* ---- Fleet: same row idiom as Models, one extra identity column for the
    serving model, so widths differ but nothing else does. */
 .mtable.fleet .mthead, .mtable.fleet .mrow {
-  grid-template-columns: minmax(150px, 1.2fr) minmax(130px, 1fr) 88px 88px 72px 112px minmax(104px, auto) 18px;
+  grid-template-columns: minmax(150px, 1.2fr) minmax(130px, 1fr) 84px 76px 56px 112px 112px minmax(104px, auto) 18px;
 }
+.m-power { min-width: 0; }
 
 .field { display: grid; gap: 4px; }
 .field span { font-size: 12px; color: var(--muted); }
@@ -1339,17 +1468,26 @@ button.chip:hover { color: var(--ink); }
 
 /* The live meters, one section per Spark: which machine, what it serves, and
    its own tiles under it. */
-.stack.mon { gap: 22px; }
+.stack.mon { gap: 20px; }
 .mon-machine { display: grid; gap: 10px; }
 .mon-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .mon-head h2 { font-size: 13.5px; }
 .mon-head .muted { font-size: 12px; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
-.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 13px 15px; display: grid; gap: 6px; }
+/* The machines of one unit under one heading, as on the Sparks page. */
+.mon-group { display: grid; gap: 12px; }
+.mon-group-head { display: flex; align-items: center; gap: 10px; padding-bottom: 7px; border-bottom: 1px solid var(--line); }
+.mon-group-head h2 { font-size: 14px; }
+.mon-group-head .faint { font-family: var(--mono); font-size: 11.5px; }
+.mon-room { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.mon-room .hbar { width: 90px; }
+/* Six tiles to a row on a laptop screen. auto-fill keeps every machine's
+   tiles on the same columns, so a row of boxes reads down as well as across. */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 10px 12px; display: grid; gap: 4px; align-content: start; }
 .tile .label { font-size: 10.5px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
-.tile .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 600; }
+.tile .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; }
 .tile .value small { font-size: 11.5px; color: var(--faint); font-weight: 400; font-family: var(--sans); }
-.tile svg { width: 100%; height: 34px; display: block; }
+.tile svg { width: 100%; height: 28px; display: block; }
 .tile polyline { fill: none; stroke: var(--live); stroke-width: 1.6; }
 .tile .spark-fill { fill: color-mix(in srgb, var(--live) 12%, transparent); stroke: none; }
 
@@ -1496,9 +1634,18 @@ button.chip:hover { color: var(--ink); }
   .rdetail .facts { grid-template-columns: minmax(0, 1fr); }
   .add-role { flex-wrap: wrap; }
   .mtable.fleet .mrow { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+  .mtable.fleet .m-power { grid-column: 1 / -1; }
+  .room-cell { justify-items: start; }
   .mthead { display: none; }
   .mthead + .mrow { border-top: 0; }
-  .mrow { grid-template-columns: 1fr auto; row-gap: 10px; }
+  /* Name, then where it sits, then speed, size and fit on one line, then the
+     buttons: the row stacks as it always has, with two more facts in it. */
+  .mrow { grid-template-columns: auto auto minmax(0, 1fr); column-gap: 18px; row-gap: 8px; padding-block: 10px; }
+  .m-where { grid-column: 1 / -1; }
+  .m-where:empty { display: none; }
+  .m-fit { text-align: right; }
+  .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .r-runs { grid-column: 1 / -1; }
   .mband { grid-template-columns: 1fr; row-gap: 12px; }
   .m-id { grid-column: 1 / -1; }
   .m-id .spec { white-space: normal; }
@@ -1537,6 +1684,20 @@ button.chip:hover { color: var(--ink); }
   .endpoint-line code { overflow-wrap: anywhere; min-width: 0; }
   .content-head { padding: 18px 16px 0; }
   main { padding: 14px 16px 70px; }
+  /* The figures in two columns, and the fleet strip in one line that scrolls
+     sideways rather than wrapping into a wall. */
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .kpi .value { font-size: 18px; }
+  .kpi .sub { white-space: normal; }
+  .fleet-strip:has(.fs-group) { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; }
+  .fs-group { flex: none; }
+  .fs-cells { flex-wrap: nowrap; }
+  .unit-card header { flex-wrap: wrap; row-gap: 6px; }
+  .member-grid { grid-template-columns: minmax(0, 1fr); }
+  .mon-room { margin-left: 0; flex-basis: 100%; }
+  .mon-room .hbar { flex: 1; max-width: 160px; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .power-foot .prow.every { margin-left: 0; }
   .update-facts { grid-template-columns: 1fr; }
   .update-signed { display: none; }
   .update-blocker { grid-template-columns: 1fr; }

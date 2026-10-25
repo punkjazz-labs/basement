@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { Telemetry } from './api'
+import type { NodeInventory, Telemetry } from './api'
 import type { FleetRow } from './fleetModels'
 import {
-  EMPTY_MACHINE, LOCAL_MACHINE, WINDOW, foldSample, forgetMachines, machineSeries, monitorMachines,
-  recordSilence, recordTelemetry, resetTelemetry, subscribeTelemetry, telemetryRevision,
+  EMPTY_MACHINE, LOCAL_MACHINE, WINDOW, foldSample, forgetMachines, heartbeatKey, inventorySample, isHeartbeatKey,
+  machineSeries, monitorMachines, recordHeartbeats, recordSilence, recordTelemetry, resetTelemetry,
+  subscribeTelemetry, telemetryRevision, withHeartbeatKeys,
 } from './telemetry'
 
 // One sample, with only the fields a test cares about set. Everything else is
@@ -148,17 +149,17 @@ describe('which Sparks the meters are drawn for', () => {
   // peer this console holds a key for. All three get a section; the third one
   // gets no key, which is what its section then says.
   const three: FleetRow[] = [
-    row('node-lead', 'spark-f1cc', 'http://spark-f1cc.local:7070', true),
-    row('node-loft', 'spark-a393', 'http://spark-a393.local:7070'),
-    row('node-msi', 'edgexpert-2051', 'http://edgexpert-2051.local:7070'),
+    row('node-lead', 'spark-f7e0', 'http://spark-f7e0.local:7070', true),
+    row('node-loft', 'spark-a5d6', 'http://spark-a5d6.local:7070'),
+    row('node-msi', 'edgexpert-1c47', 'http://edgexpert-1c47.local:7070'),
   ]
-  const peer = { id: 'peer-1', name: 'spark-a393', base_url: 'http://spark-a393.local:7070' }
+  const peer = { id: 'peer-1', name: 'spark-a5d6', base_url: 'http://spark-a5d6.local:7070' }
 
   it('lists every Spark in the fleet, this one first', () => {
     expect(monitorMachines(three, [peer], 'attic')).toEqual([
-      { id: 'node-lead', key: LOCAL_MACHINE, name: 'spark-f1cc' },
-      { id: 'node-loft', key: 'peer-1', name: 'spark-a393' },
-      { id: 'node-msi', key: '', name: 'edgexpert-2051' },
+      { id: 'node-lead', key: LOCAL_MACHINE, name: 'spark-f7e0' },
+      { id: 'node-loft', key: 'peer-1', name: 'spark-a5d6' },
+      { id: 'node-msi', key: '', name: 'edgexpert-1c47' },
     ])
   })
 
@@ -166,11 +167,11 @@ describe('which Sparks the meters are drawn for', () => {
   // Sparks this console cannot read. They share the empty samples key, so
   // only the id keeps them apart, and the page is drawn from the id.
   it('gives two unreadable Sparks two identities', () => {
-    const four = [...three, row('node-msi-b', 'edgexpert-37c4', 'http://edgexpert-37c4.local:7070')]
+    const four = [...three, row('node-msi-b', 'edgexpert-41b8', 'http://edgexpert-41b8.local:7070')]
     const machines = monitorMachines(four, [peer], 'attic')
     expect(machines).toHaveLength(4)
     expect(machines.filter(machine => machine.key === '').map(machine => machine.name))
-      .toEqual(['edgexpert-2051', 'edgexpert-37c4'])
+      .toEqual(['edgexpert-1c47', 'edgexpert-41b8'])
     expect(new Set(machines.map(machine => machine.id)).size).toBe(4)
   })
 
@@ -179,8 +180,8 @@ describe('which Sparks the meters are drawn for', () => {
   // de-duplicates on.
   it('tells apart two Sparks that report no node id', () => {
     const nameless = [
-      row('', 'edgexpert-2051', 'http://edgexpert-2051.local:7070'),
-      row('', 'edgexpert-37c4', 'http://edgexpert-37c4.local:7070'),
+      row('', 'edgexpert-1c47', 'http://edgexpert-1c47.local:7070'),
+      row('', 'edgexpert-41b8', 'http://edgexpert-41b8.local:7070'),
     ]
     const machines = monitorMachines(nameless, [], 'attic')
     expect(new Set(machines.map(machine => machine.id)).size).toBe(3)
@@ -191,7 +192,7 @@ describe('which Sparks the meters are drawn for', () => {
   it('puts this machine first whatever the fleet order is', () => {
     const reversed = [three[2], three[1], three[0]]
     expect(monitorMachines(reversed, [peer], 'attic').map(machine => machine.name))
-      .toEqual(['spark-f1cc', 'edgexpert-2051', 'spark-a393'])
+      .toEqual(['spark-f7e0', 'edgexpert-1c47', 'spark-a5d6'])
   })
 
   // A Spark that leads no fleet has no row of its own, so the list is made
@@ -204,18 +205,129 @@ describe('which Sparks the meters are drawn for', () => {
   // A Spark added by address has a row and a key, so its meters are readable
   // even though it never joined the fleet.
   it('reads a Spark added by address through its own key', () => {
-    const added = row('peer-1', 'spark-a393', 'http://spark-a393.local:7070')
+    const added = row('peer-1', 'spark-a5d6', 'http://spark-a5d6.local:7070')
     expect(monitorMachines([added], [peer], 'attic')).toEqual([
       { id: LOCAL_MACHINE, key: LOCAL_MACHINE, name: 'attic' },
-      { id: 'peer-1', key: 'peer-1', name: 'spark-a393' },
+      { id: 'peer-1', key: 'peer-1', name: 'spark-a5d6' },
     ])
   })
 
   // The console URL is the key both sides meet on, so a trailing slash or a
   // different case must not lose the key.
   it('matches a peer to its row however the URL was written', () => {
-    const loud = { ...peer, base_url: 'http://SPARK-A393.local:7070/' }
+    const loud = { ...peer, base_url: 'http://SPARK-A5D6.local:7070/' }
     expect(monitorMachines(three, [loud], 'attic')[1])
-      .toEqual({ id: 'node-loft', key: 'peer-1', name: 'spark-a393' })
+      .toEqual({ id: 'node-loft', key: 'peer-1', name: 'spark-a5d6' })
+  })
+})
+
+// A box this console holds no key for still reports itself in every
+// heartbeat, so its meters are read from there.
+describe('boxes read from their heartbeat', () => {
+  beforeEach(() => resetTelemetry())
+
+  const beat = (at: string, over: Partial<NodeInventory> = {}): NodeInventory => ({
+    hostname: 'edgexpert-41b8', product_name: 'EdgeXpert', dgx_spark: true,
+    memory_total_bytes: 128, memory_available_bytes: 10,
+    storage_total_bytes: 1900, storage_available_bytes: 1200,
+    gpu_memory_total_bytes: 128, gpu_memory_free_bytes: 10,
+    gpu_power_draw_watts: 74, gpu_clock_mhz: 2380, gpu_temperature_c: 66,
+    observed_at: at,
+    ...over,
+  })
+
+  const box = (answering: boolean, inventory?: NodeInventory) => ({
+    nodeID: 'node-41b8', isSelf: false, answering, inventory,
+  })
+
+  it('turns one heartbeat into one sample', () => {
+    expect(inventorySample(beat('2026-10-25T10:00:00Z'))).toEqual({
+      sampled_at: '2026-10-25T10:00:00Z',
+      memory_total: 128, memory_available: 10,
+      gpu_memory_total: 128, gpu_memory_free: 10,
+      gpu_power_draw_watts: 74, gpu_clock_mhz: 2380, gpu_temperature_c: 66,
+      storage_total: 1900, storage_available: 1200,
+    })
+  })
+
+  // A heartbeat with no stamp cannot be told apart from the last one.
+  it('uses no heartbeat it cannot date', () => {
+    expect(inventorySample(beat('', { observed_at: undefined }))).toBeNull()
+  })
+
+  // The controller's receipt time names the heartbeat when it has one.
+  it('stamps a sample with the time the heartbeat arrived', () => {
+    expect(inventorySample(beat('2026-10-25T10:00:00Z'), '2026-10-25T10:00:01Z')?.sampled_at)
+      .toBe('2026-10-25T10:00:01Z')
+  })
+
+  it('grows a point for each heartbeat that arrives, even with the same reading stamp', () => {
+    recordHeartbeats([{ ...box(true, beat('2026-10-25T10:00:00Z')), heartbeatAt: '2026-10-25T10:00:01Z' }])
+    recordHeartbeats([{ ...box(true, beat('2026-10-25T10:00:00Z')), heartbeatAt: '2026-10-25T10:00:06Z' }])
+    expect(machineSeries(heartbeatKey('node-41b8')).series.power).toEqual([74, 74])
+  })
+
+  // A meter the heartbeat left out is unread, and draws no point.
+  it('reads an absent GPU meter as unread', () => {
+    const next = foldSample(EMPTY_MACHINE, inventorySample(beat('2026-10-25T10:00:00Z', { gpu_temperature_c: undefined }))!)
+    expect(next.series.temperature).toEqual([])
+    expect(next.series.power).toEqual([74])
+  })
+
+  it('grows one point per new heartbeat and none for the same one twice', () => {
+    recordHeartbeats([box(true, beat('2026-10-25T10:00:00Z'))])
+    recordHeartbeats([box(true, beat('2026-10-25T10:00:00Z'))])
+    recordHeartbeats([box(true, beat('2026-10-25T10:00:05Z', { memory_available_bytes: 9 }))])
+    const held = machineSeries(heartbeatKey('node-41b8'))
+    expect(held.series.memFree).toEqual([10, 9])
+    expect(held.series.clock).toEqual([2380, 2380])
+    expect(held.answering).toBe(true)
+  })
+
+  // A box gone quiet keeps its last samples and says it is quiet.
+  it('keeps the samples of a box that stopped answering', () => {
+    recordHeartbeats([box(true, beat('2026-10-25T10:00:00Z'))])
+    recordHeartbeats([box(false, beat('2026-10-25T10:00:00Z'))])
+    const held = machineSeries(heartbeatKey('node-41b8'))
+    expect(held.answering).toBe(false)
+    expect(held.series.power).toEqual([74])
+  })
+
+  // A box already quiet when the console opened still has a last reading,
+  // shown as the last reading rather than as one still to come.
+  it('shows the last reading of a box that was quiet before the console opened', () => {
+    recordHeartbeats([box(false, beat('2026-10-25T10:00:00Z'))])
+    recordHeartbeats([box(false, beat('2026-10-25T10:00:00Z'))])
+    const held = machineSeries(heartbeatKey('node-41b8'))
+    expect(held.latest?.gpu_power_draw_watts).toBe(74)
+    expect(held.answering).toBe(false)
+    expect(held.series.power).toEqual([74])
+  })
+
+  it('never reads this box from its heartbeat', () => {
+    recordHeartbeats([{ ...box(true, beat('2026-10-25T10:00:00Z')), isSelf: true }])
+    expect(machineSeries(heartbeatKey('node-41b8'))).toBe(EMPTY_MACHINE)
+  })
+
+  // The peers poll prunes only peer keys, and the fleet poll only heartbeat
+  // keys, so neither throws away the other's history.
+  it('lets each poll prune only its own keys', () => {
+    recordTelemetry('peer-1', sample('2026-08-28T10:00:00Z'))
+    recordHeartbeats([box(true, beat('2026-10-25T10:00:00Z'))])
+    forgetMachines([LOCAL_MACHINE], isHeartbeatKey)
+    expect(machineSeries(heartbeatKey('node-41b8'))).not.toBe(EMPTY_MACHINE)
+    expect(machineSeries('peer-1')).toBe(EMPTY_MACHINE)
+    forgetMachines([], key => !isHeartbeatKey(key))
+    expect(machineSeries(heartbeatKey('node-41b8'))).toBe(EMPTY_MACHINE)
+  })
+
+  it('gives every fleet box with no key a heartbeat key', () => {
+    const fleet = [
+      row('node-lead', 'spark-f7e0', 'http://spark-f7e0.local:7070', true),
+      row('node-41b8', 'edgexpert-41b8', 'http://edgexpert-41b8.local:7070'),
+      { ...row('peer-9', 'shed', 'http://shed.local:7070'), legacyPeerOnly: true },
+    ]
+    const machines = withHeartbeatKeys(monitorMachines(fleet, [], 'attic'), fleet)
+    expect(machines.map(machine => machine.key)).toEqual([LOCAL_MACHINE, 'node:node-41b8', ''])
   })
 })
