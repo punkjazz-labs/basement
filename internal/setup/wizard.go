@@ -71,11 +71,9 @@ type Discovered struct {
 	// Target is the machine the operator chose, addressed the way setup
 	// connects to it.
 	Target string
-	// Peers are all the other machines the sweep found, in discovery order.
-	// They are recorded on the target as fleet groundwork (ADR 0010).
-	Peers []string
-	// Offer is the subset of Peers whose hostname looks GB10-class: the
-	// only machines setup offers to install on in the same run. A network
+	// Offer is the other machines the sweep found whose hostname looks
+	// GB10-class, in discovery order: the only machines setup offers to
+	// install on in the same run. A network
 	// can hold plenty of unrelated SSH hosts, and walking the operator
 	// through every one of them would be noise at best and somebody else's
 	// hardware at worst. A GB10 under a custom hostname is missed here on
@@ -124,7 +122,6 @@ func DiscoverAndChoose(ctx context.Context, ui WizardUI) (Discovered, error) {
 		if position == index {
 			continue
 		}
-		found.Peers = append(found.Peers, candidate.DisplayName())
 		if discovery.LikelyGB10Name(candidate.Hostname) {
 			found.Offer = append(found.Offer, candidate.DisplayName())
 		}
@@ -182,12 +179,12 @@ func ConnectAndVerify(ctx context.Context, ui WizardUI, target, sshUser string) 
 // machine than the one running the wizard (it changes the recommended
 // listen default). This is the tail shared by every entry point: the local
 // GB10 shortcut, a remote SSH install, and the browser wizard.
-func FinishInstall(ctx context.Context, ui WizardUI, runner Runner, source BinarySource, peers []string, remote bool) (InstallResult, error) {
+func FinishInstall(ctx context.Context, ui WizardUI, runner Runner, source BinarySource, remote bool) (InstallResult, error) {
 	mode, err := ui.ChooseListen(remote)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	result, err := Install(ctx, runner, source, Options{Listen: mode, DiscoveredPeers: peers}, func(format string, args ...any) {
+	result, err := Install(ctx, runner, source, Options{Listen: mode}, func(format string, args ...any) {
 		ui.Progress("  · " + fmt.Sprintf(format, args...))
 	})
 	if err != nil {
@@ -287,10 +284,6 @@ var verifyOperatorConsole = operatorConsoleHealth
 // is reported and the machines already installed keep their result. When the
 // run ends up touching more than one machine, the pairing guidance goes out
 // through ui.NextSteps.
-//
-// Additional machines are installed without DiscoveredPeers: the fleet.json
-// groundwork (ADR 0010) is recorded on the machine the operator chose first,
-// and nothing reads it yet either way.
 func InstallMore(ctx context.Context, ui WizardUI, first Machine, offer []string, source BinarySource, sshUser string) []Machine {
 	installed := []Machine{first}
 	var pending []string
@@ -360,7 +353,7 @@ func installOne(ctx context.Context, ui WizardUI, target, sshUser string, source
 		return InstallResult{}, err
 	}
 	defer closeRunner()
-	return FinishInstall(ctx, ui, runner, source, nil, true)
+	return FinishInstall(ctx, ui, runner, source, true)
 }
 
 // PairingSteps renders what the operator should do once every machine in the

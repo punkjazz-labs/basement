@@ -2,9 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -740,11 +738,11 @@ func (s *Server) trustedWorkerRecipe(proposed recipe.Recipe) (recipe.Recipe, err
 	if !ok {
 		return recipe.Recipe{}, fmt.Errorf("this Spark does not have recipe %s version %d in its own catalogue", proposed.ID, proposed.Version)
 	}
-	localSum, err := recipeFingerprint(local)
+	localSum, err := fleet.RecipeFingerprint(local)
 	if err != nil {
 		return recipe.Recipe{}, err
 	}
-	proposedSum, err := recipeFingerprint(proposed)
+	proposedSum, err := fleet.RecipeFingerprint(proposed)
 	if err != nil {
 		return recipe.Recipe{}, err
 	}
@@ -755,15 +753,6 @@ func (s *Server) trustedWorkerRecipe(proposed recipe.Recipe) (recipe.Recipe, err
 		return recipe.Recipe{}, errors.New("a single-Spark recipe is never run on behalf of another Spark")
 	}
 	return local, nil
-}
-
-func recipeFingerprint(r recipe.Recipe) (string, error) {
-	encoded, err := json.Marshal(r)
-	if err != nil {
-		return "", errors.New("a recipe could not be canonicalized for comparison")
-	}
-	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:]), nil
 }
 
 // sharedArtifacts reports artifact keys and paths this node's OTHER

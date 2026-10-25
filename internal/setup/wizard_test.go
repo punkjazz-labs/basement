@@ -63,7 +63,7 @@ func TestFinishInstallDrivesChooseListenProgressAndSummary(t *testing.T) {
 	runner.outputs["pairing-token"] = "tok-xyz\n"
 	ui := &stubUI{listenMode: ListenLoopback}
 
-	result, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, nil, false)
+	result, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestFinishInstallDrivesChooseListenProgressAndSummary(t *testing.T) {
 func TestFinishInstallPropagatesChooseListenError(t *testing.T) {
 	runner := newFakeRunner()
 	ui := &stubUI{listenErr: errors.New("boom")}
-	if _, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, nil, false); err == nil {
+	if _, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, false); err == nil {
 		t.Fatal("expected the listen choice error to propagate")
 	}
 	if len(ui.summaries) != 0 {
@@ -99,7 +99,7 @@ func TestFinishInstallPropagatesInstallErrorWithoutSummary(t *testing.T) {
 	runner := newFakeRunner()
 	runner.failures["getent group docker"] = "no such group"
 	ui := &stubUI{listenMode: ListenLoopback}
-	_, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, nil, false)
+	_, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, false)
 	if err == nil || !strings.Contains(err.Error(), "install failed") {
 		t.Fatalf("expected a wrapped install failure, got %v", err)
 	}
@@ -174,7 +174,7 @@ func TestFinishInstallChecksANonLoopbackConsoleFromTheOperator(t *testing.T) {
 
 	runner := installableRunner("192.168.99.134", "spark-head")
 	ui := &stubUI{listenMode: ListenLAN}
-	if _, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, nil, true); err != nil {
+	if _, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, true); err != nil {
 		t.Fatal(err)
 	}
 	if checked != "http://192.168.99.134:7070" {
@@ -189,7 +189,7 @@ func TestFinishInstallDoesNotShowSuccessForAnUnreachableConsole(t *testing.T) {
 
 	runner := installableRunner("192.168.99.134", "spark-head")
 	ui := &stubUI{listenMode: ListenLAN}
-	result, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, nil, true)
+	result, err := FinishInstall(context.Background(), ui, runner, LocalFileSource{Path: "/tmp/binary"}, true)
 	if err == nil || !strings.Contains(err.Error(), "installed and running") || !strings.Contains(err.Error(), "TCP port 7070") {
 		t.Fatalf("unreachable console error = %v", err)
 	}

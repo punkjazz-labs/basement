@@ -57,7 +57,7 @@ func runSetup(args []string) int {
 				fmt.Fprintf(os.Stderr, "%s cannot locate this binary: %v\n", paint.red("✗"), err)
 				return 1
 			}
-			if _, err := ui.finishInstall(ctx, local, setup.LocalFileSource{Path: executable}, nil, false); err != nil {
+			if _, err := ui.finishInstall(ctx, local, setup.LocalFileSource{Path: executable}, false); err != nil {
 				return 1
 			}
 			return 0
@@ -104,7 +104,7 @@ func runSetup(args []string) int {
 	defer runner.Close()
 
 	source := setup.PickSource(*binary)
-	result, err := ui.finishInstall(ctx, runner, source, found.Peers, true)
+	result, err := ui.finishInstall(ctx, runner, source, true)
 	if err != nil {
 		return 1
 	}
@@ -323,8 +323,8 @@ func (u *terminalUI) NextSteps(lines []string) {
 // browser at the finished console once it is reachable from outside. The
 // error is already reported when it returns one; callers only decide the
 // exit code.
-func (u *terminalUI) finishInstall(ctx context.Context, runner setup.Runner, source setup.BinarySource, peers []string, remote bool) (setup.InstallResult, error) {
-	result, err := setup.FinishInstall(ctx, u, runner, source, peers, remote)
+func (u *terminalUI) finishInstall(ctx context.Context, runner setup.Runner, source setup.BinarySource, remote bool) (setup.InstallResult, error) {
+	result, err := setup.FinishInstall(ctx, u, runner, source, remote)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %v\n", u.paint.red("✗"), err)
 		return setup.InstallResult{}, err

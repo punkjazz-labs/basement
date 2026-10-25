@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -80,9 +79,6 @@ const (
 // Options configures one installation.
 type Options struct {
 	Listen ListenMode
-	// DiscoveredPeers are other machines found on the network, recorded on
-	// the master for future distributed (multi-GB10) recipes.
-	DiscoveredPeers []string
 	// ConsoleHost anchors the reported ConsoleURL to an address the caller
 	// already verified, instead of the one the target reports for itself.
 	// The console's adoption path sets it to the address the owner adopted
@@ -397,20 +393,6 @@ func Install(ctx context.Context, runner Runner, source BinarySource, opts Optio
 	logf("starting basement.service")
 	if _, err := runner.RunPrivileged(ctx, "systemctl daemon-reload && systemctl enable basement.service basement-updater.service basement-updater.path && systemctl restart basement.service && systemctl start basement-updater.service && systemctl start basement-updater.path && systemctl is-active --quiet basement.service && systemctl is-active --quiet basement-updater.path && test -x /usr/lib/basement/updater/basement-updater", nil); err != nil {
 		return InstallResult{}, fmt.Errorf("start service: %w", err)
-	}
-
-	if len(opts.DiscoveredPeers) > 0 {
-		fleet, err := json.MarshalIndent(map[string]any{
-			"schema":           1,
-			"recorded_at":      time.Now().UTC().Format(time.RFC3339),
-			"discovered_peers": opts.DiscoveredPeers,
-		}, "", "  ")
-		if err == nil {
-			payload := string(fleet) + "\n"
-			if _, err := runner.RunPrivileged(ctx, "tee "+dataDir+"/fleet.json >/dev/null && chown "+serviceUser+":"+serviceUser+" "+dataDir+"/fleet.json", strings.NewReader(payload)); err != nil {
-				logf("note: could not record discovered peers: %v", err)
-			}
-		}
 	}
 
 	// The health check, the port and every reported URL follow the primary

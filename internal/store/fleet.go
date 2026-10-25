@@ -155,16 +155,6 @@ func (s *Store) EnsureNodeIdentity(ctx context.Context, identity NodeIdentity) e
 	return tx.Commit()
 }
 
-func (s *Store) LocalNodeIdentity(ctx context.Context) (NodeIdentity, error) {
-	var identity NodeIdentity
-	err := s.db.QueryRowContext(ctx, `SELECT node_id,public_key,certificate_fingerprint,created_at FROM node_identity WHERE singleton=1`).
-		Scan(&identity.NodeID, &identity.PublicKey, &identity.CertificateFingerprint, &identity.CreatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return NodeIdentity{}, os.ErrNotExist
-	}
-	return identity, err
-}
-
 // InitializeFleetMigration records only facts available on this manager. A
 // legacy peer becomes a placeholder and an active distributed model becomes
 // a candidate. Neither is treated as authenticated membership or a proven
@@ -481,11 +471,6 @@ func (s *Store) CommitFleetNode(ctx context.Context, fleetID, nodeID string) err
 
 func (s *Store) MarkFleetNodeAdoptionUncertain(ctx context.Context, fleetID, nodeID string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE fleet_nodes SET membership_state='adoption-uncertain',updated_at=? WHERE fleet_id=? AND node_id=? AND membership_state='adopting'`, now(), fleetID, nodeID)
-	return err
-}
-
-func (s *Store) AbortFleetNode(ctx context.Context, fleetID, nodeID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM fleet_nodes WHERE fleet_id=? AND node_id=? AND membership_state='adopting'`, fleetID, nodeID)
 	return err
 }
 

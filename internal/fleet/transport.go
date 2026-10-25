@@ -153,8 +153,10 @@ func (m *Manager) joinPrepare(w http.ResponseWriter, r *http.Request) {
 		writeFleetError(w, http.StatusBadRequest, errors.New("fleet join protocol fields are invalid"))
 		return
 	}
-	expectedFingerprint, secret, err := parseJoinCode("v1." + m.identity.CertificateFingerprint + "." + request.JoinSecret)
-	if err != nil || expectedFingerprint != m.identity.CertificateFingerprint {
+	// Parsing the code rebuilt from this node's own fingerprint checks only
+	// the secret's encoding; the secret itself is checked by the store below.
+	_, secret, err := parseJoinCode("v1." + m.identity.CertificateFingerprint + "." + request.JoinSecret)
+	if err != nil {
 		writeFleetError(w, http.StatusForbidden, errors.New("the fleet join code is invalid, expired, or already used"))
 		return
 	}
