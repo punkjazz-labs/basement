@@ -28,10 +28,8 @@ A catalog change does not change an installed model. The model keeps running
 with the recipe version it was installed with. A user must start an update
 by hand. Nothing in the manager starts an update on its own.
 
-The feed can also carry revocations. A revocation marks one recipe version as
-withdrawn. Section 5 of this runbook gives the full rule. One fact matters
-here: a revocation is permanent. Once a manager accepts a revocation, that
-manager keeps it forever, even if a later index drops the entry.
+The feed has no revocation list. To withdraw a bad recipe version, publish a
+fixed recipe with a higher version number.
 
 ## 2. One-time activation
 
@@ -88,13 +86,10 @@ Follow these steps to publish a new index.
    index.json`, or `make build-index OUT=index.json`. This step reads
    `docs/RECIPE-FEED.md` section 2a for key handling and writes an unsigned
    `index.json`.
-3. Add revocations if you have any. Pass `-revoked
-   path/to/revoked.json` to `build-index`. Section 5 of this runbook gives
-   the file format.
-4. Sign the index: run `BASEMENT_SIGN_KEY=<path to the private key file> make
+3. Sign the index: run `BASEMENT_SIGN_KEY=<path to the private key file> make
    sign-index INDEX=index.json`. This writes `index.json.sig` beside
    `index.json`.
-5. Verify the signature locally before you publish. `cmd/sign-index` has no
+4. Verify the signature locally before you publish. `cmd/sign-index` has no
    built-in verify mode, so use a short Go program:
 
    ```go
@@ -126,7 +121,7 @@ Follow these steps to publish a new index.
 
    Run this program with `go run`. Fix the problem before you publish if it
    prints an error.
-6. Push `index.json` and `index.json.sig` to the feed repository. Push both
+5. Push `index.json` and `index.json.sig` to the feed repository. Push both
    files together. A manager that fetches one without the other treats the
    fetch as failed and keeps its old catalog.
 
@@ -190,7 +185,7 @@ make publish-feed
 This command applies the safe subset of bumps, commits and pushes them if
 there were any, builds and signs a fresh `index.json`, publishes it to the
 feed repository, and verifies the published bytes match what was pushed
-byte for byte. Section 6 describes the schedule that runs this command on
+byte for byte. Section 5 describes the schedule that runs this command on
 its own.
 
 A drift a maintainer has judged goes into `docs/feed-acknowledged.yaml`.
@@ -206,72 +201,7 @@ drafts new candidate recipes, not version bumps of existing ones. That path
 still ends at a human commit to this repository, the same as every recipe
 change does today.
 
-## 5. Revocations
-
-### When to use one
-
-Use a revocation when a published recipe version must never be installed
-again. Three examples: the pinned weights are wrong, the recipe has a
-licence problem, or the pinned runtime image is compromised.
-
-A revocation does not stop a model that is already running. The manager
-never stops a running model on its own. The console shows a notice instead,
-on the model and on the recipe, and the owner of that model decides what to
-do.
-
-### The file format the tool accepts
-
-Pass the `-revoked` flag to `build-index` with a path to a JSON file. The
-file holds a JSON array. Each entry is one object with four fields:
-
-```json
-[
-  {
-    "id": "some-recipe-1s",
-    "version": 2,
-    "reason": "the published weights were the wrong quantisation",
-    "revoked_at": "2026-08-12T00:00:00Z"
-  }
-]
-```
-
-Every field is required.
-
-- `id` names one recipe. It cannot be empty.
-- `version` names one exact recipe version. It must be 1 or higher. It
-  cannot name a range and it cannot mean "every version".
-- `reason` is the human-readable reason. It cannot be empty or blank. The
-  console shows this text to the person whose model it concerns, word for
-  word.
-- `revoked_at` is an RFC3339 timestamp. It cannot be zero or missing.
-
-The tool rejects the whole file if any entry is missing a field, if any
-field is empty where a value is required, or if the file carries a field
-these four do not name. The tool also rejects the whole file if two entries
-name the same recipe at the same version. Fix the file and run the tool
-again.
-
-### Revocations are permanent
-
-Once a manager accepts an index that revokes a recipe version, that manager
-keeps the version revoked forever. This stays true even if a later index
-drops the entry. A dropped entry says nothing new. It does not undo the
-revocation.
-
-If a revocation turns out to be too broad, do not try to undo it. Publish a
-fixed new version of the recipe instead, the same way any other recipe
-change ships. The reason for this rule: allowing an un-revoke would let a
-compromised signing key quietly restore a recipe version that was pulled for
-a real reason.
-
-### The reason is always shown verbatim
-
-The console shows a revoked recipe's reason exactly as written in the
-`reason` field. It never shortens the reason and it never replaces the
-reason with a generic message. Write every reason so it can stand alone in
-front of the person who owns the affected model.
-
-## 6. Automation
+## 5. Automation
 
 `make publish-feed` is safe to run on a schedule. Every step in it verifies
 its own result, or the step fails and the run stops before it. A step that

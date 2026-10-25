@@ -524,22 +524,6 @@ func (s *Server) runFeedRefresh(running chan struct{}) {
 	s.feedRefreshMu.Unlock()
 }
 
-// revocationsByVersion keys every accepted revocation by recipe id and
-// version, because revocation is per version: the catalog's current entry
-// for an id may be untouched while the version somebody has installed is
-// revoked, and vice versa.
-func (s *Server) revocationsByVersion(ctx context.Context) (map[string]store.RevokedRecipe, error) {
-	entries, err := s.store.Revocations(ctx)
-	if err != nil {
-		return nil, err
-	}
-	index := make(map[string]store.RevokedRecipe, len(entries))
-	for _, entry := range entries {
-		index[fmt.Sprintf("%s@%d", entry.RecipeID, entry.RecipeVersion)] = entry
-	}
-	return index, nil
-}
-
 func (s *Server) effectiveRecipes() []recipe.Recipe {
 	if p := s.effective.Load(); p != nil {
 		return *p
@@ -862,29 +846,14 @@ func (s *Server) listRecipes(w http.ResponseWriter, r *http.Request) {
 	}
 	type view struct {
 		recipe.Recipe
-		ArtifactBytes int64 `json:"artifact_bytes"`
-		RequiredBytes int64 `json:"required_bytes"`
-		// Revoked says the publisher has withdrawn this exact version, and
-		// RevokedReason is their wording, carried to the console unchanged.
-		// A revoked recipe stays in the catalog on purpose: hiding it would
-		// leave anyone already running it with no explanation at all.
-		Revoked         bool                 `json:"revoked"`
-		RevokedReason   string               `json:"revoked_reason,omitempty"`
+		ArtifactBytes   int64                `json:"artifact_bytes"`
+		RequiredBytes   int64                `json:"required_bytes"`
 		MediaGeneration *mediaGenerationView `json:"media_generation,omitempty"`
-	}
-	revocations, err := s.revocationsByVersion(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
 	}
 	effective := s.effectiveRecipes()
 	result := make([]view, 0, len(effective))
 	for _, item := range effective {
 		response := view{Recipe: item, ArtifactBytes: item.TotalArtifactBytes(), RequiredBytes: item.RequiredBytes()}
-		if revocation, ok := revocations[fmt.Sprintf("%s@%d", item.ID, item.Version)]; ok {
-			response.Revoked = true
-			response.RevokedReason = revocation.Reason
-		}
 		if config, media := item.MediaGeneration(); media {
 			modes := make([]string, 0, len(config.Graphs))
 			for mode := range config.Graphs {
@@ -916,30 +885,7 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err)
 		return
 	}
-	revocations, err := s.revocationsByVersion(r.Context())
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	// An installed model is marked against the version it was actually
-	// installed with, which is the only version the notice could honestly be
-	// about. Nothing here stops or changes the model: the owner is told, and
-	// the owner decides (ADR 0009 item 7).
-	type view struct {
-		store.InstalledModel
-		Revoked       bool   `json:"revoked"`
-		RevokedReason string `json:"revoked_reason,omitempty"`
-	}
-	result := make([]view, 0, len(models))
-	for _, model := range models {
-		item := view{InstalledModel: model}
-		if revocation, ok := revocations[fmt.Sprintf("%s@%d", model.RecipeID, model.RecipeVersion)]; ok {
-			item.Revoked = true
-			item.RevokedReason = revocation.Reason
-		}
-		result = append(result, item)
-	}
-	writeJSON(w, 200, result)
+	writeJSON(w, 200, models)
 }
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1049,23 +995,6 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) install(w http.ResponseWriter, r *http.Request, selected recipe.Recipe) {
-	// Refused as early as the recipe is known, before any confirmation,
-	// preflight, licence acceptance or job exists. This is the only thing
-	// revocation stops: a NEW install of the revoked version. Start, stop,
-	// remove and everything a model already serving depends on are decided
-	// elsewhere in this file and are deliberately not asked about here, so a
-	// revocation arriving in the background can never take somebody's running
-	// model away (ADR 0009 item 7).
-	if revocation, revoked, err := s.store.Revocation(r.Context(), selected.ID, selected.Version); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	} else if revoked {
-		// The publisher's own words, not a generic refusal: the owner is
-		// entitled to know why this will not install.
-		writeError(w, http.StatusConflict, fmt.Errorf("%s version %d was withdrawn by its publisher and cannot be installed: %s",
-			selected.DisplayName, selected.Version, revocation.Reason))
-		return
-	}
 	var request struct {
 		Confirmed                   bool  `json:"confirmed"`
 		AcceptLicence               bool  `json:"accept_licence"`
