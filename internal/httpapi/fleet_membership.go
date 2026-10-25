@@ -31,10 +31,6 @@ func (s *Server) fleetJoinCode(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	if s.fleetManager == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("fleet membership is not initialized"))
 		return
@@ -50,10 +46,6 @@ func (s *Server) fleetJoinCode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) fleetJoin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	if s.fleetManager == nil {
@@ -101,10 +93,6 @@ func (s *Server) fleetInvitationAction(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	if s.fleetManager == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("fleet membership is not initialized"))
 		return
@@ -138,10 +126,6 @@ func (s *Server) fleetInvitationAction(w http.ResponseWriter, r *http.Request) {
 func (s *Server) fleetInvite(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	if s.fleetManager == nil {

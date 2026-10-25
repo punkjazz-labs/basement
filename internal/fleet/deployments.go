@@ -20,9 +20,12 @@ import (
 )
 
 type IndependentIntent struct {
-	Confirmed                   bool `json:"confirmed"`
-	AcceptLicence               bool `json:"accept_licence"`
-	ConfirmTerritoryEligibility bool `json:"confirm_territory_eligibility"`
+	Confirmed     bool `json:"confirmed"`
+	AcceptLicence bool `json:"accept_licence"`
+	// Nothing reads this any more: accepting the licence covers its
+	// territory terms. It stays on the wire because the fleet transport
+	// decodes strictly and an older controller still sends it.
+	ConfirmTerritoryEligibility bool `json:"confirm_territory_eligibility,omitempty"`
 	Activate                    bool `json:"activate"`
 	RemoveArtifacts             bool `json:"remove_artifacts,omitempty"`
 }

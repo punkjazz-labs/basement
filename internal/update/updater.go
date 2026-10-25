@@ -27,7 +27,6 @@ type Paths struct {
 	InstallRoot string
 	VersionsDir string
 	CurrentLink string
-	LegacyLink  string
 	StagingDir  string
 	StateDir    string
 	// UnitDir is where the three units this updater may reconcile live. It is
@@ -41,8 +40,8 @@ type Paths struct {
 func SystemPaths() Paths {
 	return Paths{
 		InstallRoot: "/usr/lib/basement", VersionsDir: "/usr/lib/basement/versions",
-		CurrentLink: "/usr/lib/basement/current", LegacyLink: "/usr/lib/basement/basement",
-		StagingDir: "/var/lib/basement/updates/staging", StateDir: "/var/lib/basement-updater",
+		CurrentLink: "/usr/lib/basement/current",
+		StagingDir:  "/var/lib/basement/updates/staging", StateDir: "/var/lib/basement-updater",
 		UnitDir: "/etc/systemd/system",
 	}
 }
@@ -422,14 +421,14 @@ func (updater *Updater) swapHelper(journal Journal, maySwap bool) string {
 	transactionDir := updater.Paths.transactionDir(journal.AttemptID)
 	manifest, err := updater.verifiedManifest(transactionDir)
 	if err != nil {
-		return helperSwapFailed(cleanFailure(err))
+		return helperSwapFailed(CleanFailure(err))
 	}
 	if manifest.SchemaVersion != ManifestHelperSchemaVersion || manifest.HelperSHA256 != journal.HelperSHA256 {
 		return helperSwapFailed("the signed release does not name the helper this request promised")
 	}
 	live, err := FileDigest(updater.Paths.helperPath())
 	if err != nil {
-		return helperSwapFailed(cleanFailure(err))
+		return helperSwapFailed(CleanFailure(err))
 	}
 	if live == manifest.HelperSHA256 {
 		return HelperStateUnchanged
@@ -438,7 +437,7 @@ func (updater *Updater) swapHelper(journal Journal, maySwap bool) string {
 		return helperSwapFailed("a recovered transaction does not swap the helper")
 	}
 	if err := updater.replaceHelper(transactionDir, manifest); err != nil {
-		return helperSwapFailed(cleanFailure(err))
+		return helperSwapFailed(CleanFailure(err))
 	}
 	return HelperStateUpdated
 }
@@ -524,7 +523,7 @@ func (updater *Updater) rollback(ctx context.Context, journal Journal, targetFai
 		return updater.recoveryRequired(journal, errors.Join(targetFailure, err))
 	}
 	journal.State = JournalRollbackSwitched
-	journal.Failure = cleanFailure(targetFailure)
+	journal.Failure = CleanFailure(targetFailure)
 	journal.UpdatedAt = journalNow(updater.Now)
 	if err := updater.writeJournal(journal); err != nil {
 		return err
@@ -565,7 +564,7 @@ func (updater *Updater) checkRollback(ctx context.Context, journal Journal) erro
 
 func (updater *Updater) recoveryRequired(journal Journal, cause error) error {
 	journal.State = JournalRecoveryRequired
-	journal.Failure = cleanFailure(cause)
+	journal.Failure = CleanFailure(cause)
 	journal.UpdatedAt = journalNow(updater.Now)
 	if err := updater.writeJournal(journal); err != nil {
 		return errors.Join(cause, err)
@@ -684,7 +683,7 @@ func (updater *Updater) writeReceipt(receipt Receipt) error {
 func (updater *Updater) quarantineRequest(cause error) {
 	_ = os.Remove(updater.Paths.requestPath())
 	_ = syncDirectory(updater.Paths.pendingDir())
-	_ = updater.writeReceipt(Receipt{SchemaVersion: 1, State: "failed_before_handoff", Failure: cleanFailure(cause), UpdatedAt: journalNow(updater.Now)})
+	_ = updater.writeReceipt(Receipt{SchemaVersion: 1, State: "failed_before_handoff", Failure: CleanFailure(cause), UpdatedAt: journalNow(updater.Now)})
 }
 
 func (updater *Updater) pruneSlots(keep ...string) {

@@ -158,7 +158,7 @@ func (s *Server) run(ctx context.Context) {
 	// release download on the target since this process is never
 	// linux/arm64.
 	source := setup.PickSource("")
-	result, err := setup.FinishInstall(ctx, s, runner, source, found.Peers, true)
+	result, err := setup.FinishInstall(ctx, s, runner, source, true)
 	if err != nil {
 		s.fail(err)
 		return

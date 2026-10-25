@@ -155,16 +155,6 @@ func (s *Store) EnsureNodeIdentity(ctx context.Context, identity NodeIdentity) e
 	return tx.Commit()
 }
 
-func (s *Store) LocalNodeIdentity(ctx context.Context) (NodeIdentity, error) {
-	var identity NodeIdentity
-	err := s.db.QueryRowContext(ctx, `SELECT node_id,public_key,certificate_fingerprint,created_at FROM node_identity WHERE singleton=1`).
-		Scan(&identity.NodeID, &identity.PublicKey, &identity.CertificateFingerprint, &identity.CreatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return NodeIdentity{}, os.ErrNotExist
-	}
-	return identity, err
-}
-
 // InitializeFleetMigration records only facts available on this manager. A
 // legacy peer becomes a placeholder and an active distributed model becomes
 // a candidate. Neither is treated as authenticated membership or a proven
@@ -484,11 +474,6 @@ func (s *Store) MarkFleetNodeAdoptionUncertain(ctx context.Context, fleetID, nod
 	return err
 }
 
-func (s *Store) AbortFleetNode(ctx context.Context, fleetID, nodeID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM fleet_nodes WHERE fleet_id=? AND node_id=? AND membership_state='adopting'`, fleetID, nodeID)
-	return err
-}
-
 func (s *Store) CreateFleetJoinCode(ctx context.Context, codeHash string, expires time.Time) error {
 	config, err := s.FleetConfig(ctx)
 	if err != nil {
@@ -713,7 +698,7 @@ func (s *Store) CreateFleetDeployment(ctx context.Context, deployment FleetDeplo
 }
 
 // SetFleetDeploymentJob gives a record its first owner job, or re-asserts the
-// job it already names. It refuses a removed record: the owner_job_id=''
+// job it already names. It refuses a removed record: the empty owner_job_id
 // branch checks no job id, so without the state guard it would match a removed
 // job-less record and put it back to work. That record can really be handed to
 // a caller: two placements of one model onto one Spark under different
@@ -784,7 +769,7 @@ func (s *Store) AdvanceFleetDeploymentJob(ctx context.Context, deploymentID, exp
 // beside it carry their own state guards for the same reason: a removed
 // record keeps the job id it last named, so AdvanceFleetDeploymentJob can be
 // aimed at one by naming that exact job, and SetFleetDeploymentJob's
-// owner_job_id='' branch names no job at all. Each refuses a removed record
+// empty owner_job_id branch names no job at all. Each refuses a removed record
 // itself, so no caller ordering has to be trusted. Writing "removed" over
 // "removed" stays allowed, so clearing one twice is not an error.
 func (s *Store) ObserveFleetDeployment(ctx context.Context, deploymentID, state, observedAt string) error {

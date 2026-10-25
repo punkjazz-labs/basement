@@ -26,15 +26,11 @@ type powerModeNodeResponse struct {
 	store.PowerMode
 }
 
-// requirePowerMutation is the gate both doors pass. It is the ordinary console
-// mutation gate plus the managed-member door, in that order, so a member gets
-// exactly the sentence it gives for a model change: one console owns this
-// machine, and on a member that console is the controller's.
+// requirePowerMutation is the gate both doors pass after the console session:
+// the managed-member door, so a member gets exactly the sentence it gives for
+// a model change (one console owns this machine, and on a member that console
+// is the controller's), then the idempotency key.
 func (s *Server) requirePowerMutation(w http.ResponseWriter, r *http.Request) bool {
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return false
-	}
 	if s.refuseManagedMemberMutation(w, r) {
 		return false
 	}
@@ -54,10 +50,6 @@ func (s *Server) powerMode(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
-			return
-		}
 		state, err := s.power.PowerMode(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)

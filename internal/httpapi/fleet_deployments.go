@@ -40,19 +40,6 @@ func (s *Server) CreateIndependentJob(ctx context.Context, selected recipe.Recip
 	if selected.Requirements.RequiredLicenceAccept && !intent.AcceptLicence {
 		return store.Job{}, false, errors.New("the model licence is not accepted on this Spark")
 	}
-	if selected.RequiresTerritoryConfirmation() && !intent.ConfirmTerritoryEligibility {
-		return store.Job{}, false, errors.New("the territory eligibility is not confirmed on this Spark")
-	}
-	if intent.AcceptLicence {
-		if err := s.store.AcceptLicence(ctx, selected.ID, selected.Version); err != nil {
-			return store.Job{}, false, err
-		}
-	}
-	if intent.ConfirmTerritoryEligibility {
-		if err := s.store.ConfirmTerritoryEligibility(ctx, selected.ID, selected.Version); err != nil {
-			return store.Job{}, false, err
-		}
-	}
 	job, created, err := s.store.CreateJob(ctx, "install", selected.ID, idempotencyKey, engine.InstallPayload{
 		Activate: boolPointer(intent.Activate), ReservationID: reservationID, DeploymentID: deploymentID,
 	})
@@ -185,10 +172,6 @@ func (s *Server) fleetPlacementPlan(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if _, ok := s.auth.Authenticate(r); !ok {
-		writeError(w, http.StatusUnauthorized, errors.New("console authentication is required"))
-		return
-	}
 	if s.fleetManager == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("fleet placement is unavailable"))
 		return
@@ -215,10 +198,6 @@ func (s *Server) fleetDeployments(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("console authentication is required"))
-			return
-		}
 		deployments, err := s.fleetManager.Deployments(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -226,17 +205,15 @@ func (s *Server) fleetDeployments(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, deployments)
 	case http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		var request struct {
-			RecipeID                    string `json:"recipe_id"`
-			NodeID                      string `json:"node_id"`
-			Confirmed                   bool   `json:"confirmed"`
-			AcceptLicence               bool   `json:"accept_licence"`
-			ConfirmTerritoryEligibility bool   `json:"confirm_territory_eligibility"`
-			Activate                    *bool  `json:"activate"`
+			RecipeID      string `json:"recipe_id"`
+			NodeID        string `json:"node_id"`
+			Confirmed     bool   `json:"confirmed"`
+			AcceptLicence bool   `json:"accept_licence"`
+			// Accepted and ignored: accepting the licence covers its
+			// territory terms, and the console still sends this field.
+			ConfirmTerritoryEligibility bool  `json:"confirm_territory_eligibility"`
+			Activate                    *bool `json:"activate"`
 		}
 		if err := decodeBody(r, &request); err != nil {
 			writeError(w, http.StatusBadRequest, err)
@@ -248,8 +225,7 @@ func (s *Server) fleetDeployments(w http.ResponseWriter, r *http.Request) {
 		}
 		deployment, created, err := s.fleetManager.CreateIndependentDeployment(r.Context(), fleet.CreateDeploymentRequest{
 			RecipeID: request.RecipeID, NodeID: request.NodeID, IdempotencyKey: r.Header.Get("Idempotency-Key"),
-			Intent: fleet.IndependentIntent{Confirmed: request.Confirmed, AcceptLicence: request.AcceptLicence,
-				ConfirmTerritoryEligibility: request.ConfirmTerritoryEligibility, Activate: activate},
+			Intent: fleet.IndependentIntent{Confirmed: request.Confirmed, AcceptLicence: request.AcceptLicence, Activate: activate},
 		})
 		if err != nil {
 			writeError(w, http.StatusConflict, err)
@@ -277,10 +253,6 @@ func (s *Server) fleetDeploymentAdopt(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.fleetManager == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("fleet placement is unavailable"))
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	var request struct {
@@ -317,10 +289,6 @@ func (s *Server) fleetDeploymentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("console authentication is required"))
-			return
-		}
 		deployment, err := s.fleetManager.Deployment(r.Context(), parts[0])
 		if err != nil {
 			writeError(w, http.StatusNotFound, errors.New("fleet deployment not found"))
@@ -330,19 +298,11 @@ func (s *Server) fleetDeploymentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet {
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("console authentication is required"))
-			return
-		}
 		s.fleetDeploymentEvents(w, r, parts[0])
 		return
 	}
 	if len(parts) != 2 || r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	// "release" is not an action on a model. It ends a record this fleet can no

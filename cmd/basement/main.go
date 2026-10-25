@@ -76,10 +76,7 @@ func main() {
 	// cache exists on disk. Fleet migration needs that same history so an
 	// active distributed recipe from the cache is not missed as a legacy
 	// candidate merely because it was not in the original embedded set.
-	// The database is also where accepted revocations land, permanently: a
-	// version this machine has been told not to install stays refused across
-	// restarts and across later indexes that no longer mention it.
-	feed := recipefeed.NewFetcher(recipes, cfg.DataDir, logger, db)
+	feed := recipefeed.NewFetcher(recipes, cfg.DataDir, logger)
 	cachedAll, cachedEffective := feed.Snapshot()
 	provider := inventory.Host{DataDir: cfg.DataDir, DockerSocket: "/var/run/docker.sock"}
 	buildIdentity, err := fleet.BinaryBuildIdentity(cfg.Version)
@@ -148,7 +145,7 @@ func main() {
 	// index that has not been refreshed in a month can say so rather than
 	// look like a healthy feed with nothing new in it.
 	api.SetRecipeFeedHealth(feed.Health)
-	// The same fetch the 6 hour cycle runs, on the owner's word. Wired here,
+	// The same fetch the hourly cycle runs, on the owner's word. Wired here,
 	// before anything can listen, together with the publication hook below, so
 	// a forced fetch always reaches the engine and the API as well.
 	feed.SetOnUpdate(func(all, effective []recipe.Recipe) {

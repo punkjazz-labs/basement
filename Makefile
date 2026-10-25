@@ -10,7 +10,7 @@
 build-index:
 	go run ./cmd/build-index -out "$${OUT:-index.json}"
 
-# sign-index produces index.json.minisig for the remote recipe index
+# sign-index produces index.json.sig for the remote recipe index
 # (docs/plans/04-remote-recipe-index.md). The private key never appears in
 # this repository, in this Makefile, or in CI config: it must already exist
 # as a file on the machine running this target, and its path — not its

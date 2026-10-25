@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func sign(priv ed25519.PrivateKey, message []byte) []byte {
 func TestRoundTripSurvivesTheClientDecodePath(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "index.json")
-	if _, err := run(outPath, "", ""); err != nil {
+	if _, err := run(outPath, ""); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
 	indexBytes, err := os.ReadFile(outPath)
@@ -100,7 +101,7 @@ func TestRoundTripSurvivesTheClientDecodePath(t *testing.T) {
 func TestOutputEndsInExactlyOneNewline(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "index.json")
-	if _, err := run(outPath, "", ""); err != nil {
+	if _, err := run(outPath, ""); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
 	data, err := os.ReadFile(outPath)
@@ -116,107 +117,35 @@ func TestOutputEndsInExactlyOneNewline(t *testing.T) {
 	}
 }
 
-// TestRevokedFileWithDuplicateEntryFails covers the one check that is this
-// tool's own, not the wire format's: two entries naming the same recipe at
-// the same version is either a no-op duplicate or a contradiction, and
-// either way it belongs to whoever drafted the file to resolve, not to
-// every manager that would otherwise fetch the ambiguity.
-func TestRevokedFileWithDuplicateEntryFails(t *testing.T) {
+// TestSummaryNamesTheRecipeCount pins the summary line, because
+// packaging/publish-feed.sh reads the recipe count out of it for the feed
+// repository's commit message.
+func TestSummaryNamesTheRecipeCount(t *testing.T) {
 	dir := t.TempDir()
-	revokedPath := filepath.Join(dir, "revoked.json")
-	body := `[
-		{"id": "some-recipe-1s", "version": 1, "reason": "wrong quantisation", "revoked_at": "2026-08-12T00:00:00Z"},
-		{"id": "some-recipe-1s", "version": 1, "reason": "duplicate of the entry above", "revoked_at": "2026-08-13T00:00:00Z"}
-	]`
-	if err := os.WriteFile(revokedPath, []byte(body), 0o640); err != nil {
-		t.Fatal(err)
-	}
 	outPath := filepath.Join(dir, "index.json")
-	if _, err := run(outPath, revokedPath, ""); err == nil {
-		t.Fatal("a revoked file with a duplicate (id, version) entry was accepted")
+	summary, err := run(outPath, "")
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
 	}
-	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
-		t.Fatal("a failed build left an output file behind")
-	}
-}
-
-// TestMalformedRevokedFileFails covers every other way a -revoked file can
-// be wrong: not JSON at all, an unknown field (the same strictness the
-// client's own decoder holds the wire format to), and each required field
-// missing in turn.
-func TestMalformedRevokedFileFails(t *testing.T) {
-	cases := []struct {
-		name string
-		body string
-	}{
-		{"not JSON at all", `not json`},
-		{"unknown field", `[{"id": "x-1s", "version": 1, "reason": "r", "revoked_at": "2026-08-12T00:00:00Z", "all_versions": true}]`},
-		{"missing id", `[{"version": 1, "reason": "r", "revoked_at": "2026-08-12T00:00:00Z"}]`},
-		{"missing reason", `[{"id": "x-1s", "version": 1, "revoked_at": "2026-08-12T00:00:00Z"}]`},
-		{"blank reason", `[{"id": "x-1s", "version": 1, "reason": "   ", "revoked_at": "2026-08-12T00:00:00Z"}]`},
-		{"zero version", `[{"id": "x-1s", "version": 0, "reason": "r", "revoked_at": "2026-08-12T00:00:00Z"}]`},
-		{"missing revoked_at", `[{"id": "x-1s", "version": 1, "reason": "r"}]`},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			dir := t.TempDir()
-			revokedPath := filepath.Join(dir, "revoked.json")
-			if err := os.WriteFile(revokedPath, []byte(testCase.body), 0o640); err != nil {
-				t.Fatal(err)
-			}
-			outPath := filepath.Join(dir, "index.json")
-			if _, err := run(outPath, revokedPath, ""); err == nil {
-				t.Fatalf("malformed revoked file (%s) was accepted", testCase.name)
-			}
-			if _, err := os.Stat(outPath); !os.IsNotExist(err) {
-				t.Fatal("a failed build left an output file behind")
-			}
-		})
-	}
-}
-
-// TestValidRevocationIsIncludedAndSurvivesTheClientDecodePath is the
-// positive counterpart of the two tests above: a well-formed -revoked file
-// actually reaches the output, unchanged, through the same client decode
-// path the round-trip test exercises.
-func TestValidRevocationIsIncludedAndSurvivesTheClientDecodePath(t *testing.T) {
-	dir := t.TempDir()
-	revokedPath := filepath.Join(dir, "revoked.json")
-	body := `[{"id": "some-recipe-1s", "version": 1, "reason": "the published weights were the wrong quantisation", "revoked_at": "2026-08-12T00:00:00Z"}]`
-	if err := os.WriteFile(revokedPath, []byte(body), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	outPath := filepath.Join(dir, "index.json")
-	if _, err := run(outPath, revokedPath, ""); err != nil {
-		t.Fatalf("run failed on a well-formed revoked file: %v", err)
-	}
-	indexBytes, err := os.ReadFile(outPath)
+	embedded, err := recipe.Builtin()
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub, priv := testKeypair(t)
-	idx, _, err := recipe.VerifyAndParseIndex(indexBytes, sign(priv, indexBytes), pub)
-	if err != nil {
-		t.Fatalf("index with a valid revocation did not survive the client's decode path: %v", err)
-	}
-	if len(idx.Revoked) != 1 {
-		t.Fatalf("expected one revocation in the built index, got: %#v", idx.Revoked)
-	}
-	got := idx.Revoked[0]
-	if got.ID != "some-recipe-1s" || got.Version != 1 || got.Reason != "the published weights were the wrong quantisation" {
-		t.Fatalf("revocation was not carried through unchanged: %#v", got)
+	want := "wrote " + outPath + ": " + strconv.Itoa(len(embedded)) + " recipe(s)"
+	if summary != want {
+		t.Fatalf("summary = %q, want %q", summary, want)
 	}
 }
 
 // TestGeneratedAtFlagIsUsedVerbatim proves the -generated-at flag actually
 // controls the timestamp written, which is the whole point of the flag: a
-// publish must be reproducible byte for byte given the same binary, the
-// same revoked file, and the same -generated-at.
+// publish must be reproducible byte for byte given the same binary and the
+// same -generated-at.
 func TestGeneratedAtFlagIsUsedVerbatim(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "index.json")
 	want := "2026-08-12T00:00:00Z"
-	if _, err := run(outPath, "", want); err != nil {
+	if _, err := run(outPath, want); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
 	data, err := os.ReadFile(outPath)
@@ -245,7 +174,7 @@ func TestGeneratedAtFlagIsUsedVerbatim(t *testing.T) {
 func TestGeneratedAtFlagRejectsAMalformedTimestamp(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "index.json")
-	if _, err := run(outPath, "", "12 August 2026"); err == nil {
+	if _, err := run(outPath, "12 August 2026"); err == nil {
 		t.Fatal("a malformed -generated-at value was accepted")
 	}
 	if _, err := os.Stat(outPath); !os.IsNotExist(err) {

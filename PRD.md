@@ -233,7 +233,6 @@ Persist at least:
 - Manager schema version
 - Local installation identity and authentication state
 - Machine inventory snapshots
-- Accepted model licences and timestamps
 - Installed recipe ID and version
 - Artifact revisions and checksums
 - Container image digest

@@ -717,19 +717,6 @@ type Operation struct {
 	Type string `yaml:"type" json:"type"`
 }
 
-// RequiresTerritoryConfirmation reports whether any artifact carries a
-// territory-exclusion licence term, in which case the install API must
-// require confirm_territory_eligibility (section 5.3) before install can
-// proceed.
-func (r Recipe) RequiresTerritoryConfirmation() bool {
-	for _, artifact := range r.Artifacts {
-		if len(artifact.LicenceTerritoryExclusions) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 func (r Recipe) TotalArtifactBytes() int64 {
 	var total int64
 	for _, artifact := range r.Artifacts {

@@ -248,10 +248,6 @@ func (s *Server) fleetDiscover(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), fleetDiscoverBudget)
 	defer cancel()
 	found, err := discoverCandidates(ctx, nil)
@@ -798,10 +794,6 @@ func (r *adoptionRun) succeed(result adoptionResult) {
 func (s *Server) fleetAdopt(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	if active, err := s.store.FleetUpgradeMaintenanceActive(r.Context()); err != nil {

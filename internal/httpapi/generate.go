@@ -237,10 +237,6 @@ func (s *Server) generateHandler(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	s.updateAdmissionMu.Lock()
 	defer s.updateAdmissionMu.Unlock()
 	if s.refuseMutationDuringUpdate(w) {
@@ -463,10 +459,6 @@ func findStagedMedia(dataDir, id string) (string, bool) {
 func (s *Server) mediaStage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, mediaMaxUploadBytes)
@@ -931,10 +923,6 @@ func (s *Server) serveGenerationFile(w http.ResponseWriter, r *http.Request, id 
 }
 
 func (s *Server) cancelGeneration(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	record, err := s.store.Generation(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("no generation with that id"))
@@ -970,10 +958,6 @@ func (s *Server) cancelGeneration(w http.ResponseWriter, r *http.Request, id str
 // the disk never disagree. A generation that is still running is refused
 // rather than pulled out from under the worker holding it.
 func (s *Server) deleteGeneration(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	record, err := s.store.Generation(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("no generation with that id"))

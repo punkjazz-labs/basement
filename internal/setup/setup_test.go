@@ -107,7 +107,7 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 	runner.outputs["hostname -s"] = "spark-head\n"
 
 	result, err := Install(context.Background(), runner, LocalFileSource{Path: "/tmp/binary"},
-		Options{Listen: ListenLAN, DiscoveredPeers: []string{"gx10-office.local"}}, nil)
+		Options{Listen: ListenLAN}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,6 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 		`mv -f "$temporary" ` + sudoersPath,
 		"tee " + dropInPath,
 		"systemctl daemon-reload && systemctl enable basement.service basement-updater.service basement-updater.path && systemctl restart basement.service && systemctl start basement-updater.service && systemctl start basement-updater.path && systemctl is-active --quiet basement.service && systemctl is-active --quiet basement-updater.path && test -x /usr/lib/basement/updater/basement-updater",
-		"tee " + dataDir + "/fleet.json",
 	} {
 		if !strings.Contains(joined, required) {
 			t.Errorf("privileged plan is missing %q", required)
@@ -154,15 +153,6 @@ func TestInstallRunsFullPlanForLAN(t *testing.T) {
 	}
 	if !strings.Contains(dropIn, "--listen 192.168.99.134:7070") {
 		t.Errorf("listen drop-in = %q", dropIn)
-	}
-	var fleet string
-	for command, payload := range runner.writes {
-		if strings.Contains(command, "fleet.json") {
-			fleet = payload
-		}
-	}
-	if !strings.Contains(fleet, "gx10-office.local") {
-		t.Errorf("fleet.json is missing the discovered peer: %q", fleet)
 	}
 }
 

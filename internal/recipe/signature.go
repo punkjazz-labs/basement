@@ -18,7 +18,7 @@ import (
 // that turns the over-the-air recipe channel on for its fleet.
 const IndexPublicKeyBase64 = "nnN/8YJHfjsMglhSYqwH+2/GwOghge3NwjeAiu0zxjc="
 
-// IndexPublicKey decodes the embedded placeholder constant. It panics on a
+// IndexPublicKey decodes the embedded key constant. It panics on a
 // malformed constant, which can only happen if this file itself is edited
 // incorrectly — there is no untrusted input on this path.
 func IndexPublicKey() ed25519.PublicKey {

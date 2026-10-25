@@ -24,7 +24,7 @@ func TestFleetMembershipRoutesRequireOwnerSession(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://console.test/api/v1/fleet/join-code", nil)
 	request.Header.Set("Authorization", "Bearer public-key")
 	server.Handler().ServeHTTP(unauthorized, request)
-	if unauthorized.Code != http.StatusForbidden {
+	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("public key reached join-code route: status=%d", unauthorized.Code)
 	}
 
@@ -67,7 +67,7 @@ func TestFleetJoinRouteRefusesKeysAndUnreadableRequests(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+key)
 	server.Handler().ServeHTTP(keyed, request)
-	if keyed.Code != http.StatusForbidden {
+	if keyed.Code != http.StatusUnauthorized {
 		t.Fatalf("an API key reached the join route: status=%d body=%s", keyed.Code, keyed.Body.String())
 	}
 
@@ -121,7 +121,7 @@ func TestFleetInvitationRoutesNeedTheOwnerSession(t *testing.T) {
 		request = httptest.NewRequest(http.MethodPost, "http://console.test/api/v1/fleet/invitations/inv_abc/"+action, nil)
 		request.Header.Set("Authorization", "Bearer "+key)
 		server.Handler().ServeHTTP(answered, request)
-		if answered.Code != http.StatusForbidden {
+		if answered.Code != http.StatusUnauthorized {
 			t.Fatalf("an API key reached %s: status=%d body=%s", action, answered.Code, answered.Body.String())
 		}
 	}
@@ -158,7 +158,7 @@ func TestControllerInviteRoutesNeedTheOwnerSessionAndAnAddressableConsole(t *tes
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+key)
 	server.Handler().ServeHTTP(keyed, request)
-	if keyed.Code != http.StatusForbidden {
+	if keyed.Code != http.StatusUnauthorized {
 		t.Fatalf("an API key asked another Spark to join: status=%d body=%s", keyed.Code, keyed.Body.String())
 	}
 	anonymous := httptest.NewRecorder()

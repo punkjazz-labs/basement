@@ -299,8 +299,9 @@ func TestWorkerReportsWhyItCannotJoinTheCable(t *testing.T) {
 }
 
 // The endpoint carries the same guards as every other node endpoint: a fleet
-// key, and only a two-Spark recipe this Spark itself holds.
-func TestWorkerCableEndpointIsKeyOnlyAndCatalogued(t *testing.T) {
+// key (or this Spark's own console session), and only a two-Spark recipe this
+// Spark itself holds.
+func TestWorkerCableEndpointRefusesStrangersAndUnknownRecipes(t *testing.T) {
 	fixture := newNodeFixture(t)
 	stubFabricProbe(t, operations.FabricProbe{Interface: "enp1s0f1np1", Address: "169.254.37.4", Port: 45111, Token: "abc123"}, nil)
 
@@ -320,7 +321,7 @@ func TestWorkerCableEndpointIsKeyOnlyAndCatalogued(t *testing.T) {
 	}
 }
 
-func TestWorkerNodeEndpointsAreKeyOnlyAndAllowlisted(t *testing.T) {
+func TestWorkerNodeEndpointsRefuseStrangersAndAreAllowlisted(t *testing.T) {
 	fixture := newNodeFixture(t)
 
 	if status, _ := fixture.post(t, "/api/v1/internal/node/step", "", map[string]any{}); status != http.StatusUnauthorized {
@@ -1601,7 +1602,7 @@ func TestDelegatedStepProgressIsReadableWhileItRuns(t *testing.T) {
 		t.Fatalf("a finished step is still reported as running: %#v", after)
 	}
 
-	// Same key-only rule as every other node endpoint.
+	// Same authentication as every other node endpoint.
 	if status, _ := fixture.post(t, "/api/v1/internal/node/step/progress", "", map[string]any{"job_id": "job-1"}); status != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated progress read status=%d", status)
 	}

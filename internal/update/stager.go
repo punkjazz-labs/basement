@@ -115,14 +115,6 @@ func NewStager(dataDir string, keys KeyRing) *Stager {
 	}
 }
 
-func (stager *Stager) Stage(ctx context.Context, candidate Candidate, runningVersion string) (AttemptStatus, error) {
-	status, err := stager.Prepare(candidate, runningVersion)
-	if err != nil {
-		return AttemptStatus{}, err
-	}
-	return stager.StagePrepared(ctx, candidate, status)
-}
-
 // Prepare validates the server-selected candidate and persists the update
 // intent before the API starts asynchronous network work.
 func (stager *Stager) Prepare(candidate Candidate, runningVersion string) (AttemptStatus, error) {
@@ -185,7 +177,7 @@ func (stager *Stager) StageOnly(ctx context.Context, candidate Candidate, status
 	}
 	fail := func(cause error) (AttemptStatus, error) {
 		status.State = "failed_before_handoff"
-		status.Failure = cleanFailure(cause)
+		status.Failure = CleanFailure(cause)
 		status.UpdatedAt = journalNow(stager.Now)
 		_ = stager.writeStatus(status)
 		return status, cause
@@ -313,7 +305,7 @@ func (stager *Stager) ApplyStaged(status AttemptStatus) (AttemptStatus, error) {
 	}
 	fail := func(cause error) (AttemptStatus, error) {
 		status.State = "failed_before_handoff"
-		status.Failure = cleanFailure(cause)
+		status.Failure = CleanFailure(cause)
 		status.UpdatedAt = journalNow(stager.Now)
 		_ = stager.writeStatus(status)
 		return status, cause

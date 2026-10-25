@@ -388,12 +388,10 @@ func TestRecipePolicyRejectsUnsafeVariants(t *testing.T) {
 	}
 }
 
-// TestLicenceTerritoryExclusionsAcceptedAndTracked proves the field is
-// accepted when it is a well-formed, non-empty list of non-blank strings,
-// that an absent field leaves a recipe unaffected (the shipped pack has no
-// such field yet and still validates), and that RequiresTerritoryConfirmation
-// answers correctly in both cases.
-func TestLicenceTerritoryExclusionsAcceptedAndTracked(t *testing.T) {
+// TestLicenceTerritoryExclusionsAccepted proves the field is accepted when it
+// is a well-formed, non-empty list of non-blank strings, and that an absent
+// field leaves a recipe unaffected.
+func TestLicenceTerritoryExclusionsAccepted(t *testing.T) {
 	recipes, err := Builtin()
 	if err != nil {
 		t.Fatal(err)
@@ -402,8 +400,10 @@ func TestLicenceTerritoryExclusionsAcceptedAndTracked(t *testing.T) {
 	if !ok {
 		t.Fatal("Qwen 35 recipe missing")
 	}
-	if base.RequiresTerritoryConfirmation() {
-		t.Fatalf("a recipe with no licence_territory_exclusions must not require territory confirmation: %#v", base.Artifacts)
+	for _, artifact := range base.Artifacts {
+		if len(artifact.LicenceTerritoryExclusions) != 0 {
+			t.Fatalf("fixture recipe unexpectedly carries licence_territory_exclusions: %#v", base.Artifacts)
+		}
 	}
 
 	candidate := base
@@ -419,9 +419,6 @@ func TestLicenceTerritoryExclusionsAcceptedAndTracked(t *testing.T) {
 	}
 	if err := Validate(candidate); err != nil {
 		t.Fatalf("Validate() with a well-formed licence_territory_exclusions list = %v, want nil", err)
-	}
-	if !candidate.RequiresTerritoryConfirmation() {
-		t.Fatal("a recipe whose artifact carries licence_territory_exclusions must require territory confirmation")
 	}
 }
 

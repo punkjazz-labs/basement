@@ -10,7 +10,6 @@
 // Usage:
 //
 //	go run ./cmd/build-index -out index.json
-//	go run ./cmd/build-index -out index.json -revoked revoked.json
 //
 // The output is unsigned. Pair this with cmd/sign-index (or `make
 // sign-index`) to produce the detached signature before publishing; see
@@ -18,12 +17,10 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/punkjazz-labs/basement/internal/recipe"
@@ -31,10 +28,9 @@ import (
 
 func main() {
 	out := flag.String("out", "index.json", "path to write the built index to")
-	revokedPath := flag.String("revoked", "", "optional path to a JSON file listing revocations to fold into the index (see docs/RECIPE-FEED.md)")
 	generatedAt := flag.String("generated-at", "", "optional RFC3339 timestamp for generated_at; default is now, UTC. Set this to reproduce a publish byte for byte")
 	flag.Parse()
-	summary, err := run(*out, *revokedPath, *generatedAt)
+	summary, err := run(*out, *generatedAt)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build-index:", err)
 		os.Exit(1)
@@ -42,13 +38,13 @@ func main() {
 	fmt.Println(summary)
 }
 
-// run loads the embedded recipe pack, re-validates it, folds in whatever
-// revocations -revoked names, and writes the resulting index atomically to
-// outPath. It touches outPath only after every check has already passed, so
-// a run that fails for any reason leaves no output file behind: a partial or
-// invalid index is worse than none, because nothing downstream distinguishes
-// "not published yet" from "published but wrong".
-func run(outPath, revokedPath, generatedAtFlag string) (string, error) {
+// run loads the embedded recipe pack, re-validates it, and writes the
+// resulting index atomically to outPath. It touches outPath only after every
+// check has already passed, so a run that fails for any reason leaves no
+// output file behind: a partial or invalid index is worse than none, because
+// nothing downstream distinguishes "not published yet" from "published but
+// wrong".
+func run(outPath, generatedAtFlag string) (string, error) {
 	recipes, err := recipe.Builtin()
 	if err != nil {
 		return "", fmt.Errorf("load embedded recipes: %w", err)
@@ -67,15 +63,10 @@ func run(outPath, revokedPath, generatedAtFlag string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	revocations, err := loadRevocations(revokedPath)
-	if err != nil {
-		return "", err
-	}
 	idx := recipe.Index{
 		SchemaVersion: recipe.IndexSchemaVersion,
 		GeneratedAt:   generated,
 		Recipes:       recipes,
-		Revoked:       revocations,
 	}
 	body, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
@@ -85,14 +76,13 @@ func run(outPath, revokedPath, generatedAtFlag string) (string, error) {
 	if err := writeAtomic(outPath, body); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("wrote %s: %d recipe(s), %d revocation(s)", outPath, len(recipes), len(revocations)), nil
+	return fmt.Sprintf("wrote %s: %d recipe(s)", outPath, len(recipes)), nil
 }
 
 // resolveGeneratedAt returns time.Now in UTC when flagValue is empty, and
 // otherwise parses flagValue as RFC3339. The flag exists so a publish can be
 // reproduced byte for byte: rerunning this tool with the same embedded
-// binary, the same revoked file, and the same -generated-at must write the
-// same bytes.
+// binary and the same -generated-at must write the same bytes.
 func resolveGeneratedAt(flagValue string) (time.Time, error) {
 	if flagValue == "" {
 		return time.Now().UTC(), nil
@@ -102,52 +92,6 @@ func resolveGeneratedAt(flagValue string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse -generated-at: %w", err)
 	}
 	return parsed.UTC(), nil
-}
-
-// loadRevocations reads and validates the optional -revoked file. It holds
-// the file to the same rules recipe.VerifyAndParseIndex holds the published
-// revoked array to (unknown fields refused, every field required, id and
-// version naming exactly one recipe version), plus one this tool alone can
-// check before anything is published: no two entries may name the same
-// (id, version) pair, since two revocations for one recipe version is
-// either a duplicate that adds nothing or a contradiction, and either way
-// belongs to whoever is drafting the file, not to every manager that fetches
-// the result.
-func loadRevocations(path string) ([]recipe.Revocation, error) {
-	if path == "" {
-		return nil, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read revoked file: %w", err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var revocations []recipe.Revocation
-	if err := decoder.Decode(&revocations); err != nil {
-		return nil, fmt.Errorf("decode revoked file: %w", err)
-	}
-	seen := make(map[string]bool, len(revocations))
-	for i, r := range revocations {
-		if strings.TrimSpace(r.ID) == "" {
-			return nil, fmt.Errorf("revoked[%d]: id is required", i)
-		}
-		if r.Version < 1 {
-			return nil, fmt.Errorf("revoked[%d]: version must name one exact recipe version (>= 1)", i)
-		}
-		if strings.TrimSpace(r.Reason) == "" {
-			return nil, fmt.Errorf("revoked[%d]: reason is required and must be human-readable", i)
-		}
-		if r.RevokedAt.IsZero() {
-			return nil, fmt.Errorf("revoked[%d]: revoked_at is required", i)
-		}
-		key := fmt.Sprintf("%s@%d", r.ID, r.Version)
-		if seen[key] {
-			return nil, fmt.Errorf("revoked[%d]: duplicate revocation for %s version %d", i, r.ID, r.Version)
-		}
-		seen[key] = true
-	}
-	return revocations, nil
 }
 
 // writeAtomic writes data to a temporary file beside path and renames it

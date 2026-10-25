@@ -118,10 +118,11 @@ says where the same path starts.
 
 ### Fleet groundwork
 
-Non-selected discovered machines are recorded on the master as
-`fleet.json` (`discovered_peers`). Nothing consumes it yet; it is the seed
-for multi-GB10 (master/worker) recipes so a future distributed topology
-can offer known peers without a fresh discovery pass.
+Setup used to record the non-selected discovered machines on the master as
+`fleet.json` (`discovered_peers`). Nothing ever read it, and fleet membership
+(ADR 0016) became the record of which machines belong together, so the file
+stopped being written on 2026-10-25. Machines installed earlier may still
+carry it; nothing reads it there either.
 
 ## Consequences
 

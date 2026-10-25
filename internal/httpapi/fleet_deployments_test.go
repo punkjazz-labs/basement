@@ -214,8 +214,8 @@ func TestPublicAPIKeyCannotPlanOrCreateFleetDeployment(t *testing.T) {
 		want int
 	}{
 		{path: "/api/v1/fleet/placements/plan", body: `{"recipe_id":"anything"}`, want: http.StatusUnauthorized},
-		{path: "/api/v1/fleet/deployments", body: `{"recipe_id":"anything","node_id":"anything","confirmed":true}`, want: http.StatusForbidden},
-		{path: "/api/v1/fleet/deployments/adopt", body: `{"recipe_id":"anything","node_id":"anything"}`, want: http.StatusForbidden},
+		{path: "/api/v1/fleet/deployments", body: `{"recipe_id":"anything","node_id":"anything","confirmed":true}`, want: http.StatusUnauthorized},
+		{path: "/api/v1/fleet/deployments/adopt", body: `{"recipe_id":"anything","node_id":"anything"}`, want: http.StatusUnauthorized},
 	} {
 		request := httptest.NewRequest(http.MethodPost, "http://manager.test"+test.path, bytes.NewBufferString(test.body))
 		request.Header.Set("Content-Type", "application/json")
@@ -292,7 +292,7 @@ func TestFleetDeploymentReleaseRouteClearsAStrandedRecord(t *testing.T) {
 		return response
 	}
 	release := func(owner bool) *httptest.ResponseRecorder { return releaseID(owner, "deployment_stranded") }
-	if refused := release(false); refused.Code != http.StatusForbidden {
+	if refused := release(false); refused.Code != http.StatusUnauthorized {
 		t.Fatalf("a caller with no owner session cleared a record: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 	// A record that is not there answers as the read of that same record

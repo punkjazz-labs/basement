@@ -125,10 +125,11 @@ general form of that power: they can switch to anything already on the
 machine, repeatedly, with no install to show for it, and nothing about
 delegated placement needs them.
 
-This is enforced in the auth wrapper, before the handler is entered, and
-checked a second time inside the handler for a request that arrived
-marked as delegated. Negative tests pin both, and pin that `/api/v1/keys`
-and `/api/v1/peers` remain console-only.
+Since 2026-10-25 this is enforced in one place: the shared auth middleware
+admits a key on the model routes and marks the request, and `modelAction`
+refuses any keyed request that is not exactly an install, with 403, before
+it does anything else. Negative tests pin that, and pin that
+`/api/v1/keys` and `/api/v1/peers` remain console-only.
 
 A delegated install carries no CSRF token and needs none. CSRF exists to
 stop a browser's ambient cookie authority from being spent by another

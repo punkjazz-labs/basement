@@ -2,9 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,17 +108,11 @@ func (d *delegatedProgress) snapshot(jobID string) (string, json.RawMessage, boo
 	return d.operation, d.receipt, true
 }
 
-// withNodeAuth accepts an API-key bearer token and nothing else. A console
-// session is deliberately not accepted: these endpoints mutate this node's
-// containers, and refusing cookies means a browser can never be walked into
-// calling them, so no CSRF token is involved.
-func (s *Server) withNodeAuth(next http.HandlerFunc) http.HandlerFunc {
+// nodeRoute refuses anything but POST. Every worker route changes this node's
+// containers or reservations, so none of them may run as a GET, which is the
+// one method admit lets a session through without its CSRF token.
+func nodeRoute(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") || !s.store.VerifyAPIKey(r.Context(), strings.TrimPrefix(header, "Bearer ")) {
-			writeError(w, http.StatusUnauthorized, errors.New("a fleet API key is required"))
-			return
-		}
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
 			return
@@ -746,11 +738,11 @@ func (s *Server) trustedWorkerRecipe(proposed recipe.Recipe) (recipe.Recipe, err
 	if !ok {
 		return recipe.Recipe{}, fmt.Errorf("this Spark does not have recipe %s version %d in its own catalogue", proposed.ID, proposed.Version)
 	}
-	localSum, err := recipeFingerprint(local)
+	localSum, err := fleet.RecipeFingerprint(local)
 	if err != nil {
 		return recipe.Recipe{}, err
 	}
-	proposedSum, err := recipeFingerprint(proposed)
+	proposedSum, err := fleet.RecipeFingerprint(proposed)
 	if err != nil {
 		return recipe.Recipe{}, err
 	}
@@ -761,15 +753,6 @@ func (s *Server) trustedWorkerRecipe(proposed recipe.Recipe) (recipe.Recipe, err
 		return recipe.Recipe{}, errors.New("a single-Spark recipe is never run on behalf of another Spark")
 	}
 	return local, nil
-}
-
-func recipeFingerprint(r recipe.Recipe) (string, error) {
-	encoded, err := json.Marshal(r)
-	if err != nil {
-		return "", errors.New("a recipe could not be canonicalized for comparison")
-	}
-	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:]), nil
 }
 
 // sharedArtifacts reports artifact keys and paths this node's OTHER

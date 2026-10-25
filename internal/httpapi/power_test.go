@@ -155,8 +155,8 @@ func TestPowerModeAPIReadsAndSetsTheModeForTheConsoleOnly(t *testing.T) {
 	noSession := doRequest(t, http.MethodPost, h.server.URL+"/api/v1/system/power-mode", `{"mode":"cool"}`, nil,
 		map[string]string{"Origin": h.server.URL, "Idempotency-Key": "power-anonymous"})
 	noSession.Body.Close()
-	if noSession.StatusCode != http.StatusForbidden {
-		t.Fatalf("an unauthenticated write status=%d, want 403", noSession.StatusCode)
+	if noSession.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("an unauthenticated write status=%d, want 401", noSession.StatusCode)
 	}
 	if commands := h.commands(); len(commands) != 0 {
 		t.Fatalf("a refused request reached the GPU: %v", commands)

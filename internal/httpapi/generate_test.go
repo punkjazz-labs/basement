@@ -655,14 +655,7 @@ func TestRecipeCatalogReportsMediaGenerationConfigOnlyForMedia(t *testing.T) {
 	}
 	media := recipetest.Media()
 	text := textRecipes[0]
-	// The catalog listing reads accepted revocations to mark the affected
-	// recipes, so it needs a real (empty) database rather than a zero Server.
-	database, err := store.Open(filepath.Join(t.TempDir(), "manager.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { database.Close() })
-	server := &Server{store: database}
+	server := &Server{}
 	server.SetRecipes([]recipe.Recipe{media, text}, []recipe.Recipe{media, text})
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/recipes", nil)

@@ -185,6 +185,9 @@ CREATE TABLE IF NOT EXISTS installed_models (
   active INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
+-- accepted_licences and territory_confirmations are no longer written or
+-- read. They stay rather than being dropped, so no existing database has to
+-- migrate and an older manager still finds its own schema after a rollback.
 CREATE TABLE IF NOT EXISTS accepted_licences (
   recipe_id TEXT NOT NULL,
   recipe_version INTEGER NOT NULL,
@@ -1599,28 +1602,6 @@ func (s *Store) ClearRole(ctx context.Context, name string) error {
 func (s *Store) DeleteModel(ctx context.Context, recipeID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM installed_models WHERE recipe_id=?`, recipeID)
 	return err
-}
-
-func (s *Store) AcceptLicence(ctx context.Context, recipeID string, version int) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO accepted_licences(recipe_id,recipe_version,accepted_at) VALUES(?,?,?)`, recipeID, version, now())
-	return err
-}
-
-func (s *Store) LicenceAccepted(ctx context.Context, recipeID string, version int) (bool, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM accepted_licences WHERE recipe_id=? AND recipe_version=?`, recipeID, version).Scan(&count)
-	return count == 1, err
-}
-
-func (s *Store) ConfirmTerritoryEligibility(ctx context.Context, recipeID string, version int) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO territory_confirmations(recipe_id,recipe_version,confirmed_at) VALUES(?,?,?)`, recipeID, version, now())
-	return err
-}
-
-func (s *Store) TerritoryEligibilityConfirmed(ctx context.Context, recipeID string, version int) (bool, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM territory_confirmations WHERE recipe_id=? AND recipe_version=?`, recipeID, version).Scan(&count)
-	return count == 1, err
 }
 
 // Generation is one media generation: what was asked for, what happened to

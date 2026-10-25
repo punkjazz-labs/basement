@@ -116,9 +116,8 @@ and is not part of this codebase.
 
 ## API surface
 
-`internal/httpapi/docredact.go` adds, all under console session auth
-(`withReadAuth` at the mux, `AuthorizeMutation` inline on every POST, matching the
-`jobAction`/`modelAction` dispatch shape already used elsewhere in the package):
+`internal/httpapi/docredact.go` adds, all under console session auth (the `owner`
+wrapper at the mux, which also checks CSRF and Origin on every POST):
 
 - `POST /api/v1/docredact/analyze` -- run the pattern pass over submitted text, start a
   session.

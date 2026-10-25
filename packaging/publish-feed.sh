@@ -16,7 +16,7 @@
 #   packaging/publish-feed.sh
 #
 # Run on the owner's laptop, from a clean checkout of main. See docs/
-# RECIPE-FEED.md section 6 for the scheduled job that runs this unattended.
+# RECIPE-FEED.md section 5 for the scheduled job that runs this unattended.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -76,16 +76,9 @@ fi
 
 echo "==> build-index"
 index_path="$work/index.json"
-revoked_args=()
-if [ -n "${REVOKED:-}" ]; then
-  revoked_args=(-revoked "$REVOKED")
-fi
-# The +-expansion keeps macOS's bash 3.2 happy: expanding an empty array
-# under set -u is an unbound-variable error there.
-build_summary="$(go run ./cmd/build-index -out "$index_path" ${revoked_args[@]+"${revoked_args[@]}"})"
+build_summary="$(go run ./cmd/build-index -out "$index_path")"
 echo "$build_summary"
 recipe_count="$(printf '%s\n' "$build_summary" | grep -oE '[0-9]+ recipe' | grep -oE '[0-9]+')"
-revocation_count="$(printf '%s\n' "$build_summary" | grep -oE '[0-9]+ revocation' | grep -oE '[0-9]+')"
 
 echo "==> reading the signing key from the keychain"
 key_file="$(mktemp)"
@@ -112,7 +105,7 @@ timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   cd "$feed_clone"
   git checkout -B main
   git add index.json index.json.sig
-  git commit -m "feed: ${recipe_count} recipes, ${revocation_count} revocations, ${timestamp}"
+  git commit -m "feed: ${recipe_count} recipes, ${timestamp}"
   git push origin main
 )
 

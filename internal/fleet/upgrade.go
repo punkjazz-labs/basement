@@ -91,16 +91,10 @@ func (m *Manager) requireFleetMutationAllowed(ctx context.Context) error {
 	return errors.New("fleet maintenance is active; placement and membership changes wait until every node runs the target version")
 }
 
-func candidateFromUpgradeRelease(release UpgradeRelease) managerupdate.Candidate {
-	return managerupdate.Candidate{
-		Release:       managerupdate.Release{TagName: release.ReleaseTag},
-		ManifestBytes: append([]byte(nil), release.ManifestBytes...),
-		Signature:     append([]byte(nil), release.SignatureBytes...),
-		AssetURL:      release.AssetURL,
-	}
-}
-
-func validateUpgradeRelease(release UpgradeRelease) error {
+// ValidateUpgradeRelease checks that a release names one complete run and
+// that its manifest bytes are the ones its digest says. Both the member's
+// fleet transport and its local runtime ask before staging anything.
+func ValidateUpgradeRelease(release UpgradeRelease) error {
 	if release.Version != UpgradeProtocolVersion || release.RunID == "" || release.ReleaseTag == "" || release.TargetVersion == "" || release.ManifestSHA256 == "" || len(release.ManifestBytes) == 0 || len(release.SignatureBytes) == 0 || release.AssetURL == "" {
 		return errors.New("fleet upgrade release identity is invalid")
 	}
@@ -331,7 +325,7 @@ func (m *Manager) ResolveUpgrade(ctx context.Context) (store.FleetUpgradeRun, er
 			continue
 		}
 		if resolveErr := m.upgradeResolveCall(ctx, run, node); resolveErr != nil {
-			_ = m.database.UpdateFleetUpgradeNodeResolve(ctx, run.RunID, node.NodeID, "unreachable", cleanUpgradeFailure(resolveErr))
+			_ = m.database.UpdateFleetUpgradeNodeResolve(ctx, run.RunID, node.NodeID, "unreachable", managerupdate.CleanFailure(resolveErr))
 			continue
 		}
 		if err := m.database.UpdateFleetUpgradeNodeResolve(ctx, run.RunID, node.NodeID, "resolved", ""); err != nil {
@@ -511,21 +505,10 @@ func (m *Manager) failUpgrade(ctx context.Context, run store.FleetUpgradeRun, no
 	if runningVersion == "" {
 		runningVersion = node.RunningVersion
 	}
-	failure := cleanUpgradeFailure(cause)
+	failure := managerupdate.CleanFailure(cause)
 	_ = m.database.UpdateFleetUpgradeNode(ctx, run.RunID, node.NodeID, state, runningVersion, node.AttemptID, failure)
 	_ = m.database.UpdateFleetUpgradeRunState(ctx, run.RunID, "failed", fmt.Sprintf("node %s failed: %s", node.DisplayName, failure))
 	return cause
-}
-
-func cleanUpgradeFailure(err error) string {
-	if err == nil {
-		return ""
-	}
-	message := strings.Join(strings.Fields(err.Error()), " ")
-	if len(message) > 300 {
-		message = message[:300]
-	}
-	return message
 }
 
 func releaseForRun(run store.FleetUpgradeRun) UpgradeRelease {
@@ -617,7 +600,7 @@ func (m *Manager) upgradeStage(w http.ResponseWriter, r *http.Request) {
 		writeFleetError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := validateUpgradeRelease(request); err != nil {
+	if err := ValidateUpgradeRelease(request); err != nil {
 		writeFleetError(w, http.StatusBadRequest, err)
 		return
 	}

@@ -130,7 +130,7 @@ func (updater *Updater) reconcileUnits(ctx context.Context, journal Journal, may
 		live, err := os.ReadFile(installed)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			if failure == "" {
-				failure = cleanFailure(err)
+				failure = CleanFailure(err)
 			}
 			continue
 		}
@@ -144,7 +144,7 @@ func (updater *Updater) reconcileUnits(ctx context.Context, journal Journal, may
 			// suffix, so systemd never loads it.
 			if backupErr := copySyncedFile(installed, installed+".previous", 0o644); backupErr != nil {
 				if failure == "" {
-					failure = cleanFailure(backupErr)
+					failure = CleanFailure(backupErr)
 				}
 				continue
 			}
@@ -155,7 +155,7 @@ func (updater *Updater) reconcileUnits(ctx context.Context, journal Journal, may
 		// day on the manager slot.
 		if writeErr := writeBytesAtomic(installed, []byte(unit.text), 0o644); writeErr != nil {
 			if failure == "" {
-				failure = cleanFailure(writeErr)
+				failure = CleanFailure(writeErr)
 			}
 			continue
 		}
@@ -167,7 +167,7 @@ func (updater *Updater) reconcileUnits(ctx context.Context, journal Journal, may
 	// recorded here, never treated as a rollback trigger.
 	if changed > 0 {
 		if err := updater.daemonReload(ctx); err != nil && failure == "" {
-			failure = cleanFailure(err)
+			failure = CleanFailure(err)
 		}
 	}
 	if failure != "" {
