@@ -32,14 +32,17 @@ import {
   COOL_TAG, DISRUPTIVE_KINDS, FLEET_DEPLOYMENTS_PATH,
   NO_PLACEMENT_BACK, NO_PLACEMENT_LEFT, PLACEMENT_PLAN_PATH,
   type ActionTarget, type FleetDeploymentAction, type FleetRow, type ModelsTab, type NodeChip,
-  type PlacementTarget, type PowerRow,
+  type PlacementTarget,
 } from '../fleetModels'
+import { AttentionBanner, FleetHealthLine, HealthDot } from '../components/FleetHealth'
+import { Sparkline } from '../components/Sparkline'
+import { loadsRefused } from '../fleetHealth'
 import { boxHeadroom, fitWord, tightestBox, type BoxHeadroom, type FitResult } from '../headroom'
 import { HeadroomBar, freeText } from '../headroomBar'
 import { boxOfRow, fleetMemory, loadFit, loadTargets, variantFamily } from '../loadFit'
 import { LOCAL_MACHINE, machineSeries, subscribeTelemetry, telemetryRevision } from '../telemetry'
 import {
-  boxesWord, fleetDisk, unitFor, unitHealth, unitPlacement, HEALTH_WORD, type FleetUnit,
+  boxesWord, unitFor, unitHealth, unitPlacement, HEALTH_WORD, type FleetUnit,
 } from '../units'
 
 // Model summaries trace to the recipes and docs/MODEL-CANDIDATES-2026-08.md.
@@ -107,160 +110,35 @@ interface ConfirmState {
   switchFrom?: string
 }
 
-// The card one strip chip opens is rendered under the strip, so the chip has
-// to name it.
-const NODE_CARD_ID = 'fleet-node-card'
-
 // No power change is ever running from this screen: the switch lives on the
 // Sparks page. The strip still reads each Spark's mode through powerRow, and
 // this is the empty run list that read is made against.
 const NO_POWER_RUNS: ReadonlySet<string> = new Set()
 
-// The dot a box wears wherever this page names it: lit while it serves a
-// model, and otherwise the word its own membership state gives it.
-const boxDot = (spark: FleetRow): string =>
-  spark.serving ? 'on' : spark.status.dot === 'on' ? '' : spark.status.dot
-
-// One group of the fleet strip: a unit, or the boxes that run on their own.
-interface StripGroup {
+// One figure of the line under the health line. At most three, and only the
+// ones that move or that the owner would act on (Cloudflare's stat cards, the
+// research's keep list): how fast the serving models answer, which box has
+// the least memory left, and how many tokens this Spark has served. A count of
+// what is serving is on the cards right under it, and free disk belongs to
+// Storage, so neither is said here.
+interface Fact {
   key: string
-  label: string
-  model: string
-  sparks: FleetRow[]
-}
-
-// The fleet over the table, one compact cell per box, grouped by the units
-// the boxes form. Each cell is the box's dot, its short name, a headroom bar
-// and what it has free. The groups wrap onto a second line rather than run
-// into each other, and on a phone the strip scrolls sideways. Every number is
-// one that box reported about itself, and n/a means it has reported none yet.
-// Each cell opens that box's own card below the strip. A box in the cool mode
-// carries the small "cool" tag: the mode its row shows, which is what that box
-// reported. A box that has reported no mode carries no tag.
-function FleetStrip({ groups, names, power, headroom, open, onOpen }: {
-  groups: StripGroup[]
-  names: string[]
-  power: Map<string, PowerRow>
-  headroom: (spark: FleetRow) => BoxHeadroom
-  open: string
-  onOpen: (nodeID: string) => void
-}) {
-  return (
-    <div className="fleet-strip" role="group" aria-label="Boxes in this fleet">
-      {groups.map(group => (
-        <div className="fs-group" key={group.key}>
-          <div className="fs-group-label">
-            <b>{group.label}</b>
-            {group.model && <span>{group.model}</span>}
-          </div>
-          <div className="fs-cells">
-            {group.sparks.map(spark => {
-              const room = headroom(spark)
-              return (
-                <button
-                  type="button"
-                  className="fs-node"
-                  key={spark.nodeID}
-                  aria-expanded={open === spark.nodeID}
-                  // Named only while the card is really there: a control that
-                  // points at nothing is worse than one that points at nothing
-                  // named.
-                  aria-controls={open === spark.nodeID ? NODE_CARD_ID : undefined}
-                  title={spark.displayName}
-                  onClick={() => onOpen(spark.nodeID)}
-                >
-                  <span className="fs-top">
-                    <i className={`sdot ${boxDot(spark)}`} aria-hidden="true" />
-                    <span className="fs-name">{shortSparkName(spark.displayName, names)}</span>
-                    {power.get(spark.nodeID)?.tag && <span className="fs-cool">{COOL_TAG}</span>}
-                  </span>
-                  <HeadroomBar headroom={room} />
-                  <span className={`fs-free ${room.state}`}>{freeText(room)}</span>
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-// What one machine has free, as the card states it. A Spark that has reported
-// nothing about itself says so once rather than twice.
-const sizeLine = (free?: number, total?: number): string =>
-  free === undefined && total === undefined ? 'n/a' : `${formatBytes(free)} free of ${formatBytes(total)}`
-
-// One Spark's card: what that machine reported about itself. The power mode
-// is set on the Sparks page, where every Spark has a switch of its own; this
-// screen is about models, and it only reads the mode for the "cool" tag on
-// the strip above.
-function NodeCard({ spark, headroom, unit }: { spark: FleetRow; headroom: BoxHeadroom; unit?: string }) {
-  const inventory = spark.inventory
-  return (
-    <div className="node-card" id={NODE_CARD_ID}>
-      <header>
-        <strong>{spark.displayName}</strong>
-        <span className="role">{[unit, spark.role].filter(Boolean).join(' · ')}</span>
-      </header>
-      <div className="rows">
-        <div className="row">
-          <span className="k">Memory</span>
-          <span className="v room">
-            <HeadroomBar headroom={headroom} />
-            {sizeLine(inventory?.memory_available_bytes, inventory?.memory_total_bytes)}
-          </span>
-        </div>
-        <div className="row">
-          <span className="k">Disk</span>
-          <span className="v">{sizeLine(inventory?.storage_available_bytes, inventory?.storage_total_bytes)}</span>
-        </div>
-        {inventory?.gpu_temperature_c ? (
-          <div className="row">
-            <span className="k">GPU</span>
-            <span className="v">
-              {[
-                `${inventory.gpu_temperature_c} °C`,
-                inventory.gpu_power_draw_watts ? `${inventory.gpu_power_draw_watts.toFixed(0)} W` : '',
-                inventory.gpu_clock_mhz ? `${inventory.gpu_clock_mhz} MHz` : '',
-              ].filter(Boolean).join(' · ')}
-            </span>
-          </div>
-        ) : null}
-      </div>
-    </div>
-  )
-}
-
-// One figure of the strip under the title: a tiny label, a big number in the
-// monospace face, its unit in faint text, and one quiet line under it.
-interface Kpi {
-  label: string
-  value: string
-  unit?: string
-  sub?: ReactNode
-  tone?: '' | 'tight' | 'full'
+  node: ReactNode
+  tone?: '' | 'warn' | 'fail'
   title?: string
+  onClick?: () => void
 }
 
-// "7.2 GB" as a number and a unit, so the unit can stand faint beside it.
-const splitUnit = (text: string): { value: string; unit?: string } => {
-  const at = text.indexOf(' ')
-  return at === -1 ? { value: text } : { value: text.slice(0, at), unit: text.slice(at + 1) }
-}
-
-function KpiStrip({ items }: { items: Kpi[] }) {
+function FactsLine({ facts }: { facts: Fact[] }) {
+  if (facts.length === 0) return null
   return (
-    <div className="kpis" role="group" aria-label="At a glance">
-      {items.map(item => (
-        <div className={`kpi ${item.tone ?? ''}`} key={item.label} title={item.title}>
-          <span className="label">{item.label}</span>
-          <span className="value">
-            {item.value}
-            {item.unit && <small>{item.unit}</small>}
-          </span>
-          {item.sub && <span className="sub">{item.sub}</span>}
-        </div>
+    <div className="facts-line" role="group" aria-label="At a glance">
+      {facts.map(fact => fact.onClick ? (
+        <button type="button" key={fact.key} className={`fact ${fact.tone ?? ''}`} title={fact.title} onClick={fact.onClick}>
+          {fact.node}
+        </button>
+      ) : (
+        <span key={fact.key} className={`fact ${fact.tone ?? ''}`} title={fact.title}>{fact.node}</span>
       ))}
     </div>
   )
@@ -304,7 +182,7 @@ type Placement = 'local' | 'peer'
 
 export default function Models({
   system, recipes, models, jobs, peers, refresh, refreshModelsAndJobs, openDeployment, openFleetDeployment,
-  openPlayground, openGenerate, openFleet,
+  openPlayground, openGenerate, openFleet, view, openBox, openUnit,
 }: AppState) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [licence, setLicence] = useState(false)
@@ -374,9 +252,6 @@ export default function Models({
   // is a ref rather than state because only the placement poll reads it, and
   // it must not restart that poll when it grows.
   const touchedPlacements = useRef<Set<string>>(new Set())
-  // Which Spark's card is open under the fleet line. One at a time, and empty
-  // for none: it is state of this screen alone.
-  const [openSpark, setOpenSpark] = useState('')
   // This box's own meters, which are fresher than anything the fleet relays
   // about it. The memory rule reads them, so the page follows them.
   useSyncExternalStore(subscribeTelemetry, telemetryRevision, telemetryRevision)
@@ -540,9 +415,6 @@ export default function Models({
     () => new Map(sparks.map(spark => [spark.nodeID, powerRow(spark, undefined, NO_POWER_RUNS)])),
     [sparks],
   )
-  // The Spark whose card is open. A Spark that has left the fleet between the
-  // click and this render has no row, and so no card.
-  const openRow = sparks.find(spark => spark.nodeID === openSpark)
   const showMemberBanner = shouldShowMemberBanner(fleetRoleSummary)
 
   // ---- The fleet as units, and the memory of every box ----------------------
@@ -1671,44 +1543,60 @@ export default function Models({
       </div>
     )
     // The model that serves, over the table rather than inside it. It carries
-    // the same expansion the row carries, and opens it the same way.
+    // the same expansion the row carries, and opens it the same way. The card
+    // is the unit: its title opens the unit's drawer (or the one box it runs
+    // on), and each box chip under it opens that box.
     if (asBand) {
+      const members = bandMembers(read)
+      const servingBox = host ?? (isActive ? selfTarget : undefined)
+      const openTitle = unit ? () => openUnit(unit.key) : showFleet && servingBox ? () => openBox(servingBox.nodeID) : undefined
+      const live = isActive && !isMedia ? machineSeries(LOCAL_MACHINE).series.tps : []
+      // The unit's own word, read from the shared view, which knows how its
+      // boxes are doing as well as whether they answer.
+      const viewUnit = unit ? view.findUnit(unit.key) : undefined
+      const status = viewUnit ? view.unitStatusOf(viewUnit) : unit ? { word: HEALTH_WORD[unitHealth(unit)], tone: unitHealth(unit) } : undefined
       return (
         <div className="mband-group" key={recipe.id}>
           <div className={`mband ${open ? 'open' : ''}`} {...expand}>
             <div className="m-id">
               <Mark recipe={recipe} recipeIDs={[recipe.id]} size={34} />
-              <div>
-                <p className="tagline">Serving</p>
-                <div className="nm">{nameLine}</div>
-                {/* Speed, size, and the machine it runs on. A benchmark
-                    running against it adds its own word: the number beside it
-                    is about to change. */}
-                <div className="meta">
-                  {[
-                    isMedia ? 'n/a' : `${speed} tok/s`,
-                    formatBytes(recipe.artifact_bytes),
-                    place,
-                    measuring ? 'measuring' : '',
-                  ].filter(Boolean).join(' · ')}
-                  {unit && unitHealth(unit) !== 'healthy' && (
-                    <span className={`health ${unitHealth(unit)}`}>{HEALTH_WORD[unitHealth(unit)]}</span>
-                  )}
+              <div className="mb-main">
+                <p className="tagline">{measuring ? 'Serving · measuring' : 'Serving'}</p>
+                <div className="nm">
+                  {openTitle ? (
+                    <button type="button" className="mb-title" onClick={act(openTitle)}>{recipe.display_name}</button>
+                  ) : recipe.display_name}
+                  {revoked(revocation) && <span className="tag revoked">Revoked</span>}
+                  {status && status.tone !== 'healthy' && <span className={`health ${status.tone}`}>{status.word}</span>}
                 </div>
-                {/* Every box the model runs on, head first, each with its own
-                    memory. The unit stands or falls together, so a box that
-                    is tight shows here as well as on the strip. */}
-                {bandMembers(read).length > 0 && (
-                  <div className="members">
-                    {bandMembers(read).map(({ spark, head }) => {
+                {/* Speed first, with its recent line where this Spark reads
+                    one, then size and where it runs. */}
+                <div className="meta">
+                  <span className="mb-speed">{isMedia ? 'n/a' : <><b>{speed}</b> tok/s</>}</span>
+                  {live.length > 1 && <Sparkline points={live} label="Generation speed on this Spark" tone="live" />}
+                  <span>{[formatBytes(recipe.artifact_bytes), place].filter(Boolean).join(' · ')}</span>
+                </div>
+                {/* Every box the model runs on, head first, each with the
+                    memory it has free (PlanetScale's topology nodes). The
+                    unit stands or falls together, so a tight box shows here. */}
+                {members.length > 0 && (
+                  <div className="members" role="group" aria-label="Boxes it runs on">
+                    {members.map(({ spark, head }) => {
                       const room = headroomOf(spark)
                       return (
-                        <span className="member-chip" key={spark.nodeID} title={`${spark.displayName} · ${freeText(room)}`}>
-                          <i className={`sdot ${boxDot(spark)}`} aria-hidden="true" />
+                        <button
+                          type="button"
+                          className={`member-chip ${room.state}`}
+                          key={spark.nodeID}
+                          title={`${spark.displayName} · ${freeText(room)}`}
+                          onClick={act(() => openBox(spark.nodeID))}
+                        >
+                          <HealthDot box={view.healthOf(spark.nodeID)} />
                           <span className="mc-name">{shortSparkName(spark.displayName, sparkNames)}</span>
                           {head && <small>head</small>}
-                          <HeadroomBar headroom={room} size="mini" />
-                        </span>
+                          <span className="mc-free">{room.state === 'unknown' ? 'n/a' : formatBytes(room.box.availableBytes)}</span>
+                          {powerRows.get(spark.nodeID)?.tag && <span className="fs-cool">{COOL_TAG}</span>}
+                        </button>
                       )
                     })}
                   </div>
@@ -1800,78 +1688,85 @@ export default function Models({
     bands.some(read => isTypical(read.speed)) ||
     onScreen.some(recipe => isTypical(speedOf(recipe, installed.get(recipe.id)?.tokens_per_second)))
 
-  // ---- The strip under the title ---------------------------------------------
+  // ---- The line under the health line ---------------------------------------
 
-  // Each Serving card is one unit, so the count of cards is the count of
-  // units serving. Speed adds only what was measured here: a community
-  // figure is not a measurement, and a model on another box carries none.
+  // How fast the serving models answer. This Spark reads its own runtime's
+  // counters every five seconds, which is the live figure; a model on another
+  // box reports no speed in its heartbeat, so only what this Spark measured
+  // or reads live is ever added up here.
   const tokenBands = bands.filter(read => !read.isMedia)
   const measuredBands = tokenBands.filter(read => read.measured)
   const totalSpeed = measuredBands.reduce((sum, read) => sum + (read.measured ?? 0), 0)
+  const localMeter = machineSeries(LOCAL_MACHINE)
+  const localRate = localMeter.latest?.active_model && localMeter.series.tps.length > 0
+    ? localMeter.series.tps[localMeter.series.tps.length - 1]
+    : undefined
   // Memory is never pooled, so the fleet's headroom is its tightest box.
   const rooms = (showFleet ? localRows : [selfTarget]).map(headroomOf)
   const tightest = tightestBox(rooms)
-  const disk = showFleet ? fleetDisk(localRows) : undefined
   const tokenTotal = tokens ? tokens.totals.prompt_tokens + tokens.totals.generation_tokens : 0
-  const kpis: Kpi[] = [
-    { label: 'Serving', value: String(bands.length), sub: bands.length === 1 ? 'unit' : 'units' },
-    measuredBands.length > 0
-      ? {
-        label: 'Total tok/s',
-        value: totalSpeed.toFixed(1),
-        unit: 'tok/s',
-        sub: measuredBands.length < tokenBands.length
-          ? `${measuredBands.length} of ${tokenBands.length} measured`
-          : 'measured on this Spark',
-      }
-      : { label: 'Total tok/s', value: 'n/a', sub: tokenBands.length > 0 ? 'not measured yet' : 'nothing serving' },
-    tightest
-      ? {
-        label: 'Memory headroom',
-        ...splitUnit(formatBytes(tightest.box.availableBytes)),
-        sub: [showFleet ? tightest.box.name : 'free on this Spark', tightest.state === 'tight' ? 'tight' : '']
-          .filter(Boolean).join(' · '),
-        tone: tightest.state === 'tight' ? 'tight' : tightest.state === 'full' ? 'full' : '',
-        title: showFleet ? 'Free memory on the box with the least of it' : undefined,
-      }
-      : { label: 'Memory headroom', value: 'n/a', sub: 'not reported yet' },
-    disk
-      ? {
-        label: 'Free disk',
-        ...splitUnit(formatBytes(disk.bytes)),
-        sub: disk.reported < disk.boxes ? `${disk.reported} of ${disk.boxes} boxes reported` : `across ${disk.boxes} boxes`,
-      }
-      : { label: 'Free disk', ...splitUnit(formatBytes(system?.storage_available_bytes)), sub: 'this Spark' },
-    tokens && tokenTotal > 0
-      ? {
-        label: 'Tokens served',
-        value: formatTokens(tokenTotal),
-        sub: `${formatTokens(tokens.totals.prompt_tokens)} prompt · ${formatTokens(tokens.totals.generation_tokens)} generated`,
-        title: `${tokenTotal.toLocaleString()} tokens. ${TOKENS_COUNTED}`,
-      }
-      : { label: 'Tokens served', value: 'n/a', sub: 'none counted yet' },
-  ]
-
-  // The fleet strip, unit by unit, then the boxes that run on their own.
-  const stripGroups: StripGroup[] = [
-    ...grouping.units.map(unit => ({
-      key: unit.key, label: `TP${unit.size}`, model: nameOf(unit.recipeID), sparks: unit.members.map(member => member.row),
-    })),
-    ...(grouping.independent.length > 0
-      ? [{
-        key: 'independent',
-        label: grouping.units.length > 0 ? 'Independent' : boxesWord(grouping.independent),
-        model: '',
-        sparks: grouping.independent,
-      }]
-      : []),
-  ]
-  const openLocal = localRows.find(spark => spark.nodeID === openRow?.nodeID)
-  const openUnit = openLocal ? grouping.units.find(unit => unit.members.some(member => member.row === openLocal)) : undefined
+  const facts: Fact[] = []
+  if (localRate !== undefined && localRate > 0) {
+    facts.push({
+      key: 'speed',
+      title: 'Generation speed on this Spark, read from its runtime every five seconds',
+      node: (
+        <>
+          <b>{localRate.toFixed(1)}</b> tok/s now
+          <Sparkline points={localMeter.series.tps} label="Generation speed on this Spark" tone="live" />
+        </>
+      ),
+    })
+  } else if (measuredBands.length > 0) {
+    facts.push({
+      key: 'speed',
+      title: measuredBands.length < tokenBands.length
+        ? `Measured on this Spark. ${tokenBands.length - measuredBands.length} serving ${
+          tokenBands.length - measuredBands.length === 1 ? 'model has' : 'models have'} no measurement here.`
+        : 'Measured on this Spark by its last speed check',
+      node: (
+        <>
+          <b>{totalSpeed.toFixed(1)}</b> tok/s measured
+          {localMeter.series.tps.length > 1 && (
+            <Sparkline points={localMeter.series.tps} label="Generation speed on this Spark" tone="live" />
+          )}
+        </>
+      ),
+    })
+  }
+  if (tightest) {
+    const refused = loadsRefused(tightest)
+    const tightRow = (showFleet ? localRows : [selfTarget]).find(row => row.nodeID === tightest.box.id)
+    facts.push({
+      key: 'tightest',
+      tone: tightest.state === 'full' ? 'fail' : tightest.state === 'tight' ? 'warn' : '',
+      title: showFleet ? 'Free memory on the box with the least of it' : 'Free memory on this Spark',
+      onClick: tightRow ? () => openBox(tightRow.nodeID) : undefined,
+      node: (
+        <>
+          {showFleet ? 'Tightest ' : 'Memory '}
+          {showFleet && <span className="fact-box">{tightest.box.name}</span>}
+          <HeadroomBar headroom={tightest} size="mini" />
+          <b>{formatBytes(tightest.box.availableBytes)}</b> free
+          {refused && <span className="fact-warn">loads refused</span>}
+        </>
+      ),
+    })
+  }
+  if (tokens && tokenTotal > 0) {
+    facts.push({
+      key: 'tokens',
+      title: `${tokenTotal.toLocaleString()} tokens: ${formatTokens(tokens.totals.prompt_tokens)} prompt, ${
+        formatTokens(tokens.totals.generation_tokens)} generated. ${TOKENS_COUNTED}`,
+      node: <><b>{formatTokens(tokenTotal)}</b> tokens served</>,
+    })
+  }
 
   return (
     <div className="stack">
-      <KpiStrip items={kpis} />
+      <FleetHealthLine summary={view.summary} boxes={view.health} onOpenBox={box => openBox(box.id)} />
+      <AttentionBanner banner={view.banner} onOpen={openBox} />
+      <FactsLine facts={facts} />
       {blockers.length > 0 && (
         <div className="alert" role="alert">
           <strong>Setup needed before models can run</strong>
@@ -1932,23 +1827,6 @@ export default function Models({
         </section>
       )}
 
-      {showFleet && (
-        <FleetStrip
-          groups={stripGroups}
-          names={sparkNames}
-          power={powerRows}
-          headroom={headroomOf}
-          open={openSpark}
-          onOpen={nodeID => setOpenSpark(openSpark === nodeID ? '' : nodeID)}
-        />
-      )}
-      {showFleet && openLocal && (
-        <NodeCard
-          spark={openLocal}
-          headroom={headroomOf(openLocal)}
-          unit={openUnit ? `${unitPlacement(openUnit)} · ${nameOf(openUnit.recipeID)}` : ''}
-        />
-      )}
       {showMemberBanner && (
         <MemberBanner controllerConsoleURL={fleetRoleSummary?.controller_console_url ?? ''} />
       )}
@@ -1988,7 +1866,7 @@ export default function Models({
       <div className="mtable">
         <div className="mthead" aria-hidden="true">
           <span>Model</span><span>Where</span><span className="r">Tok/s</span><span className="r">Disk</span>
-          <span className="f">Fits</span><span /><span />
+          <span className="f">Fits?</span><span /><span />
         </div>
         {showTabs ? (
           <>

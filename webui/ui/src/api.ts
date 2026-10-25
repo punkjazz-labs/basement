@@ -617,6 +617,13 @@ export interface NodeInventory {
   hostname: string
   product_name: string
   dgx_spark: boolean
+  // The machine's own description of itself, from the same heartbeat
+  // (inventory.System). Optional because an older manager may leave any of
+  // them out, and an absent one is unread, not empty.
+  os?: string
+  kernel?: string
+  gpu_description?: string
+  docker_version?: string
   memory_total_bytes: number
   memory_available_bytes: number
   storage_total_bytes: number

@@ -218,3 +218,35 @@ export function fleetDisk(rows: readonly FleetRow[]): FleetDisk {
   }
   return { bytes, reported, boxes: rows.length }
 }
+
+// ---- A unit's memory at a glance ----------------------------------------------
+
+export interface UnitMemory {
+  free: number
+  total: number
+  // How many members reported their memory, out of how many the unit has
+  // here. A sum over fewer boxes than the unit holds says so.
+  reported: number
+  members: number
+}
+
+// What a unit's boxes have free between them, and of how much. A load never
+// draws on this sum: each box answers for its own share (headroom.ts), and
+// the bars beside each member are what the memory rule reads. The sum is only
+// how a group of boxes is read at a glance.
+export function unitMemory(
+  unit: FleetUnit,
+  boxOf: (row: FleetRow) => { totalBytes?: number; availableBytes?: number },
+): UnitMemory {
+  let free = 0
+  let total = 0
+  let reported = 0
+  for (const member of unit.members) {
+    const box = boxOf(member.row)
+    if (!box.totalBytes || box.totalBytes <= 0 || typeof box.availableBytes !== 'number' || box.availableBytes <= 0) continue
+    free += box.availableBytes
+    total += box.totalBytes
+    reported += 1
+  }
+  return { free, total, reported, members: unit.members.length }
+}

@@ -279,10 +279,30 @@ function refusal(recipe: Recipe, check: BoxFit): string {
   return `Not enough memory on ${name}: ${formatBytes(check.box.availableBytes)} free, ${needs}`
 }
 
+// A fit with less than this to spare above the reserve, on the box with the
+// least, reads Tight. The need is an estimate, and an estimate this close to
+// the line could land on either side of it. Tight still loads: the rule
+// above decides that, and this only changes the word.
+export const TIGHT_MARGIN_BYTES = 8 * GB
+
+// What the box with the least to spare keeps above its reserve once the
+// model has landed, among boxes that fit. Undefined while no box fits.
+export function fitMargin(fit: FitResult): { bytes: number; box: Box } | undefined {
+  let least: { bytes: number; box: Box } | undefined
+  for (const check of fit.boxes) {
+    if (check.fits !== true || check.after === undefined) continue
+    const system = check.after - check.need.bytes - check.reserve
+    const gpu = check.gpuAfter === undefined ? Infinity : check.gpuAfter - check.need.bytes
+    const bytes = Math.min(system, gpu)
+    if (!least || bytes < least.bytes) least = { bytes, box: check.box }
+  }
+  return least
+}
+
 // The short word a Fits cell shows, and the sentence behind it.
 export interface FitWord {
   word: string
-  tone: 'ok' | 'warn' | 'unknown'
+  tone: 'ok' | 'tight' | 'warn' | 'unknown'
   title: string
 }
 
@@ -291,6 +311,17 @@ export function fitWord(fit: FitResult): FitWord {
     const first = fit.boxes[0]
     const where = fit.boxes.length === 1 ? first.box.name : `${fit.boxes.length} boxes`
     const after = first?.freedName ? ` once ${first.freedName} stops` : ''
+    const margin = fitMargin(fit)
+    if (margin && margin.bytes < TIGHT_MARGIN_BYTES) {
+      // formatBytes says n/a for zero, which here is a figure and not an
+      // absence, so the words carry it instead.
+      const spare = margin.bytes >= 1_000_000 ? `about ${formatBytes(margin.bytes)}` : 'almost nothing'
+      return {
+        word: 'Tight',
+        tone: 'tight',
+        title: `Fits on ${where}${after}, with ${spare} to spare above the reserve on ${margin.box.name} (estimate)`,
+      }
+    }
     return { word: 'Fits', tone: 'ok', title: `Fits in memory on ${where}${after} (estimate)` }
   }
   if (fit.fits === false) return { word: 'No room', tone: 'warn', title: fit.reason }

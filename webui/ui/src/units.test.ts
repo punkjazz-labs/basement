@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { FleetDeploymentView, FleetModelSnapshot, InstalledModel } from './api'
 import type { FleetRow } from './fleetModels'
 import {
-  boxKind, boxesWord, fleetDisk, fleetUnits, memberRole, unitFor, unitHealth, unitOfBox, unitPlacement,
+  boxKind, boxesWord, fleetDisk, fleetUnits, memberRole, unitFor, unitHealth, unitMemory, unitOfBox, unitPlacement,
   unitServing, withLocalModels, HEALTH_WORD,
 } from './units'
 
@@ -194,5 +194,24 @@ describe('this box and the whole fleet', () => {
   it('totals free disk over the boxes that reported it', () => {
     const silent = box('spark-quiet', 'DGX Spark', [], { inventory: undefined })
     expect(fleetDisk([...edges, silent])).toEqual({ bytes: 600 * GB, reported: 2, boxes: 3 })
+  })
+})
+
+// The sum a group header shows. A load never draws on it: each box answers
+// for its own share. It is only how a group of boxes is read at a glance.
+describe('what a unit has free between its boxes', () => {
+  const boxOf = (row: FleetRow) => ({
+    totalBytes: row.inventory?.memory_total_bytes, availableBytes: row.inventory?.memory_available_bytes,
+  })
+
+  it('adds up the boxes that reported', () => {
+    const [unit] = fleetUnits(fleet, placements).units
+    expect(unitMemory(unit, boxOf)).toEqual({ free: 72 * GB, total: 512 * GB, reported: 4, members: 4 })
+  })
+
+  it('says how many reported when some have not', () => {
+    const quiet = fleet.map((row, index) => (index === 1 ? { ...row, inventory: undefined } : row))
+    const [unit] = fleetUnits(quiet, placements).units
+    expect(unitMemory(unit, boxOf)).toMatchObject({ free: 54 * GB, reported: 3, members: 4 })
   })
 })

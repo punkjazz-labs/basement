@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { NodeInventory, Recipe } from './api'
 import {
-  boxFromInventory, boxHeadroom, fitOn, fitWord, memoryShare, modelNeedBytes, needOnBox, reserveFor, tightestBox,
-  DEFAULT_RESERVE_BYTES, FULL_BYTES, type Box,
+  boxFromInventory, boxHeadroom, fitMargin, fitOn, fitWord, memoryShare, modelNeedBytes, needOnBox, reserveFor,
+  tightestBox, DEFAULT_RESERVE_BYTES, FULL_BYTES, TIGHT_MARGIN_BYTES, type Box,
 } from './headroom'
 
 const GB = 1_000_000_000
@@ -167,11 +167,31 @@ describe('whether a model fits', () => {
     expect(fitWord(fit)).toEqual({ word: 'No room', tone: 'warn', title: fit.reason })
   })
 
-  it('fits a box with the need and the reserve free', () => {
+  // One gigabyte to spare above the reserve still loads: the rule says yes.
+  // The word says how close it is.
+  it('fits a box with the need and the reserve free, and says when it is tight', () => {
     const fit = fitOn(small, [box('spark-f7e0', 41)])
     expect(fit.fits).toBe(true)
     expect(fit.reason).toBe('')
-    expect(fitWord(fit).word).toBe('Fits')
+    expect(fitWord(fit).word).toBe('Tight')
+    expect(fitWord(fit).tone).toBe('tight')
+    expect(fitWord(fit).title).toBe('Fits on spark-f7e0, with about 1.0 GB to spare above the reserve on spark-f7e0 (estimate)')
+  })
+
+  it('reads Fits once there is room to spare above the reserve', () => {
+    const roomy = fitOn(small, [box('spark-f7e0', 40 + TIGHT_MARGIN_BYTES / GB)])
+    expect(fitWord(roomy).word).toBe('Fits')
+    const close = fitOn(small, [box('spark-f7e0', 40 + TIGHT_MARGIN_BYTES / GB - 0.1)])
+    expect(fitWord(close).word).toBe('Tight')
+  })
+
+  // A unit is as tight as its tightest box.
+  it('measures the margin on the box with the least to spare', () => {
+    const fit = fitOn(small, [box('spark-2b4f', 90), box('spark-9a07', 43)])
+    expect(fitMargin(fit)?.box.name).toBe('spark-9a07')
+    expect((fitMargin(fit)?.bytes ?? 0) / GB).toBeCloseTo(3)
+    expect(fitWord(fit).word).toBe('Tight')
+    expect(fitMargin(fitOn(small, [box('edgexpert-5e12', 7.2)]))).toBeUndefined()
   })
 
   // Switching on the same box: what stops is counted as free for what starts.

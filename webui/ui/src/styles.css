@@ -1,9 +1,10 @@
 /* basement console — dark only, site palette (basement.punkjazz.ai).
    Near-black slate ground, cream ink, hairlines, dense 13px scale.
    Color roles are strict: orange = primary actions + the wordmark,
-   NVIDIA green = a model is serving (nothing else, ever), forest = an
-   editorial stamp, amber = warning, red = failure. Measured numbers
-   are receipts and stay quiet. */
+   NVIDIA green = a model is serving, or a box in good health on the
+   fleet's health dots (nothing else, ever), forest = an editorial stamp,
+   amber = warning, red = failure. Measured numbers are receipts and stay
+   quiet. */
 
 :root {
   --bg: #131519;
@@ -405,6 +406,10 @@ input[type='text'], input[type='password'], textarea {
 .m-fit .fit::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: none; }
 .m-fit .fit.ok { color: var(--muted); }
 .m-fit .fit.warn { color: var(--warn); }
+/* Fits, with little to spare above the reserve. It still loads; the amber
+   dot only says the estimate is close to the line. */
+.m-fit .fit.tight { color: var(--muted); }
+.m-fit .fit.tight::before { background: var(--warn); }
 .m-fit .fit.unknown { color: var(--faint); }
 .m-fit .fit.unknown::before { background: var(--line-strong); }
 /* A load button the memory rule holds dead. The wrapper carries the reason,
@@ -412,22 +417,8 @@ input[type='text'], input[type='password'], textarea {
 .held { display: inline-flex; cursor: not-allowed; }
 .room-note { margin: 0 0 12px; color: var(--warn); font-size: 12px; max-width: 70ch; }
 
-/* The page's figures, under the title: Monitor's tile language, smaller. */
-.kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
-.kpi {
-  background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
-  padding: 10px 14px 11px; display: grid; gap: 2px; align-content: start; min-width: 0;
-}
-.kpi .label { font-size: 10.5px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; white-space: nowrap; }
-.kpi .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 600; line-height: 1.3; white-space: nowrap; }
-.kpi .value small { font-size: 11.5px; color: var(--faint); font-weight: 400; font-family: var(--sans); margin-left: 5px; }
-.kpi .sub { font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.kpi.tight { border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
-.kpi.tight .value { color: var(--warn); }
-.kpi.full { border-color: color-mix(in srgb, var(--fail) 40%, var(--line)); }
-.kpi.full .value { color: var(--fail); }
-
-/* How a unit is doing. Healthy is plain: green is kept for serving. */
+/* How a unit is doing. Healthy is plain: green is kept for serving and for
+   the health dots. */
 .health {
   display: inline-block; font-family: var(--sans); font-size: 10.5px; font-weight: 600; line-height: 1.5;
   border: 1px solid var(--line-strong); border-radius: 999px; padding: 0 8px; color: var(--muted); white-space: nowrap;
@@ -436,16 +427,21 @@ input[type='text'], input[type='password'], textarea {
 .health.failed { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 45%, var(--line)); background: color-mix(in srgb, var(--fail) 7%, transparent); }
 .mband .meta .health { margin-left: 10px; }
 
-/* The boxes a serving unit runs on, head first, each with its memory. */
-.mband .members { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+/* The boxes a serving unit runs on, head first, each with the memory it has
+   free. Each chip opens that box's drawer. */
+.mband .members { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .member-chip {
-  display: inline-flex; align-items: center; gap: 6px; padding: 2px 7px;
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px;
   border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface);
-  font-family: var(--mono); font-size: 10.5px; color: var(--ink); white-space: nowrap;
+  font-family: var(--mono); font-size: 11px; color: var(--ink); white-space: nowrap; cursor: pointer;
 }
-.member-chip .sdot { width: 5px; height: 5px; box-shadow: none; }
+.member-chip:hover { border-color: var(--faint); background: var(--hover); }
+.member-chip .hdot { width: 6px; height: 6px; }
 .member-chip .mc-name { font-weight: 600; }
 .member-chip small { color: var(--faint); font-size: 10px; }
+.member-chip .mc-free { color: var(--muted); font-variant-numeric: tabular-nums; }
+.member-chip.tight .mc-free { color: var(--warn); }
+.member-chip.full .mc-free { color: var(--fail); }
 
 /* The model that serves, over the table rather than inside it. Green says one
    thing on this console and says it here: this model is serving. The band
@@ -468,48 +464,26 @@ input[type='text'], input[type='password'], textarea {
   color: color-mix(in srgb, var(--live) 65%, var(--ink));
 }
 .mband .meta {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums;
   color: var(--faint); margin-top: 3px;
 }
+.mband .mb-main { min-width: 0; }
+.mband .mb-speed b { color: var(--ink); font-weight: 600; font-size: 13px; }
+/* The card's title opens the unit, so it reads as a name that can be
+   followed, not as a second button. */
+.mb-title {
+  background: none; border: 0; padding: 0; color: var(--ink); font: inherit; font-weight: 600; text-align: left;
+  text-decoration: underline; text-decoration-color: transparent; text-underline-offset: 3px;
+}
+.mb-title:hover { text-decoration-color: var(--faint); }
 
-/* The fleet over the table. The member banner uses the plain strip; the
-   fleet itself is drawn grouped, one bordered region per unit holding one
-   fixed-width cell per box, so nothing can ever run into its neighbour: the
-   groups wrap onto a second line instead, and scroll sideways on a phone. */
+/* The member banner: one quiet line in place of the fleet's own lines. */
 .fleet-strip {
   display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   padding: 8px 14px; font-size: 12px; color: var(--muted);
 }
-.fleet-strip:has(.fs-group) { align-items: stretch; gap: 8px; padding: 8px; }
-.fs-group {
-  display: grid; gap: 6px; align-content: start; min-width: 0;
-  border: 1px solid var(--line); border-radius: 8px; padding: 6px 6px 6px;
-}
-.fs-group-label {
-  display: flex; align-items: baseline; gap: 7px; padding: 0 3px; min-width: 0;
-  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
-}
-.fs-group-label b { font-family: var(--mono); font-weight: 650; color: var(--muted); }
-.fs-group-label span {
-  text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 11.5px; color: var(--muted);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.fs-cells { display: flex; gap: 4px; flex-wrap: wrap; }
-/* Each cell opens that box's own card below the strip. */
-.fleet-strip button.fs-node {
-  display: grid; gap: 5px; width: 108px; padding: 6px 8px 7px;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
-  color: inherit; font: inherit; text-align: left;
-}
-.fleet-strip button.fs-node:hover { border-color: var(--line-strong); background: var(--hover); }
-.fleet-strip button.fs-node[aria-expanded="true"] { border-color: var(--faint); background: var(--surface-2); }
-.fs-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.fs-name { font-family: var(--mono); font-size: 11.5px; color: var(--ink); font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fs-top .fs-cool { margin-left: auto; }
-.fs-free { font-family: var(--mono); font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--faint); white-space: nowrap; }
-.fs-free.tight { color: var(--warn); }
-.fs-free.full { color: var(--fail); }
 
 /* One box's memory: what is in use, and a tick where the reserve begins.
    Cream while there is room, amber when tight, red only when the box is out
@@ -532,23 +506,6 @@ input[type='text'], input[type='password'], textarea {
   border-radius: 4px; padding: 0 5px;
 }
 
-/* The card one strip chip opens: what that Spark reported about itself. */
-.node-card {
-  background: var(--surface); border: 1px solid var(--line-strong);
-  border-radius: var(--radius); box-shadow: var(--shadow); max-width: 560px;
-}
-.node-card header {
-  padding: 12px 16px; border-bottom: 1px solid var(--line);
-  display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
-}
-.node-card header .role { color: var(--faint); font-size: 12px; }
-.node-card .rows { padding: 6px 0; }
-.node-card .row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 16px; }
-.node-card .row .k { color: var(--muted); }
-.node-card .row .v { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
-.node-card .row .v.room { display: inline-flex; align-items: center; gap: 10px; }
-.node-card .room .hbar { width: 72px; }
-
 /* A choice between two states, in one control. */
 .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; }
 .seg button { background: none; border: 0; color: var(--muted); padding: 5px 12px; font: inherit; font-size: 12.5px; }
@@ -567,52 +524,12 @@ input[type='text'], input[type='password'], textarea {
 .pcell { display: grid; gap: 3px; justify-items: start; min-width: 0; }
 .pcell .seg button { padding: 3px 10px; font-size: 11.5px; }
 .pcell .powerfail { font-size: 11px; max-width: 28ch; }
-.power-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 0 4px; }
-.power-foot h2 { font-size: 13px; }
-/* The sentence opens upward, over the table it explains. */
-.power-foot .tip-text { top: auto; bottom: calc(100% + 7px); }
-.power-foot .prow.every { margin-left: auto; gap: 8px; }
-.power-foot .prow.every .nm { min-width: 0; font-family: var(--sans); color: var(--muted); font-size: 12.5px; }
 
-/* The fleet at the top of the Sparks page: one card per unit, the members of
-   each in a grid, and the boxes that run on their own in a group of their
-   own. Every card has the same anatomy, so six boxes read as two shapes. */
-.fleet-overview .section-head { margin-bottom: 10px; }
-.unit-cards { display: grid; gap: 12px; }
-.unit-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
-.unit-card header {
-  display: flex; align-items: center; gap: 12px; padding: 9px 14px;
-  background: var(--panel); border-bottom: 1px solid var(--line);
-}
-.unit-card header img, .unit-card header .mark { width: 26px; height: 26px; border-radius: 6px; }
-.unit-title { display: grid; min-width: 0; flex: 1; }
-.unit-title strong { font-size: 13.5px; font-weight: 600; }
-.unit-title span { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
-.unit-speed { font-family: var(--mono); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.unit-speed small { font-family: var(--sans); font-size: 11px; font-weight: 400; color: var(--faint); margin-left: 4px; }
-.member-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; padding: 10px; }
-.member {
-  display: grid; gap: 7px; min-width: 0; padding: 9px 11px 10px;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-}
-.member-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.member-head strong { font-family: var(--mono); font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .role-tag {
   font-family: var(--mono); font-size: 10px; color: var(--muted); white-space: nowrap;
   border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 5px;
   overflow: hidden; text-overflow: ellipsis; max-width: 16ch;
 }
-.member-head .role-tag { margin-left: auto; }
-.member-room { display: grid; gap: 4px; }
-.member-room span { font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--muted); }
-.member-room .tight { color: var(--warn); }
-.member-room .full { color: var(--fail); }
-.member-facts { display: flex; gap: 16px; margin: 0; }
-.member-facts div { display: grid; }
-.member-facts dt { font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
-.member-facts dd { margin: 0; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--ink); }
-/* Memory in the table: the figure, and the bar under it. */
-.room-cell { display: grid; justify-items: end; gap: 4px; }
 
 /* expanded detail — the "A depth" inside a row */
 .mdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }
@@ -763,13 +680,6 @@ input[type='text'], input[type='password'], textarea {
 .add-role .txt { flex: 1; }
 .add-role .txt strong { display: block; font-size: 12.5px; font-weight: 600; }
 .add-role .txt span { display: block; font-size: 11.5px; color: var(--faint); margin-top: 1px; }
-
-/* ---- Fleet: same row idiom as Models, one extra identity column for the
-   serving model, so widths differ but nothing else does. */
-.mtable.fleet .mthead, .mtable.fleet .mrow {
-  grid-template-columns: minmax(150px, 1.2fr) minmax(130px, 1fr) 84px 76px 56px 112px 112px minmax(104px, auto) 18px;
-}
-.m-power { min-width: 0; }
 
 .field { display: grid; gap: 4px; }
 .field span { font-size: 12px; color: var(--muted); }
@@ -1466,30 +1376,7 @@ button.chip:hover { color: var(--ink); }
 
 /* ---- Monitor -------------------------------------------------------------- */
 
-/* The live meters, one section per Spark: which machine, what it serves, and
-   its own tiles under it. */
-.stack.mon { gap: 20px; }
-.mon-machine { display: grid; gap: 10px; }
-.mon-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-.mon-head h2 { font-size: 13.5px; }
-.mon-head .muted { font-size: 12px; }
-/* The machines of one unit under one heading, as on the Sparks page. */
-.mon-group { display: grid; gap: 12px; }
-.mon-group-head { display: flex; align-items: center; gap: 10px; padding-bottom: 7px; border-bottom: 1px solid var(--line); }
-.mon-group-head h2 { font-size: 14px; }
-.mon-group-head .faint { font-family: var(--mono); font-size: 11.5px; }
-.mon-room { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
-.mon-room .hbar { width: 90px; }
-/* Six tiles to a row on a laptop screen. auto-fill keeps every machine's
-   tiles on the same columns, so a row of boxes reads down as well as across. */
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; }
-.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 10px 12px; display: grid; gap: 4px; align-content: start; }
-.tile .label { font-size: 10.5px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
-.tile .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; }
-.tile .value small { font-size: 11.5px; color: var(--faint); font-weight: 400; font-family: var(--sans); }
-.tile svg { width: 100%; height: 28px; display: block; }
-.tile polyline { fill: none; stroke: var(--live); stroke-width: 1.6; }
-.tile .spark-fill { fill: color-mix(in srgb, var(--live) 12%, transparent); stroke: none; }
+/* The v3 Monitor rules live with the other v3 rules at the end of the file. */
 
 /* ---- Storage -------------------------------------------------------------- */
 
@@ -1633,9 +1520,6 @@ button.chip:hover { color: var(--ink); }
   .r-caret { display: none; }
   .rdetail .facts { grid-template-columns: minmax(0, 1fr); }
   .add-role { flex-wrap: wrap; }
-  .mtable.fleet .mrow { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
-  .mtable.fleet .m-power { grid-column: 1 / -1; }
-  .room-cell { justify-items: start; }
   .mthead { display: none; }
   .mthead + .mrow { border-top: 0; }
   /* Name, then where it sits, then speed, size and fit on one line, then the
@@ -1644,7 +1528,6 @@ button.chip:hover { color: var(--ink); }
   .m-where { grid-column: 1 / -1; }
   .m-where:empty { display: none; }
   .m-fit { text-align: right; }
-  .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .r-runs { grid-column: 1 / -1; }
   .mband { grid-template-columns: 1fr; row-gap: 12px; }
   .m-id { grid-column: 1 / -1; }
@@ -1684,20 +1567,6 @@ button.chip:hover { color: var(--ink); }
   .endpoint-line code { overflow-wrap: anywhere; min-width: 0; }
   .content-head { padding: 18px 16px 0; }
   main { padding: 14px 16px 70px; }
-  /* The figures in two columns, and the fleet strip in one line that scrolls
-     sideways rather than wrapping into a wall. */
-  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  .kpi .value { font-size: 18px; }
-  .kpi .sub { white-space: normal; }
-  .fleet-strip:has(.fs-group) { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; }
-  .fs-group { flex: none; }
-  .fs-cells { flex-wrap: nowrap; }
-  .unit-card header { flex-wrap: wrap; row-gap: 6px; }
-  .member-grid { grid-template-columns: minmax(0, 1fr); }
-  .mon-room { margin-left: 0; flex-basis: 100%; }
-  .mon-room .hbar { flex: 1; max-width: 160px; }
-  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .power-foot .prow.every { margin-left: 0; }
   .update-facts { grid-template-columns: 1fr; }
   .update-signed { display: none; }
   .update-blocker { grid-template-columns: 1fr; }
@@ -1894,4 +1763,399 @@ a.minutes-download { margin-left: auto; flex: none; text-decoration: none; }
   .minutes-row .k { width: 100%; }
   .minutes-step .hrow { flex-wrap: wrap; }
   .tip-text { position: fixed; inset: auto 16px 16px; width: auto; max-width: none; }
+}
+
+/* ==== v3: the fleet read as a fleet ========================================= */
+
+/* The page title's own row also holds the one fleet-wide power change on the
+   Sparks page, pushed to the far end. */
+.content-head .head-power { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.head-power .prow.every { gap: 8px; }
+.head-power .prow.every .nm { min-width: 0; font-family: var(--sans); color: var(--muted); font-size: 12px; }
+.head-power .seg button { padding: 3px 10px; font-size: 12px; }
+.head-power .tip-text { right: 0; left: auto; }
+
+/* ---- One box's light ------------------------------------------------------ */
+
+/* Green while all is well, amber when a box wants a look, red when it cannot
+   be reached or something on it failed. Hollow while its heartbeat is stale:
+   the colour is the last thing it said, the ring says it has gone quiet. */
+.hdot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block;
+  color: var(--line-strong); background: currentColor;
+}
+.hdot.ok { color: var(--live); }
+.hdot.warn { color: var(--warn); }
+.hdot.fail { color: var(--fail); }
+.hdot.stale { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+.hdot.unknown { color: var(--line-strong); }
+
+/* ---- The health line under the title ------------------------------------- */
+
+.health-line { display: flex; align-items: center; gap: 12px; min-width: 0; font-size: 12.5px; color: var(--muted); }
+.health-line .leds {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
+}
+.health-line .led {
+  width: 9px; height: 9px; padding: 0; border: 0; border-radius: 50%; cursor: pointer;
+  color: var(--line-strong); background: currentColor;
+}
+.health-line .led.ok { color: var(--live); }
+.health-line .led.warn { color: var(--warn); }
+.health-line .led.fail { color: var(--fail); }
+.health-line .led.stale { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+.health-line .led:hover { outline: 2px solid var(--line-strong); outline-offset: 1px; }
+.health-line .health-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.health-line.warn .health-text { color: var(--warn); }
+.health-line.fail .health-text { color: var(--fail); }
+
+/* ---- The attention banner ------------------------------------------------- */
+
+/* Only drawn while something is wrong, with the one action that leads to it. */
+.attention {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line));
+  background: color-mix(in srgb, var(--warn) 7%, var(--surface));
+}
+.attention.fail {
+  border-color: color-mix(in srgb, var(--fail) 45%, var(--line));
+  background: color-mix(in srgb, var(--fail) 7%, var(--surface));
+}
+.attention-mark {
+  flex: none; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%;
+  font-style: normal; font-weight: 700; font-size: 12px; color: var(--bg); background: var(--warn);
+}
+.attention.fail .attention-mark { background: var(--fail); }
+.attention-copy { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.attention-copy strong { font-size: 13px; font-weight: 600; color: var(--warn); }
+.attention.fail .attention-copy strong { color: var(--fail); }
+.attention-copy span { font-size: 12.5px; color: var(--muted); }
+.attention button { flex: none; white-space: nowrap; }
+
+/* ---- Models: the facts line ----------------------------------------------- */
+
+/* At most three facts in one quiet line. The figure is the receipt and the
+   words around it stay faint. */
+.facts-line { display: flex; align-items: center; flex-wrap: wrap; row-gap: 6px; font-size: 12.5px; color: var(--muted); }
+.facts-line .fact {
+  display: inline-flex; align-items: center; gap: 7px; padding: 0 14px;
+  border-left: 1px solid var(--line); white-space: nowrap;
+}
+.facts-line .fact:first-child { padding-left: 0; border-left: 0; }
+.facts-line button.fact { background: none; border-top: 0; border-right: 0; border-bottom: 0; color: inherit; font: inherit; cursor: pointer; }
+.facts-line button.fact:hover { color: var(--ink); }
+.facts-line .fact b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; color: var(--ink); }
+.facts-line .fact .hbar { width: 40px; }
+.fact-box { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.facts-line .fact.warn b, .facts-line .fact.warn .fact-box { color: var(--warn); }
+.facts-line .fact.fail b, .facts-line .fact.fail .fact-box { color: var(--fail); }
+.fact-warn { color: var(--warn); font-weight: 550; }
+
+/* ---- History: sparklines and the one chart --------------------------------- */
+
+.sparkline { width: 64px; height: 18px; flex: none; display: block; overflow: visible; }
+.sparkline polyline { fill: none; stroke: color-mix(in srgb, var(--ink) 55%, transparent); stroke-width: 1.4; stroke-linejoin: round; }
+.sparkline circle { fill: color-mix(in srgb, var(--ink) 75%, transparent); }
+.sparkline.live polyline { stroke: var(--live); }
+.sparkline.live circle { fill: var(--live); }
+.sparkline.warn polyline { stroke: var(--warn); }
+.sparkline.empty { opacity: 0; }
+
+.mchart { margin: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 10px 12px 8px; display: grid; gap: 6px; }
+.mchart figcaption { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.mchart .t { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+.mchart .avg { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+.mchart .avg small { font-family: var(--sans); font-size: 11px; font-weight: 400; color: var(--faint); margin-left: 5px; }
+.mchart .plot { position: relative; }
+.mchart svg { width: 100%; height: 116px; display: block; }
+.mchart .grid { stroke: var(--line); stroke-width: 1; }
+.mchart .area { fill: color-mix(in srgb, var(--ink) 6%, transparent); }
+.mchart polyline { fill: none; stroke: color-mix(in srgb, var(--ink) 70%, transparent); stroke-width: 1.6; stroke-linejoin: round; }
+.mchart.live .area { fill: color-mix(in srgb, var(--live) 10%, transparent); }
+.mchart.live polyline { stroke: var(--live); }
+.mchart.warn polyline { stroke: var(--warn); }
+.mchart.warn .area { fill: color-mix(in srgb, var(--warn) 9%, transparent); }
+.mchart.fail polyline { stroke: var(--fail); }
+.mchart .ymax { position: absolute; top: 0; left: 0; font-family: var(--mono); font-size: 10px; color: var(--faint); }
+.mchart .axis { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 4px; }
+.mchart-empty { margin: 0; padding: 18px 0 14px; font-size: 12px; color: var(--faint); }
+
+/* ---- A box's free memory in a cell ------------------------------------------ */
+
+.memfree { display: inline-flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; }
+.memfree .hbar { width: 64px; flex: none; }
+.memfree .hbar.mini { width: 34px; }
+.memfree .num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink); }
+.memfree.tight .num { color: var(--warn); }
+.memfree.full .num { color: var(--fail); }
+.memfree.unknown .num { color: var(--faint); }
+.memfree .refused { font-size: 11px; font-weight: 550; color: var(--warn); }
+
+/* ---- The detail drawer -------------------------------------------------------- */
+
+.drawer-layer { position: fixed; inset: 0; z-index: 60; }
+.drawer-scrim { position: absolute; inset: 0; background: rgb(0 0 0 / 0.45); }
+.drawer {
+  position: absolute; top: 0; right: 0; bottom: 0; width: min(520px, 100vw);
+  background: var(--bg); border-left: 1px solid var(--line-strong);
+  box-shadow: -16px 0 40px rgb(0 0 0 / 0.45); overflow-y: auto; overscroll-behavior: contain;
+  padding: 22px 24px 28px; animation: drawer-in 0.18s ease-out;
+}
+@keyframes drawer-in { from { transform: translateX(24px); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .drawer { animation: none; } }
+.drawer-close { position: absolute; top: 14px; right: 14px; }
+.drawer:focus { outline: none; }
+.dr { display: grid; gap: 16px; }
+.dr-head { display: flex; align-items: flex-start; gap: 12px; padding-right: 32px; }
+.dr-head > .hdot { width: 10px; height: 10px; margin-top: 7px; }
+.dr-head img, .dr-head .mark { width: 30px; height: 30px; border-radius: 7px; }
+.dr-title { min-width: 0; display: grid; gap: 2px; }
+.dr-title h2 { font-size: 17px; font-family: var(--mono); font-weight: 600; letter-spacing: 0; overflow-wrap: anywhere; }
+.dr-role { margin: 0; font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dr-beat { margin: 0; font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+.dr-issues {
+  list-style: none; margin: 0; padding: 8px 12px; border-radius: 8px; display: grid; gap: 2px;
+  font-size: 12.5px; color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line));
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+}
+.dr-issues.fail { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 40%, var(--line)); background: color-mix(in srgb, var(--fail) 6%, transparent); }
+.dr-facts3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.fcard {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px 11px; display: grid; gap: 4px; align-content: start; min-width: 0;
+}
+.fcard .l { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--faint); }
+.fcard .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; line-height: 1.3; white-space: nowrap; }
+.fcard .v small { font-family: var(--sans); font-size: 11px; font-weight: 400; color: var(--faint); }
+.fcard .s { font-size: 11.5px; color: var(--faint); }
+.fcard .s.warn { color: var(--warn); font-weight: 550; }
+.fcard .hbar { width: 100%; margin: 2px 0; }
+.fcard.tight .v, .fcard.warn .v { color: var(--warn); }
+.fcard.full .v, .fcard.fail .v { color: var(--fail); }
+.dr-chart { display: grid; gap: 8px; }
+.dr-chart > .seg { justify-self: start; }
+.dr-chart .seg button { padding: 3px 11px; font-size: 12px; }
+.dr-list { margin: 0; display: grid; }
+.dr-fact { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.dr-fact:last-child { border-bottom: 0; }
+.dr-fact dt { color: var(--muted); }
+.dr-fact dd { margin: 0; font-family: var(--mono); font-size: 12px; text-align: right; overflow-wrap: anywhere; }
+.dr-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 14px; border-top: 1px solid var(--line); }
+.dr-actions .prow { flex: 1; }
+.dr-actions .prow .nm { display: none; }
+.dr-members h3 { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); margin-bottom: 8px; }
+/* The unit's boxes as a small topology: the head, then its members hung off
+   it, one memory figure each. */
+.topology { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+.topology li { position: relative; }
+.topology li.member { padding-left: 20px; }
+.topology li.member::before {
+  content: ""; position: absolute; left: 8px; top: -6px; height: 22px; width: 9px;
+  border-left: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); border-bottom-left-radius: 4px;
+}
+.topology li.missing { font-size: 12px; color: var(--warn); padding-top: 4px; padding-bottom: 4px; }
+.topology button {
+  width: 100%; display: flex; align-items: center; gap: 9px; text-align: left; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; color: var(--ink);
+}
+.topology button:hover { border-color: var(--line-strong); background: var(--hover); }
+.topology .nm { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+.topology .memfree { margin-left: auto; }
+.topology .chev { color: var(--faint); flex: none; }
+/* A name inside a sentence that opens something. */
+.linkish {
+  background: none; border: 0; padding: 0; font: inherit; color: var(--ink); cursor: pointer;
+  text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 2px;
+}
+.linkish:hover { text-decoration-color: var(--muted); }
+
+/* ---- Sparks: one grouped table ------------------------------------------------ */
+
+.stable { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
+.srow {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.35fr) minmax(96px, 0.7fr) minmax(170px, 1fr) 64px 76px 112px 116px 22px;
+  align-items: center; column-gap: 12px; padding: 6px 14px; min-height: 44px;
+  border-bottom: 1px solid var(--line); cursor: pointer;
+}
+.srow:hover, .srow.open { background: var(--hover); }
+.srow:last-child { border-bottom: 0; }
+.srow.head {
+  min-height: 32px; padding-block: 0; background: var(--panel); cursor: default;
+  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
+}
+.srow.head:hover { background: var(--panel); }
+.srow.head .r { text-align: right; }
+.srow.head .tip { text-transform: none; letter-spacing: 0; }
+.s-box { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.s-name { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 7px; min-width: 0; }
+.s-name .nm { font-family: var(--mono); font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s-name .sub { flex-basis: 100%; font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.self-tag { font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+.s-status { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); min-width: 0; }
+.s-temp { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--faint); }
+.s-temp.warn { color: var(--warn); }
+.s-temp.fail { color: var(--fail); }
+.s-seen { font-family: var(--mono); font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.s-power { min-width: 0; }
+.s-power .pcell .seg button { padding: 2px 9px; font-size: 11.5px; }
+.s-actions { display: flex; gap: 6px; justify-content: flex-end; align-items: center; }
+.s-actions button.ghost { padding-block: 4px; font-size: 12px; }
+.s-actions .more { padding: 2px 8px; letter-spacing: 0.1em; }
+.s-chev {
+  display: flex; justify-content: flex-end; align-items: center; padding: 4px 0; background: none; border: 0;
+  color: var(--faint); cursor: pointer;
+}
+.s-chev:hover, .srow:hover .s-chev { color: var(--ink); }
+/* A unit's group header: the model, how it is split, its health, and what
+   its boxes have free between them. It opens the unit. */
+.sgroup {
+  display: flex; align-items: center; gap: 10px; padding: 8px 14px; min-height: 40px;
+  background: var(--panel); border-bottom: 1px solid var(--line); cursor: pointer;
+}
+.sgroup img, .sgroup .mark { width: 22px; height: 22px; border-radius: 5px; font-size: 11px; }
+.sg-title { background: none; border: 0; padding: 0; font: inherit; font-size: 13px; font-weight: 600; color: var(--ink); cursor: pointer; }
+.sg-title.static { cursor: default; }
+.sg-place { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.sg-mem { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.sg-chev { color: var(--faint); display: flex; }
+.sgroup:hover .sg-chev, .sgroup:hover .sg-title { color: var(--ink); }
+.sgroup.plain { cursor: default; }
+.sgroup.plain .sg-mem { color: var(--faint); font-family: var(--sans); }
+.stable .mdetail { border-bottom: 1px solid var(--line); }
+
+/* ---- Monitor: one card per unit, events beside them ------------------------- */
+
+.stack.mon { gap: 14px; }
+.mon-cols { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 16px; align-items: start; }
+.mon-main { display: grid; gap: 14px; min-width: 0; }
+.ucard {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+  padding: 12px 14px 6px; display: grid; gap: 10px; min-width: 0;
+}
+.ucard-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ucard-head img, .ucard-head .mark { width: 24px; height: 24px; border-radius: 6px; }
+.ucard-head .health { margin-left: auto; }
+.ucard-title {
+  display: flex; align-items: baseline; gap: 10px; min-width: 0; background: none; border: 0; padding: 0;
+  color: var(--ink); font: inherit; text-align: left; cursor: pointer;
+}
+.ucard-title.static { cursor: default; }
+.ucard-title strong { font-size: 14px; font-weight: 600; }
+.ucard-title span { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+button.ucard-title:hover strong { text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 3px; }
+.ucard-note { margin: 0; font-size: 12px; color: var(--faint); }
+.utable { display: grid; }
+.urow {
+  display: grid; grid-template-columns: minmax(170px, 1.3fr) minmax(130px, 1fr) 60px minmax(170px, 1fr) 14px;
+  align-items: center; column-gap: 12px; padding: 7px 4px; border-top: 1px solid var(--line); min-height: 38px;
+}
+.urow.head {
+  min-height: 26px; padding-block: 2px; border-top: 0;
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
+}
+.urow.head .r { text-align: right; }
+.urow.link { cursor: pointer; border-radius: 0; }
+.urow.link:hover { background: var(--hover); }
+.u-box { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.u-box .nm { font-family: var(--mono); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.u-box .role-tag { max-width: 22ch; }
+.u-note { flex-basis: 100%; font-size: 11px; color: var(--faint); padding-left: 15px; }
+.u-span { grid-column: 2 / span 3; font-size: 12px; }
+.u-trend { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.u-trend .n, .u-num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.u-num { text-align: right; }
+.u-num.warn { color: var(--warn); }
+.u-num.fail { color: var(--fail); }
+.u-chev { color: var(--faint); display: flex; justify-content: flex-end; }
+.urow.link:hover .u-chev { color: var(--ink); }
+/* Every metric, for whoever wants them. Collapsed until asked for. */
+.allm { border-top: 1px solid var(--line); padding: 6px 4px 4px; }
+.allm summary { cursor: pointer; font-size: 12px; color: var(--muted); padding: 2px 0; width: fit-content; }
+.allm summary:hover { color: var(--ink); }
+.allm-table { display: grid; margin-top: 6px; }
+.allm-row { display: grid; grid-template-columns: minmax(130px, 1fr) repeat(4, minmax(120px, 1fr)); gap: 10px; align-items: center; padding: 5px 0; border-top: 1px solid var(--line); }
+.allm-row.head { border-top: 0; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+.allm-row .nm { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+.allm-cell { display: flex; align-items: center; gap: 8px; }
+.allm-cell .sparkline { width: 52px; }
+.allm-cell .n { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.allm-runtime { margin: 8px 0 2px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+/* What happened lately: the jobs, and the changes this console has seen. */
+.events {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+  padding: 12px 14px 6px; position: sticky; top: 16px;
+}
+.events h2 { font-size: 13px; margin-bottom: 4px; }
+.events ol { list-style: none; margin: 0; padding: 0; }
+.events li + li { border-top: 1px solid var(--line); }
+.events li button {
+  width: 100%; display: flex; gap: 10px; align-items: flex-start; text-align: left; cursor: pointer;
+  background: none; border: 0; padding: 7px 0; color: inherit; font: inherit;
+}
+.events li button:hover .ev-sub { text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 2px; }
+.edot { width: 7px; height: 7px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--line-strong); }
+.edot.ok { background: color-mix(in srgb, var(--ink) 45%, transparent); }
+.edot.warn { background: var(--warn); }
+.edot.fail { background: var(--fail); }
+.edot.busy { background: var(--warn); animation: breathe 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .edot.busy { animation: none; } }
+.ev-body { display: block; min-width: 0; line-height: 1.45; }
+.ev-sub { font-size: 12.5px; font-weight: 600; color: var(--ink); margin-right: 5px; }
+.ev-text { font-size: 12.5px; color: var(--muted); }
+.ev-text.fail { color: var(--fail); }
+.ev-text.warn { color: var(--warn); }
+.ev-meta { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 1px; }
+.events-empty { font-size: 12px; margin: 6px 0 10px; }
+
+/* ---- v3 on narrower screens ---------------------------------------------------- */
+
+@media (max-width: 1100px) {
+  .mon-cols { grid-template-columns: minmax(0, 1fr); }
+  .events { position: static; }
+}
+
+@media (max-width: 900px) {
+  .srow { grid-template-columns: minmax(0, 1fr) auto auto; row-gap: 6px; column-gap: 12px; padding-block: 9px; }
+  .srow.head { display: none; }
+  .s-box { grid-column: 1 / 2; }
+  .s-status { grid-column: 2 / 4; justify-content: flex-end; }
+  .s-mem { grid-column: 1 / 2; }
+  .s-temp { grid-column: 2 / 3; }
+  .s-seen { grid-column: 3 / 4; text-align: right; }
+  .s-power { grid-column: 1 / 2; }
+  .s-actions { grid-column: 2 / 4; }
+  .s-chev { display: none; }
+  .sgroup { flex-wrap: wrap; row-gap: 4px; }
+  .sg-mem { margin-left: 0; flex-basis: 100%; }
+  .sg-chev { display: none; }
+  .urow { grid-template-columns: minmax(0, 1fr) auto auto; row-gap: 4px; }
+  .urow.head { display: none; }
+  .u-box { grid-column: 1 / -1; }
+  .u-mem { grid-column: 1 / 2; }
+  .u-trend { grid-column: 1 / 2; }
+  .u-span { grid-column: 1 / -1; }
+  .u-chev { display: none; }
+  .allm-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .allm-row.head { display: none; }
+  .allm-row .nm { grid-column: 1 / -1; }
+}
+
+@media (max-width: 760px) {
+  /* The drawer is a full-screen sheet on a phone. */
+  .drawer { width: 100vw; border-left: 0; padding: 18px 16px 24px; }
+  .dr-facts3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .health-line { flex-wrap: wrap; row-gap: 6px; }
+  .health-line .health-text { white-space: normal; }
+  .attention { flex-wrap: wrap; }
+  /* One fact to a line on a phone. A fact too wide for the screen breaks
+     between its parts, never inside a word. */
+  .facts-line { display: grid; gap: 6px; }
+  .facts-line .fact, .facts-line .fact:first-child { padding: 0; border-left: 0; flex-wrap: wrap; row-gap: 2px; }
+  .content-head .head-row { flex-wrap: wrap; row-gap: 8px; }
+  .content-head .head-power { margin-left: 0; flex-basis: 100%; }
+  .ucard-title { flex-wrap: wrap; row-gap: 1px; }
+  .head-power .prow.every .nm { display: none; }
 }

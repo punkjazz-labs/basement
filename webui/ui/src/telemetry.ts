@@ -22,10 +22,15 @@ export interface Series {
   clock: number[]
   temperature: number[]
   memFree: number[]
+  // When each sample was taken, by the machine's own clock, in milliseconds.
+  // One entry per sample folded in, so a chart can say how long a window of
+  // its own series covers. Every series is pushed at most once per sample, so
+  // the tail of this one spans at least as long as the tail of any other.
+  at: number[]
 }
 
 export const EMPTY_SERIES: Series = {
-  tps: [], running: [], waiting: [], kv: [], gpuFree: [], power: [], clock: [], temperature: [], memFree: [],
+  tps: [], running: [], waiting: [], kv: [], gpuFree: [], power: [], clock: [], temperature: [], memFree: [], at: [],
 }
 
 // One machine's history: every series, the last sample whole, and whether
@@ -93,6 +98,7 @@ export function foldSample(previous: MachineSeries, sample: Telemetry): MachineS
       clock: sample.gpu_clock_mhz > 0 ? push(held.clock, sample.gpu_clock_mhz) : held.clock,
       temperature: sample.gpu_temperature_c > 0 ? push(held.temperature, sample.gpu_temperature_c) : held.temperature,
       memFree: sample.memory_total > 0 ? push(held.memFree, sample.memory_available) : held.memFree,
+      at: Number.isFinite(Date.parse(sample.sampled_at)) ? push(held.at, Date.parse(sample.sampled_at)) : held.at,
     },
     latest: sample,
     answering: true,

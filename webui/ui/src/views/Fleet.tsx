@@ -1,8 +1,8 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  adoptedName, api, bareHost, copyText, formatBytes, idempotency, rankCandidates,
-  type AdoptStatus, type FleetCandidate, type FleetInvitation, type FleetInviteProgress,
-  type FleetPowerMode, type FleetSummary, type InstalledModel, type Peer, type PeerSummary, type Recipe,
+  adoptedName, api, bareHost, copyText, formatBytes, rankCandidates,
+  type AdoptStatus, type FleetCandidate, type FleetInviteProgress,
+  type FleetInvitation, type FleetSummary, type Peer, type PeerSummary, type Recipe,
 } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
@@ -10,32 +10,22 @@ import { Mark } from '../mark'
 import { Tip } from '../tip'
 import { FORM_IGNORED_BY_MANAGERS, IGNORED_BY_MANAGERS } from '../fields'
 import {
-  fleetInvitations, fleetNodeFor, fleetSize, fleetStatusNote, fleetSummary, foundLine, foundSparks,
+  consoleKey, fleetInvitations, fleetNodeFor, fleetSize, fleetStatusNote, fleetSummary, foundLine, foundSparks,
   invitationBody, invitationTitle, inviteBody, inviteName, inviteOutcome, inviteSettled, inviteTitle,
-  inviteWaitLine, isFleetInviteProgress, joinedBadge, joinedFacts, localRoleLine, membershipRows,
-  nodeFacts, nodeHostname, nodeName, nodeReported, nodeServing, nodeStatus, peerRoleLine,
-  readIgnored, rememberIgnored, shouldSweepForSparks, sparkSubline,
+  inviteWaitLine, isFleetInviteProgress, joinedBadge, joinedFacts, membershipRows,
+  readIgnored, rememberIgnored, shouldSweepForSparks,
   INVITATION_POLL_MS, INVITE_POLL_MS, MEMBERSHIP_POLL_MS,
 } from '../fleetInvite'
-import {
-  fleetRows, localPowerRow, powerFanOut, powerFanOutBusy, powerRefusalLine, powerRefusedTitle,
-  powerRow, retiredPowerSets,
-  COOL_MODE, COOL_MODE_LABEL, COOL_MODE_SHORT, EVERY_SPARK, FLEET_POWER_MODE_PATH, FULL_MODE, FULL_MODE_LABEL,
-  FULL_MODE_SHORT,
-  LOCAL_POWER_MODE_PATH, POWER_MODE_BUSY, POWER_MODE_NOTE, POWER_REFUSED_TITLE,
-  type FleetRow, type PowerRow, type PowerState,
-} from '../fleetModels'
+import { POWER_MODE_NOTE, type FleetRow } from '../fleetModels'
+import { shortAge, temperatureLight, type BoxHealth } from '../fleetHealth'
+import type { FleetView } from '../fleetView'
 import { boxFromSystem, boxHeadroom, type BoxHeadroom } from '../headroom'
-import { HeadroomBar, freeOfTotal } from '../headroomBar'
-import { boxOfRow, fleetMemory } from '../loadFit'
-import { LOCAL_MACHINE, machineSeries, subscribeTelemetry, telemetryRevision } from '../telemetry'
-import {
-  HEALTH_WORD, memberRole, unitHealth, unitPlacement, type FleetGrouping, type FleetUnit,
-} from '../units'
+import type { PowerSwitchState } from '../powerControl'
+import { unitMemory, unitPlacement, type FleetUnit } from '../units'
+import { AttentionBanner, FleetHealthLine, HealthDot } from '../components/FleetHealth'
+import { MemoryFree } from '../components/Memory'
+import { PowerSwitch } from '../components/Power'
 
-interface FleetProps extends AppState {
-  liveTPS: number | null
-}
 
 interface AddForm {
   name: string
@@ -61,195 +51,135 @@ const INSTALL_COMMAND = 'curl -fsSL basement.punkjazz.ai/install.sh | sh'
 const STEP_CLASS: Record<string, string> = { done: 'complete', running: 'active', failed: 'failed', pending: 'pending' }
 const STEP_WORD: Record<string, string> = { done: 'Done', running: 'Working', failed: 'Failed', pending: 'Waiting' }
 
-// One Spark's power switch: the machine, the two modes, and whatever else
-// that row carries. The mode holds across restarts, so this is a setting and
-// not an action. A Spark that has reported no mode gets a dead switch and no
-// selection: nothing here guesses that a silent Spark runs at full speed.
-// compact is the same switch inside a table row: the machine is named by the
-// row, so the switch drops its name and says each mode in one word.
-export function PowerSwitch({ name, power, onSet, compact = false }: {
-  name: string
-  power: PowerRow
-  onSet: (mode: string) => void
-  compact?: boolean
-}) {
-  return (
-    <div className={compact ? 'pcell' : 'prow'}>
-      {!compact && <span className="nm">{name}</span>}
-      <span className="seg" role="group" aria-label={`Power mode for ${name}`}>
-        <button
-          type="button"
-          aria-pressed={power.mode === FULL_MODE}
-          aria-label={compact ? FULL_MODE_LABEL : undefined}
-          title={compact ? FULL_MODE_LABEL : undefined}
-          disabled={power.disabled}
-          onClick={() => onSet(FULL_MODE)}
-        >
-          {compact ? FULL_MODE_SHORT : FULL_MODE_LABEL}
-        </button>
-        <button
-          type="button"
-          aria-pressed={power.mode === COOL_MODE}
-          aria-label={compact ? COOL_MODE_LABEL : undefined}
-          title={compact ? COOL_MODE_LABEL : undefined}
-          disabled={power.disabled}
-          onClick={() => onSet(COOL_MODE)}
-        >
-          {compact ? COOL_MODE_SHORT : COOL_MODE_LABEL}
-        </button>
-      </span>
-      {power.busy && <span className="busy">{POWER_MODE_BUSY}</span>}
-      {/* That Spark's own words about a GPU that did not take the mode. The
-          mode the owner chose stays chosen while this stands: the setting is
-          stored, and it goes back on the chip at the next start. A refusal is
-          not tooltip material, so it stays on the screen. */}
-      {power.failure !== '' && <p className="powerfail">{power.failure}</p>}
-    </div>
-  )
+// ---- The grouped table ------------------------------------------------------
+//
+// One table for the whole fleet (Tailscale's machines list), grouped the way
+// the fleet runs: one group per unit, headed by its model, its width, its
+// health and the memory its boxes have free between them (spark-dash's
+// pooled block), then the boxes in no unit. A row is one box and one or two
+// facts per column, and no charts: the box's charts are in its drawer, which
+// the row and its chevron open.
+
+// One box as this table draws it. Everything a cell needs is read once, so
+// the row itself only lays it out.
+interface SparkLine {
+  row: FleetRow
+  health?: BoxHealth
+  // Its place in its unit: head or member. Empty in no unit.
+  tag: string
+  // The quiet second line, where a row has one.
+  sub: string
+  status: { word: string; dot: string }
+  room: BoxHeadroom
+  temperature?: number
+  seen: string
+  power: PowerSwitchState | null
+  // The peer record behind this row, for a Spark this console added by
+  // address. Its pairing is managed from the row itself.
+  peer?: Peer
 }
 
-// The one fleet-wide change: each button sends that mode to every Spark in
-// the fleet. It names no machine to copy the mode from on purpose. The Spark
-// the console runs on used to be that source, and a controller whose own GPU
-// reports no mode then had no way at all to set the fleet, which is a real
-// state on a machine with no nvidia-smi command. The only thing that holds
-// this control now is a run already under way (powerFanOutBusy).
-export function PowerFanOut({ busy, onSet }: { busy: boolean; onSet: (mode: string) => void }) {
-  return (
-    <div className="prow every">
-      <span className="nm">{EVERY_SPARK}</span>
-      <button type="button" className="ghost" disabled={busy} onClick={() => onSet(FULL_MODE)}>
-        {FULL_MODE_LABEL}
-      </button>
-      <button type="button" className="ghost" disabled={busy} onClick={() => onSet(COOL_MODE)}>
-        {COOL_MODE_LABEL}
-      </button>
-    </div>
-  )
-}
+const Chevron = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+)
 
-// A member of the fleet whose heartbeat has gone quiet is a warning, drawn
-// amber. Only a state that really failed is red, and a box that answers is
-// lit while it serves.
-const memberDot = (spark: FleetRow): string =>
-  !spark.answering && !spark.isSelf ? 'warn' : spark.serving ? 'on' : ''
-
-// One box inside a unit card or the Independent group: its name, its place in
-// the unit, whether it answers, its memory against the reserve, its disk, and
-// its GPU. Every figure is one that box reported, and n/a means none yet.
-function MemberCell({ spark, role, headroom, gpu }: {
-  spark: FleetRow
-  role: string
-  headroom: BoxHeadroom
-  gpu: { temperature?: number; watts?: number }
+function SparkRow({ line, expanded, onOpen, onToggle }: {
+  line: SparkLine
+  expanded: boolean
+  onOpen: () => void
+  onToggle: () => void
 }) {
+  const { row, health, status, room, temperature, power, peer } = line
+  const heat = temperatureLight(temperature)
+  const stop = (event: React.SyntheticEvent) => event.stopPropagation()
   return (
-    <div className="member">
-      <div className="member-head">
-        <span className={`sdot ${memberDot(spark)}`} aria-hidden="true" />
-        <strong title={spark.displayName}>{spark.displayName}</strong>
-        {role && <span className="role-tag">{role}</span>}
+    <div className={`srow ${expanded ? 'open' : ''}`} role="row" onClick={onOpen}>
+      <div className="s-box" role="cell">
+        <div className="s-name">
+          <span className="nm">{row.displayName}</span>
+          {line.tag && <span className="role-tag">{line.tag}</span>}
+          {row.isSelf && <span className="self-tag">{THIS_SPARK}</span>}
+          {line.sub && <span className="sub">{line.sub}</span>}
+        </div>
       </div>
-      <div className="member-room">
-        <HeadroomBar headroom={headroom} />
-        <span className={headroom.state}>{freeOfTotal(headroom)}</span>
+      {/* One dot per row: the box's health while something is wrong with it
+          (hollow while its heartbeat is stale), and otherwise the serving
+          light its status word has always worn. */}
+      <div className="s-status" role="cell">
+        {health && health.light !== 'ok'
+          ? <HealthDot box={health} />
+          : <span className={`sdot ${status.dot}`} aria-hidden="true" />}
+        {status.word || 'n/a'}
       </div>
-      <dl className="member-facts">
-        <div><dt>Disk</dt><dd>{formatBytes(spark.inventory?.storage_available_bytes)}</dd></div>
-        <div><dt>GPU</dt><dd>{gpu.temperature ? `${gpu.temperature} °C` : 'n/a'}</dd></div>
-        <div><dt>Power</dt><dd>{gpu.watts ? `${gpu.watts.toFixed(0)} W` : 'n/a'}</dd></div>
-      </dl>
-    </div>
-  )
-}
-
-// The fleet at the top of the Sparks page, one card per unit and one group
-// for the boxes that run on their own. The table under it keeps every detail;
-// this is the shape of the fleet at a glance.
-function FleetOverview({ grouping, recipes, models, headroomOf, gpuOf }: {
-  grouping: FleetGrouping
-  recipes: Recipe[]
-  models: InstalledModel[]
-  headroomOf: (spark: FleetRow) => BoxHeadroom
-  gpuOf: (spark: FleetRow) => { temperature?: number; watts?: number }
-}) {
-  const recipeOf = (id: string) => recipes.find(recipe => recipe.id === id)
-  // Only a speed this Spark measured is a speed. A unit this Spark is not in
-  // reports none in its heartbeat, so it reads n/a rather than a figure from
-  // somewhere else.
-  const speedOf = (unit: FleetUnit): string => {
-    const measured = unit.members.some(member => member.row.isSelf)
-      ? models.find(model => model.recipe_id === unit.recipeID)?.tokens_per_second
-      : undefined
-    return measured ? measured.toFixed(1) : 'n/a'
-  }
-  return (
-    <section className="fleet-overview" aria-label="Fleet">
-      <div className="section-head">
-        <h2>Fleet</h2>
-        <span className="faint">
-          {grouping.units.length} {grouping.units.length === 1 ? 'unit' : 'units'}
-          {grouping.independent.length > 0 && ` · ${grouping.independent.length} independent`}
-        </span>
+      <div className="s-mem" role="cell"><MemoryFree headroom={room} /></div>
+      <div className={`s-temp ${heat}`} role="cell">{temperature ? `${temperature} °C` : 'n/a'}</div>
+      <div className="s-seen" role="cell">{line.seen}</div>
+      <div className="s-power" role="cell" onClick={stop}>
+        {power && <PowerSwitch compact name={row.displayName} power={power.row} onSet={power.set} />}
       </div>
-      <div className="unit-cards">
-        {grouping.units.map(unit => {
-          const recipe = recipeOf(unit.recipeID)
-          const health = unitHealth(unit)
-          return (
-            <section className="unit-card" key={unit.key} aria-label={recipe?.display_name ?? unit.recipeID}>
-              <header>
-                <Mark recipe={recipe} recipeIDs={[unit.recipeID]} name={unit.recipeID} size={26} />
-                <div className="unit-title">
-                  <strong>{recipe?.display_name ?? unit.recipeID}</strong>
-                  <span>{unitPlacement(unit)}</span>
-                </div>
-                <span className={`health ${health}`}>{HEALTH_WORD[health]}</span>
-                <span className="unit-speed">{speedOf(unit)}<small>tok/s</small></span>
-              </header>
-              <div className="member-grid">
-                {unit.members.map(member => (
-                  <MemberCell
-                    key={member.row.nodeID}
-                    spark={member.row}
-                    role={memberRole(member)}
-                    headroom={headroomOf(member.row)}
-                    gpu={gpuOf(member.row)}
-                  />
-                ))}
-              </div>
-            </section>
-          )
-        })}
-        {grouping.independent.length > 0 && (
-          <section className="unit-card independent" aria-label="Independent">
-            <header>
-              <div className="unit-title">
-                <strong>Independent</strong>
-                <span>Each box runs its own model</span>
-              </div>
-            </header>
-            <div className="member-grid">
-              {grouping.independent.map(spark => (
-                <MemberCell
-                  key={spark.nodeID}
-                  spark={spark}
-                  role={spark.serving ? recipeOf(spark.serving.recipe_id)?.display_name ?? spark.serving.recipe_id : 'Idle'}
-                  headroom={headroomOf(spark)}
-                  gpu={gpuOf(spark)}
-                />
-              ))}
-            </div>
-          </section>
+      <div className="s-actions" role="cell" onClick={stop}>
+        {!row.isSelf && row.consoleURL && (
+          <button type="button" className="ghost" onClick={() => window.open(row.consoleURL, '_blank', 'noopener,noreferrer')}>
+            Open console
+          </button>
+        )}
+        {peer && (
+          <button
+            type="button"
+            className="quiet more"
+            aria-expanded={expanded}
+            aria-label={`Pairing for ${row.displayName}`}
+            onClick={onToggle}
+          >
+            Pairing
+          </button>
         )}
       </div>
-    </section>
+      <button type="button" className="s-chev" aria-label={`Open ${row.displayName}`} onClick={event => {
+        event.stopPropagation()
+        onOpen()
+      }}>
+        <Chevron />
+      </button>
+    </div>
+  )
+}
+
+// The head of one unit's group. The whole header opens the unit's drawer.
+function UnitHeader({ unit, recipe, view, onOpen }: {
+  unit: FleetUnit
+  recipe?: Recipe
+  view: FleetView
+  onOpen: () => void
+}) {
+  const status = view.unitStatusOf(unit)
+  const memory = unitMemory(unit, row => view.headroomOf(row).box)
+  const name = recipe?.display_name ?? unit.recipeID
+  return (
+    <div className="sgroup" role="row" onClick={onOpen}>
+      <Mark recipe={recipe} recipeIDs={[unit.recipeID]} name={unit.recipeID} size={22} />
+      <button type="button" className="sg-title" onClick={event => {
+        event.stopPropagation()
+        onOpen()
+      }}>
+        {name}
+      </button>
+      <span className="sg-place">{unitPlacement(unit)}</span>
+      <span className={`health ${status.tone}`}>{status.word}</span>
+      <span className="sg-mem" title="Each box answers for its own memory; this is only their sum">
+        {memory.reported > 0
+          ? `${formatBytes(memory.free)} free of ${formatBytes(memory.total)}${
+            memory.reported < memory.members ? ` (${memory.reported} of ${memory.members} reported)` : ''}`
+          : 'memory not reported'}
+      </span>
+      <span className="sg-chev" aria-hidden="true"><Chevron /></span>
+    </div>
   )
 }
 
 export default function Fleet({
-  system, recipes, models, jobs, peers, deployments, refreshPeers, liveTPS,
-}: FleetProps) {
+  recipes, models, peers, refreshPeers, view, openBox, openUnit, power,
+}: AppState) {
   const [summaries, setSummaries] = useState<Record<string, PeerSummary>>({})
   const [expanded, setExpanded] = useState('')
   const [form, setForm] = useState<AddForm>(EMPTY_FORM)
@@ -293,19 +223,6 @@ export default function Fleet({
   const [inviteOpen, setInviteOpen] = useState(false)
   const inviteRef = useRef<HTMLDialogElement>(null)
   const sweptOnce = useRef(false)
-
-  // The power mode this console last set on each Spark, and what that Spark
-  // answered about it. The membership poll is up to ten seconds behind a
-  // change, and that Spark's own heartbeat is behind that again, so without
-  // this the switch would jump back to the old mode for a moment.
-  const [powerSet, setPowerSet] = useState<Map<string, PowerState>>(new Map())
-  // Every Spark a power change is running on now. A fleet-wide run names all
-  // of them at once, so no row can take a click the run is about to overwrite.
-  const [powerSetting, setPowerSetting] = useState<Set<string>>(new Set())
-  // What this Spark says about its own chip, for a console that leads no
-  // fleet. null is a mode this console has not read, which is not a mode.
-  const [localPower, setLocalPower] = useState<PowerState | null>(null)
-  const [localPowerBusy, setLocalPowerBusy] = useState(false)
 
   // The password is only ever in this component's state and in the one
   // request that carries it. Leaving the view drops it.
@@ -390,19 +307,14 @@ export default function Fleet({
     [membership, peers],
   )
 
-  // Which Spark this console speaks for. A controller answers for every Spark
-  // in its fleet, its own machine included; every other console answers for
-  // the one machine it runs on, and a member for none: the controller owns
-  // that machine's settings, and a switch that could only be refused would be
-  // a lie.
+  // Whether this console leads a fleet. Whose power switches it holds is the
+  // shared power control's business (powerControl.ts); here it only keeps the
+  // summary below fresh.
   const leadsFleet = membership?.role === 'controller'
-  const isMember = membership?.role === 'member'
 
   // These rows do not poll the machines they describe: their freshness is the
   // membership summary's, so the summary is what gets re-read, once for the
-  // whole fleet and only while something on this screen depends on it. The
-  // power switches depend on it too: a mode set from another console reaches
-  // this one through the same summary.
+  // whole fleet and only while something on this screen depends on it.
   const memberRowCount = memberRows.length
   useEffect(() => {
     if (memberRowCount === 0 && !leadsFleet) return
@@ -413,161 +325,6 @@ export default function Fleet({
     const timer = setInterval(poll, MEMBERSHIP_POLL_MS)
     return () => clearInterval(timer)
   }, [memberRowCount, leadsFleet, refreshMembership])
-
-  // Every Spark this console can set the mode on, in the order the fleet
-  // reports them. Read at the moment the summary arrives, which is the only
-  // moment any of it is fresh.
-  const sparks = useMemo(
-    () => (leadsFleet ? fleetRows(membership ?? null, peers, window.location.origin, Date.now()) : []),
-    [leadsFleet, membership, peers],
-  )
-  // What each Spark's switch shows: what that Spark reported, what this
-  // console set on it a moment ago, and whether a change is running there.
-  const powerRows = useMemo(
-    () => new Map(sparks.map(spark =>
-      [spark.nodeID, powerRow(spark, powerSet.get(spark.nodeID), powerSetting)])),
-    [sparks, powerSet, powerSetting],
-  )
-
-  // The fleet as units, and every box's memory, read the way the Models page
-  // reads them. This Spark's own meter is the freshest reading of it.
-  useSyncExternalStore(subscribeTelemetry, telemetryRevision, telemetryRevision)
-  const selfLatest = machineSeries(LOCAL_MACHINE).latest
-  const memory = fleetMemory({ sparks, models, recipes, deployments, jobs, system, latest: selfLatest })
-  const headroomOf = (spark: FleetRow): BoxHeadroom => boxHeadroom(boxOfRow(spark, memory.view))
-  const gpuOf = (spark: FleetRow) => (spark.isSelf && selfLatest
-    ? { temperature: selfLatest.gpu_temperature_c || undefined, watts: selfLatest.gpu_power_draw_watts || undefined }
-    : { temperature: spark.inventory?.gpu_temperature_c, watts: spark.inventory?.gpu_power_draw_watts })
-  const selfRoom = boxHeadroom(memory.view.self)
-  const selfNodeID = sparks.find(spark => spark.isSelf)?.nodeID ?? ''
-  // The power switch a table row carries: the fleet's row for that box on a
-  // controller, this Spark's own on a console that leads no fleet, and none
-  // on a member, whose settings the controller owns.
-  const powerCell = (nodeID: string, name: string) => {
-    if (isMember || membership === undefined) return null
-    if (!leadsFleet) {
-      return nodeID === selfNodeID || nodeID === ''
-        ? <PowerSwitch compact name={name} power={localPowerRow(localPower, localPowerBusy)} onSet={setLocalPowerMode} />
-        : null
-    }
-    const power = powerRows.get(nodeID)
-    const spark = sparks.find(item => item.nodeID === nodeID)
-    if (!power || !spark) return null
-    return <PowerSwitch compact name={name} power={power} onSet={mode => setPowerMode([spark], mode)} />
-  }
-
-  // A mode this console set is kept only until the fleet read carries it.
-  // This runs on every read, so the answer is retired the moment it has
-  // nothing left to add, and every later change is read from the fleet like
-  // any other fact about that Spark.
-  useEffect(() => {
-    const retired = retiredPowerSets(sparks, powerSet, powerSetting)
-    if (retired.length === 0) return
-    setPowerSet(previous => {
-      const next = new Map(previous)
-      for (const nodeID of retired) next.delete(nodeID)
-      return next
-    })
-  }, [sparks, powerSet, powerSetting])
-
-  // Set the power mode on one Spark, or on every Spark in the fleet. One call
-  // per Spark, sent one after another, through the fleet door: the controller
-  // takes its own node id there too, so this console holds one way to write
-  // the setting rather than a local one and a remote one.
-  //
-  // Every Spark named is locked for the whole run. A Spark answers with the
-  // mode it now holds and with its own sentence if the GPU refused the
-  // change, and both stand until that Spark's next heartbeat carries them. A
-  // call that was refused outright changed nothing there, so that row goes
-  // back to what it last reported and the refusal is said in one notice at
-  // the end, one line per Spark.
-  const setPowerMode = async (targets: FleetRow[], mode: string) => {
-    if (mode === '' || targets.length === 0) return
-    if (targets.some(target => powerSetting.has(target.nodeID))) return
-    const named = targets.map(target => target.nodeID)
-    setPowerSetting(previous => new Set([...previous, ...named]))
-    setPowerSet(previous => {
-      const next = new Map(previous)
-      for (const id of named) next.set(id, { mode, failure: '' })
-      return next
-    })
-    const refused: string[] = []
-    try {
-      for (const target of targets) {
-        try {
-          const answer = await api<FleetPowerMode>(FLEET_POWER_MODE_PATH, {
-            method: 'POST',
-            headers: idempotency(),
-            body: JSON.stringify({ node_id: target.nodeID, mode }),
-          })
-          setPowerSet(previous =>
-            new Map(previous).set(target.nodeID, { mode: answer.mode, failure: answer.failure ?? '' }))
-        } catch (problem) {
-          setPowerSet(previous => {
-            const next = new Map(previous)
-            next.delete(target.nodeID)
-            return next
-          })
-          refused.push(powerRefusalLine(
-            target.displayName, problem instanceof Error ? problem.message : String(problem)))
-        }
-      }
-    } finally {
-      setPowerSetting(previous => {
-        const next = new Set(previous)
-        for (const id of named) next.delete(id)
-        return next
-      })
-    }
-    // A run over one Spark has one Spark to name; a fleet-wide run names none
-    // in the title and every refused one in the lines under it.
-    if (refused.length > 0) {
-      noticeBox(
-        targets.length === 1 ? powerRefusedTitle(targets[0].displayName) : POWER_REFUSED_TITLE,
-        refused.join('\n'),
-      )
-    }
-  }
-
-  // What this Spark holds now, read from its own door. A console that leads a
-  // fleet never asks: the summary already carries the mode of every Spark in
-  // it, this machine included.
-  useEffect(() => {
-    // undefined is a summary that has not answered yet, which is not the same
-    // as no fleet: the read waits for it rather than asking on a guess.
-    if (membership === undefined || leadsFleet || isMember) return
-    let cancelled = false
-    api<PowerState>(LOCAL_POWER_MODE_PATH)
-      .then(state => {
-        if (!cancelled) setLocalPower({ mode: state.mode ?? '', failure: state.failure ?? '' })
-      })
-      .catch(() => {
-        /* a manager that cannot read the mode leaves the switch dead */
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [membership, leadsFleet, isMember])
-
-  // The same change on a Spark that answers for itself. The answer is the
-  // whole new state, so what the machine now holds and its own sentence about
-  // a GPU that refused the cap both come back together.
-  const setLocalPowerMode = async (mode: string) => {
-    if (mode === '' || localPowerBusy) return
-    setLocalPowerBusy(true)
-    try {
-      const answer = await api<PowerState>(LOCAL_POWER_MODE_PATH, {
-        method: 'POST',
-        headers: idempotency(),
-        body: JSON.stringify({ mode }),
-      })
-      setLocalPower({ mode: answer.mode ?? '', failure: answer.failure ?? '' })
-    } catch (problem) {
-      noticeBox(powerRefusedTitle(THIS_SPARK), problem instanceof Error ? problem.message : String(problem))
-    } finally {
-      setLocalPowerBusy(false)
-    }
-  }
 
   // The tab is opened from the click itself: a browser blocks a window opened
   // after an await, and the dialog promises that tab is already there.
@@ -825,8 +582,6 @@ export default function Fleet({
     }
   }
 
-  const thisModel = models.find(model => model.active && model.status === 'ready')
-  const thisRecipe = recipes.find(recipe => recipe.id === thisModel?.recipe_id)
   const adoptSteps = status?.steps ?? []
   const failedStep = adoptSteps.find(step => step.state === 'failed')
   const progress = status?.progress ?? []
@@ -838,23 +593,123 @@ export default function Fleet({
   // row or the sweep's own label stands in.
   const targetName = inviteName(attempt, addTarget?.name ?? '')
   const inviteState = attempt?.state ?? 'waiting'
-  // Only claimed when the catalog actually carries a two-Spark recipe.
+
+  // ---- One row per box ------------------------------------------------------
+
+  // This Spark knows what it serves first hand.
+  const thisModel = models.find(model => model.active && model.status === 'ready')
+  const nameOf = (id: string) => recipes.find(recipe => recipe.id === id)?.display_name ?? id
+  const peerOf = (row: FleetRow) => peers.find(peer => consoleKey(peer.base_url) === consoleKey(row.consoleURL))
+  const lineOf = (row: FleetRow, tag: string): SparkLine => {
+    const peer = peerOf(row)
+    // A Spark added by address reports nothing to the fleet. What this
+    // console knows of it is what its own summary answered, polled above.
+    if (row.legacyPeerOnly) {
+      const summary = peer ? summaries[peer.id] : undefined
+      const reachable = summary?.reachable ?? false
+      const active = (summary?.system?.installed_models ?? []).find(model => model.active && model.status === 'ready')
+      return {
+        row, tag, peer,
+        sub: active ? `${nameOf(active.recipe_id)} · not in the fleet` : 'added by address · not in the fleet',
+        status: !summary ? { word: 'Checking', dot: '' }
+          : !reachable ? { word: 'Unreachable', dot: 'fail' }
+            : active ? { word: 'Serving', dot: 'on' } : { word: 'Idle', dot: '' },
+        room: reachable ? boxHeadroom(boxFromSystem(row.nodeID, row.displayName, summary?.system ?? null)) : view.headroomOf(row),
+        seen: reachable ? 'now' : 'n/a',
+        power: power.switchFor(row),
+      }
+    }
+    const serving = row.isSelf ? thisModel : row.serving
+    const age = view.ageOf(row)
+    return {
+      row, tag, peer,
+      health: view.healthOf(row.nodeID),
+      // A box in no unit says what it runs; a unit's group header already
+      // says it for every member.
+      sub: tag === '' && serving ? nameOf(serving.recipe_id) : '',
+      status: row.isSelf ? (thisModel ? { word: 'Serving', dot: 'on' } : { word: 'Idle', dot: '' }) : row.status,
+      room: view.headroomOf(row),
+      temperature: view.temperatureOf(row),
+      seen: row.isSelf ? 'now' : age === undefined ? 'n/a' : `${shortAge(age)} ago`,
+      power: power.switchFor(row),
+    }
+  }
+  const rowFor = (line: SparkLine) => {
+    const key = line.row.nodeID || line.row.consoleURL
+    const open = expanded === key
+    const peer = line.peer
+    return (
+      <Fragment key={key}>
+        <SparkRow
+          line={line}
+          expanded={open}
+          onOpen={() => openBox(line.row.nodeID)}
+          onToggle={() => setExpanded(open ? '' : key)}
+        />
+        {open && peer && (
+          <div className="mdetail" role="row">
+            <dl className="facts">
+              <dt>Address</dt><dd><code>{peer.base_url}</code></dd>
+            </dl>
+            <div className="row-tools">
+              {/* One verb for every Spark that is not in the fleet yet,
+                  whichever way it was added to this console. */}
+              {!fleetStatusNote(fleetNodeFor(membership ?? null, peer.base_url)) && (
+                <button className="primary" onClick={() => addToFleet(peer.base_url, peer.name, peer.name)}>
+                  Add to fleet
+                </button>
+              )}
+              <button className="danger" onClick={() => remove(peer)}>Remove</button>
+            </div>
+          </div>
+        )}
+      </Fragment>
+    )
+  }
+  const units = view.grouping.units
+  const unassigned = view.unassigned
 
   return (
     <div className="stack">
-      {/* The shape of the fleet first: one card per unit, then the boxes
-          that run on their own. Only a console that leads a fleet of more
-          than one box has a shape to show. */}
-      {leadsFleet && memory.rows.length > 1 && (
-        <FleetOverview
-          grouping={memory.grouping}
-          recipes={recipes}
-          models={models}
-          headroomOf={headroomOf}
-          gpuOf={gpuOf}
-        />
-      )}
-      {peers.length === 0 && memberRows.length === 0 ? (
+      <FleetHealthLine summary={view.summary} boxes={view.health} onOpenBox={box => openBox(box.id)} />
+      <AttentionBanner banner={view.banner} onOpen={openBox} />
+
+      {/* Every box in one table, grouped by the unit it runs in. A unit's
+          header opens the unit; a row opens its box. */}
+      <div className="stable" role="table" aria-label="Sparks">
+        <div className="srow head" role="row">
+          <span role="columnheader">Box</span>
+          <span role="columnheader">Status</span>
+          <span role="columnheader">Memory free</span>
+          <span role="columnheader" className="r">GPU temp</span>
+          <span role="columnheader">Last seen</span>
+          <span role="columnheader">
+            Power{!power.fanOut && power.ready && !power.isMember && <> <Tip text={POWER_MODE_NOTE} label="What the power modes do" /></>}
+          </span>
+          <span /><span />
+        </div>
+        {units.map(unit => (
+          <Fragment key={unit.key}>
+            <UnitHeader
+              unit={unit}
+              recipe={recipes.find(recipe => recipe.id === unit.recipeID)}
+              view={view}
+              onOpen={() => openUnit(unit.key)}
+            />
+            {unit.members.map(member => rowFor(lineOf(member.row, member.head ? 'head' : 'member')))}
+          </Fragment>
+        ))}
+        {unassigned.length > 0 && units.length > 0 && (
+          <div className="sgroup plain" role="row">
+            <span className="sg-title static">Unassigned</span>
+            <span className="sg-place">{unassigned.length === 1 ? '1 box' : `${unassigned.length} boxes`}</span>
+            <span className="sg-mem">each box runs its own model</span>
+          </div>
+        )}
+        {unassigned.map(row => rowFor(lineOf(row, '')))}
+      </div>
+
+      {peers.length === 0 && memberRows.length === 0 && (
         // One peer is what basement supports today, so both ways in live
         // here and both disappear once a second Spark exists.
         <div className="empty">
@@ -864,293 +719,6 @@ export default function Fleet({
             <button className="quiet" onClick={() => openAdd()}>Add by address</button>
           </div>
         </div>
-      ) : (
-        <div className="mtable fleet">
-          <div className="mthead" aria-hidden="true">
-            <span>Spark</span><span>Serving</span><span className="r">Memory</span><span className="r">Disk free</span>
-            <span className="r">Version</span><span style={{ paddingLeft: 20 }}>Status</span><span>Power</span><span /><span />
-          </div>
-
-          <div className="mrow">
-            <div className="m-id">
-              <div>
-                <div className="nm">{THIS_SPARK}</div>
-                <div className="use">{sparkSubline(system?.hostname ?? '', localRoleLine(membership ?? null))}</div>
-              </div>
-            </div>
-            <div className="m-id">
-              {thisRecipe ? (
-                <>
-                  <Mark recipe={thisRecipe} recipeIDs={[thisRecipe.id]} size={24} />
-                  <div className="nm" style={{ fontSize: 13 }}>{thisRecipe.display_name}</div>
-                </>
-              ) : (
-                <span className="faint">Idle</span>
-              )}
-            </div>
-            <div className="m-num room-cell">
-              <span className="n">{formatBytes(memory.view.self.availableBytes)}</span>
-              <HeadroomBar headroom={selfRoom} size="mini" />
-            </div>
-            <div className="m-num"><span className="n">{formatBytes(system?.storage_available_bytes)}</span></div>
-            <div className="m-num"><span className="n">{system?.manager_version || 'n/a'}</span></div>
-            <div className="m-status">
-              <span className={`sdot ${thisModel ? 'on' : ''}`} aria-hidden="true" />
-              {thisModel ? 'Serving' : 'Idle'}
-              {thisModel && liveTPS !== null && <span className="faint" style={{ marginLeft: 4 }}>{liveTPS.toFixed(1)} tok/s</span>}
-            </div>
-            <div className="m-power">{powerCell(selfNodeID, THIS_SPARK)}</div>
-            <div className="m-actions" />
-            <span />
-          </div>
-
-          {peers.map(peer => {
-            const summary = summaries[peer.id]
-            const reachable = summary?.reachable ?? false
-            const peerModels = summary?.system?.installed_models ?? []
-            const peerActive = peerModels.find(model => model.active && model.status === 'ready')
-            const peerRecipe = recipes.find(recipe => recipe.id === peerActive?.recipe_id)
-            const open = expanded === peer.id
-            const toggle = () => setExpanded(open ? '' : peer.id)
-            const statusLabel = !summary ? 'Checking' : !reachable ? 'Unreachable' : peerActive ? 'Serving' : 'Idle'
-            const dotClass = !summary ? '' : !reachable ? 'fail' : peerActive ? 'on' : ''
-            // A peer this console only polls over its API and a peer that is
-            // really in the fleet are the same row; only membership decides
-            // whether it can still be added.
-            const memberNode = fleetNodeFor(membership ?? null, peer.base_url)
-            const fleetNote = fleetStatusNote(memberNode)
-            return (
-              <Fragment key={peer.id}>
-                <div
-                  className={`mrow ${open ? 'open' : ''}`}
-                  role="button"
-                  tabIndex={0}
-                  aria-expanded={open}
-                  onClick={toggle}
-                  onKeyDown={event => {
-                    if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
-                      event.preventDefault()
-                      toggle()
-                    }
-                  }}
-                >
-                  <div className="m-id">
-                    <div>
-                      <div className="nm">{peer.name}</div>
-                      <div className="use">
-                        {sparkSubline(summary?.system?.hostname ?? '', peerRoleLine(membership ?? null, memberNode))}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="m-id">
-                    {peerRecipe ? (
-                      <>
-                        <Mark recipe={peerRecipe} recipeIDs={[peerRecipe.id]} size={24} />
-                        <div className="nm" style={{ fontSize: 13 }}>{peerRecipe.display_name}</div>
-                      </>
-                    ) : (
-                      <span className="faint">{reachable ? 'Idle' : 'n/a'}</span>
-                    )}
-                  </div>
-                  <div className="m-num room-cell">
-                    <span className="n">{reachable ? formatBytes(summary?.system?.memory_available_bytes) : 'n/a'}</span>
-                    {reachable && (
-                      <HeadroomBar headroom={boxHeadroom(boxFromSystem(peer.id, peer.name, summary?.system ?? null))} size="mini" />
-                    )}
-                  </div>
-                  <div className="m-num"><span className="n">{reachable ? formatBytes(summary?.system?.storage_available_bytes) : 'n/a'}</span></div>
-                  <div className="m-num"><span className="n">{reachable ? (summary?.system?.manager_version || 'n/a') : 'n/a'}</span></div>
-                  <div className="m-status">
-                    <span className={`sdot ${dotClass}`} aria-hidden="true" />
-                    <span>
-                      {statusLabel}
-                      {fleetNote && <span className="peer-note">{fleetNote}</span>}
-                    </span>
-                  </div>
-                  <div className="m-power" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
-                    {powerCell(memberNode?.node_id ?? peer.id, peer.name)}
-                  </div>
-                  <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
-                    <button
-                      className="ghost"
-                      onClick={event => {
-                        event.stopPropagation()
-                        window.open(peer.base_url, '_blank', 'noopener,noreferrer')
-                      }}
-                    >
-                      Open console
-                    </button>
-                  </div>
-                  <span className={`m-caret ${open ? 'open' : ''}`} aria-hidden="true">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
-                  </span>
-                </div>
-                {open && (
-                  <div className="mdetail">
-                    <dl className="facts">
-                      <dt>Address</dt><dd><code>{peer.base_url}</code></dd>
-                    </dl>
-                    <div className="row-tools">
-                      {/* One verb for every Spark that is not in the fleet
-                          yet, whichever way it was added to this console. */}
-                      {!fleetNote && (
-                        <button className="primary" onClick={() => addToFleet(peer.base_url, peer.name, peer.name)}>
-                          Add to fleet
-                        </button>
-                      )}
-                      <button className="danger" onClick={() => remove(peer)}>Remove</button>
-                    </div>
-                  </div>
-                )}
-              </Fragment>
-            )
-          })}
-
-          {/* A Spark that joined the fleet itself. Every number in its row is
-              one it reported in its own heartbeat, and n/a means it has not
-              reported that yet rather than that it has none. */}
-          {memberRows.map(node => {
-            const key = `node:${node.node_id}`
-            const open = expanded === key
-            const toggle = () => setExpanded(open ? '' : key)
-            const status = nodeStatus(node)
-            const serving = nodeServing(node)
-            const servingRecipe = recipes.find(recipe => recipe.id === serving?.recipe_id)
-            const fleetNote = fleetStatusNote(node)
-            return (
-              <Fragment key={key}>
-                <div
-                  className={`mrow ${open ? 'open' : ''}`}
-                  role="button"
-                  tabIndex={0}
-                  aria-expanded={open}
-                  onClick={toggle}
-                  onKeyDown={event => {
-                    if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
-                      event.preventDefault()
-                      toggle()
-                    }
-                  }}
-                >
-                  <div className="m-id">
-                    <div>
-                      <div className="nm">{nodeName(node)}</div>
-                      <div className="use">
-                        {sparkSubline(nodeHostname(node), peerRoleLine(membership ?? null, node))}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="m-id">
-                    {serving ? (
-                      <>
-                        <Mark
-                          recipe={servingRecipe}
-                          recipeIDs={[serving.recipe_id]}
-                          name={serving.recipe_id}
-                          size={24}
-                        />
-                        {/* Named by this console's catalog when it knows the
-                            recipe, and by the id that Spark sent when it does
-                            not. */}
-                        <div className="nm" style={{ fontSize: 13 }}>
-                          {servingRecipe?.display_name ?? serving.recipe_id}
-                        </div>
-                      </>
-                    ) : (
-                      <span className="faint">{nodeReported(node) ? 'Idle' : 'n/a'}</span>
-                    )}
-                  </div>
-                  <div className="m-num room-cell">
-                    <span className="n">{formatBytes(node.inventory?.memory_available_bytes)}</span>
-                    {(() => {
-                      const spark = memory.rows.find(item => item.nodeID === node.node_id)
-                      return spark ? <HeadroomBar headroom={headroomOf(spark)} size="mini" /> : null
-                    })()}
-                  </div>
-                  <div className="m-num"><span className="n">{formatBytes(node.inventory?.storage_available_bytes)}</span></div>
-                  <div className="m-num"><span className="n">{node.manager_version || 'n/a'}</span></div>
-                  <div className="m-status">
-                    <span className={`sdot ${status.dot}`} aria-hidden="true" />
-                    <span>
-                      {status.word}
-                      {fleetNote && <span className="peer-note">{fleetNote}</span>}
-                    </span>
-                  </div>
-                  <div className="m-power" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
-                    {powerCell(node.node_id, nodeName(node))}
-                  </div>
-                  <div className="m-actions" onKeyDown={event => event.stopPropagation()}>
-                    <button
-                      className="ghost"
-                      onClick={event => {
-                        event.stopPropagation()
-                        window.open(node.console_url, '_blank', 'noopener,noreferrer')
-                      }}
-                    >
-                      Open console
-                    </button>
-                  </div>
-                  <span className={`m-caret ${open ? 'open' : ''}`} aria-hidden="true">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
-                  </span>
-                </div>
-                {open && (
-                  <div className="mdetail">
-                    <dl className="facts">
-                      {nodeFacts(node, Date.now()).map(fact => (
-                        <Fragment key={fact.label}>
-                          <dt>{fact.label}</dt>
-                          <dd>{fact.label === 'Address' ? <code>{fact.value}</code> : fact.value}</dd>
-                        </Fragment>
-                      ))}
-                    </dl>
-                    {/* No Remove here: this Spark is a member of the fleet,
-                        and the manager has no endpoint that takes one out.
-                        A button that could not do it would be a lie. */}
-                  </div>
-                )}
-              </Fragment>
-            )
-          })}
-        </div>
-      )}
-
-      {/* How hard each Spark runs its chip. Each machine's switch sits in its
-          own row of the table above; this line carries the sentence that
-          explains the choice, and the one change that reaches every Spark. A
-          member console shows none: the controller owns this machine's
-          settings. */}
-      {membership !== undefined && !isMember && (
-        <section className="power-foot" aria-label="Power mode">
-          <h2>Power</h2>
-          <Tip text={POWER_MODE_NOTE} label="What the power modes do" />
-          {/* With no other Spark there is no table above, so this Spark's
-              own switch, and on a fleet of one its fleet switch, stand here. */}
-          {peers.length === 0 && memberRows.length === 0 && (
-            leadsFleet
-              ? sparks.map(spark => {
-                const power = powerRows.get(spark.nodeID)
-                return power ? (
-                  <PowerSwitch
-                    key={spark.nodeID}
-                    name={spark.isSelf ? THIS_SPARK : spark.displayName}
-                    power={power}
-                    onSet={mode => setPowerMode([spark], mode)}
-                  />
-                ) : null
-              })
-              : <PowerSwitch name={THIS_SPARK} power={localPowerRow(localPower, localPowerBusy)} onSet={setLocalPowerMode} />
-          )}
-          {/* Only where there is more than one Spark to send it to. A Spark
-              added by address never joined this fleet, so powerFanOut leaves
-              it out and it is not counted here either. */}
-          {leadsFleet && powerFanOut(sparks).length > 1 && (
-            <PowerFanOut
-              busy={powerFanOutBusy(sparks, powerSetting)}
-              onSet={mode => setPowerMode(powerFanOut(sparks), mode)}
-            />
-          )}
-        </section>
       )}
 
       {/* A machine already running basement that this fleet has never met.
