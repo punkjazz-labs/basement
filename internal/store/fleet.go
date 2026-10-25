@@ -698,7 +698,7 @@ func (s *Store) CreateFleetDeployment(ctx context.Context, deployment FleetDeplo
 }
 
 // SetFleetDeploymentJob gives a record its first owner job, or re-asserts the
-// job it already names. It refuses a removed record: the owner_job_id=''
+// job it already names. It refuses a removed record: the empty owner_job_id
 // branch checks no job id, so without the state guard it would match a removed
 // job-less record and put it back to work. That record can really be handed to
 // a caller: two placements of one model onto one Spark under different
@@ -769,7 +769,7 @@ func (s *Store) AdvanceFleetDeploymentJob(ctx context.Context, deploymentID, exp
 // beside it carry their own state guards for the same reason: a removed
 // record keeps the job id it last named, so AdvanceFleetDeploymentJob can be
 // aimed at one by naming that exact job, and SetFleetDeploymentJob's
-// owner_job_id='' branch names no job at all. Each refuses a removed record
+// empty owner_job_id branch names no job at all. Each refuses a removed record
 // itself, so no caller ordering has to be trusted. Writing "removed" over
 // "removed" stays allowed, so clearing one twice is not an error.
 func (s *Store) ObserveFleetDeployment(ctx context.Context, deploymentID, state, observedAt string) error {
