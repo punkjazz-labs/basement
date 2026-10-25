@@ -32,10 +32,12 @@ does not describe an operational feed today.
    ship inside the manager binary. The manager will verify the manifest
    signature, then each recipe file's sha256 against the manifest. Key
    rotation will ship as a manager release carrying old and new keys.
-4. **Trust labels are not transferable.** A feed recipe will arrive at most as
-   `basement-candidate`. `basement-verified` will require DGX qualification
+4. **Trust labels.** `basement-verified` will require DGX qualification
    evidence recorded in the repository; the feed will only distribute labels
-   the repository evidence supports.
+   the repository evidence supports. The manager-side clamp that demoted any
+   feed recipe to `basement-candidate` was removed on 2026-10-25: the feed has
+   one publisher, who builds the index from this repository, and every recipe
+   is a candidate anyway.
 5. **Consent and execution.** The manager will fetch the feed read-only and
    show "new model available". Installing will still run the full local
    validator, preflight, licence acceptance, and confirmation. No fetched
@@ -93,10 +95,6 @@ Resolved since:
   reporting `{state, accepted_generated_at, fetched_at, stale}` with a 30-day
   staleness bound. Revocation (item 7) was built on 2026-08-12 and removed
   unused on 2026-10-25.
-- Feed ingest now enforces item 4 (2026-08-12): whatever a signed index
-  claims, a recipe arrives at most as `basement-candidate` with `candidate`
-  verification, demoted at the trust boundary in `VerifyAndParseIndex` with a
-  logged reason.
 - The wire format question is settled by the amended item 2: the single
   signed index is the accepted design, and the signature file is named
   `index.json.sig` to say what it actually is.
