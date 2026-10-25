@@ -51,7 +51,7 @@ func TestMissingDirectoryLeavesTheFeatureInert(t *testing.T) {
 	if len(snapshot.Services) != 0 || len(snapshot.Problems) != 0 {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
-	if _, held := registry.Holder("node", "spark-head"); held {
+	if _, held := registry.Holder("node", "head-box"); held {
 		t.Fatal("no declaration can hold a Spark")
 	}
 	registry.CheckNow(context.Background())
@@ -59,12 +59,12 @@ func TestMissingDirectoryLeavesTheFeatureInert(t *testing.T) {
 
 func TestReloadReadsValidFilesAndReportsTheRest(t *testing.T) {
 	registry, dir, _ := newTestRegistry(t)
-	writeFile(t, dir, "b-good.yaml", declaration("good-service", "http://127.0.0.1:1/health", "spark-head", "spark-worker"))
+	writeFile(t, dir, "b-good.yaml", declaration("good-service", "http://127.0.0.1:1/health", "head-box", "worker-box"))
 	writeFile(t, dir, "a-broken.yaml", "schema_version: 1\nid: [\n")
-	writeFile(t, dir, "c-duplicate.yaml", declaration("good-service", "http://127.0.0.1:2/health", "spark-other"))
+	writeFile(t, dir, "c-duplicate.yaml", declaration("good-service", "http://127.0.0.1:2/health", "other-box"))
 	writeFile(t, dir, "notes.txt", "not a declaration")
 	writeFile(t, dir, ".hidden.yaml", "also ignored")
-	writeFile(t, dir, "d-typo.yaml", declaration("typo-service", "http://127.0.0.1:3/health", "spark-third")+"health_url_typo: x\n")
+	writeFile(t, dir, "d-typo.yaml", declaration("typo-service", "http://127.0.0.1:3/health", "third-box")+"health_url_typo: x\n")
 	registry.Reload()
 
 	snapshot := registry.Snapshot()
@@ -84,13 +84,13 @@ func TestReloadReadsValidFilesAndReportsTheRest(t *testing.T) {
 			t.Fatalf("problem for %s = %q, want %q", problem.File, problem.Error, wants[problem.File])
 		}
 	}
-	if holder, held := registry.Holder("", "SPARK-WORKER"); !held || holder != "Service good-service" {
+	if holder, held := registry.Holder("", "WORKER-BOX"); !held || holder != "Service good-service" {
 		t.Fatalf("holder = %q, %v", holder, held)
 	}
-	if _, held := registry.Holder("", "spark-other"); held {
+	if _, held := registry.Holder("", "other-box"); held {
 		t.Fatal("a refused duplicate must not hold the Spark it names")
 	}
-	if _, held := registry.Holder("", "spark-third"); held {
+	if _, held := registry.Holder("", "third-box"); held {
 		t.Fatal("a refused file must not hold the Spark it names")
 	}
 
@@ -98,7 +98,7 @@ func TestReloadReadsValidFilesAndReportsTheRest(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry.Reload()
-	if _, held := registry.Holder("", "spark-worker"); held {
+	if _, held := registry.Holder("", "worker-box"); held {
 		t.Fatal("removing the file releases the Spark")
 	}
 	if snapshot := registry.Snapshot(); len(snapshot.Services) != 1 || snapshot.Services[0].Declaration.ID != "good-service" ||
@@ -133,7 +133,7 @@ func TestCheckReportsHealthFromOneGet(t *testing.T) {
 	defer server.Close()
 
 	registry, dir, clock := newTestRegistry(t)
-	writeFile(t, dir, "service.yaml", declaration("probe-service", server.URL+"/health", "spark-head"))
+	writeFile(t, dir, "service.yaml", declaration("probe-service", server.URL+"/health", "head-box"))
 	registry.Reload()
 	registry.CheckNow(context.Background())
 	health := registry.Snapshot().Services[0].Health
@@ -167,7 +167,7 @@ func TestCheckFollowsNoRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 	registry, dir, _ := newTestRegistry(t)
-	writeFile(t, dir, "service.yaml", declaration("redirect-service", server.URL+"/health", "spark-head"))
+	writeFile(t, dir, "service.yaml", declaration("redirect-service", server.URL+"/health", "head-box"))
 	registry.Reload()
 	registry.CheckNow(context.Background())
 	health := registry.Snapshot().Services[0].Health
@@ -194,8 +194,8 @@ func TestCheckWithoutAnAnswerIsUnhealthy(t *testing.T) {
 	closed.Close()
 
 	registry, dir, _ := newTestRegistry(t)
-	writeFile(t, dir, "a.yaml", declaration("slow-service", slow.URL+"/health", "spark-a"))
-	writeFile(t, dir, "b.yaml", declaration("gone-service", closedURL+"/health", "spark-b"))
+	writeFile(t, dir, "a.yaml", declaration("slow-service", slow.URL+"/health", "box-a"))
+	writeFile(t, dir, "b.yaml", declaration("gone-service", closedURL+"/health", "box-b"))
 	registry.Reload()
 	registry.CheckNow(context.Background())
 	services := registry.Snapshot().Services
@@ -212,7 +212,7 @@ func TestChecksRunOnTheirOwnInterval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
 	defer server.Close()
 	registry, dir, clock := newTestRegistry(t)
-	writeFile(t, dir, "service.yaml", declaration("interval-service", server.URL+"/health", "spark-head")+"health_interval_seconds: 10\n")
+	writeFile(t, dir, "service.yaml", declaration("interval-service", server.URL+"/health", "head-box")+"health_interval_seconds: 10\n")
 	registry.Reload()
 
 	var checks sync.WaitGroup
@@ -240,7 +240,7 @@ func TestChecksRunOnTheirOwnInterval(t *testing.T) {
 	if registry.Snapshot().Services[0].Health.Status != StatusHealthy {
 		t.Fatal("an unchanged declaration must keep its health across a reload")
 	}
-	writeFile(t, dir, "service.yaml", declaration("interval-service", server.URL+"/other", "spark-head"))
+	writeFile(t, dir, "service.yaml", declaration("interval-service", server.URL+"/other", "head-box"))
 	registry.Reload()
 	if registry.Snapshot().Services[0].Health.Status != StatusUnknown {
 		t.Fatal("a changed health URL must start again from unknown")
@@ -288,7 +288,7 @@ func TestRunStopsWithItsContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
 	defer server.Close()
 	registry, dir, _ := newTestRegistry(t)
-	writeFile(t, dir, "service.yaml", declaration("run-service", server.URL+"/health", "spark-head"))
+	writeFile(t, dir, "service.yaml", declaration("run-service", server.URL+"/health", "head-box"))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

@@ -13,10 +13,18 @@ func TestTwoSparkStartRefusesAWorkerAnAttachedServiceHolds(t *testing.T) {
 	ctx := context.Background()
 	fake := newFleetExecutor()
 	runner, s, r := newTwoSparkEngine(t, fake)
+	planned, err := fake.Plan(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := planned.Peer
+	if worker.ID == "" || worker.Name == "" {
+		t.Fatalf("the two-Spark fixture names no worker: %+v", worker)
+	}
 	runner.SetRuntimeHolder(func(nodeID, displayName string) (string, bool) {
-		return "Video pair", nodeID == "peer_1" && displayName == "spark-b"
+		return "Video pair", nodeID == worker.ID && displayName == worker.Name
 	})
-	want := "the attached service Video pair has spark-b reserved outside Basement, so this two-Spark model cannot start"
+	want := "the attached service Video pair has " + worker.Name + " reserved outside Basement, so this two-Spark model cannot start"
 
 	job, _, err := s.CreateJob(ctx, "install", r.ID, "held-worker-install", map[string]any{"confirmed": true})
 	if err != nil {

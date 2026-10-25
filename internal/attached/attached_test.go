@@ -22,7 +22,7 @@ topology:
   spark_count: 2
   parallelism: TP1 x SP2 pair
   nodes:
-    - node_name: spark-head
+    - node_name: head-box
       role: head/rank0
     - node_id: node-worker-id
       role: worker/rank1
@@ -33,7 +33,7 @@ licence_territory_exclusions:
 `
 
 func TestShippedExampleIsAValidDeclaration(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "examples", "attached-services", "fasth3-edgexpert-pair.yaml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "examples", "attached-services", "fasth3-gpu-pair.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestShippedExampleIsAValidDeclaration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the example declaration must stay valid: %v", err)
 	}
-	if service.ID != "fasth3-edgexpert-pair" || service.Kind != "video-generation" || service.ServedModelName != "fasth3-omniref" {
+	if service.ID != "fasth3-gpu-pair" || service.Kind != "video-generation" || service.ServedModelName != "fasth3-omniref" {
 		t.Fatalf("example identity = %+v", service)
 	}
 	if service.Topology.SparkCount != 2 || len(service.Topology.Nodes) != 2 {
@@ -54,8 +54,8 @@ func TestShippedExampleIsAValidDeclaration(t *testing.T) {
 	if service.LicenceURL != "" {
 		t.Fatal("the example must not carry a licence URL nobody recorded a source for")
 	}
-	if !service.Names("", "edgexpert-2051") || !service.Names("", "EDGEXPERT-37C4.local") || service.Names("", "edgexpert-0000") {
-		t.Fatal("the example must name exactly the two EdgeXpert Sparks")
+	if !service.Names("", "head-box") || !service.Names("", "WORKER-BOX.local") || service.Names("", "other-box") {
+		t.Fatal("the example must name exactly the two Sparks of the pair")
 	}
 	if service.HealthInterval() != 30*time.Second {
 		t.Fatalf("health interval = %s", service.HealthInterval())
@@ -100,10 +100,10 @@ func TestDecodeRefusesWhatCannotBeTrusted(t *testing.T) {
 		"count":       {func(s string) string { return strings.Replace(s, "spark_count: 2", "spark_count: 3", 1) }, "must name exactly 3 Sparks"},
 		"count range": {func(s string) string { return strings.Replace(s, "spark_count: 2", "spark_count: 5", 1) }, "spark_count must be between 1 and 4"},
 		"both names": {func(s string) string {
-			return strings.Replace(s, "    - node_name: spark-head\n", "    - node_name: spark-head\n      node_id: also\n", 1)
+			return strings.Replace(s, "    - node_name: head-box\n", "    - node_name: head-box\n      node_id: also\n", 1)
 		}, "exactly one of node_name and node_id"},
 		"duplicate node": {func(s string) string {
-			return strings.Replace(s, "    - node_id: node-worker-id\n", "    - node_name: SPARK-HEAD.local\n", 1)
+			return strings.Replace(s, "    - node_id: node-worker-id\n", "    - node_name: HEAD-BOX.local\n", 1)
 		}, "names a Spark already listed"},
 		"licence link": {func(s string) string {
 			return strings.Replace(s, "licence_url: https://example.com/LICENSE", "licence_url: javascript:alert(1)", 1)
@@ -130,13 +130,13 @@ func TestDecodeRefusesWhatCannotBeTrusted(t *testing.T) {
 }
 
 func TestNodeMatching(t *testing.T) {
-	byName := Node{NodeName: "EdgeXpert-2051.example.ts.net"}
-	for _, name := range []string{"edgexpert-2051", "EDGEXPERT-2051", "edgexpert-2051.local", " edgexpert-2051 "} {
+	byName := Node{NodeName: "Head-Box.example.ts.net"}
+	for _, name := range []string{"head-box", "HEAD-BOX", "head-box.local", " head-box "} {
 		if !byName.Matches("", name) {
 			t.Fatalf("%q should match %q", byName.NodeName, name)
 		}
 	}
-	for _, name := range []string{"", "edgexpert-20511", "edgexpert", "spark-2051"} {
+	for _, name := range []string{"", "head-box0", "head", "other-box"} {
 		if byName.Matches("node-1", name) {
 			t.Fatalf("%q must not match %q", byName.NodeName, name)
 		}

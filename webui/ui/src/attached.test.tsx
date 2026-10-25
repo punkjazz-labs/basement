@@ -12,30 +12,30 @@ const ago = (seconds: number) => new Date(NOW - seconds * 1000).toISOString()
 // The shipped example declaration (docs/examples/attached-services), as the
 // manager reports it once it has been checked.
 const fastH3 = (overrides: Partial<AttachedService> = {}): AttachedService => ({
-  file: 'fasth3-edgexpert-pair.yaml',
+  file: 'fasth3-gpu-pair.yaml',
   declaration: {
     schema_version: 1,
-    id: 'fasth3-edgexpert-pair',
+    id: 'fasth3-gpu-pair',
     display_name: 'FastH3 (MiniMax H3 Omni, FastVideo)',
     model_by: 'MiniMax / FastVideo',
     kind: 'video-generation',
     served_model_name: 'fasth3-omniref',
-    managed_by: 'systemd: fasth3-serve.service (edgexpert-2051), h3-ray.service + h3-memguard.service (both)',
+    managed_by: 'systemd: fasth3-serve.service (head-box), h3-ray.service + h3-memguard.service (both)',
     endpoint: 'http://127.0.0.1:8790 (head; reach via ssh tunnel)',
     health_url: 'http://127.0.0.1:8790/health',
     health_interval_seconds: 30,
     topology: {
       spark_count: 2,
       parallelism: 'TP1 x SP2 pair (Ray)',
-      nodes: [{ node_name: 'edgexpert-2051', role: 'head/rank0' }, { node_name: 'edgexpert-37c4', role: 'worker/rank1' }],
+      nodes: [{ node_name: 'head-box', role: 'head/rank0' }, { node_name: 'worker-box', role: 'worker/rank1' }],
     },
     licence: 'MiniMax H3 Community License Agreement',
     licence_territory_exclusions: ['European Union', 'United Kingdom', 'Republic of Korea', 'United States of America'],
   },
   health: { status: 'healthy', last_checked_at: ago(12), latency_ms: 3 },
   nodes: [
-    { name: 'edgexpert-2051', role: 'head/rank0', this_spark: true, protected: true },
-    { name: 'edgexpert-37c4', role: 'worker/rank1', this_spark: false, protected: true },
+    { name: 'head-box', role: 'head/rank0', this_spark: true, protected: true },
+    { name: 'worker-box', role: 'worker/rank1', this_spark: false, protected: true },
   ],
   ...overrides,
 })
@@ -48,7 +48,7 @@ describe('attachedServices', () => {
       services: [fastH3(), { file: 'x.yaml' }, { ...fastH3(), health: { status: 'great' } }],
       errors: [{ file: 'broken.yaml', error: 'the file is empty' }, { file: 3 }],
     })
-    expect(parsed.services.map(service => service.declaration.id)).toEqual(['fasth3-edgexpert-pair'])
+    expect(parsed.services.map(service => service.declaration.id)).toEqual(['fasth3-gpu-pair'])
     expect(parsed.errors).toEqual([{ file: 'broken.yaml', error: 'the file is empty' }])
   })
 
@@ -62,7 +62,7 @@ describe('attached service copy', () => {
   it('states the topology the declaration gives', () => {
     expect(topologyLine(fastH3().declaration)).toBe('2 Sparks · TP1 x SP2 pair (Ray)')
     const single = fastH3().declaration
-    expect(topologyLine({ ...single, topology: { spark_count: 1, nodes: [{ node_name: 'spark-a' }] } })).toBe('1 Spark')
+    expect(topologyLine({ ...single, topology: { spark_count: 1, nodes: [{ node_name: 'box-a' }] } })).toBe('1 Spark')
   })
 
   it('writes the kind in sentence case and keeps a kind it has never seen', () => {
@@ -94,17 +94,17 @@ describe('attached service copy', () => {
   it('says the Sparks are kept free only when this console can keep them free', () => {
     expect(guardLine(fastH3())).toEqual({
       warn: false,
-      text: 'Basement does not install, start, stop or update this service. It keeps its own models off these Sparks while fasth3-edgexpert-pair.yaml is in place.',
+      text: 'Basement does not install, start, stop or update this service. It keeps its own models off these Sparks while fasth3-gpu-pair.yaml is in place.',
     })
     const typo = fastH3({
       nodes: [
-        { name: 'edgexpert-2051', role: 'head/rank0', this_spark: true, protected: true },
-        { name: 'edgexpert-37c5', role: 'worker/rank1', this_spark: false, protected: false },
+        { name: 'head-box', role: 'head/rank0', this_spark: true, protected: true },
+        { name: 'wroker-box', role: 'worker/rank1', this_spark: false, protected: false },
       ],
     })
     expect(guardLine(typo)).toEqual({
       warn: true,
-      text: 'This console cannot match edgexpert-37c5 to a Spark it places models on, so it cannot keep its own models off it. Check the node name in fasth3-edgexpert-pair.yaml.',
+      text: 'This console cannot match wroker-box to a Spark it places models on, so it cannot keep its own models off it. Check the node name in fasth3-gpu-pair.yaml.',
     })
   })
 
@@ -124,10 +124,10 @@ describe('AttachedCard', () => {
       'Attached service · managed outside Basement',
       'Healthy · checked 12 s ago',
       '2 Sparks · TP1 x SP2 pair (Ray)',
-      'edgexpert-2051 head/rank0',
-      'edgexpert-37c4 worker/rank1',
+      'head-box head/rank0',
+      'worker-box worker/rank1',
       'http://127.0.0.1:8790 (head; reach via ssh tunnel)',
-      'systemd: fasth3-serve.service (edgexpert-2051), h3-ray.service + h3-memguard.service (both)',
+      'systemd: fasth3-serve.service (head-box), h3-ray.service + h3-memguard.service (both)',
       'MiniMax / FastVideo',
       'Video generation',
       'fasth3-omniref',

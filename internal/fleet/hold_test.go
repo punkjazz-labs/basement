@@ -104,9 +104,9 @@ func TestControllerKeepsPlacementsOffHeldSparks(t *testing.T) {
 	}
 	placeable := independentRecipes(t, recipes, 2)
 	first, second := placeable[0], placeable[1]
-	controller, _ := newPlacementManager(t, "controller", "192.168.99.10", recipes)
-	memberA, memberAStore := newPlacementManager(t, "node-a", "192.168.99.20", recipes)
-	memberB, memberBStore := newPlacementManager(t, "node-b", "192.168.99.21", recipes)
+	controller, _ := newPlacementManager(t, "controller", "192.0.2.10", recipes)
+	memberA, memberAStore := newPlacementManager(t, "node-a", "192.0.2.20", recipes)
+	memberB, memberBStore := newPlacementManager(t, "node-b", "192.0.2.21", recipes)
 	memberA.SetIndependentRuntime(&placementRuntime{database: memberAStore, allocator: memberA.Allocator()})
 	memberB.SetIndependentRuntime(&placementRuntime{database: memberBStore, allocator: memberB.Allocator()})
 	controller.newClient = inMemoryFleetClients(t, controller, map[string]*Manager{
@@ -179,7 +179,7 @@ func TestControllerKeepsPlacementsOffHeldSparks(t *testing.T) {
 }
 
 func TestManagerHolderReachesItsOwnAllocator(t *testing.T) {
-	manager, _ := newTestManager(t, "spark-head", "192.168.99.10")
+	manager, _ := newTestManager(t, "head-box", "192.0.2.10")
 	asked := ""
 	manager.SetRuntimeHolder(func(nodeID, displayName string) (string, bool) {
 		asked = nodeID + "/" + displayName
@@ -189,7 +189,7 @@ func TestManagerHolderReachesItsOwnAllocator(t *testing.T) {
 	if !errors.As(err, new(HeldNodeError)) {
 		t.Fatalf("the manager's own allocator ignored its holder: %v", err)
 	}
-	if asked != manager.identity.NodeID+"/spark-head" {
+	if asked != manager.identity.NodeID+"/head-box" {
 		t.Fatalf("the allocator asked about %q, not this node", asked)
 	}
 	manager.SetRuntimeHolder(nil)

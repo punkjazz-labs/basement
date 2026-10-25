@@ -1,4 +1,4 @@
-# Attached service declaration (ADR 0025) for FastH3 on the EdgeXpert pair.
+# Attached service declaration (ADR 0025) for FastH3 on a two-box GB10 pair.
 #
 # FastH3 is not a basement recipe and not a container: systemd units outside
 # basement run it as one model split across both Sparks. basement reads this
@@ -12,19 +12,19 @@
 # manager:
 #
 #   sudo install -d -o basement -g basement -m 0750 /var/lib/basement/attached-services.d
-#   sudo install -o basement -g basement -m 0640 fasth3-edgexpert-pair.yaml \
+#   sudo install -o basement -g basement -m 0640 fasth3-gpu-pair.yaml \
 #     /var/lib/basement/attached-services.d/
 #
 # health_url is called from the Spark that holds this file, so it is the head's
 # loopback address and the file belongs on the head. Removing the file is how
 # the Sparks are released again; stop the service first.
 schema_version: 1
-id: fasth3-edgexpert-pair
+id: fasth3-gpu-pair
 display_name: FastH3 (MiniMax H3 Omni, FastVideo)
 model_by: MiniMax / FastVideo
 kind: video-generation
 served_model_name: fasth3-omniref
-managed_by: "systemd: fasth3-serve.service (edgexpert-2051), h3-ray.service + h3-memguard.service (both)"
+managed_by: "systemd: fasth3-serve.service (head-box), h3-ray.service + h3-memguard.service (both)"
 # Display text only; basement never dials it. The OpenAI-style video API
 # listens on the head's loopback interface.
 endpoint: "http://127.0.0.1:8790 (head; reach via ssh tunnel)"
@@ -36,9 +36,10 @@ topology:
   nodes:
     # node_name is the name each Spark reports to the fleet, compared without
     # case or domain suffix. node_id may be given instead of node_name.
-    - node_name: edgexpert-2051
+    # head-box and worker-box stand in for the names your two Sparks report.
+    - node_name: head-box
       role: head/rank0
-    - node_name: edgexpert-37c4
+    - node_name: worker-box
       role: worker/rank1
 licence: MiniMax H3 Community License Agreement
 # licence_url is left out on purpose: the URL of the licence file that ships

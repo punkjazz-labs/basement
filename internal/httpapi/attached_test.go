@@ -57,6 +57,26 @@ func newAttachedTestServer(t *testing.T) (*httptest.Server, *Server, string, []*
 	return server, api, dataDir, paired.Cookies(), result.CSRF
 }
 
+// registerNamedPeer is registerPeer under a name the test chooses, so a
+// declaration can name the paired Spark the way its operator would.
+func registerNamedPeer(t *testing.T, server *httptest.Server, cookies []*http.Cookie, csrf, name, baseURL, key string) string {
+	t.Helper()
+	created := doRequest(t, http.MethodPost, server.URL+"/api/v1/peers", `{"name":"`+name+`","base_url":"`+baseURL+`","api_key":"`+key+`"}`,
+		cookies, map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf})
+	data, _ := io.ReadAll(created.Body)
+	created.Body.Close()
+	if created.StatusCode != http.StatusCreated {
+		t.Fatalf("peer create status=%d body=%s", created.StatusCode, data)
+	}
+	var peerView struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &peerView); err != nil {
+		t.Fatal(err)
+	}
+	return peerView.ID
+}
+
 type attachedListing struct {
 	Services []struct {
 		File        string             `json:"file"`
@@ -123,7 +143,7 @@ func TestAttachedServicesReportDeclarationHealthAndProtection(t *testing.T) {
 
 	server, api, dataDir, cookies, csrf := newAttachedTestServer(t)
 	peer := newDelegatePeer(t, "rosk_peerkey")
-	peerID := registerPeer(t, server, cookies, csrf, peer.URL, "rosk_peerkey")
+	peerID := registerNamedPeer(t, server, cookies, csrf, "box-alpha", peer.URL, "rosk_peerkey")
 
 	registry := attached.NewRegistry(dataDir, nil)
 	if err := os.Mkdir(registry.Directory(), 0o750); err != nil {
@@ -132,7 +152,7 @@ func TestAttachedServicesReportDeclarationHealthAndProtection(t *testing.T) {
 	declaration := "schema_version: 1\nid: video-pair\ndisplay_name: Video pair\nkind: video-generation\n" +
 		"managed_by: \"systemd: video.service\"\nendpoint: \"http://127.0.0.1:8790 (head)\"\nhealth_url: " + service.URL + "/health\n" +
 		"topology:\n  spark_count: 2\n  parallelism: TP1 x SP2 pair\n  nodes:\n" +
-		"    - node_name: EDGEXPERT-ALPHA.local\n      role: head/rank0\n    - node_name: spark-ghost\n      role: worker/rank1\n" +
+		"    - node_name: BOX-ALPHA.local\n      role: head/rank0\n    - node_name: ghost-box\n      role: worker/rank1\n" +
 		"licence: Example Licence\nlicence_territory_exclusions:\n  - Somewhere\n"
 	if err := os.WriteFile(filepath.Join(registry.Directory(), "video-pair.yaml"), []byte(declaration), 0o600); err != nil {
 		t.Fatal(err)
@@ -160,7 +180,7 @@ func TestAttachedServicesReportDeclarationHealthAndProtection(t *testing.T) {
 	// The paired Spark is one this manager places models on; the ghost is a
 	// name it cannot match, and the console has to be able to say so.
 	if len(entry.Nodes) != 2 || !entry.Nodes[0].Protected || entry.Nodes[0].ThisSpark || entry.Nodes[0].Role != "head/rank0" ||
-		entry.Nodes[1].Protected || entry.Nodes[1].Name != "spark-ghost" {
+		entry.Nodes[1].Protected || entry.Nodes[1].Name != "ghost-box" {
 		t.Fatalf("nodes = %+v", entry.Nodes)
 	}
 
@@ -184,7 +204,7 @@ func TestAttachedServicesReportDeclarationHealthAndProtection(t *testing.T) {
 		`{"confirmed":true,"activate":true}`, cookies, map[string]string{"Origin": server.URL, "X-CSRF-Token": csrf, "Idempotency-Key": "onto-held-peer"})
 	body, _ := io.ReadAll(install.Body)
 	install.Body.Close()
-	if install.StatusCode != http.StatusConflict || !strings.Contains(string(body), "the attached service Video pair has edgexpert-alpha reserved outside Basement") {
+	if install.StatusCode != http.StatusConflict || !strings.Contains(string(body), "the attached service Video pair has box-alpha reserved outside Basement") {
 		t.Fatalf("delegated install onto a held peer: status=%d body=%s", install.StatusCode, body)
 	}
 	peer.mu.Lock()
