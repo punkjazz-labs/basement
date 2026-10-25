@@ -68,7 +68,7 @@ func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
 	resolution, err := s.updateResolver.Resolve(ctx, s.version)
 	if err != nil {
 		result["checked"] = false
-		result["note"] = cleanUpdateError(err)
+		result["note"] = managerupdate.CleanFailure(err)
 		s.finishUpdateCheck(result, nil)
 		writeJSON(w, http.StatusOK, result)
 		return
@@ -371,7 +371,7 @@ func (s *Server) fleetUpgradeAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) StageFleetUpgrade(ctx context.Context, release fleet.UpgradeRelease) (fleet.LocalUpgradeStatus, error) {
-	if err := validateFleetUpgradeRelease(release); err != nil {
+	if err := fleet.ValidateUpgradeRelease(release); err != nil {
 		return fleet.LocalUpgradeStatus{}, err
 	}
 	s.updateAdmissionMu.Lock()
@@ -409,8 +409,8 @@ func (s *Server) StageFleetUpgrade(ctx context.Context, release fleet.UpgradeRel
 	if node.AttemptID == "" {
 		status, err = s.updateStager.Prepare(candidate, s.version)
 		if err != nil {
-			_ = s.store.UpdateFleetUpgradeNode(ctx, run.RunID, node.NodeID, "failed_before_handoff", s.version, "", cleanUpdateError(err))
-			_ = s.store.UpdateFleetUpgradeRunState(ctx, run.RunID, "failed", cleanUpdateError(err))
+			_ = s.store.UpdateFleetUpgradeNode(ctx, run.RunID, node.NodeID, "failed_before_handoff", s.version, "", managerupdate.CleanFailure(err))
+			_ = s.store.UpdateFleetUpgradeRunState(ctx, run.RunID, "failed", managerupdate.CleanFailure(err))
 			s.updateAdmissionMu.Unlock()
 			return fleet.LocalUpgradeStatus{}, err
 		}
@@ -427,8 +427,8 @@ func (s *Server) StageFleetUpgrade(ctx context.Context, release fleet.UpgradeRel
 	s.updateAdmissionMu.Unlock()
 	status, err = s.updateStager.StageOnly(ctx, candidate, status)
 	if err != nil {
-		_ = s.store.UpdateFleetUpgradeNode(ctx, run.RunID, node.NodeID, "failed_before_handoff", s.version, status.AttemptID, cleanUpdateError(err))
-		_ = s.store.UpdateFleetUpgradeRunState(ctx, run.RunID, "failed", cleanUpdateError(err))
+		_ = s.store.UpdateFleetUpgradeNode(ctx, run.RunID, node.NodeID, "failed_before_handoff", s.version, status.AttemptID, managerupdate.CleanFailure(err))
+		_ = s.store.UpdateFleetUpgradeRunState(ctx, run.RunID, "failed", managerupdate.CleanFailure(err))
 		return fleet.LocalUpgradeStatus{}, err
 	}
 	if err := s.store.UpdateFleetUpgradeNode(ctx, run.RunID, node.NodeID, "staged", s.version, status.AttemptID, ""); err != nil {
@@ -650,16 +650,6 @@ func (s *Server) releaseFleetUpgradeReservation(ctx context.Context, runID strin
 	return s.fleetManager.Allocator().Release(ctx, fleet.ReservationID(fleet.ClaimKindUpdate, runID))
 }
 
-func validateFleetUpgradeRelease(release fleet.UpgradeRelease) error {
-	if release.Version != fleet.UpgradeProtocolVersion || release.RunID == "" || release.ReleaseTag == "" || release.TargetVersion == "" || release.ManifestSHA256 == "" || len(release.ManifestBytes) == 0 || len(release.SignatureBytes) == 0 || release.AssetURL == "" {
-		return errors.New("fleet upgrade release identity is invalid")
-	}
-	if release.ReleaseTag != release.TargetVersion || managerupdate.ManifestDigest(release.ManifestBytes) != release.ManifestSHA256 {
-		return errors.New("fleet upgrade release does not match its manifest identity")
-	}
-	return nil
-}
-
 func localUpgradeNode(run store.FleetUpgradeRun, nodeID string) (store.FleetUpgradeNode, error) {
 	for _, node := range run.Nodes {
 		if node.NodeID == nodeID {
@@ -689,15 +679,4 @@ func cloneUpdateCandidate(candidate managerupdate.Candidate) managerupdate.Candi
 	candidate.Manifest.RollbackFrom = append([]string(nil), candidate.Manifest.RollbackFrom...)
 	candidate.Release.Assets = append([]managerupdate.ReleaseAsset(nil), candidate.Release.Assets...)
 	return candidate
-}
-
-func cleanUpdateError(err error) string {
-	if err == nil {
-		return ""
-	}
-	message := strings.Join(strings.Fields(err.Error()), " ")
-	if len(message) > 300 {
-		message = message[:300]
-	}
-	return message
 }

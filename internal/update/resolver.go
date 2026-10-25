@@ -19,8 +19,6 @@ const (
 	githubReleasesURL  = "https://api.github.com/repos/punkjazz-labs/basement/releases?per_page=100"
 )
 
-var ErrManualUpgradeRequired = errors.New("no signed release supports rollback from the running manager")
-
 type ReleaseAsset struct {
 	Name string `json:"name"`
 	URL  string `json:"browser_download_url"`

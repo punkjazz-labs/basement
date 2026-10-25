@@ -193,7 +193,9 @@ func syncDirectory(path string) error {
 	return directory.Sync()
 }
 
-func cleanFailure(err error) string {
+// CleanFailure turns an error into the one-line, bounded sentence every
+// update and fleet upgrade record stores and shows.
+func CleanFailure(err error) string {
 	if err == nil {
 		return ""
 	}

@@ -508,7 +508,6 @@ func helperUpdaterFixture(t *testing.T, installedHelper, releaseHelper []byte, s
 		InstallRoot: filepath.Join(root, "usr", "lib", "basement"),
 		VersionsDir: filepath.Join(root, "usr", "lib", "basement", "versions"),
 		CurrentLink: filepath.Join(root, "usr", "lib", "basement", "current"),
-		LegacyLink:  filepath.Join(root, "usr", "lib", "basement", "basement"),
 		StagingDir:  filepath.Join(root, "var", "lib", "basement", "updates", "staging"),
 		StateDir:    filepath.Join(root, "var", "lib", "basement-updater"),
 	}
@@ -576,7 +575,6 @@ func updaterFixture(t *testing.T, health HealthChecker) (*Updater, Paths) {
 		InstallRoot: filepath.Join(root, "usr", "lib", "basement"),
 		VersionsDir: filepath.Join(root, "usr", "lib", "basement", "versions"),
 		CurrentLink: filepath.Join(root, "usr", "lib", "basement", "current"),
-		LegacyLink:  filepath.Join(root, "usr", "lib", "basement", "basement"),
 		StagingDir:  filepath.Join(root, "var", "lib", "basement", "updates", "staging"),
 		StateDir:    filepath.Join(root, "var", "lib", "basement-updater"),
 	}
