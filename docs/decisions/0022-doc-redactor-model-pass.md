@@ -176,7 +176,7 @@ finished.
 ## API surface
 
 `internal/httpapi/docredact.go` adds one route to the set ADR 0021 listed, under the same
-console session auth and the same inline `AuthorizeMutation` on POST:
+console session auth, with CSRF and Origin checked on POST:
 
 - `POST /api/v1/docredact/sessions/{id}/modelpass` -- run the model pass over the session's
   document and fold what it verifies into the existing findings. The body is optional and

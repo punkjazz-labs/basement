@@ -220,96 +220,75 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/healthz", server.health)
 	mux.HandleFunc("/api/v1/auth/pair", server.pair)
 	mux.HandleFunc("/api/v1/auth/status", server.authStatus)
-	// system, models and telemetry are the three endpoints a peer manager
-	// reads through /summary, and preflight is the one it reads before
-	// offering to place a model here, so all four accept API-key auth in
-	// addition to a console session (ADR-scale change: see withPeerReadAuth).
-	mux.HandleFunc("/api/v1/system", server.withPeerReadAuth(server.system))
-	// The GPU power mode of this Spark (task #22). Console session only, on
-	// both methods: what a bearer key reaches is inference, never the clock of
-	// the machine that serves it. The exact path wins over /api/v1/system
-	// above, which matches its own path and nothing under it.
-	mux.HandleFunc("/api/v1/system/power-mode", server.powerMode)
-	mux.HandleFunc("/api/v1/preflight", server.withPeerReadAuth(server.preflight))
-	mux.HandleFunc("/api/v1/recipes", server.withReadAuth(server.listRecipes))
-	// Checking the feed now rather than waiting for the next scheduled cycle.
-	// Console session and CSRF only: it spends this machine's network on the
-	// owner's word, and a bearer key never reaches it.
-	mux.HandleFunc("/api/v1/recipes/refresh", server.refreshRecipeFeed)
-	mux.HandleFunc("/api/v1/models", server.withPeerReadAuth(server.listModels))
-	// The model routes are the one place an API key may cause a mutation,
-	// and only the install subaction; see withModelAuth.
-	mux.HandleFunc("/api/v1/models/", server.withModelAuth(server.modelAction))
-	mux.HandleFunc("/api/v1/jobs", server.withReadAuth(server.listJobs))
-	mux.HandleFunc("/api/v1/jobs/", server.withReadAuth(server.jobAction))
-	mux.HandleFunc("/api/v1/diagnostics", server.withReadAuth(server.diagnostics))
-	mux.HandleFunc("/api/v1/keys", server.keys)
-	mux.HandleFunc("/api/v1/keys/", server.keyAction)
-	mux.HandleFunc("/api/v1/telemetry", server.withPeerReadAuth(server.telemetry))
+	// A bearer API key reaches the routes wrapped in ownerOrKey and nothing
+	// else; see admit.
+	mux.HandleFunc("/api/v1/system", server.ownerOrKey(server.system))
+	// The exact path wins over /api/v1/system above, which matches its own
+	// path and nothing under it.
+	mux.HandleFunc("/api/v1/system/power-mode", server.owner(server.powerMode))
+	mux.HandleFunc("/api/v1/preflight", server.ownerOrKey(server.preflight))
+	mux.HandleFunc("/api/v1/recipes", server.owner(server.listRecipes))
+	mux.HandleFunc("/api/v1/recipes/refresh", server.owner(server.refreshRecipeFeed))
+	mux.HandleFunc("/api/v1/models", server.ownerOrKey(server.listModels))
+	mux.HandleFunc("/api/v1/models/", server.ownerOrKey(server.modelAction))
+	mux.HandleFunc("/api/v1/jobs", server.owner(server.listJobs))
+	mux.HandleFunc("/api/v1/jobs/", server.owner(server.jobAction))
+	mux.HandleFunc("/api/v1/diagnostics", server.owner(server.diagnostics))
+	mux.HandleFunc("/api/v1/keys", server.owner(server.keys))
+	mux.HandleFunc("/api/v1/keys/", server.owner(server.keyAction))
+	mux.HandleFunc("/api/v1/telemetry", server.ownerOrKey(server.telemetry))
 	// Token usage is this Spark's own accounting and stays on this Spark: a
 	// fleet does not add its members' totals up anywhere yet.
-	mux.HandleFunc("/api/v1/tokens", server.withReadAuth(server.tokenUsage))
+	mux.HandleFunc("/api/v1/tokens", server.owner(server.tokenUsage))
 	// Roles: the stable names clients address on /v1 instead of a model id.
-	// Console session only, on both: what a key holder may reach through /v1
-	// is inference, never a change to which model answers to a name.
-	mux.HandleFunc("/api/v1/roles", server.roles)
-	mux.HandleFunc("/api/v1/roles/", server.roleAction)
-	// Media generation. Console session only, on all of them: a bearer key
-	// reaches inference through /v1 and nothing else, and generating is work
-	// on the owner's own machine that produces files on it.
-	mux.HandleFunc("/api/v1/generate", server.withReadAuth(server.generateHandler))
-	mux.HandleFunc("/api/v1/generations", server.withReadAuth(server.listGenerations))
-	mux.HandleFunc("/api/v1/generations/events", server.withReadAuth(server.generationEvents))
-	mux.HandleFunc("/api/v1/generations/media", server.withReadAuth(server.mediaStage))
-	mux.HandleFunc("/api/v1/generations/", server.withReadAuth(server.generationAction))
-	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
-	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
-	// Document redactor (docs/plans/12-doc-redactor.md), pattern pass only.
-	// Console session only, across all three routes: a document's text, its
-	// findings, and its mapping are never something a bearer key should be
-	// able to submit or read.
-	mux.HandleFunc("/api/v1/docredact/analyze", server.withReadAuth(server.docredactAnalyze))
-	mux.HandleFunc("/api/v1/docredact/sessions/", server.withReadAuth(server.docredactSessionAction))
-	mux.HandleFunc("/api/v1/docredact/restore", server.withReadAuth(server.docredactRestore))
-	mux.HandleFunc("/api/v1/update/status", server.withReadAuth(server.updateStatus))
-	mux.HandleFunc("/api/v1/update/apply", server.withReadAuth(server.updateApplyAPI))
-	mux.HandleFunc("/api/v1/update", server.withReadAuth(server.updateAPI))
-	mux.HandleFunc("/api/v1/peers", server.peersCollection)
-	mux.HandleFunc("/api/v1/peers/", server.withReadAuth(server.peerAction))
-	// Adopting a second Spark from the console (ADR 0014). Console session
-	// only, on all three: a bearer key never reaches them, and none of them
-	// is on peerAllowedPaths.
-	mux.HandleFunc("/api/v1/fleet/discover", server.fleetDiscover)
-	mux.HandleFunc("/api/v1/fleet/adopt", server.fleetAdopt)
-	mux.HandleFunc("/api/v1/fleet/adopt/status", server.withReadAuth(server.fleetAdoptStatus))
-	mux.HandleFunc("/api/v1/fleet", server.withReadAuth(server.fleetMembershipSummary))
-	mux.HandleFunc("/api/v1/fleet/join-code", server.fleetJoinCode)
-	mux.HandleFunc("/api/v1/fleet/join", server.fleetJoin)
-	// Two-click fleet addition (ADR 0019). Console session only, on all four:
-	// approving an invitation is what mints a join code, and asking another
-	// Spark to join spends the owner's authority over their own machines.
-	mux.HandleFunc("/api/v1/fleet/invitations", server.withReadAuth(server.fleetInvitations))
-	mux.HandleFunc("/api/v1/fleet/invitations/", server.fleetInvitationAction)
-	mux.HandleFunc("/api/v1/fleet/invite", server.fleetInvite)
-	mux.HandleFunc("/api/v1/fleet/invite/status", server.withReadAuth(server.fleetInviteStatus))
-	mux.HandleFunc("/api/v1/fleet/placements/plan", server.fleetPlacementPlan)
-	mux.HandleFunc("/api/v1/fleet/deployments", server.fleetDeployments)
+	mux.HandleFunc("/api/v1/roles", server.owner(server.roles))
+	mux.HandleFunc("/api/v1/roles/", server.owner(server.roleAction))
+	mux.HandleFunc("/api/v1/generate", server.owner(server.generateHandler))
+	mux.HandleFunc("/api/v1/generations", server.owner(server.listGenerations))
+	mux.HandleFunc("/api/v1/generations/events", server.owner(server.generationEvents))
+	mux.HandleFunc("/api/v1/generations/media", server.owner(server.mediaStage))
+	mux.HandleFunc("/api/v1/generations/", server.owner(server.generationAction))
+	mux.HandleFunc("/api/v1/storage", server.owner(server.storageBreakdown))
+	mux.HandleFunc("/api/v1/storage/artifacts", server.owner(server.deleteArtifact))
+	// Document redactor (docs/plans/12-doc-redactor.md).
+	mux.HandleFunc("/api/v1/docredact/analyze", server.owner(server.docredactAnalyze))
+	mux.HandleFunc("/api/v1/docredact/sessions/", server.owner(server.docredactSessionAction))
+	mux.HandleFunc("/api/v1/docredact/restore", server.owner(server.docredactRestore))
+	mux.HandleFunc("/api/v1/update/status", server.owner(server.updateStatus))
+	mux.HandleFunc("/api/v1/update/apply", server.owner(server.updateApplyAPI))
+	mux.HandleFunc("/api/v1/update", server.owner(server.updateAPI))
+	mux.HandleFunc("/api/v1/peers", server.owner(server.peersCollection))
+	mux.HandleFunc("/api/v1/peers/", server.owner(server.peerAction))
+	// Adopting a second Spark from the console (ADR 0014).
+	mux.HandleFunc("/api/v1/fleet/discover", server.owner(server.fleetDiscover))
+	mux.HandleFunc("/api/v1/fleet/adopt", server.owner(server.fleetAdopt))
+	mux.HandleFunc("/api/v1/fleet/adopt/status", server.owner(server.fleetAdoptStatus))
+	mux.HandleFunc("/api/v1/fleet", server.owner(server.fleetMembershipSummary))
+	mux.HandleFunc("/api/v1/fleet/join-code", server.owner(server.fleetJoinCode))
+	mux.HandleFunc("/api/v1/fleet/join", server.owner(server.fleetJoin))
+	// Two-click fleet addition (ADR 0019).
+	mux.HandleFunc("/api/v1/fleet/invitations", server.owner(server.fleetInvitations))
+	mux.HandleFunc("/api/v1/fleet/invitations/", server.owner(server.fleetInvitationAction))
+	mux.HandleFunc("/api/v1/fleet/invite", server.owner(server.fleetInvite))
+	mux.HandleFunc("/api/v1/fleet/invite/status", server.owner(server.fleetInviteStatus))
+	mux.HandleFunc("/api/v1/fleet/placements/plan", server.owner(server.fleetPlacementPlan))
+	mux.HandleFunc("/api/v1/fleet/deployments", server.owner(server.fleetDeployments))
 	// The exact path wins over the prefix below, so no deployment id can
 	// shadow adoption. Deployment ids always start with "deployment_".
-	mux.HandleFunc("/api/v1/fleet/deployments/adopt", server.fleetDeploymentAdopt)
-	mux.HandleFunc("/api/v1/fleet/deployments/", server.fleetDeploymentAction)
-	mux.HandleFunc("/api/v1/fleet/upgrade", server.withReadAuth(server.fleetUpgradeAPI))
+	mux.HandleFunc("/api/v1/fleet/deployments/adopt", server.owner(server.fleetDeploymentAdopt))
+	mux.HandleFunc("/api/v1/fleet/deployments/", server.owner(server.fleetDeploymentAction))
+	mux.HandleFunc("/api/v1/fleet/upgrade", server.owner(server.fleetUpgradeAPI))
 	// One dashboard sets the power mode of any Spark in the fleet. Reading it
 	// needs no route: every node reports its own mode in the heartbeat, so
 	// /api/v1/fleet already carries it.
-	mux.HandleFunc("/api/v1/fleet/power-mode", server.fleetPowerMode)
+	mux.HandleFunc("/api/v1/fleet/power-mode", server.owner(server.fleetPowerMode))
 	// Two-Spark serving: the head node drives this node's own rank through
-	// these, authenticated by fleet API key only (see withNodeAuth).
-	mux.HandleFunc("/api/v1/internal/node/fabric", server.withNodeAuth(server.nodeFabric))
-	mux.HandleFunc("/api/v1/internal/node/preflight", server.withNodeAuth(server.nodePreflight))
-	mux.HandleFunc("/api/v1/internal/node/reservation/renew", server.withNodeAuth(server.nodeRenewReservation))
-	mux.HandleFunc("/api/v1/internal/node/step", server.withNodeAuth(server.nodeStep))
-	mux.HandleFunc("/api/v1/internal/node/step/progress", server.withNodeAuth(server.nodeStepProgress))
+	// these with this node's API key.
+	mux.HandleFunc("/api/v1/internal/node/fabric", server.ownerOrKey(nodeRoute(server.nodeFabric)))
+	mux.HandleFunc("/api/v1/internal/node/preflight", server.ownerOrKey(nodeRoute(server.nodePreflight)))
+	mux.HandleFunc("/api/v1/internal/node/reservation/renew", server.ownerOrKey(nodeRoute(server.nodeRenewReservation)))
+	mux.HandleFunc("/api/v1/internal/node/step", server.ownerOrKey(nodeRoute(server.nodeStep)))
+	mux.HandleFunc("/api/v1/internal/node/step/progress", server.ownerOrKey(nodeRoute(server.nodeStepProgress)))
 	mux.HandleFunc("/v1/", server.proxyModel)
 	assets, _ := fs.Sub(webui.Assets, "assets")
 	fileServer := http.FileServer(http.FS(assets))
@@ -424,10 +403,6 @@ type feedRefreshResponse struct {
 func (s *Server) refreshRecipeFeed(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	if s.feedRefresh == nil {
@@ -918,9 +893,12 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, errors.New("recipe not found"))
 		return
 	}
-	if delegatedInstall(r) {
-		// withModelAuth sets the marker only for an install, so this is a
-		// second lock on the same door rather than the first one.
+	if viaKey(r) {
+		// Install is the one model action a key may take: it is what a head
+		// Spark asks of this one when its owner places a model here (ADR
+		// 0013). Start, stop, smoke-test, benchmark and remove stay with the
+		// console session, so a key never becomes control over what this
+		// Spark is serving right now, or a way to delete anything.
 		if !isModelInstallRequest(r) {
 			writeError(w, http.StatusForbidden, errors.New("an API key may only trigger an install on this Spark"))
 			return
@@ -935,18 +913,12 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, errors.New("a two-Spark model cannot be placed from another Spark, so install it from this Spark's own console"))
 			return
 		}
-		// A node that joined a fleet answers to its controller for what it
-		// holds, and a key issued before it joined must not become a second
-		// authority over the same machine. The console path below refuses the
-		// same thing in the same words, so an old peer and a local browser get
-		// one answer, not two (ADR 0013).
-		if s.refuseManagedMemberMutation(w, r) {
-			return
-		}
-	} else if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	} else if s.refuseManagedMemberMutation(w, r) {
+	}
+	// A node that joined a fleet answers to its controller for what it holds,
+	// and a key issued before it joined must not become a second authority
+	// over the same machine. An old peer and a local browser get the same
+	// answer (ADR 0013).
+	if s.refuseManagedMemberMutation(w, r) {
 		return
 	}
 	s.updateAdmissionMu.Lock()
@@ -1022,7 +994,7 @@ func (s *Server) install(w http.ResponseWriter, r *http.Request, selected recipe
 	// activate: true is still honoured, because that is a placement the
 	// owner asked for on the other console, and the head always says it.
 	activate := request.Activate == nil || *request.Activate
-	if delegatedInstall(r) && request.Activate == nil {
+	if viaKey(r) && request.Activate == nil {
 		activate = false
 	}
 	s.createJob(w, r, "install", selected, map[string]any{"confirmed": true, "activate": activate})
@@ -1107,10 +1079,6 @@ func (s *Server) jobAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost {
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, 403, err)
-			return
-		}
 		if s.refuseManagedMemberMutation(w, r) {
 			return
 		}
@@ -1265,7 +1233,9 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 // request is inferenceTarget's decision: the active one, or the one a role
 // names (see roles.go).
 func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeInference(r) {
+	// No CSRF check here, for the session or the key: the console's own
+	// Playground posts chat requests with the session cookie alone.
+	if _, ok := s.signedIn(r, true); !ok {
 		writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", "provide a valid basement API key as 'Authorization: Bearer rosk_...'")
 		return
 	}
@@ -1315,14 +1285,6 @@ func (s *Server) proxyModel(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-func (s *Server) authorizeInference(r *http.Request) bool {
-	if s.bearerAPIKey(r) {
-		return true
-	}
-	_, ok := s.auth.Authenticate(r)
-	return ok
-}
-
 // activeReadyRecipe resolves the exact recipe version the active model was
 // installed and started with — never the catalog's current entry for that
 // ID. This is what proxyModel dials and what telemetry reports on; using a
@@ -1348,10 +1310,6 @@ func (s *Server) activeReadyRecipe(ctx context.Context) (recipe.Recipe, bool) {
 func (s *Server) keys(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
-			return
-		}
 		list, err := s.store.APIKeys(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -1359,10 +1317,6 @@ func (s *Server) keys(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, list)
 	case http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		var request struct {
 			Name string `json:"name"`
 		}
@@ -1389,10 +1343,6 @@ func (s *Server) keyAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodDelete {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	if err := s.store.RevokeAPIKey(r.Context(), id); err != nil {
@@ -1448,16 +1398,8 @@ type peerView struct {
 func (s *Server) peersCollection(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
-			return
-		}
 		s.listPeers(w, r)
 	case http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		s.createPeer(w, r)
 	default:
 		methodNotAllowed(w)
@@ -1513,10 +1455,6 @@ func (s *Server) peerAction(w http.ResponseWriter, r *http.Request) {
 	}
 	id := parts[0]
 	if len(parts) == 1 && r.Method == http.MethodDelete {
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		if err := s.store.DeletePeer(r.Context(), id); err != nil {
 			writeError(w, http.StatusNotFound, errors.New("that Spark is not in the fleet"))
 			return
@@ -1601,10 +1539,6 @@ func (s *Server) peerPreflight(w http.ResponseWriter, r *http.Request, id string
 // Idempotency-Key travels with the request, so a retried click lands on the
 // peer's existing job rather than starting a second download.
 func (s *Server) peerInstall(w http.ResponseWriter, r *http.Request, id, recipeID string) {
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	if _, err := s.delegatableRecipe(recipeID); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -2184,10 +2118,6 @@ func (s *Server) deleteArtifact(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	var request struct {
 		Repository string `json:"repository"`
 		Revision   string `json:"revision"`
@@ -2293,72 +2223,66 @@ func writeOpenAIError(w http.ResponseWriter, status int, kind, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"type": kind, "message": message}})
 }
 
-func (s *Server) withReadAuth(next http.HandlerFunc) http.HandlerFunc {
+// Every /api/v1 route except pairing and its status is wrapped in owner or
+// ownerOrKey, and /v1 asks signedIn directly. This is the one place a request
+// is authenticated, so it is also the one place a scoped key would be checked.
+//
+// A bearer API key reaches only the routes wrapped in ownerOrKey: the reads a
+// peer Spark makes (system, models, telemetry, preflight), model install
+// (see modelAction for the install-only rule), and the worker node steps a
+// head Spark drives. Everything else is the owner's console session.
+
+// owner admits the console session only.
+func (s *Server) owner(next http.HandlerFunc) http.HandlerFunc {
+	return s.admit(false, next)
+}
+
+// ownerOrKey admits the console session or a bearer API key.
+func (s *Server) ownerOrKey(next http.HandlerFunc) http.HandlerFunc {
+	return s.admit(true, next)
+}
+
+// admit authenticates a request and marks one that came with a key. A session
+// mutation also needs its CSRF token and a same-host Origin, because a browser
+// attaches the session cookie on its own; an Authorization header is never
+// attached by a browser, so a key needs neither.
+func (s *Server) admit(keys bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, 401, errors.New("authentication required"))
+		key, ok := s.signedIn(r, keys)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
 			return
+		}
+		if key {
+			next(w, r.WithContext(context.WithValue(r.Context(), keyCaller{}, true)))
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if err := s.auth.AuthorizeMutation(r); err != nil {
+				writeError(w, http.StatusForbidden, err)
+				return
+			}
 		}
 		next(w, r)
 	}
 }
 
-// withPeerReadAuth additionally accepts an API-key bearer token, so another
-// Spark's manager can read this handler on our behalf: when assembling a
-// fleet summary (system, models, telemetry) or when asking whether this
-// machine could take an install (preflight, ADR 0013). It must only ever
-// wrap read-only, non-sensitive handlers — those four and nothing else.
-// Preflight qualifies: it runs the recipe's verify_ steps, which inspect
-// disk, memory and ports without touching runtime state, and reports this
-// machine's own answer. Every other read-only /api/v1 route keeps requiring
-// a console session via withReadAuth.
-func (s *Server) withPeerReadAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.bearerAPIKey(r) {
-			next(w, r)
-			return
-		}
-		if _, ok := s.auth.Authenticate(r); ok {
-			next(w, r)
-			return
-		}
-		writeError(w, 401, errors.New("authentication required"))
+// signedIn reports whether the request carries the console session or, when
+// keys is set, a valid bearer API key, and whether it was the key.
+func (s *Server) signedIn(r *http.Request, keys bool) (key, ok bool) {
+	if keys && s.bearerAPIKey(r) {
+		return true, true
 	}
+	_, ok = s.auth.Authenticate(r)
+	return false, ok
 }
 
-// withModelAuth gates every /api/v1/models/{id}/... action. A console
-// session drives all of them, exactly as before. An API-key bearer token
-// drives exactly one: install, which is what a head Spark asks this machine
-// to do when its owner places a model here (ADR 0013). Start, stop,
-// smoke-test, benchmark and remove stay console-only, so holding a key never
-// becomes control over what this Spark is serving right now, and neither
-// does it become a way to delete anything.
-func (s *Server) withModelAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := s.auth.Authenticate(r); ok {
-			next(w, r)
-			return
-		}
-		if isModelInstallRequest(r) && s.bearerAPIKey(r) {
-			// No CSRF token is involved on this path, and none is wanted.
-			// CSRF exists to stop a browser's ambient cookie authority from
-			// being spent by another site; an Authorization header is never
-			// attached by a browser on its own, so there is nothing to
-			// forge. The marker tells modelAction the same thing.
-			next(w, r.WithContext(context.WithValue(r.Context(), delegatedInstallKey{}, true)))
-			return
-		}
-		writeError(w, 401, errors.New("authentication required"))
-	}
-}
+// keyCaller marks a request that authenticated with a bearer API key rather
+// than the console session. Only admit sets it.
+type keyCaller struct{}
 
-// delegatedInstallKey marks a request that authenticated with a bearer API
-// key rather than a console session. Only withModelAuth ever sets it, and
-// only for an install.
-type delegatedInstallKey struct{}
-
-func delegatedInstall(r *http.Request) bool {
-	marked, _ := r.Context().Value(delegatedInstallKey{}).(bool)
+func viaKey(r *http.Request) bool {
+	marked, _ := r.Context().Value(keyCaller{}).(bool)
 	return marked
 }
 

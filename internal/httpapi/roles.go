@@ -78,10 +78,6 @@ const switchDrainTimeout = 30 * time.Second
 func (s *Server) roles(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
-			return
-		}
 		list, err := s.store.Roles(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -89,10 +85,6 @@ func (s *Server) roles(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, list)
 	case http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		s.assignRole(w, r)
 	default:
 		methodNotAllowed(w)
@@ -140,10 +132,6 @@ func (s *Server) roleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodDelete {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	if err := s.store.ClearRole(r.Context(), name); err != nil {

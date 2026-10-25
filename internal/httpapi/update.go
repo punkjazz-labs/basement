@@ -130,10 +130,6 @@ func (s *Server) finishUpdateCheck(result map[string]any, candidate *managerupda
 }
 
 func (s *Server) applyUpdate(w http.ResponseWriter, r *http.Request) {
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	if r.ContentLength != 0 {
 		var request struct{}
 		if err := decodeBody(r, &request); err != nil {
@@ -323,10 +319,6 @@ func (s *Server) fleetUpgradeAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, run)
 	case http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		var request struct {
 			Confirmed bool   `json:"confirmed"`
 			Action    string `json:"action"`

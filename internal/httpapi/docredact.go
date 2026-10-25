@@ -114,10 +114,6 @@ func (s *Server) docredactAnalyze(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	var request struct {
 		Text string `json:"text"`
 		Name string `json:"name"`
@@ -169,10 +165,6 @@ func (s *Server) docredactSessionAction(w http.ResponseWriter, r *http.Request) 
 	// not an error -- selected text is a phrase until the caller names a
 	// category this build knows.
 	case len(parts) == 2 && parts[1] == "findings" && r.Method == http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		var request struct {
 			Literal  string `json:"literal"`
 			Category string `json:"category"`
@@ -192,10 +184,6 @@ func (s *Server) docredactSessionAction(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, map[string]any{"finding": finding, "findings": session.doc.Findings})
 
 	case len(parts) == 4 && parts[1] == "findings" && parts[3] == "toggle" && r.Method == http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		var request struct {
 			Enabled bool `json:"enabled"`
 		}
@@ -217,10 +205,6 @@ func (s *Server) docredactSessionAction(w http.ResponseWriter, r *http.Request) 
 	// tally and the findings as they now stand, and refuses only when there
 	// is no text model to ask.
 	case len(parts) == 2 && parts[1] == "modelpass" && r.Method == http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		var request struct {
 			Model string `json:"model"`
 		}
@@ -269,10 +253,6 @@ func (s *Server) docredactSessionAction(w http.ResponseWriter, r *http.Request) 
 	// was never in the redacted copy, so a reply quoting it is the model
 	// inventing a pseudonym, not this session's own.
 	case len(parts) == 2 && parts[1] == "restore" && r.Method == http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		var request struct {
 			Text string `json:"text"`
 		}
@@ -409,10 +389,6 @@ func restoreResponse(text string, result docredact.RestoreResult) any {
 func (s *Server) docredactRestore(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	var request struct {

@@ -769,11 +769,10 @@ func TestBearerKeyOnlyReachesInstallOnModelRoutes(t *testing.T) {
 		t.Fatalf("delegated install status=%d body=%s", delegated.StatusCode, body)
 	}
 
-	// The model subactions must be refused by withModelAuth itself, before
-	// modelAction is ever entered, which is what 401 (rather than 403) pins
-	// here: the wrapper is the lock, not a check further down the handler.
-	// The keys and peers routes were already console-only and answer with
-	// their own existing status, so they are allowed either.
+	// The model subactions are refused with the install-only sentence before
+	// anything else in modelAction runs, which is what 403 with that wording
+	// pins here. The keys and peers routes are console-only and are refused
+	// by the auth middleware itself.
 	refused := []struct {
 		name   string
 		method string
@@ -781,12 +780,12 @@ func TestBearerKeyOnlyReachesInstallOnModelRoutes(t *testing.T) {
 		body   string
 		want   []int
 	}{
-		{"start", http.MethodPost, "/api/v1/models/" + target + "/start", "{}", []int{http.StatusUnauthorized}},
-		{"stop", http.MethodPost, "/api/v1/models/" + target + "/stop", "{}", []int{http.StatusUnauthorized}},
-		{"smoke-test", http.MethodPost, "/api/v1/models/" + target + "/smoke-test", "{}", []int{http.StatusUnauthorized}},
-		{"benchmark", http.MethodPost, "/api/v1/models/" + target + "/benchmark", "{}", []int{http.StatusUnauthorized}},
-		{"remove", http.MethodDelete, "/api/v1/models/" + target, `{"remove_artifacts":false,"expected_reclaim_bytes":0}`, []int{http.StatusUnauthorized}},
-		{"install with a trailing segment", http.MethodPost, "/api/v1/models/" + target + "/install/start", "{}", []int{http.StatusUnauthorized}},
+		{"start", http.MethodPost, "/api/v1/models/" + target + "/start", "{}", []int{http.StatusForbidden}},
+		{"stop", http.MethodPost, "/api/v1/models/" + target + "/stop", "{}", []int{http.StatusForbidden}},
+		{"smoke-test", http.MethodPost, "/api/v1/models/" + target + "/smoke-test", "{}", []int{http.StatusForbidden}},
+		{"benchmark", http.MethodPost, "/api/v1/models/" + target + "/benchmark", "{}", []int{http.StatusForbidden}},
+		{"remove", http.MethodDelete, "/api/v1/models/" + target, `{"remove_artifacts":false,"expected_reclaim_bytes":0}`, []int{http.StatusForbidden}},
+		{"install with a trailing segment", http.MethodPost, "/api/v1/models/" + target + "/install/start", "{}", []int{http.StatusForbidden}},
 		{"create key", http.MethodPost, "/api/v1/keys", `{"name":"escalate"}`, []int{http.StatusUnauthorized, http.StatusForbidden}},
 		{"list keys", http.MethodGet, "/api/v1/keys", "", []int{http.StatusUnauthorized, http.StatusForbidden}},
 		{"create peer", http.MethodPost, "/api/v1/peers", `{"name":"x","base_url":"http://127.0.0.1:1","api_key":"y"}`, []int{http.StatusUnauthorized, http.StatusForbidden}},
@@ -804,6 +803,10 @@ func TestBearerKeyOnlyReachesInstallOnModelRoutes(t *testing.T) {
 			}
 			if !accepted {
 				t.Fatalf("%s with API key status=%d, want one of %v: body=%s", testCase.name, response.StatusCode, testCase.want, data)
+			}
+			if response.StatusCode == http.StatusForbidden && strings.HasPrefix(testCase.path, "/api/v1/models/") &&
+				!strings.Contains(string(data), "an API key may only trigger an install") {
+				t.Fatalf("%s was refused for the wrong reason: %s", testCase.name, data)
 			}
 		})
 	}
@@ -1259,11 +1262,10 @@ func TestDelegatableRecipeReadsTheEffectiveCatalogOnly(t *testing.T) {
 	}
 }
 
-// TestModelInstallRequestClassifier pins the predicate both locks in the
-// least-privilege rule are built on: withModelAuth uses it to decide whether
-// a bearer key is admitted at all, and modelAction uses it again before
-// acting on a request that arrived marked as delegated. Anything it
-// misclassifies as an install becomes reachable with a key alone.
+// TestModelInstallRequestClassifier pins the predicate the least-privilege
+// rule is built on: modelAction uses it to decide whether a request that
+// arrived with a bearer key may go any further. Anything it misclassifies as
+// an install becomes reachable with a key alone.
 func TestModelInstallRequestClassifier(t *testing.T) {
 	cases := []struct {
 		method string

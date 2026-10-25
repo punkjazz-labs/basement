@@ -330,8 +330,8 @@ func TestCheckingTheFeedNeedsAConsoleSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if answer.status != http.StatusForbidden {
-		t.Fatalf("an unauthenticated check status=%d, want 403", answer.status)
+	if answer.status != http.StatusUnauthorized {
+		t.Fatalf("an unauthenticated check status=%d, want 401", answer.status)
 	}
 	// A session cookie without the CSRF token is not a console either.
 	answer, err = checkFeed(h, h.cookies, "")

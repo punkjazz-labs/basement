@@ -172,10 +172,6 @@ func (s *Server) fleetPlacementPlan(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if _, ok := s.auth.Authenticate(r); !ok {
-		writeError(w, http.StatusUnauthorized, errors.New("console authentication is required"))
-		return
-	}
 	if s.fleetManager == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("fleet placement is unavailable"))
 		return
@@ -202,10 +198,6 @@ func (s *Server) fleetDeployments(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("console authentication is required"))
-			return
-		}
 		deployments, err := s.fleetManager.Deployments(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -213,10 +205,6 @@ func (s *Server) fleetDeployments(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, deployments)
 	case http.MethodPost:
-		if err := s.auth.AuthorizeMutation(r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
 		var request struct {
 			RecipeID      string `json:"recipe_id"`
 			NodeID        string `json:"node_id"`
@@ -267,10 +255,6 @@ func (s *Server) fleetDeploymentAdopt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("fleet placement is unavailable"))
 		return
 	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
 	var request struct {
 		NodeID   string `json:"node_id"`
 		RecipeID string `json:"recipe_id"`
@@ -305,10 +289,6 @@ func (s *Server) fleetDeploymentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("console authentication is required"))
-			return
-		}
 		deployment, err := s.fleetManager.Deployment(r.Context(), parts[0])
 		if err != nil {
 			writeError(w, http.StatusNotFound, errors.New("fleet deployment not found"))
@@ -318,19 +298,11 @@ func (s *Server) fleetDeploymentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet {
-		if _, ok := s.auth.Authenticate(r); !ok {
-			writeError(w, http.StatusUnauthorized, errors.New("console authentication is required"))
-			return
-		}
 		s.fleetDeploymentEvents(w, r, parts[0])
 		return
 	}
 	if len(parts) != 2 || r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if err := s.auth.AuthorizeMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 	// "release" is not an action on a model. It ends a record this fleet can no
