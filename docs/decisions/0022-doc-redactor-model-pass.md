@@ -186,9 +186,16 @@ console session auth and the same inline `AuthorizeMutation` on POST:
   `docredact.ModelPassResult` plus the display name of the model that answered. 503 when no
   text model is serving.
 
-`cmd/docredact-bench` is a developer command, not part of the API. It reads the corpus from
-disk, runs against any OpenAI-compatible base URL given to `-base-url`, and writes an
-aligned text table plus optional JSON. It is never invoked by the manager.
+`cmd/docredact-bench` was a developer command, not part of the API. It read the corpus from
+disk, ran against any OpenAI-compatible base URL given to `-base-url`, and wrote an
+aligned text table plus optional JSON. It was never invoked by the manager.
+
+## Amendment, 2026-10-25
+
+`cmd/docredact-bench` and `ScoreDocument` were removed: the bake-off they ran is recorded in
+`docs/research/redactor-model-qualification.md`, and nothing in the build, CI or release
+ran them. The labeled corpus and `LoadCorpus` stay, because the docredact tests use them.
+Running a new bake-off means restoring the command from git history.
 
 ## Amendment, 2026-08-13
 

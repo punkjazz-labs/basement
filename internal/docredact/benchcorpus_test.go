@@ -59,8 +59,7 @@ func TestCorpusInvariants(t *testing.T) {
 
 // TestLoadCorpusSortsByFilename pins the loader's iteration order to
 // filename, not directory-listing order or JSON "name" field order, so a
-// caller (a future cmd/docredact-bench) can rely on it for stable, diffable
-// output across runs.
+// caller can rely on it for stable, diffable output across runs.
 func TestLoadCorpusSortsByFilename(t *testing.T) {
 	docs, err := LoadCorpus("testdata/corpus")
 	if err != nil {
