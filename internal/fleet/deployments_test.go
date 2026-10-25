@@ -163,7 +163,7 @@ func TestIndependentPlacementsOwnJobsAndServingPerNode(t *testing.T) {
 	if _, err := memberA.PlanIndependent(ctx, first.ID); err == nil {
 		t.Fatal("a fleet member issued a placement plan")
 	}
-	intent := IndependentIntent{Confirmed: true, AcceptLicence: true, ConfirmTerritoryEligibility: true, Activate: true}
+	intent := IndependentIntent{Confirmed: true, AcceptLicence: true, Activate: true}
 	deploymentA, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{RecipeID: first.ID, NodeID: memberA.identity.NodeID, IdempotencyKey: "place-first", Intent: intent})
 	if err != nil || !created {
 		t.Fatalf("first placement created=%v err=%v", created, err)
@@ -790,7 +790,7 @@ func TestAClearedRecordStaysClearedWhenTheSparkComesBack(t *testing.T) {
 	}
 	installed, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{
 		RecipeID: placed.ID, NodeID: member.identity.NodeID, IdempotencyKey: "place-it",
-		Intent: IndependentIntent{Confirmed: true, AcceptLicence: true, ConfirmTerritoryEligibility: true, Activate: true},
+		Intent: IndependentIntent{Confirmed: true, AcceptLicence: true, Activate: true},
 	})
 	if err != nil || !created || installed.OwnerJobID == "" {
 		t.Fatalf("the placement to clear was not made: created=%v deployment=%+v err=%v", created, installed, err)
@@ -1237,7 +1237,7 @@ func TestAnAdoptHoldsThePairWhileItRebuildsAClearedRecord(t *testing.T) {
 	go func() {
 		deployment, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{
 			RecipeID: placed.ID, NodeID: member.identity.NodeID, IdempotencyKey: "install-during-the-rebuild",
-			Intent: IndependentIntent{Confirmed: true, AcceptLicence: true, ConfirmTerritoryEligibility: true, Activate: true},
+			Intent: IndependentIntent{Confirmed: true, AcceptLicence: true, Activate: true},
 		})
 		createDone <- pairPlacementResult{deployment: deployment, created: created, err: err}
 	}()
@@ -1314,7 +1314,7 @@ func TestTwoCreatesForOnePairInstallOnce(t *testing.T) {
 	if err := controller.PollOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	intent := IndependentIntent{Confirmed: true, AcceptLicence: true, ConfirmTerritoryEligibility: true, Activate: true}
+	intent := IndependentIntent{Confirmed: true, AcceptLicence: true, Activate: true}
 	place := func(key string) chan pairPlacementResult {
 		done := make(chan pairPlacementResult, 1)
 		go func() {
@@ -1403,7 +1403,7 @@ func TestAnotherModelOnTheSameSparkIsNotHeldUp(t *testing.T) {
 	go func() {
 		deployment, created, err := controller.CreateIndependentDeployment(ctx, CreateDeploymentRequest{
 			RecipeID: installing.ID, NodeID: member.identity.NodeID, IdempotencyKey: "install-the-other-model",
-			Intent: IndependentIntent{Confirmed: true, AcceptLicence: true, ConfirmTerritoryEligibility: true},
+			Intent: IndependentIntent{Confirmed: true, AcceptLicence: true},
 		})
 		createDone <- pairPlacementResult{deployment: deployment, created: created, err: err}
 	}()

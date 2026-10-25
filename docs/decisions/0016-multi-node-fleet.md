@@ -213,9 +213,11 @@ store into a shared database:
   the deployment id, exact recipe fingerprint, rank, driver node and local
   container state that the current in-memory `workerLease` cannot preserve.
 
-Existing `jobs`, `job_steps`, `installed_models`, `accepted_licences`,
-`territory_confirmations`, `roles`, `api_keys` and model metrics remain local
-and keep their current meanings.
+Existing `jobs`, `job_steps`, `installed_models`, `roles`, `api_keys` and
+model metrics remain local and keep their current meanings.
+(`accepted_licences` and `territory_confirmations` still exist in the schema
+but are no longer written or read: licence acceptance is a per-install flag,
+and since 2026-10-25 it also covers a licence's territory terms.)
 
 Migration is additive and staged:
 

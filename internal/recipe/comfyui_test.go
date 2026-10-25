@@ -284,8 +284,8 @@ uninstall:
 	if !reflect.DeepEqual(config.SizeWaits, wantWaits) {
 		t.Fatalf("decoded size_waits=%#v, want %#v", config.SizeWaits, wantWaits)
 	}
-	if !decoded.RequiresTerritoryConfirmation() {
-		t.Fatal("a territory-gated media recipe must still require its confirmation")
+	if len(decoded.Artifacts) == 0 || len(decoded.Artifacts[0].LicenceTerritoryExclusions) == 0 {
+		t.Fatalf("the licence's territory exclusions did not survive decoding: %#v", decoded.Artifacts)
 	}
 }
 

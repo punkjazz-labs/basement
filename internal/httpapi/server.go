@@ -189,12 +189,10 @@ type preflightCheck struct {
 	Error     string `json:"error,omitempty"`
 }
 type preflightResponse struct {
-	RecipeID                      string           `json:"recipe_id"`
-	Ready                         bool             `json:"ready"`
-	Checks                        []preflightCheck `json:"checks"`
-	LicenceAccepted               bool             `json:"licence_accepted"`
-	TerritoryEligibilityConfirmed bool             `json:"territory_eligibility_confirmed"`
-	Secrets                       map[string]bool  `json:"secrets"`
+	RecipeID string           `json:"recipe_id"`
+	Ready    bool             `json:"ready"`
+	Checks   []preflightCheck `json:"checks"`
+	Secrets  map[string]bool  `json:"secrets"`
 }
 
 func New(version, dataDir string, authManager *auth.Manager, s *store.Store, provider inventory.Provider, executor operations.Executor, e *engine.Engine, recipes []recipe.Recipe) *Server {
@@ -727,10 +725,6 @@ func (s *Server) runPreflightSkippingReservation(ctx context.Context, selected r
 		}
 		response.Checks = append(response.Checks, check)
 	}
-	accepted, _ := s.store.LicenceAccepted(ctx, selected.ID, selected.Version)
-	response.LicenceAccepted = accepted
-	territoryConfirmed, _ := s.store.TerritoryEligibilityConfirmed(ctx, selected.ID, selected.Version)
-	response.TerritoryEligibilityConfirmed = territoryConfirmed
 	for _, name := range selected.Requirements.Secrets {
 		_, present := os.LookupEnv(name)
 		response.Secrets[name] = present
@@ -996,8 +990,10 @@ func (s *Server) modelAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) install(w http.ResponseWriter, r *http.Request, selected recipe.Recipe) {
 	var request struct {
-		Confirmed                   bool  `json:"confirmed"`
-		AcceptLicence               bool  `json:"accept_licence"`
+		Confirmed     bool `json:"confirmed"`
+		AcceptLicence bool `json:"accept_licence"`
+		// Accepted and ignored: accepting the licence covers its territory
+		// terms, and the console and older head Sparks still send this field.
 		ConfirmTerritoryEligibility bool  `json:"confirm_territory_eligibility"`
 		Activate                    *bool `json:"activate"`
 	}
@@ -1017,22 +1013,6 @@ func (s *Server) install(w http.ResponseWriter, r *http.Request, selected recipe
 	if selected.Requirements.RequiredLicenceAccept && !request.AcceptLicence {
 		writeError(w, 400, errors.New("model licence acceptance is required"))
 		return
-	}
-	if selected.RequiresTerritoryConfirmation() && !request.ConfirmTerritoryEligibility {
-		writeError(w, 400, errors.New("territory eligibility confirmation is required"))
-		return
-	}
-	if request.AcceptLicence {
-		if err := s.store.AcceptLicence(r.Context(), selected.ID, selected.Version); err != nil {
-			writeError(w, 500, err)
-			return
-		}
-	}
-	if request.ConfirmTerritoryEligibility {
-		if err := s.store.ConfirmTerritoryEligibility(r.Context(), selected.ID, selected.Version); err != nil {
-			writeError(w, 500, err)
-			return
-		}
 	}
 	// Activate defaults to true, preserving the historical install-and-serve
 	// behaviour for callers that omit it. A delegated install is the one

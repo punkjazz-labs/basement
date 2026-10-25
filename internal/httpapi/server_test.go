@@ -828,13 +828,11 @@ func TestBearerKeyOnlyReachesInstallOnModelRoutes(t *testing.T) {
 	}
 }
 
-// TestInstallRequiresTerritoryEligibilityConfirmation pins section 5.3: a
-// recipe whose artifact carries licence_territory_exclusions gates install on
-// a second, separate confirmation from licence acceptance, refused with 400
-// naming the missing confirmation exactly as accept_licence is, a no-op for a
-// recipe without the field, and read back on a later preflight so a reinstall
-// does not ask again.
-func TestInstallRequiresTerritoryEligibilityConfirmation(t *testing.T) {
+// TestLicenceAcceptanceCoversTerritoryTerms pins the one install gate: a
+// recipe whose licence excludes territories installs on licence acceptance
+// alone, is refused without it, and still accepts the
+// confirm_territory_eligibility field the console sends.
+func TestLicenceAcceptanceCoversTerritoryTerms(t *testing.T) {
 	dataDir := t.TempDir()
 	database, err := store.Open(filepath.Join(dataDir, "manager.db"))
 	if err != nil {
@@ -887,70 +885,47 @@ func TestInstallRequiresTerritoryEligibilityConfirmation(t *testing.T) {
 	paired.Body.Close()
 	headers := map[string]string{"Origin": server.URL, "X-CSRF-Token": pairResult.CSRF, "Idempotency-Key": "territory-install"}
 
-	// Licence accepted but territory confirmation omitted: refused, naming
-	// the missing confirmation, and nothing is written.
+	// Without licence acceptance: refused, naming what is missing.
 	missing := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+gated.ID+"/install",
-		`{"confirmed":true,"accept_licence":true,"activate":false}`, cookies, headers)
+		`{"confirmed":true,"activate":false}`, cookies, headers)
 	missingBody, _ := io.ReadAll(missing.Body)
 	missing.Body.Close()
 	if missing.StatusCode != http.StatusBadRequest {
-		t.Fatalf("install without territory confirmation status=%d body=%s", missing.StatusCode, missingBody)
+		t.Fatalf("install without licence acceptance status=%d body=%s", missing.StatusCode, missingBody)
 	}
-	if !bytes.Contains(missingBody, []byte("territory eligibility confirmation is required")) {
-		t.Fatalf("refusal did not name the missing confirmation: %s", missingBody)
-	}
-
-	// False explicitly is the same refusal as omitted.
-	explicitFalse := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+gated.ID+"/install",
-		`{"confirmed":true,"accept_licence":true,"confirm_territory_eligibility":false,"activate":false}`, cookies, headers)
-	explicitFalseBody, _ := io.ReadAll(explicitFalse.Body)
-	explicitFalse.Body.Close()
-	if explicitFalse.StatusCode != http.StatusBadRequest {
-		t.Fatalf("install with confirm_territory_eligibility=false status=%d body=%s", explicitFalse.StatusCode, explicitFalseBody)
+	if !bytes.Contains(missingBody, []byte("model licence acceptance is required")) {
+		t.Fatalf("refusal did not name the missing acceptance: %s", missingBody)
 	}
 
-	// A recipe without the field is unaffected: the pack's second
-	// single-Spark recipe carries no exclusions and installs with the field
-	// entirely absent from the request.
-	other := secondSingleSpark(modified).ID
-	if other == "" || other == gated.ID {
-		t.Fatal("need a second single-Spark recipe with no territory exclusions")
-	}
-	ungated := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+other+"/install", `{"confirmed":true,"accept_licence":true,"activate":false}`, cookies,
-		map[string]string{"Origin": server.URL, "X-CSRF-Token": pairResult.CSRF, "Idempotency-Key": "ungated-install"})
-	ungatedBody, _ := io.ReadAll(ungated.Body)
-	ungated.Body.Close()
-	if ungated.StatusCode != http.StatusAccepted {
-		t.Fatalf("ungated install status=%d body=%s", ungated.StatusCode, ungatedBody)
-	}
-
-	// True installs, is recorded, and a later preflight reads it back.
-	confirmed := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+gated.ID+"/install",
-		`{"confirmed":true,"accept_licence":true,"confirm_territory_eligibility":true,"activate":false}`, cookies, headers)
-	confirmedBody, _ := io.ReadAll(confirmed.Body)
-	confirmed.Body.Close()
-	if confirmed.StatusCode != http.StatusAccepted {
-		t.Fatalf("install with territory confirmation status=%d body=%s", confirmed.StatusCode, confirmedBody)
+	// Licence accepted, territory field absent: installs.
+	accepted := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+gated.ID+"/install",
+		`{"confirmed":true,"accept_licence":true,"activate":false}`, cookies, headers)
+	acceptedBody, _ := io.ReadAll(accepted.Body)
+	accepted.Body.Close()
+	if accepted.StatusCode != http.StatusAccepted {
+		t.Fatalf("install with licence acceptance status=%d body=%s", accepted.StatusCode, acceptedBody)
 	}
 	var created struct {
 		Job store.Job `json:"job"`
 	}
-	if err := json.Unmarshal(confirmedBody, &created); err != nil {
+	if err := json.Unmarshal(acceptedBody, &created); err != nil {
 		t.Fatal(err)
 	}
 	waitAPIJob(t, server.URL, created.Job.ID, cookies, "ready")
 
-	preflight := doRequest(t, http.MethodGet, server.URL+"/api/v1/preflight?recipe_id="+gated.ID, "", cookies, nil)
-	preflightBody, _ := io.ReadAll(preflight.Body)
-	preflight.Body.Close()
-	var preflightResult struct {
-		TerritoryEligibilityConfirmed bool `json:"territory_eligibility_confirmed"`
+	// The field the console sends is still accepted rather than refused as
+	// unknown.
+	other := secondSingleSpark(modified).ID
+	if other == "" || other == gated.ID {
+		t.Fatal("need a second single-Spark recipe")
 	}
-	if err := json.Unmarshal(preflightBody, &preflightResult); err != nil {
-		t.Fatal(err)
-	}
-	if !preflightResult.TerritoryEligibilityConfirmed {
-		t.Fatalf("preflight did not read back the recorded confirmation: %s", preflightBody)
+	console := doRequest(t, http.MethodPost, server.URL+"/api/v1/models/"+other+"/install",
+		`{"confirmed":true,"accept_licence":true,"confirm_territory_eligibility":true,"activate":false}`, cookies,
+		map[string]string{"Origin": server.URL, "X-CSRF-Token": pairResult.CSRF, "Idempotency-Key": "console-install"})
+	consoleBody, _ := io.ReadAll(console.Body)
+	console.Body.Close()
+	if console.StatusCode != http.StatusAccepted {
+		t.Fatalf("install with the console's territory field status=%d body=%s", console.StatusCode, consoleBody)
 	}
 }
 
