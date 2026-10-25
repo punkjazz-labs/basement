@@ -1,16 +1,22 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { api, copyText, formatBytes, idempotency, type Recipe, type Role } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
+import { Icon } from '../components/Icon'
 import { readableWeights, sortCatalog } from '../catalog'
+import { fleetRows, shortSparkName } from '../fleetModels'
+import type { FitResult } from '../headroom'
+import { fleetMemory, loadFit, loadTargets } from '../loadFit'
 import { DEFAULT_ROLE, combinedFit, distinctModelsAfter, isValidRoleName, normalizeRoleName, roleRows } from '../roles'
+import { LOCAL_MACHINE, machineSeries, subscribeTelemetry, telemetryRevision } from '../telemetry'
+import { boxesWord, servesModel, unitFor, unitPlacement, unitServing } from '../units'
 
 // The swap warning, in the words the design settled on. This Spark serves one
 // model at a time, so it is shown whenever a choice would leave roles pointing
 // at more than one model, which is exactly when models swap in and out.
 const SWAP_NOTE = 'Switching models delays the first response.'
 
-export default function Roles({ system, recipes, models }: AppState) {
+export default function Roles({ system, recipes, models, jobs, peers, fleet, deployments }: AppState) {
   const [roles, setRoles] = useState<Role[]>([])
   // The role whose picker is open. '' is every row closed; 'new' is the
   // add-a-custom-role form.
@@ -44,6 +50,42 @@ export default function Roles({ system, recipes, models }: AppState) {
   const assignment = useMemo(() => new Map(roles.map(role => [role.name, role.recipe_id])), [roles])
   const rows = useMemo(() => roleRows(roles), [roles])
   const labelOf = (name: string) => rows.find(row => row.name === name)?.label ?? name
+
+  // The fleet, read the way the Models page reads it, so a model serving on
+  // two EdgeXperts is serving here too and never reads as missing. Only the
+  // console that leads the fleet holds the other boxes.
+  useSyncExternalStore(subscribeTelemetry, telemetryRevision, telemetryRevision)
+  const sparks = useMemo(
+    () => fleetRows(fleet?.role === 'controller' ? fleet : null, peers, window.location.origin, Date.now()),
+    [fleet, peers],
+  )
+  const { rows: boxes, grouping, self, view: memory } = fleetMemory({
+    sparks, models, recipes, deployments, jobs, system, latest: machineSeries(LOCAL_MACHINE).latest,
+  })
+  const inFleet = boxes.length > 1
+  const boxNames = boxes.map(box => box.displayName)
+  const shortName = (name: string) => shortSparkName(name, boxNames)
+
+  // Where a model runs: the unit the fleet placed it on, the box that serves
+  // or holds it, or this Spark. A model held nowhere runs nowhere.
+  const runsOn = (recipeID: string): string => {
+    const unit = unitFor(grouping, [recipeID], self.nodeID)
+    if (unit) return unitPlacement(unit)
+    if (installed.has(recipeID)) return inFleet ? self.displayName : 'This Spark'
+    const holders = boxes.filter(box => !box.isSelf && box.installedModels.some(model => model.recipe_id === recipeID))
+    const serving = holders.find(box => servesModel(box, recipeID))
+    if (serving) return serving.displayName
+    if (holders.length === 1) return holders[0].displayName
+    return holders.length > 1 ? boxesWord(holders) : 'n/a'
+  }
+
+  // Whether this model could load on this Spark now, which is what a role
+  // asks of it on its first request. A model already serving loads nothing.
+  const loadHere = (recipe: Recipe): FitResult | null => {
+    const model = installed.get(recipe.id)
+    if (!model || (model.active && model.status === 'ready')) return null
+    return loadFit(recipe, loadTargets(recipe, self, grouping), memory)
+  }
 
   const base = `${window.location.origin}/v1`
   const shortBase = `${window.location.host}/v1`
@@ -151,9 +193,19 @@ export default function Roles({ system, recipes, models }: AppState) {
         : { word: 'Nothing is serving', dot: '' }
     }
     const model = installed.get(recipeID)
-    if (!model) return { word: 'Not installed', dot: 'fail' }
-    if (model.active && model.status === 'ready') return { word: 'Serving', dot: 'on' }
-    return { word: 'Loads on first request', dot: 'wait' }
+    if (model?.active && model.status === 'ready') return { word: 'Serving', dot: 'on' }
+    // Serving elsewhere in the fleet is serving: green, and named.
+    const unit = unitFor(grouping, [recipeID])
+    if (unit && unitServing(unit)) {
+      return { word: `Serving on ${boxesWord(unit.members.map(member => member.row), unit.size)}`, dot: 'on' }
+    }
+    const elsewhere = boxes.find(box => !box.isSelf && servesModel(box, recipeID))
+    if (elsewhere) return { word: `Serving on ${shortName(elsewhere.displayName)}`, dot: 'on' }
+    if (model) return { word: 'Loads on first request', dot: 'wait' }
+    const holder = boxes.find(box => !box.isSelf && box.installedModels.some(item => item.recipe_id === recipeID))
+    if (holder) return { word: `Installed on ${shortName(holder.displayName)}`, dot: 'wait' }
+    // A model that is not installed is a setup to finish, not a failure.
+    return { word: 'Not installed', dot: 'warn' }
   }
 
   const picker = (roleName: string, label: string) => {
@@ -186,18 +238,24 @@ export default function Roles({ system, recipes, models }: AppState) {
               if (fitWith(roleName, recipe.id).overBudget) {
                 notes.push('may not fit together in memory')
               }
+              // A role loads its model on the first request. One that has no
+              // room to load is not offered: the owner's rule holds here too.
+              const room = loadHere(recipe)
+              const held = room?.fits === false && recipe.id !== current
               return (
-                <label className={`confirm-check ${swaps ? 'over' : ''}`} key={recipe.id}>
+                <label className={`confirm-check ${swaps || held ? 'over' : ''}`} key={recipe.id}>
                   <input
                     type="radio"
                     name={`${roleName}-model`}
                     checked={choice === recipe.id}
+                    disabled={held}
                     onChange={() => setChoice(recipe.id)}
                   />
                   <span>
                     {recipe.display_name}
                     <small>{notes.join(' · ')}</small>
-                    {swaps && <span className="swap-note">{SWAP_NOTE}</span>}
+                    {held ? <span className="swap-note">{room?.reason}</span>
+                      : swaps && <span className="swap-note">{SWAP_NOTE}</span>}
                   </span>
                   <span className="row-check" />
                 </label>
@@ -215,7 +273,8 @@ export default function Roles({ system, recipes, models }: AppState) {
           <button
             type="button"
             className="primary"
-            disabled={busy || !choice || choice === current}
+            disabled={busy || !choice || choice === current ||
+              (catalog.get(choice) ? loadHere(catalog.get(choice) as Recipe)?.fits === false : false)}
             onClick={() => assign(roleName, choice)}
           >
             Assign to {label}
@@ -230,6 +289,10 @@ export default function Roles({ system, recipes, models }: AppState) {
     const recipeID = assignment.get(name)
     const recipe = recipeID ? catalog.get(recipeID) : undefined
     const state = stateOf(name)
+    // The model that answers this role now: its own, or for the standard
+    // role the one serving.
+    const answering = recipe ?? (name === DEFAULT_ROLE && !recipeID ? servingRecipe : undefined)
+    const room = recipe ? loadHere(recipe) : null
     const toggle = () => (expanded ? closePicker() : openPicker(name))
     const act = (work: () => void) => (event: React.MouseEvent) => {
       event.stopPropagation()
@@ -281,9 +344,17 @@ export default function Roles({ system, recipes, models }: AppState) {
               <div className="nm faint">No model yet</div>
             )}
           </div>
+          <div className="r-runs">
+            {answering ? runsOn(answering.id) : recipeID ? runsOn(recipeID) : <span className="faint">n/a</span>}
+          </div>
           <div className="r-status">
             <span className={`sdot ${state.dot}`} aria-hidden="true" />
-            <span>{state.word}</span>
+            <span>
+              {state.word}
+              {/* The first request would have to load this model, and this
+                  Spark has no room for it now. */}
+              {room?.fits === false && <span className="room-flag" title={room.reason}>No room to load</span>}
+            </span>
           </div>
           <div className="r-actions" onKeyDown={event => event.stopPropagation()}>
             <button className={recipeID ? 'ghost' : 'primary'} onClick={act(toggle)}>
@@ -291,7 +362,7 @@ export default function Roles({ system, recipes, models }: AppState) {
             </button>
           </div>
           <span className={`r-caret ${expanded ? 'open' : ''}`} aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+            <Icon name="chevronRight" size={14} />
           </span>
         </div>
         {expanded && (
@@ -299,6 +370,12 @@ export default function Roles({ system, recipes, models }: AppState) {
             <dl className="facts">
               <dt>Endpoint</dt>
               <dd><code>{base}</code></dd>
+              {room?.fits === false && (
+                <>
+                  <dt>Memory</dt>
+                  <dd className="room-line">{room.reason}</dd>
+                </>
+              )}
               <dt>Model name apps use</dt>
               <dd><code>role/{name}</code></dd>
               <dt>Answering now</dt>
@@ -344,7 +421,8 @@ export default function Roles({ system, recipes, models }: AppState) {
 
       <div className="rtable">
         <div className="rthead" aria-hidden="true">
-          <span>Role</span><span>Endpoint</span><span>Assigned model</span><span>State</span><span /><span />
+          <span>Role</span><span>Endpoint</span><span>Assigned model</span><span>Runs on</span><span>State</span>
+          <span /><span />
         </div>
         {rows.map(rowFor)}
         <div className="rrow add">

@@ -169,6 +169,10 @@ export const COOL_MODE = 'cool'
 export const FULL_MODE_LABEL = 'Full speed'
 export const COOL_MODE_LABEL = 'Cool and quiet'
 export const COOL_TAG = 'cool'
+// The same two modes where the switch sits inside a table row. The full words
+// stay the buttons' accessible names.
+export const FULL_MODE_SHORT = 'Full'
+export const COOL_MODE_SHORT = 'Cool'
 
 // The one line under the Power row. It is one string on purpose: every figure
 // in it was measured on a GB10 Spark (two qualification run pairs on
@@ -599,7 +603,10 @@ export function shortSparkName(displayName: string, fleet: readonly string[]): s
 }
 
 // The chip a model that spans the pair carries. Two Sparks are "both": the
-// fleet holds two machines and the model runs on the two of them.
+// fleet holds two machines and the model runs on the two of them. This is only
+// for a pair no fleet placement joins. A placed model is named by its unit
+// ("TP4 · 4 Sparks", units.ts), which is the only honest name once a fleet
+// holds more boxes than the model runs on.
 export const BOTH_SPARKS_CHIP = 'both'
 // The same fact in the band's own line, where the word stands alone.
 export const BOTH_SPARKS = 'both Sparks'

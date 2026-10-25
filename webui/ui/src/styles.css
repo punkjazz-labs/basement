@@ -1,25 +1,35 @@
 /* basement console — dark only, site palette (basement.punkjazz.ai).
    Near-black slate ground, cream ink, hairlines, dense 13px scale.
    Color roles are strict: orange = primary actions + the wordmark,
-   NVIDIA green = a model is serving (nothing else, ever), forest = an
-   editorial stamp, amber = warning, red = failure. Measured numbers
-   are receipts and stay quiet. */
+   NVIDIA green (--live) = a model is serving, its calmer sibling (--ok) =
+   a box in good health on dots and chips (nothing else, ever), forest = an
+   editorial stamp and the brand tile, amber = warning, red = failure only.
+   Measured numbers are receipts and stay quiet.
+
+   Depth is drawn with layers and hairlines, not shadows: the rail sits on
+   --bg, the content on the slightly lighter --canvas, cards on --surface,
+   each with a 1px line and a faint highlight along its top edge (--hi).
+   Type: page title 20/600, section 13/600, body 13–13.5, meta 11.5–12, and
+   every figure in tabular mono. Spacing keeps to a 4px rhythm. */
 
 :root {
-  --bg: #131519;
-  --surface: #181a1f;
-  --surface-2: #22242b;
-  --panel: #16181d;
-  --hover: #1d1f25;
-  --line: #2c2f37;
-  --line-strong: #40444f;
+  --bg: #111317;            /* the ground the rail sits on */
+  --canvas: #15171b;        /* the content plane, one step up */
+  --surface: #1a1c21;       /* cards and tables */
+  --surface-2: #23252c;     /* controls, chips, pressed states */
+  --panel: #17191e;         /* insets: table heads, group bands */
+  --hover: #1f2127;
+  --line: #2a2d35;
+  --line-soft: #23262d;     /* separators inside a card */
+  --line-strong: #3b3f49;
   --ink: #efe8d2;
   --muted: #a9ab93;
   --faint: #75795f;
   --accent: #dd3c10;        /* brand orange: primary actions + wordmark */
   --accent-ink: #fff4e8;    /* text on orange */
   --accent-deep: #f2703c;   /* orange as text on dark surfaces */
-  --live: #76b900;          /* NVIDIA green: a model is serving */
+  --live: #76b900;          /* NVIDIA green: a model is serving (brand moments) */
+  --ok: #74b148;            /* the same green, calmer: a healthy dot or chip */
   --chip: #1d4733;          /* forest: editorial stamps */
   --chip-line: #2f5f47;
   --warn: #d9a12f;
@@ -30,7 +40,9 @@
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", Roboto, sans-serif;
   --radius: 8px;
-  --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  --hi: inset 0 1px 0 rgb(255 255 255 / 0.035);
+  --shadow: var(--hi);
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   /* The reading column. Prose is hard to read past about 75 characters a
      line, and 64ch is the width the Redactor already gives a document, so an
      answer and a document read at the same measure. */
@@ -45,14 +57,16 @@ body {
   color: var(--ink);
   font: 13.5px/1.55 var(--sans);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 #root { min-height: 100dvh; }
 
 code, .mono { font-family: var(--mono); font-size: 0.92em; }
 button { font: inherit; cursor: pointer; }
-h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 a { color: var(--ink); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 80%, transparent); outline-offset: 2px; border-radius: 4px; }
+.icon { flex: none; display: block; }
 
 .skip-link {
   position: absolute; left: -9999px; top: 0; z-index: 100;
@@ -60,53 +74,82 @@ a { color: var(--ink); }
 }
 .skip-link:focus { left: 0; }
 
+/* Things that change state ease into it; nothing bounces. A reader who asks
+   for less motion gets none. */
+button, .srow, .mrow, .rrow, .urow, .sgroup, .member-chip, .topology button, .stat {
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
+}
+
 /* ---- Shell: sidebar + content ------------------------------------------- */
 
-.shell { display: grid; grid-template-columns: 192px 1fr; min-height: 100dvh; }
+/* The rail sits on the ground; the content is one raised plane beside it,
+   inset by a hairline and rounded where it meets the rail (Linear's shell). */
+.shell { display: grid; grid-template-columns: 216px minmax(0, 1fr); min-height: 100dvh; }
 
 .side {
-  border-right: 1px solid var(--line);
   background: var(--bg);
   display: flex; flex-direction: column;
-  padding: 16px 8px 12px;
+  padding: 14px 10px 12px;
   position: sticky; top: 0; height: 100dvh;
 }
-.side-mark { display: flex; align-items: center; gap: 8px; padding: 2px 10px 16px; text-decoration: none; color: var(--accent); }
-.side-mark strong { font-size: 13.5px; font-weight: 650; letter-spacing: -0.01em; }
+.side-mark {
+  display: flex; align-items: center; gap: 9px; padding: 4px 8px 18px;
+  text-decoration: none; color: var(--ink); border-radius: 8px;
+}
+.side-mark .brand-mark { flex: none; border-radius: 6px; box-shadow: 0 0 0 1px rgb(255 255 255 / 0.06); }
+.side-mark strong { font-size: 15px; font-weight: 650; letter-spacing: -0.02em; line-height: 1; }
 
-.side nav { display: grid; gap: 1px; }
+.side nav { display: grid; gap: 2px; }
 .side-group { display: grid; gap: 1px; }
-/* The label over a group of screens. It is the catalog's divider device: a
-   quiet uppercase word with a hairline running to the edge, so the rail reads
-   as shelves rather than as one list. */
+/* The label over a group of screens: a quiet word in sentence case, with
+   room above it, so the rail reads as shelves rather than as one list. */
 .side .group {
-  display: flex; align-items: center; gap: 8px;
-  padding: 14px 10px 5px; font-size: 10px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint);
+  padding: 16px 10px 5px; font-size: 11.5px; font-weight: 500; color: var(--faint);
 }
-.side .group::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .side nav button {
-  display: flex; align-items: center; gap: 8px; width: 100%;
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 30px;
   background: none; border: 0; color: var(--muted); text-align: left;
-  padding: 5px 10px; border-radius: 6px; font-size: 12.5px; font-weight: 450;
+  padding: 5px 10px; border-radius: 7px; font-size: 13px; font-weight: 450;
 }
-.side nav button:hover { color: var(--ink); background: var(--surface-2); }
-.side nav button[aria-current='true'] { color: var(--ink); background: var(--surface-2); font-weight: 550; }
-.side nav .badge { margin-left: auto; font-size: 11px; font-family: var(--mono); color: var(--warn); }
+.side nav button .icon { color: var(--faint); transition: color 120ms ease; }
+.side nav button:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 4.5%, transparent); }
+.side nav button:hover .icon { color: var(--muted); }
+.side nav button[aria-current='true'] {
+  color: var(--ink); font-weight: 550;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
+}
+.side nav button[aria-current='true'] .icon { color: var(--ink); }
+.side nav .rail-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side nav .badge {
+  margin-left: auto; font-size: 10.5px; font-family: var(--mono); font-variant-numeric: tabular-nums; line-height: 1;
+  color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); border-radius: 999px; padding: 3px 6px;
+}
 
+/* What this Spark is doing, as one small card at the foot of the rail: the
+   model and its light, the box in mono, then the manager's own line. */
 .side-foot {
-  margin-top: auto; padding: 10px 10px 0; display: grid; gap: 3px;
-  font-size: 11px; color: var(--faint); line-height: 1.6;
+  margin-top: auto; display: grid; gap: 4px; min-width: 0;
+  padding: 10px 11px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--canvas); box-shadow: var(--hi);
+  font-size: 11px; color: var(--faint); line-height: 1.5;
 }
-.foot-live { display: flex; align-items: center; gap: 6px; color: var(--muted); font-weight: 500; min-width: 0; flex-wrap: wrap; row-gap: 1px; }
-.foot-live span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.foot-live .led { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
-.foot-live.serving .led { background: var(--live); animation: breathe 2.6s ease-in-out infinite; }
+.foot-live { display: flex; align-items: center; gap: 7px; color: var(--ink); font-size: 12.5px; font-weight: 550; min-width: 0; flex-wrap: wrap; row-gap: 0; }
+.foot-live .foot-model { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.foot-live .led { width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); flex: none; }
+.foot-live.serving .led { background: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 18%, transparent); animation: breathe 2.6s ease-in-out infinite; }
 .foot-live.working .led { background: var(--warn); animation: breathe 1.2s ease-in-out infinite; }
 .foot-live.failed .led { background: var(--fail); }
-/* The speed sits on its own line, indented under the name, so the model
-   name always keeps the full sidebar width. */
-.foot-live .tps { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); flex-basis: 100%; padding-left: 12px; }
+/* The speed sits on its own line, under the name, so the model name always
+   keeps the full width of the card. */
+.foot-live .tps { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11px; font-weight: 450; color: var(--muted); flex-basis: 100%; padding-left: 14px; }
+.foot-box { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+.foot-host { font-family: var(--mono); font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.foot-free { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+.foot-manager { display: grid; gap: 6px; justify-items: start; border-top: 1px solid var(--line-soft); padding-top: 7px; margin-top: 3px; }
 .side-update {
   display: inline-block; text-decoration: none; font-size: 11px; line-height: 1.6;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
@@ -124,29 +167,35 @@ a { color: var(--ink); }
 .side-update.pending:hover { border-color: color-mix(in srgb, var(--warn) 65%, var(--line)); }
 .side-state { color: var(--faint); }
 .side-state.warn { color: var(--warn); }
+/* The server's note under the version: a tiny muted line of its own. */
+.side-state.note { display: block; margin-top: 1px; font-size: 10.5px; line-height: 1.45; color: color-mix(in srgb, var(--faint) 85%, transparent); }
+.side-state.note .sep { display: none; }
 .side-manager {
-  width: fit-content; padding: 0; border: 0; background: none; color: inherit;
-  font: inherit; line-height: inherit; text-align: left;
+  width: 100%; padding: 0; border: 0; background: none; color: var(--faint);
+  font: inherit; font-family: var(--mono); font-size: 10.5px; line-height: 1.5; text-align: left;
 }
+.side-manager .side-state.note { font-family: var(--sans); }
 .side-manager:hover { color: var(--muted); }
 @keyframes breathe { 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) {
-  .foot-live .led { animation: none !important; }
-}
 
-.content { min-width: 0; display: flex; flex-direction: column; }
-.content-head { padding: 26px 36px 0; max-width: 1032px; }
-.content-head .head-row { display: flex; align-items: center; gap: 12px; }
-.content-head h1 { font-size: 16px; }
+.content {
+  min-width: 0; display: flex; flex-direction: column;
+  margin: 8px 8px 8px 0; background: var(--canvas);
+  border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--hi);
+}
+.content-head { padding: 28px 40px 0; max-width: 1320px; width: 100%; }
+.content-head .head-row { display: flex; align-items: center; gap: 12px; min-height: 30px; }
+.content-head h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
 .content-head .desc { color: var(--muted); font-size: 12.5px; margin: 3px 0 0; }
 .offline {
   margin-left: auto; font-size: 11.5px; font-weight: 550; color: var(--fail);
-  border: 1px solid color-mix(in srgb, var(--fail) 40%, var(--line));
+  background: color-mix(in srgb, var(--fail) 12%, transparent);
   border-radius: 999px; padding: 3px 10px;
 }
 
-main { flex: 1; width: 100%; max-width: 1032px; padding: 18px 36px 80px; }
-main.wide-generate { max-width: 1220px; }
+/* The dashboards use the width: about 1320px of column beside the rail. */
+main { flex: 1; width: 100%; max-width: 1320px; padding: 20px 40px 80px; }
+main.wide-generate { max-width: 1320px; }
 /* The chat is the one tab that fills the window: the transcript owns the
    scrollbar, and the composer never leaves the bottom of the screen. Every
    other tab keeps the page scroll it has. */
@@ -158,10 +207,10 @@ main.chat-tall .playground { flex: 1; min-height: 0; }
 /* ---- Shared -------------------------------------------------------------- */
 
 .card {
-  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
-  padding: 16px 20px; box-shadow: var(--shadow);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  padding: 16px 20px; box-shadow: var(--hi);
 }
-.stack { display: grid; gap: 14px; min-width: 0; }
+.stack { display: grid; gap: 16px; min-width: 0; }
 .stack > * { min-width: 0; }
 .kicker { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 4px; font-weight: 600; }
 .muted { color: var(--muted); }
@@ -181,8 +230,8 @@ main.chat-tall .playground { flex: 1; min-height: 0; }
 .error-note strong { display: block; font-size: 13px; }
 .error-note p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty {
-  color: var(--faint); border: 1px dashed var(--line-strong); border-radius: 10px;
-  padding: 30px; text-align: center;
+  color: var(--muted); border: 1px dashed var(--line-strong); border-radius: 12px;
+  padding: 32px; text-align: center; background: color-mix(in srgb, var(--surface) 50%, transparent);
 }
 .empty p { margin: 0; }
 .empty-actions { display: flex; gap: 10px; justify-content: center; align-items: center; margin-top: 14px; flex-wrap: wrap; }
@@ -222,15 +271,17 @@ main.chat-tall .playground { flex: 1; min-height: 0; }
    rather than a second copy of it. */
 button.primary, a.minutes-download {
   background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent); border-radius: 999px;
-  padding: 5px 16px; font-weight: 650; font-size: 12.5px;
+  padding: 5px 16px; font-weight: 600; font-size: 12.5px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.16), 0 1px 2px rgb(0 0 0 / 0.25);
 }
-button.primary:hover, a.minutes-download:hover { filter: brightness(1.05); }
+button.primary:hover, a.minutes-download:hover { filter: brightness(1.08); }
 button.primary:disabled { background: var(--surface-2); color: var(--faint); border-color: var(--line-strong); cursor: default; filter: none; }
 button.ghost {
-  background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--line-strong); color: var(--ink);
   border-radius: 999px; padding: 5px 16px; font-weight: 500; font-size: 12.5px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
 }
-button.ghost:hover { border-color: var(--faint); }
+button.ghost:hover { border-color: color-mix(in srgb, var(--ink) 30%, var(--line-strong)); background: color-mix(in srgb, var(--ink) 6%, var(--surface-2)); }
 button.ghost:disabled { opacity: 0.4; cursor: default; }
 button.danger {
   background: none; border: 1px solid color-mix(in srgb, var(--fail) 45%, var(--line));
@@ -247,10 +298,25 @@ button.brand {
 button.brand:hover { filter: brightness(1.05); }
 button.brand:disabled { background: var(--surface-2); color: var(--faint); cursor: default; filter: none; }
 
+/* A status chip: a tinted ground in the status colour, the word in that
+   colour, and a small dot or icon before it (Mintlify's and Railway's
+   chips). Neutral unless something is true that wants a colour. */
+.state-chip {
+  display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px;
+  border-radius: 999px; white-space: nowrap; flex: none;
+  font-family: var(--sans); font-size: 11px; font-weight: 550; letter-spacing: 0; line-height: 1;
+  color: var(--muted); background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+.state-chip > i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.state-chip.live, .state-chip.ok { color: color-mix(in srgb, var(--ok) 88%, var(--ink)); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.state-chip.live > i { background: var(--live); box-shadow: 0 0 0 2px color-mix(in srgb, var(--live) 25%, transparent); }
+.state-chip.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.state-chip.fail { color: var(--fail); background: color-mix(in srgb, var(--fail) 14%, transparent); }
+
 .alert {
-  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line));
   background: color-mix(in srgb, var(--warn) 6%, var(--surface));
-  border-radius: 10px; padding: 13px 16px;
+  border-radius: 12px; padding: 13px 16px;
 }
 .alert ul { margin: 6px 0 0; padding-left: 18px; }
 
@@ -260,7 +326,7 @@ input[type='text'], input[type='password'], textarea {
 }
 
 .section-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-.section-head h2 { font-size: 14px; }
+.section-head h2 { font-size: 13px; font-weight: 600; }
 .section-head .spacer { flex: 1; }
 
 /* ---- Pairing -------------------------------------------------------------- */
@@ -282,8 +348,6 @@ input[type='text'], input[type='password'], textarea {
   padding: 24px 28px 0; box-shadow: var(--shadow), 0 8px 28px rgb(0 0 0 / 0.3);
 }
 .hero-top { display: flex; gap: 18px; align-items: center; }
-.hero-top img { width: 68px; height: 68px; border-radius: 15px; border: 1px solid var(--line); }
-.hero-top .mark { width: 68px; height: 68px; border-radius: 15px; font-size: 28px; }
 .hero-name h2 { font-size: 21px; letter-spacing: -0.02em; }
 .hero-name .pub { color: var(--muted); font-size: 12.5px; margin: 2px 0 0; }
 .hero-get { margin-left: auto; display: grid; justify-items: center; gap: 5px; }
@@ -299,57 +363,63 @@ input[type='text'], input[type='password'], textarea {
 
 /* ---- Models: table --------------------------------------------------------- */
 
-.mtable { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
+.mtable { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); box-shadow: var(--hi); }
 .mthead, .mrow {
-  display: grid; grid-template-columns: minmax(240px, 1.5fr) 92px 92px minmax(196px, auto) 18px;
-  align-items: center; padding: 0 16px; column-gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(230px, 1.6fr) minmax(120px, 0.9fr) 72px 80px 84px minmax(190px, auto) 18px;
+  align-items: center; padding: 0 16px; column-gap: 12px;
 }
-.m-caret { display: flex; justify-content: flex-end; color: var(--faint); transition: transform 0.15s ease; }
+.m-caret { display: flex; justify-content: flex-end; color: var(--faint); transition: transform 0.15s ease, color 0.12s ease; }
 .m-caret.open { transform: rotate(90deg); }
-.mrow:hover .m-caret { color: var(--muted); }
-@media (prefers-reduced-motion: reduce) {
-  .m-caret { transition: none; }
-}
+.mrow:hover .m-caret { color: var(--ink); }
+/* Column heads in sentence case, quiet, on the same band the groups use. */
 .mthead {
-  height: 32px; background: var(--panel); border-bottom: 1px solid var(--line);
-  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
+  height: 34px; background: var(--panel); border-bottom: 1px solid var(--line);
+  font-size: 11.5px; font-weight: 500; color: var(--faint);
 }
-/* The lab that made the models below it. The hairline runs from the name to
-   the right edge, so a long list reads as shelves and not as one wall. It
-   takes the place of the line that used to sit under the label: one rule for
-   one divider. */
+/* The lab that made the models below it, on a slightly lighter band with a
+   muted count's quietness (Linear's group header). */
 .mgroup {
-  padding: 10px 16px 6px; background: var(--panel);
-  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
-  display: flex; align-items: center; gap: 10px;
+  padding: 0 16px; height: 32px; background: var(--panel);
+  font-size: 12px; font-weight: 550; color: var(--muted);
+  display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line-soft);
 }
-.mgroup::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .mgroup + .mgroup, .mrow + .mgroup, .mdetail + .mgroup { border-top: 1px solid var(--line); margin-top: 0; }
 .mthead .r { text-align: right; }
-.mrow { min-height: 62px; border-bottom: 1px solid var(--line); padding-block: 10px; cursor: pointer; }
+.mrow { min-height: 56px; border-bottom: 1px solid var(--line-soft); padding-block: 8px; cursor: pointer; }
 .mrow:hover { background: var(--hover); }
 .mrow.open { background: var(--hover); }
 .mrow:last-child, .mdetail:last-child { border-bottom: 0; }
 .m-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.m-id img { width: 28px; height: 28px; border-radius: 6px; flex: none; }
+
+/* Every lab mark sits in one tile: the same size and radius everywhere a
+   given screen draws it, centred, on a quiet ground, with a hairline ring
+   so a logo drawn on white and one drawn on black read as one row. The size
+   and radius come from the component. */
+.logo {
+  position: relative; flex: none; display: inline-grid; place-items: center; overflow: hidden;
+  background: var(--surface-2);
+}
+.logo img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.logo::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.09);
+}
 /* A model from a lab this build ships no mark for. It stands in the same
-   square the logos use, and stays quiet: it says the mark is missing, it does
-   not pretend to be a brand. Each place that sizes its logos sizes this the
-   same way, so a row of marks never draws two different squares. */
+   tile the logos use, and stays quiet: it says the mark is missing, it does
+   not pretend to be a brand. */
 .mark {
-  flex: none; display: grid; place-items: center; border-radius: 6px;
-  width: 28px; height: 28px; font-size: 12px;
-  background: var(--surface-2); border: 1px solid var(--line);
+  display: grid; place-items: center; width: 100%; height: 100%;
   color: var(--muted); font-weight: 700; text-transform: uppercase; line-height: 1;
 }
 .m-id > div { min-width: 0; }
-.m-id .nm { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.m-id .nm { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .m-id .use { color: var(--muted); font-size: 12px; margin-top: 1px; }
 /* The second and last line of a model's row: one short line about the model,
    or the state the model is in while that is worth saying. It holds one line
    whatever it says, so every row is the same height. */
 .m-id .spec {
-  color: var(--muted); font-size: 12px; margin-top: 1px;
+  color: var(--faint); font-size: 12px; margin-top: 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .m-id .spec.warn { color: var(--warn); }
@@ -359,17 +429,21 @@ input[type='text'], input[type='password'], textarea {
   border-radius: 4px; padding: 1px 5px; white-space: nowrap;
 }
 .m-num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.m-num .n { font-size: 13px; font-weight: 550; }
+.m-num .n { font-size: 12.5px; font-weight: 500; color: var(--ink); }
 .m-num .n small { color: var(--faint); font-weight: 400; margin-left: 2px; font-size: 10.5px; }
 /* The unit of the speed number. The header over the column carries it at every
    width that draws the header; below that width the header is gone and the
    cell says it instead, so the unit is on screen exactly once. */
 .m-num .n .unit { display: none; }
 .m-status { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); padding-left: 20px; }
+/* A status light: a small dot with a soft halo in its own colour. */
 .sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); flex: none; }
-.sdot.on { background: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 15%, transparent); }
+.sdot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
 .sdot.busy { background: var(--warn); animation: breathe 1.2s ease-in-out infinite; }
-.sdot.fail { background: var(--fail); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fail) 15%, transparent); }
+.sdot.fail { background: var(--fail); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fail) 16%, transparent); }
+/* A warning that is not work under way: a box gone quiet, a model not
+   installed. Amber, and still. */
+.sdot.warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 14%, transparent); }
 .m-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 /* A model that lives on another Spark in the fleet says so under its status,
    in the same quiet voice the rest of the row uses. */
@@ -382,60 +456,134 @@ input[type='text'], input[type='password'], textarea {
 /* The Spark a model sits on, beside the model's name. Quieter than a tag: it
    answers "where", not "what". The lit one is serving the model now. */
 .node-chip {
-  display: inline-flex; align-items: center; gap: 5px;
-  font-family: var(--mono); font-size: 10px; font-weight: 550; letter-spacing: 0.02em;
-  color: var(--muted); background: var(--surface-2); border: 1px solid var(--line-strong);
-  border-radius: 4px; padding: 1px 6px; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 5px; height: 20px;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 500;
+  color: var(--muted); background: color-mix(in srgb, var(--ink) 5%, transparent); border: 1px solid var(--line);
+  border-radius: 6px; padding: 0 7px; white-space: nowrap;
 }
 .node-chip i { width: 5px; height: 5px; border-radius: 50%; background: var(--line-strong); flex: none; }
-.node-chip.live { color: var(--ink); border-color: color-mix(in srgb, var(--live) 40%, var(--line-strong)); }
-.node-chip.live i { background: var(--live); }
+.node-chip.live { color: var(--ink); }
+.node-chip.live i { background: var(--ok); }
 
-/* The model that serves, over the table rather than inside it. Green says one
-   thing on this console and says it here: this model is serving. The band
-   carries the page's one orange button, and opens the same depth a row opens. */
+/* Where a model sits, and whether it would fit in memory where it would load.
+   A fit is an estimate; the sentence behind it is the cell's tooltip. */
+.m-where { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+.m-where .where-text { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.m-fit, .mthead .f { padding-left: 14px; }
+/* Fits is the ordinary answer and stays plain; Tight and No room are chips
+   in their colour. */
+.m-fit .fit {
+  display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 550; white-space: nowrap; cursor: default;
+  color: var(--muted); background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.m-fit .fit::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: none; }
+.m-fit .fit.ok { color: var(--muted); }
+.m-fit .fit.ok::before { background: var(--ok); }
+.m-fit .fit.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent); }
+/* Fits, with little to spare above the reserve. It still loads; the amber
+   tint only says the estimate is close to the line. */
+.m-fit .fit.tight { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.m-fit .fit.unknown { color: var(--faint); background: none; }
+.m-fit .fit.unknown::before { background: var(--line-strong); }
+/* A load button the memory rule holds dead. The wrapper carries the reason,
+   because a disabled button takes no pointer and shows no tooltip. */
+.held { display: inline-flex; cursor: not-allowed; }
+.room-note { margin: 0 0 12px; color: var(--warn); font-size: 12px; max-width: 70ch; }
+
+/* How a unit is doing, as a chip. Healthy is plain: green is kept for
+   serving and for the health dots. */
+.health {
+  display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px;
+  font-family: var(--sans); font-size: 11px; font-weight: 550; line-height: 1; letter-spacing: 0;
+  border-radius: 999px; color: var(--muted); white-space: nowrap; flex: none;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+.health::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; }
+.health.degraded { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.health.degraded::before { background: var(--warn); }
+.health.failed { color: var(--fail); background: color-mix(in srgb, var(--fail) 14%, transparent); }
+.health.failed::before { background: var(--fail); }
+
+/* The boxes a serving unit runs on, head first, each with the memory it has
+   free. Each chip opens that box's drawer. */
+.mband .members { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.member-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px;
+  border: 1px solid var(--line); border-radius: 7px; background: var(--panel);
+  font-family: var(--mono); font-size: 11px; color: var(--ink); white-space: nowrap; cursor: pointer;
+}
+.member-chip:hover { border-color: var(--line-strong); background: var(--hover); }
+.member-chip .hdot { width: 6px; height: 6px; }
+.member-chip .mc-name { font-weight: 600; }
+.member-chip small { color: var(--faint); font-size: 10px; }
+.member-chip .mc-free { color: var(--muted); font-variant-numeric: tabular-nums; }
+.member-chip.tight .mc-free { color: var(--warn); }
+.member-chip.full .mc-free { color: var(--fail); }
+
+/* The model that serves, over the table rather than inside it: a calm card
+   with a thin green edge and a Serving chip, never a green frame. It carries
+   the page's one orange button, and opens the same depth a row opens. */
 .mband {
+  position: relative; overflow: hidden;
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center;
-  border: 1px solid color-mix(in srgb, var(--live) 25%, var(--line));
-  border-radius: 10px; background: color-mix(in srgb, var(--live) 4%, var(--surface));
-  box-shadow: inset 2px 0 0 var(--live); padding: 13px 16px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 12px; cursor: pointer;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--live) 5%, var(--surface)), var(--surface) 42%);
+  box-shadow: var(--hi); padding: 14px 18px 14px 20px;
 }
-.mband.open { border-radius: 10px 10px 0 0; }
+.mband::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: linear-gradient(var(--live), color-mix(in srgb, var(--live) 45%, transparent));
+}
+.mband:hover { border-color: var(--line-strong); }
+.mband.open { border-radius: 12px 12px 0 0; }
 .mband-group .mdetail {
-  border: 1px solid var(--line); border-top: 0; border-radius: 0 0 10px 10px;
+  border: 1px solid var(--line); border-top: 0; border-radius: 0 0 12px 12px;
 }
-.mband .m-id img, .mband .m-id .mark { width: 34px; height: 34px; border-radius: 8px; font-size: 14px; }
-.mband .nm { font-size: 15px; }
-.mband .tagline {
-  margin: 0; font-family: var(--mono); font-size: 10px; font-weight: 600;
-  letter-spacing: 0.14em; text-transform: uppercase;
-  color: color-mix(in srgb, var(--live) 65%, var(--ink));
-}
+.mband .m-id { align-items: flex-start; }
+.mband .m-id > .logo { margin-top: 1px; }
+.mband .nm { font-size: 15px; gap: 10px; }
 .mband .meta {
+  display: flex; align-items: center; gap: 6px 18px; flex-wrap: wrap;
   font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums;
-  color: var(--faint); margin-top: 3px;
+  color: var(--faint); margin-top: 5px;
+}
+.mband .mb-main { min-width: 0; }
+.mband .mb-live { display: inline-flex; align-items: center; gap: 10px; color: var(--muted); flex-wrap: wrap; }
+.mband .mb-speed b { color: var(--ink); font-weight: 600; font-size: 13px; }
+.mband .mb-part { display: inline-flex; align-items: center; gap: 10px; }
+.mband .mb-part::before { content: ""; width: 3px; height: 3px; border-radius: 50%; background: var(--line-strong); }
+.mband .mb-place { color: var(--faint); }
+/* The card's title opens the unit, so it reads as a name that can be
+   followed, not as a second button. */
+.mb-title {
+  background: none; border: 0; padding: 0; color: var(--ink); font: inherit; font-weight: 600; text-align: left;
+  text-decoration: underline; text-decoration-color: transparent; text-underline-offset: 3px;
+  transition: text-decoration-color 120ms ease;
+}
+.mb-title:hover { text-decoration-color: var(--faint); }
+
+/* The member banner: one quiet line in place of the fleet's own lines. */
+.fleet-strip {
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--hi);
+  padding: 8px 14px; font-size: 12px; color: var(--muted);
 }
 
-/* The whole fleet in one line over the table: each Spark, what it has free,
-   and how many Sparks that is. It uses the same dot as every status cell. */
-.fleet-strip {
-  display: flex; align-items: center; gap: 20px;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  padding: 8px 14px; font-size: 12px; color: var(--muted);
-  overflow: hidden; white-space: nowrap;
+/* One box's memory: what is in use, and a tick where the reserve begins.
+   Cream while there is room, amber when tight, red only when the box is out
+   of memory. Green is the serving light and never appears here. */
+.hbar {
+  position: relative; display: block; height: 4px; min-width: 24px; border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
 }
-.fleet-strip .fs-label { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
-.fleet-strip .fs-node { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.fleet-strip .fs-node b { font-weight: 500; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--faint); font-size: 11.5px; }
-.fleet-strip .fs-name { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
-.fleet-strip .fs-sep { color: var(--faint); }
-/* Each chip opens that Spark's own card below the line. */
-.fleet-strip button.fs-node {
-  background: none; border: 0; color: inherit; font: inherit; text-align: left;
-  padding: 3px 7px; margin: -3px -1px; border-radius: 6px;
-}
-.fleet-strip button.fs-node:hover { background: var(--hover); }
-.fleet-strip button.fs-node[aria-expanded="true"] { background: var(--surface-2); }
+.hbar.mini { height: 3px; width: 34px; }
+.hbar .fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: color-mix(in srgb, var(--ink) 52%, transparent); }
+.hbar .tick { position: absolute; top: 0; bottom: 0; width: 1.5px; background: var(--ink); opacity: 0.8; box-shadow: 0 0 0 1px var(--surface); }
+.hbar.tight .fill { background: var(--warn); }
+.hbar.full .fill { background: var(--fail); }
+.hbar.unknown { opacity: 0.5; }
+
 /* The one place --cool is used: a Spark running at the lower clock. */
 .fs-cool {
   font-family: var(--mono); font-size: 11px; color: var(--cool-ink);
@@ -443,51 +591,38 @@ input[type='text'], input[type='password'], textarea {
   border-radius: 4px; padding: 0 5px;
 }
 
-/* The card one strip chip opens: what that Spark reported about itself. */
-.node-card {
-  background: var(--surface); border: 1px solid var(--line-strong);
-  border-radius: var(--radius); box-shadow: var(--shadow); max-width: 560px;
-}
-.node-card header {
-  padding: 12px 16px; border-bottom: 1px solid var(--line);
-  display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
-}
-.node-card header .role { color: var(--faint); font-size: 12px; }
-.node-card .rows { padding: 6px 0; }
-.node-card .row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 16px; }
-.node-card .row .k { color: var(--muted); }
-.node-card .row .v { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
-
 /* A choice between two states, in one control. */
-.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; }
-.seg button { background: none; border: 0; color: var(--muted); padding: 5px 12px; font: inherit; font-size: 12.5px; }
-.seg button + button { border-left: 1px solid var(--line-strong); }
-.seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); font-weight: 550; }
+/* A segmented control (Vercel's): a sunken track, and the chosen state
+   raised out of it. */
+.seg {
+  display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); box-shadow: inset 0 1px 1px rgb(0 0 0 / 0.18);
+}
+.seg button { background: none; border: 0; color: var(--muted); padding: 4px 11px; border-radius: 6px; font: inherit; font-size: 12.5px; line-height: 1.4; }
+.seg button:hover:not(:disabled) { color: var(--ink); }
+.seg button[aria-pressed="true"] {
+  background: var(--surface-2); color: var(--ink); font-weight: 550;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 1px 2px rgb(0 0 0 / 0.35);
+}
 .seg button:disabled { color: var(--faint); cursor: default; }
 
-/* How hard each Spark runs its chip, on the Sparks page: one row per machine,
-   and the sentence that explains the choice in the tooltip over the list. */
-.power-list {
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-  box-shadow: var(--shadow); max-width: 620px;
+/* How hard each Spark runs its chip, on the Sparks page. Each machine's
+   switch sits in its own table row; the line under the table carries the
+   sentence that explains the choice and the one change that reaches every
+   Spark. The rows below are shared by both shapes of the switch. */
+.prow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.prow .nm { font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 132px; }
+.prow .busy, .pcell .busy { color: var(--warn); font-family: var(--mono); font-size: 11px; }
+.powerfail { flex-basis: 100%; margin: 0; color: var(--warn); font-size: 12px; max-width: 62ch; }
+.pcell { display: grid; gap: 3px; justify-items: start; min-width: 0; }
+.pcell .seg button { padding: 3px 10px; font-size: 11.5px; }
+.pcell .powerfail { font-size: 11px; max-width: 28ch; }
+
+.role-tag {
+  font-family: var(--mono); font-size: 10px; line-height: 16px; color: var(--muted); white-space: nowrap;
+  background: color-mix(in srgb, var(--ink) 7%, transparent); border-radius: 5px; padding: 0 6px;
+  overflow: hidden; text-overflow: ellipsis; max-width: 16ch;
 }
-.power-list header {
-  display: flex; align-items: center; gap: 8px;
-  padding: 11px 16px; border-bottom: 1px solid var(--line);
-}
-.power-list header h2 { font-size: 13px; }
-.power-list .prow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; }
-.power-list .prow + .prow { border-top: 1px solid var(--line); }
-.power-list .prow .nm { font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 132px; }
-.power-list .prow .busy { color: var(--warn); font-family: var(--mono); font-size: 11.5px; }
-/* The one change that reaches every Spark. It sits under the machines it acts
-   on, and each button is an action rather than a state. */
-.power-list .prow.every { border-top: 1px solid var(--line-strong); }
-.power-list .prow.every .nm { font-family: var(--sans); color: var(--muted); }
-/* The sentence over the list opens upward: dropping it downward covered the
-   first Spark's own switch, which is the control it explains. */
-.power-list header .tip-text { top: auto; bottom: calc(100% + 7px); }
-.power-list .powerfail { flex-basis: 100%; margin: 0; color: var(--warn); font-size: 12px; max-width: 62ch; }
 
 /* expanded detail — the "A depth" inside a row */
 .mdetail { border-bottom: 1px solid var(--line); background: var(--panel); padding: 18px 20px 20px; }
@@ -550,9 +685,6 @@ input[type='text'], input[type='password'], textarea {
 .revoke-line span { display: block; color: var(--muted); margin-top: 3px; }
 
 /* Lifetime token usage, read at the same density as the table above it. */
-.token-total { display: flex; align-items: baseline; gap: 9px; margin: 10px 4px 0; font-size: 12px; color: var(--muted); }
-.token-total .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; color: var(--ink); }
-.token-total small { color: var(--faint); font-size: 11.5px; margin-left: 9px; }
 
 /* ---- Roles: the same row idiom as Models, plus the explainer that runs
    before the first role is assigned. --------------------------------------- */
@@ -575,16 +707,17 @@ input[type='text'], input[type='password'], textarea {
 .hero-note p strong { font-weight: 650; }
 .hero-note .spacer { flex: 1; }
 
-.rtable { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
+.rtable { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); box-shadow: var(--hi); }
 .rthead, .rrow {
-  display: grid; grid-template-columns: minmax(120px, 1fr) minmax(180px, 1.4fr) minmax(120px, 1fr) 120px minmax(140px, auto) 18px;
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(170px, 1.3fr) minmax(130px, 1fr) minmax(110px, 0.9fr) 172px minmax(140px, auto) 18px;
   align-items: center; padding: 0 16px; column-gap: 14px;
 }
 .rthead {
-  height: 32px; background: var(--panel); border-bottom: 1px solid var(--line);
-  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint);
+  height: 34px; background: var(--panel); border-bottom: 1px solid var(--line);
+  font-size: 11.5px; font-weight: 500; color: var(--faint);
 }
-.rrow { min-height: 64px; border-bottom: 1px solid var(--line); padding-block: 11px; cursor: pointer; }
+.rrow { min-height: 52px; border-bottom: 1px solid var(--line); padding-block: 7px; cursor: pointer; }
 .rrow:hover, .rrow.open { background: var(--hover); }
 .rrow:last-child, .rdetail:last-child { border-bottom: 0; }
 .r-caret { display: flex; justify-content: flex-end; color: var(--faint); transition: transform 0.15s ease; }
@@ -615,6 +748,11 @@ input[type='text'], input[type='password'], textarea {
 .r-model .nm { font-weight: 550; font-size: 12.5px; }
 .r-model .fp { color: var(--faint); font-size: 11px; font-family: var(--mono); margin-top: 1px; }
 .r-status { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+/* Where the role's model runs, in the placement words every screen uses. */
+.r-runs { font-family: var(--mono); font-size: 11.5px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+/* The first request would have to load the model, and there is no room. */
+.room-flag { display: block; color: var(--warn); font-size: 11px; margin-top: 1px; cursor: help; }
+.room-line { color: var(--warn); }
 .sdot.wait { background: var(--faint); }
 .r-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 .r-actions button { white-space: nowrap; }
@@ -635,12 +773,6 @@ input[type='text'], input[type='password'], textarea {
 .add-role .txt { flex: 1; }
 .add-role .txt strong { display: block; font-size: 12.5px; font-weight: 600; }
 .add-role .txt span { display: block; font-size: 11.5px; color: var(--faint); margin-top: 1px; }
-
-/* ---- Fleet: same row idiom as Models, one extra identity column for the
-   serving model, so widths differ but nothing else does. */
-.mtable.fleet .mthead, .mtable.fleet .mrow {
-  grid-template-columns: minmax(150px, 1.2fr) minmax(130px, 1fr) 88px 88px 72px 112px minmax(104px, auto) 18px;
-}
 
 .field { display: grid; gap: 4px; }
 .field span { font-size: 12px; color: var(--muted); }
@@ -1337,21 +1469,7 @@ button.chip:hover { color: var(--ink); }
 
 /* ---- Monitor -------------------------------------------------------------- */
 
-/* The live meters, one section per Spark: which machine, what it serves, and
-   its own tiles under it. */
-.stack.mon { gap: 22px; }
-.mon-machine { display: grid; gap: 10px; }
-.mon-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-.mon-head h2 { font-size: 13.5px; }
-.mon-head .muted { font-size: 12px; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
-.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 13px 15px; display: grid; gap: 6px; }
-.tile .label { font-size: 10.5px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
-.tile .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 600; }
-.tile .value small { font-size: 11.5px; color: var(--faint); font-weight: 400; font-family: var(--sans); }
-.tile svg { width: 100%; height: 34px; display: block; }
-.tile polyline { fill: none; stroke: var(--live); stroke-width: 1.6; }
-.tile .spark-fill { fill: color-mix(in srgb, var(--live) 12%, transparent); stroke: none; }
+/* The v3 Monitor rules live with the other v3 rules at the end of the file. */
 
 /* ---- Storage -------------------------------------------------------------- */
 
@@ -1360,8 +1478,6 @@ button.chip:hover { color: var(--ink); }
 .disk-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); margin-top: 10px; }
 .disk-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
 .storage-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
-.storage-row img { width: 24px; height: 24px; border-radius: 6px; flex: none; }
-.storage-row .mark { width: 24px; height: 24px; font-size: 10px; }
 .storage-row .grow strong { font-weight: 600; }
 
 /* The head over the transcript keeps its height while the transcript takes
@@ -1377,8 +1493,6 @@ button.chip:hover { color: var(--ink); }
   color: var(--faint); font-size: 12px; line-height: 1.6; white-space: pre-wrap;
   border-left: 2px solid var(--line-strong); padding-left: 10px; margin-bottom: 10px;
 }
-.play-head img { border-radius: 8px; flex: none; }
-.play-head .mark { width: 30px; height: 30px; border-radius: 8px; font-size: 13px; }
 .play-head strong { font-size: 14px; font-weight: 600; display: block; }
 .play-head .faint { font-size: 12px; }
 .storage-row:last-child { border-bottom: 0; }
@@ -1495,10 +1609,15 @@ button.chip:hover { color: var(--ink); }
   .r-caret { display: none; }
   .rdetail .facts { grid-template-columns: minmax(0, 1fr); }
   .add-role { flex-wrap: wrap; }
-  .mtable.fleet .mrow { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
   .mthead { display: none; }
   .mthead + .mrow { border-top: 0; }
-  .mrow { grid-template-columns: 1fr auto; row-gap: 10px; }
+  /* Name, then where it sits, then speed, size and fit on one line, then the
+     buttons: the row stacks as it always has, with two more facts in it. */
+  .mrow { grid-template-columns: auto auto minmax(0, 1fr); column-gap: 18px; row-gap: 8px; padding-block: 10px; }
+  .m-where { grid-column: 1 / -1; }
+  .m-where:empty { display: none; }
+  .m-fit { text-align: right; }
+  .r-runs { grid-column: 1 / -1; }
   .mband { grid-template-columns: 1fr; row-gap: 12px; }
   .m-id { grid-column: 1 / -1; }
   .m-id .spec { white-space: normal; }
@@ -1521,17 +1640,18 @@ button.chip:hover { color: var(--ink); }
   .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .side {
     position: sticky; height: auto; flex-direction: row; align-items: center;
-    padding: 6px 10px; border-right: 0; border-bottom: 1px solid var(--line);
-    overflow-x: auto; z-index: 20;
+    padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--line);
+    overflow-x: auto; z-index: 20; scrollbar-width: none;
   }
-  .side-mark { padding: 0 8px 0 4px; }
+  .side::-webkit-scrollbar { display: none; }
+  .side-mark { padding: 0 10px 0 4px; flex: none; }
+  .side-mark strong { display: none; }
   .side nav { display: flex; gap: 2px; }
-  /* One row of screens across the top. The group labels and their hairlines
-     belong to a rail that runs down the side, so they stand down here. */
+  /* One row of screens across the top. The group labels belong to a rail
+     that runs down the side, so they stand down here. */
   .side-group { display: flex; gap: 2px; }
   .side .group { display: none; }
-  .side nav button { padding: 7px 10px; white-space: nowrap; }
-  .side nav button[aria-current='true'] { box-shadow: inset 0 -2px 0 var(--accent); background: none; }
+  .side nav button { padding: 6px 10px; white-space: nowrap; gap: 7px; }
   .side-foot { display: none; }
   .endpoint-line { flex-wrap: wrap; }
   .endpoint-line code { overflow-wrap: anywhere; min-width: 0; }
@@ -1733,4 +1853,516 @@ a.minutes-download { margin-left: auto; flex: none; text-decoration: none; }
   .minutes-row .k { width: 100%; }
   .minutes-step .hrow { flex-wrap: wrap; }
   .tip-text { position: fixed; inset: auto 16px 16px; width: auto; max-width: none; }
+}
+
+
+/* ==== The fleet read as a fleet: health, facts, charts, drawer, tables ===== */
+
+/* The page title's own row also holds the one fleet-wide power change on the
+   Sparks page, pushed to the far end. */
+.content-head .head-power { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.head-power .prow.every { gap: 10px; }
+.head-power .prow.every .nm { min-width: 0; font-family: var(--sans); color: var(--faint); font-size: 12px; }
+.head-power .seg button { padding: 3px 10px; font-size: 12px; }
+.head-power .tip-text { right: 0; left: auto; }
+
+/* ---- One box's light ------------------------------------------------------ */
+
+/* Green while all is well, amber when a box wants a look, red when it cannot
+   be reached or something on it failed. Hollow while its heartbeat is stale:
+   the colour is the last thing it said, the ring says it has gone quiet. */
+.hdot {
+  width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block;
+  color: var(--line-strong); background: currentColor;
+}
+.hdot.ok { color: var(--ok); }
+.hdot.warn { color: var(--warn); }
+.hdot.fail { color: var(--fail); }
+.hdot.warn, .hdot.fail { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent); }
+.hdot.stale { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+.hdot.unknown { color: var(--line-strong); }
+
+/* ---- How the fleet is doing: one line, or one banner ----------------------- */
+
+@keyframes fade-in { from { opacity: 0; transform: translateY(-3px); } }
+
+.fleet-calm {
+  margin: 0; display: inline-flex; align-items: center; gap: 9px; width: fit-content;
+  font-size: 12.5px; color: var(--muted);
+}
+.fleet-calm .hdot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
+
+/* Only drawn while something is wrong: a title, every box at a glance, then
+   one line per box that needs a look, each with its own way in. */
+.attention {
+  border-radius: 12px; overflow: hidden; animation: fade-in 260ms var(--ease);
+  border: 1px solid color-mix(in srgb, var(--warn) 26%, var(--line));
+  background: color-mix(in srgb, var(--warn) 5%, var(--surface));
+  box-shadow: var(--hi);
+}
+.attention.fail {
+  border-color: color-mix(in srgb, var(--fail) 30%, var(--line));
+  background: color-mix(in srgb, var(--fail) 5%, var(--surface));
+}
+.attention-head { display: flex; align-items: center; gap: 12px; padding: 9px 14px 9px 16px; }
+.attention-head strong { font-size: 13px; font-weight: 600; color: var(--warn); }
+.attention.fail .attention-head strong { color: var(--fail); }
+.leds { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; flex: none; }
+.led {
+  width: 8px; height: 8px; padding: 0; border: 0; border-radius: 50%; cursor: pointer;
+  color: var(--line-strong); background: currentColor;
+}
+.led.ok { color: var(--ok); }
+.led.warn { color: var(--warn); }
+.led.fail { color: var(--fail); }
+.led.stale { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+.led:hover { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 30%, transparent); }
+.led.stale:hover { box-shadow: inset 0 0 0 1.5px currentColor, 0 0 0 3px color-mix(in srgb, currentColor 30%, transparent); }
+.attention-list { list-style: none; margin: 0; padding: 0; }
+.attention-list li {
+  display: flex; align-items: center; gap: 11px; padding: 8px 10px 8px 16px;
+  border-top: 1px solid color-mix(in srgb, var(--warn) 14%, var(--line-soft));
+}
+.attention.fail .attention-list li { border-top-color: color-mix(in srgb, var(--fail) 14%, var(--line-soft)); }
+.attention-list .at-icon { color: var(--warn); }
+.attention-list li.fail .at-icon { color: var(--fail); }
+.at-copy { flex: 1; min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; }
+.at-copy strong { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.at-copy span { font-size: 12px; color: var(--muted); }
+button.ghost.at-open { flex: none; display: inline-flex; align-items: center; gap: 2px; padding: 3px 8px 3px 12px; font-size: 12px; }
+
+/* ---- Models: the stat strip ---------------------------------------------- */
+
+/* At most three facts in one hairline frame (fal's stat strip): a quiet
+   label, the figure in tabular mono, and its shape to the right. */
+.stat-strip {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--hi); overflow: hidden;
+}
+.stat {
+  display: flex; align-items: center; gap: 16px; min-width: 0; padding: 12px 16px;
+  border: 0; border-left: 1px solid var(--line-soft); background: none; color: inherit; font: inherit; text-align: left;
+}
+.stat:first-child { border-left: 0; }
+button.stat { cursor: pointer; }
+button.stat:hover { background: var(--hover); }
+.stat-text { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.stat-label { font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-value {
+  display: flex; align-items: baseline; gap: 6px; white-space: nowrap;
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted);
+}
+.stat-value b { font-size: 19px; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); line-height: 1.1; }
+.stat-aside { flex: none; display: flex; justify-content: flex-end; }
+.stat-aside .sparkline { width: 96px; height: 28px; }
+/* The memory bar sits under its own figure at a fixed, compact width. */
+.stat-meter { display: block; padding-top: 3px; }
+.stat-meter .hbar { width: 112px; height: 4px; }
+.stat.warn .stat-value b { color: var(--warn); }
+.stat.fail .stat-value b { color: var(--fail); }
+.fact-box { font-family: var(--mono); color: var(--muted); }
+.fact-warn {
+  align-self: center; font-family: var(--sans); font-size: 10.5px; font-weight: 550; line-height: 1;
+  color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); border-radius: 999px; padding: 4px 7px;
+}
+.stat.fail .fact-warn { color: var(--fail); background: color-mix(in srgb, var(--fail) 14%, transparent); }
+.stat-split { font-size: 11px; color: var(--faint); }
+
+/* ---- History: sparklines and the one chart --------------------------------- */
+
+/* A line in its own colour, a soft fill under it fading to nothing, and a
+   dot where it ends. */
+.sparkline { width: 64px; height: 18px; flex: none; display: block; overflow: visible; color: color-mix(in srgb, var(--ink) 62%, transparent); }
+.sparkline .line { fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linejoin: round; stroke-linecap: round; }
+.sparkline circle { fill: currentColor; }
+.sparkline.live { color: var(--live); }
+.sparkline.warn { color: var(--warn); }
+.sparkline.fail { color: var(--fail); }
+.sparkline.empty { opacity: 0; }
+
+.mchart { margin: 0; display: grid; gap: 12px; min-width: 0; color: color-mix(in srgb, var(--ink) 70%, transparent); }
+.mchart figcaption { display: flex; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; }
+.mchart .t { font-size: 13px; font-weight: 600; color: var(--ink); }
+.mchart .win { font-size: 11.5px; color: var(--faint); }
+.mchart .stats { margin-left: auto; display: inline-flex; align-items: baseline; gap: 14px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.mchart .st { display: inline-flex; align-items: baseline; gap: 5px; }
+.mchart .st small { font-family: var(--sans); font-size: 11px; color: var(--faint); }
+.mchart .st b { font-size: 12.5px; font-weight: 500; color: var(--muted); }
+.mchart .st:last-of-type b { font-size: 14px; font-weight: 600; color: var(--ink); }
+.mchart .u { font-size: 11px; color: var(--faint); margin-left: -9px; }
+.mchart .plot { position: relative; }
+.mchart svg { width: 100%; height: 112px; display: block; overflow: visible; }
+.mchart .grid { stroke: var(--line); stroke-dasharray: 2 4; opacity: 0.7; }
+.mchart .base { stroke: var(--line); }
+.mchart .line { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.mchart.live { color: var(--live); }
+.mchart.warn { color: var(--warn); }
+.mchart.fail { color: var(--fail); }
+.mchart .end {
+  position: absolute; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 50%;
+  background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 22%, transparent);
+}
+/* Nothing to draw yet is one quiet line, not an empty frame. */
+.chart-empty { margin: 0; display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--faint); min-width: 0; }
+.chart-empty > i {
+  flex: none; width: 14px; height: 1.5px; border-radius: 1px;
+  background: repeating-linear-gradient(90deg, var(--line-strong) 0 3px, transparent 3px 5px);
+}
+.chart-empty .t { color: var(--muted); font-weight: 550; }
+.chart-empty .t::after { content: "·"; margin-left: 6px; color: var(--line-strong); }
+
+/* A unit beside a mono figure, small and in the text face. */
+.fig-unit { font-family: var(--sans); font-size: 11px; font-weight: 400; letter-spacing: 0; color: var(--faint); }
+
+/* ---- A box's free memory in a cell ------------------------------------------ */
+
+.memfree { display: inline-flex; align-items: center; gap: 10px; min-width: 0; white-space: nowrap; }
+.memfree .hbar { width: 56px; flex: none; }
+.memfree .hbar.mini { width: 34px; }
+.memfree .num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink); min-width: 7.5ch; text-align: right; }
+.memfree.tight .num { color: var(--warn); }
+.memfree.full .num { color: var(--fail); }
+.memfree.unknown .num { color: var(--faint); }
+.memfree .refused {
+  font-size: 10.5px; font-weight: 550; line-height: 1; color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 13%, transparent); border-radius: 999px; padding: 3px 7px;
+}
+.memfree.full .refused { color: var(--fail); background: color-mix(in srgb, var(--fail) 13%, transparent); }
+
+/* ---- The detail drawer -------------------------------------------------------- */
+
+/* A sheet that floats in from the right over a dimmed page, inset from the
+   window's edge like the content plane. */
+.drawer-layer { position: fixed; inset: 0; z-index: 60; }
+.drawer-scrim { position: absolute; inset: 0; background: rgb(5 6 8 / 0.55); animation: scrim-in 220ms ease-out; }
+@keyframes scrim-in { from { opacity: 0; } }
+/* A column: the name at the top and the actions at the bottom stay put, and
+   only the body between them scrolls, so a short window never hides the
+   power switch or Open console. */
+.drawer {
+  position: absolute; top: 8px; right: 8px; bottom: 8px; width: min(540px, calc(100vw - 16px));
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--canvas); border: 1px solid var(--line-strong); border-radius: 14px;
+  box-shadow: var(--hi), 0 18px 50px rgb(0 0 0 / 0.45);
+  animation: drawer-in 300ms var(--ease);
+}
+@keyframes drawer-in { from { transform: translateX(28px); opacity: 0; } }
+.drawer-close {
+  position: absolute; z-index: 2; top: 16px; right: 16px; width: 28px; height: 28px; display: grid; place-items: center;
+  background: none; border: 0; border-radius: 8px; color: var(--faint); padding: 0;
+}
+.drawer-close:hover { color: var(--ink); background: var(--surface-2); }
+.drawer:focus { outline: none; }
+.dr { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.dr-head { flex: none; display: flex; align-items: flex-start; gap: 12px; padding: 22px 60px 16px 24px; }
+.dr-body {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  display: grid; align-content: start; gap: 18px; padding: 2px 24px 24px;
+}
+.dr-head > .hdot { width: 9px; height: 9px; margin-top: 8px; }
+.dr-title { min-width: 0; display: grid; gap: 3px; }
+.dr-title h2 { font-size: 18px; font-weight: 600; letter-spacing: -0.015em; overflow-wrap: anywhere; line-height: 1.3; }
+.dr.box .dr-title h2 { font-family: var(--mono); font-size: 17px; letter-spacing: -0.01em; }
+.dr-role { margin: 0; font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dr-beat { margin: 0; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.dr-issues { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.dr-issues .state-chip { height: auto; min-height: 26px; padding: 4px 11px 4px 8px; border-radius: 8px; white-space: normal; font-size: 12px; line-height: 1.35; gap: 7px; }
+.dr-facts3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.fcard {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--hi);
+  padding: 11px 13px 12px; display: grid; gap: 4px; align-content: start; min-width: 0;
+}
+.fcard .l { font-size: 11.5px; font-weight: 500; color: var(--faint); }
+.fcard .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 19px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.3; white-space: nowrap; }
+.fcard .v small { font-family: var(--sans); font-size: 11px; font-weight: 400; letter-spacing: 0; color: var(--faint); }
+.fcard .s { font-size: 11.5px; color: var(--faint); }
+.fcard .s.warn {
+  justify-self: start; font-weight: 550; font-size: 10.5px; line-height: 1; color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent); border-radius: 999px; padding: 3px 7px; margin-top: 2px;
+}
+.fcard .hbar { width: 100%; margin: 3px 0 2px; }
+.fcard.tight .v, .fcard.warn .v { color: var(--warn); }
+.fcard.full .v, .fcard.fail .v { color: var(--fail); }
+.dr-chart {
+  display: grid; gap: 14px; padding: 12px 14px 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--hi);
+}
+.dr-chart > .seg { justify-self: start; }
+/* With nothing drawn yet, the section is only its one quiet line. */
+.dr-chart:not(:has(.mchart, .seg)) { padding: 0; border: 0; background: none; box-shadow: none; }
+.dr-chart .seg button { padding: 3px 10px; font-size: 12px; }
+.dr-list { margin: 0; display: grid; }
+.dr-fact { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
+.dr-fact:last-child { border-bottom: 0; }
+.dr-fact dt { color: var(--muted); }
+.dr-fact dd { margin: 0; font-family: var(--mono); font-size: 12px; text-align: right; overflow-wrap: anywhere; }
+.dr-actions {
+  flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 24px; border-top: 1px solid var(--line); background: var(--canvas);
+}
+.dr-actions .prow { flex: 1; }
+.dr-actions .prow .nm { display: none; }
+.dr-members h3 { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+/* The unit's boxes as a small topology: the head, then its members hung off
+   it, one memory figure each. */
+.topology { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.topology li { position: relative; }
+.topology li.member { padding-left: 22px; }
+.topology li.member::before {
+  content: ""; position: absolute; left: 9px; top: -7px; height: 25px; width: 10px;
+  border-left: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); border-bottom-left-radius: 6px;
+}
+.topology li.missing { font-size: 12px; color: var(--warn); padding-top: 4px; padding-bottom: 4px; }
+.topology button {
+  width: 100%; display: flex; align-items: center; gap: 10px; text-align: left; cursor: pointer; min-height: 38px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 6px 10px 6px 12px; color: var(--ink);
+  box-shadow: var(--hi);
+}
+.topology button:hover { border-color: var(--line-strong); background: var(--hover); }
+.topology .nm { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+.topology .memfree { margin-left: auto; }
+.topology .chev { color: var(--faint); flex: none; }
+.topology button:hover .chev { color: var(--ink); }
+/* A name inside a sentence that opens something. */
+.linkish {
+  background: none; border: 0; padding: 0; font: inherit; color: var(--ink); cursor: pointer;
+  text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px;
+}
+.linkish:hover { text-decoration-color: var(--muted); }
+
+/* ---- Sparks: one grouped table ------------------------------------------------ */
+
+.stable { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); box-shadow: var(--hi); }
+.srow {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.4fr) minmax(96px, 0.7fr) minmax(200px, 1fr) 70px 76px 112px 118px 22px;
+  align-items: center; column-gap: 14px; padding: 8px 16px; min-height: 56px;
+  border-bottom: 1px solid var(--line-soft); cursor: pointer;
+}
+.srow:hover, .srow.open { background: var(--hover); }
+.srow:last-child { border-bottom: 0; }
+.srow.head {
+  min-height: 34px; padding-block: 0; background: var(--panel); cursor: default; border-bottom-color: var(--line);
+  font-size: 11.5px; font-weight: 500; color: var(--faint);
+}
+.srow.head:hover { background: var(--panel); }
+.srow.head .r { text-align: right; }
+.s-box { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.s-name { display: flex; align-items: center; flex-wrap: wrap; gap: 1px 8px; min-width: 0; }
+.s-name .nm { font-family: var(--mono); font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s-name .sub { flex-basis: 100%; font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s-status { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); min-width: 0; }
+.s-temp { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+.s-temp.warn { color: var(--warn); }
+.s-temp.fail { color: var(--fail); }
+.s-seen { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.s-power { min-width: 0; }
+.s-power .pcell .seg button { padding: 2px 9px; font-size: 11.5px; }
+.s-actions { display: flex; gap: 6px; justify-content: flex-end; align-items: center; }
+.s-actions button.ghost { padding: 3px 12px; font-size: 12px; }
+.s-actions .more { padding: 2px 8px; letter-spacing: 0.1em; }
+.s-chev {
+  display: flex; justify-content: flex-end; align-items: center; padding: 4px 0; background: none; border: 0;
+  color: var(--faint); cursor: pointer;
+}
+.s-chev:hover, .srow:hover .s-chev { color: var(--ink); }
+/* A unit's group header: the model, how it is split, its health, and what
+   its boxes have free between them, on a slightly lighter band (Linear's
+   group header). It opens the unit. */
+.sgroup {
+  display: flex; align-items: center; gap: 10px; padding: 0 16px; min-height: 44px;
+  background: var(--panel); border-bottom: 1px solid var(--line-soft); cursor: pointer;
+}
+.sgroup:hover { background: color-mix(in srgb, var(--ink) 3%, var(--panel)); }
+.sg-title { background: none; border: 0; padding: 0; font: inherit; font-size: 13px; font-weight: 600; color: var(--ink); cursor: pointer; }
+.sg-title.static { cursor: default; }
+.sg-place { font-family: var(--mono); font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.sg-mem { margin-left: auto; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.sg-chev { color: var(--faint); display: flex; }
+.sgroup:hover .sg-chev { color: var(--ink); }
+.sgroup.plain { cursor: default; }
+.sgroup.plain:hover { background: var(--panel); }
+.sgroup.plain .sg-mem { color: var(--faint); font-family: var(--sans); }
+.stable .mdetail { border-bottom: 1px solid var(--line-soft); }
+
+/* ---- Monitor: one card per unit, events beside them ------------------------- */
+
+.stack.mon { gap: 16px; }
+.mon-cols { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+.mon-main { display: grid; gap: 16px; min-width: 0; }
+.ucard {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--hi);
+  padding: 14px 16px 4px; display: grid; gap: 14px; min-width: 0; overflow: hidden;
+}
+.ucard-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ucard-head .health { margin-left: auto; }
+.ucard-title {
+  display: flex; align-items: baseline; gap: 10px; min-width: 0; background: none; border: 0; padding: 0;
+  color: var(--ink); font: inherit; text-align: left; cursor: pointer;
+}
+.ucard-title.static { cursor: default; }
+.ucard-title strong { font-size: 14px; font-weight: 600; }
+.ucard-title span { font-family: var(--mono); font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+button.ucard-title:hover strong { text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 3px; }
+.ucard-note { margin: 0; font-size: 12px; color: var(--faint); }
+.ucard-note::before {
+  content: ""; display: inline-block; vertical-align: middle; width: 14px; height: 1.5px; margin: -2px 9px 0 0; border-radius: 1px;
+  background: repeating-linear-gradient(90deg, var(--line-strong) 0 3px, transparent 3px 5px);
+}
+/* The box rows run to the card's edges, so a hovered row is one band. */
+.utable { display: grid; margin: 0 -16px; }
+.urow {
+  display: grid; grid-template-columns: minmax(170px, 1.3fr) minmax(140px, 1fr) 64px minmax(250px, 1.1fr) 16px;
+  align-items: center; column-gap: 14px; padding: 7px 16px; border-top: 1px solid var(--line-soft); min-height: 44px;
+}
+.urow.head {
+  min-height: 30px; padding-block: 0; border-top: 0;
+  font-size: 11.5px; font-weight: 500; color: var(--faint);
+}
+.urow.head .r { text-align: right; }
+.urow.link { cursor: pointer; }
+.urow.link:hover { background: var(--hover); }
+.u-box { display: flex; align-items: center; gap: 9px; min-width: 0; flex-wrap: wrap; }
+.u-box .nm { font-family: var(--mono); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.u-box .role-tag { max-width: 22ch; }
+.u-note { flex-basis: 100%; font-size: 11px; color: var(--faint); padding-left: 16px; }
+.u-span { grid-column: 2 / span 3; font-size: 12px; }
+.u-trend { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.u-trend .n, .u-num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.u-trend .n { min-width: 5ch; text-align: right; }
+.u-num { text-align: right; }
+.u-num.warn { color: var(--warn); }
+.u-num.fail { color: var(--fail); }
+.u-chev { color: var(--faint); display: flex; justify-content: flex-end; }
+.urow.link:hover .u-chev { color: var(--ink); }
+/* Every metric, for whoever wants them. Collapsed until asked for. */
+.allm { border-top: 1px solid var(--line-soft); margin: 0 -16px; padding: 8px 16px 10px; }
+.allm summary { cursor: pointer; font-size: 12px; color: var(--muted); padding: 2px 0; width: fit-content; }
+.allm summary:hover { color: var(--ink); }
+.allm-table { display: grid; margin-top: 8px; }
+.allm-row { display: grid; grid-template-columns: minmax(130px, 1fr) repeat(4, minmax(120px, 1fr)); gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line-soft); }
+.allm-row.head { border-top: 0; font-size: 11.5px; font-weight: 500; color: var(--faint); }
+.allm-row .nm { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+.allm-cell { display: flex; align-items: center; gap: 8px; }
+.allm-cell .sparkline { width: 52px; }
+.allm-cell .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.allm-runtime { margin: 8px 0 2px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+
+/* What happened lately, as a timeline: one node per event on a hairline,
+   coloured by how much it matters (Railway's activity feed and its severity
+   chips). What is wrong now leads. */
+.events {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--hi);
+  padding: 14px 10px 8px 14px; position: sticky; top: 16px;
+}
+.events h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+.timeline { list-style: none; margin: 0; padding: 0; position: relative; }
+.timeline::before {
+  content: ""; position: absolute; left: 4px; top: 14px; bottom: 14px; width: 1px; background: var(--line);
+}
+.ev button {
+  width: 100%; display: flex; gap: 12px; align-items: flex-start; text-align: left; cursor: pointer;
+  background: none; border: 0; padding: 7px 6px 7px 0; border-radius: 8px; color: inherit; font: inherit;
+}
+.ev button:hover .ev-title { color: var(--ink); }
+.ev button:hover .ev-sub { text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 2px; }
+.ev-node {
+  position: relative; z-index: 1; flex: none; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%;
+  background: var(--surface); border: 1.5px solid color-mix(in srgb, var(--ink) 30%, var(--surface));
+}
+.ev.warn .ev-node, .ev.fail .ev-node { border: 0; box-shadow: 0 0 0 3px var(--surface); }
+.ev.warn .ev-node { background: var(--warn); }
+.ev.fail .ev-node { background: var(--fail); }
+.ev.now.warn .ev-node { box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px color-mix(in srgb, var(--warn) 22%, transparent); }
+.ev.now.fail .ev-node { box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px color-mix(in srgb, var(--fail) 22%, transparent); }
+.ev.busy .ev-node { border-color: var(--warn); animation: breathe 1.2s ease-in-out infinite; }
+.ev-body { display: grid; gap: 2px; min-width: 0; }
+.ev-title { font-size: 12.5px; line-height: 1.4; color: var(--muted); }
+.ev-sub { font-weight: 600; color: var(--ink); margin-right: 5px; }
+.ev.warn .ev-text { color: var(--warn); }
+.ev.fail .ev-text { color: var(--fail); }
+.ev-meta { display: flex; align-items: baseline; gap: 6px; font-size: 11px; color: var(--faint); min-width: 0; }
+.ev-box { font-family: var(--mono); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev-box + .ev-when::before { content: "·"; margin-right: 6px; }
+.ev-when { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ev.now.warn .ev-when { color: var(--warn); }
+.ev.now.fail .ev-when { color: var(--fail); }
+.events-empty { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0 10px; color: var(--faint); }
+.events-empty p { margin: 0; font-size: 12px; line-height: 1.5; }
+.events-empty strong { display: block; color: var(--muted); font-weight: 550; font-size: 12.5px; }
+
+/* ---- Narrower screens ------------------------------------------------------- */
+
+@media (max-width: 1100px) {
+  .mon-cols { grid-template-columns: minmax(0, 1fr); }
+  .events { position: static; }
+}
+
+@media (max-width: 900px) {
+  .srow { grid-template-columns: minmax(0, 1fr) auto auto; row-gap: 8px; column-gap: 12px; padding-block: 10px; }
+  .srow.head { display: none; }
+  .s-box { grid-column: 1 / 2; }
+  .s-status { grid-column: 2 / 4; justify-content: flex-end; }
+  .s-mem { grid-column: 1 / 2; }
+  .s-temp { grid-column: 2 / 3; }
+  .s-seen { grid-column: 3 / 4; }
+  .s-power { grid-column: 1 / 2; }
+  .s-actions { grid-column: 2 / 4; }
+  .s-chev { display: none; }
+  .sgroup { flex-wrap: wrap; row-gap: 4px; padding-block: 8px; }
+  .sg-mem { margin-left: 0; flex-basis: 100%; }
+  .sg-chev { display: none; }
+  .urow { grid-template-columns: minmax(0, 1fr) auto auto; row-gap: 6px; padding-block: 9px; }
+  .urow.head { display: none; }
+  .u-box { grid-column: 1 / -1; }
+  .u-mem { grid-column: 1 / 2; }
+  .u-trend { grid-column: 1 / 2; }
+  .u-span { grid-column: 1 / -1; }
+  .u-chev { display: none; }
+  .allm-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .allm-row.head { display: none; }
+  .allm-row .nm { grid-column: 1 / -1; }
+  .mchart .stats { margin-left: 0; flex-basis: 100%; }
+}
+
+@media (max-width: 760px) {
+  /* On a phone the content plane is the page itself, edge to edge. */
+  .content { margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+  /* The drawer is a full-screen sheet on a phone. */
+  .drawer { inset: 0; width: 100vw; border: 0; border-radius: 0; }
+  .dr-head { padding: 18px 56px 14px 16px; }
+  .dr-body { padding: 2px 16px 20px; }
+  .dr-actions { padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); }
+  /* The three facts stay three across, set a size smaller. */
+  .dr-facts3 { gap: 6px; }
+  .fcard { padding: 9px 10px 10px; }
+  .fcard .v { font-size: 16px; }
+  .fcard .s { font-size: 11px; }
+  .attention-head { flex-wrap: wrap; row-gap: 8px; }
+  .leds { margin-left: 0; }
+  .attention-list li { align-items: flex-start; padding-left: 14px; }
+  .at-copy { display: grid; gap: 2px; }
+  /* One fact to a row on a phone: the label to the left, the figure to
+     the right, and the shape left out. */
+  .stat-strip { grid-template-columns: minmax(0, 1fr); }
+  .stat { border-left: 0; border-top: 1px solid var(--line-soft); padding: 10px 14px; }
+  .stat:first-child { border-top: 0; }
+  /* Label on the left, figure on the right, the bar under the figure; a
+     long box name takes a line of its own rather than an ellipsis. */
+  .stat-text { grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; row-gap: 2px; align-items: baseline; }
+  .stat-label { white-space: normal; overflow: visible; }
+  .stat-label .fact-sep { display: none; }
+  .stat-label .fact-box { display: block; font-size: 11px; }
+  .stat-text:has(.stat-meter) .stat-label { grid-row: span 2; }
+  .stat-value { justify-content: flex-end; }
+  .stat-value b { font-size: 15px; }
+  .stat-meter { grid-column: 2; justify-self: end; padding-top: 2px; }
+  .stat-meter .hbar { width: 96px; }
+  .stat-aside { display: none; }
+  .content-head .head-row { flex-wrap: wrap; row-gap: 8px; }
+  .content-head .head-power { margin-left: 0; flex-basis: 100%; }
+  .ucard-title { flex-wrap: wrap; row-gap: 1px; }
+  .head-power .prow.every .nm { display: none; }
+  .mband { padding: 14px 14px 14px 16px; }
+  .mband .meta { gap: 4px 12px; }
 }

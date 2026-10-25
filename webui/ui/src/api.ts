@@ -71,8 +71,14 @@ export interface Recipe {
     internal_port: number
     default_host_port: number
     served_model_id: string
-    vllm?: { max_model_len?: number; tensor_parallel_size?: number }
-    sglang?: { context_length?: number; tensor_parallel_size?: number; quantization?: string }
+    // The share of the device each engine claims up front, as the recipe's
+    // own decimal string. It is what the manager's memory guard charges a
+    // node for this model (internal/operations memoryPlan), so the console's
+    // headroom check reads the same figure.
+    vllm?: { max_model_len?: number; tensor_parallel_size?: number; gpu_memory_utilization?: string }
+    sglang?: {
+      context_length?: number; tensor_parallel_size?: number; quantization?: string; mem_fraction_static?: string
+    }
     llamacpp?: { context_size?: number; parallel?: number }
   }
   // image and digest together are the pinned runtime reference, the same
@@ -611,10 +617,28 @@ export interface NodeInventory {
   hostname: string
   product_name: string
   dgx_spark: boolean
+  // The machine's own description of itself, from the same heartbeat
+  // (inventory.System). Optional because an older manager may leave any of
+  // them out, and an absent one is unread, not empty.
+  os?: string
+  kernel?: string
+  gpu_description?: string
+  docker_version?: string
   memory_total_bytes: number
   memory_available_bytes: number
   storage_total_bytes: number
   storage_available_bytes: number
+  // The GPU readings ride in the same heartbeat. The manager leaves the
+  // three meters out when nvidia-smi gave nothing, so each one is optional
+  // and an absent one is unread, not zero.
+  gpu_memory_total_bytes?: number
+  gpu_memory_free_bytes?: number
+  gpu_power_draw_watts?: number
+  gpu_clock_mhz?: number
+  gpu_temperature_c?: number
+  // When that machine took the reading. Two polls that carry the same stamp
+  // carry the same reading.
+  observed_at?: string
 }
 
 // One model on another Spark, as its heartbeat reported it. Narrower than
