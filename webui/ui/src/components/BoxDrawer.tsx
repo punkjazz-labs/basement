@@ -7,7 +7,9 @@ import type { FleetView } from '../fleetView'
 import { HeadroomBar } from '../headroomBar'
 import type { PowerSwitchState } from '../powerControl'
 import { machineSeries, subscribeTelemetry, telemetryRevision, type Series } from '../telemetry'
+import { figure } from './Figure'
 import { HealthDot } from './FleetHealth'
+import { Icon } from './Icon'
 import { PowerSwitch } from './Power'
 import { MetricChart } from './Sparkline'
 
@@ -92,7 +94,7 @@ export function BoxDrawerBody({ view, row, system, power, onOpenUnit }: {
   const role = view.roleLine(row)
   const [roleWord, ...unitWords] = role.split(' · ')
   return (
-    <div className="dr">
+    <div className="dr box">
       <header className="dr-head">
         <HealthDot box={health} />
         <div className="dr-title">
@@ -109,70 +111,81 @@ export function BoxDrawerBody({ view, row, system, power, onOpenUnit }: {
         </div>
       </header>
 
-      {health && health.issues.length > 0 && (
-        <ul className={`dr-issues ${health.light}`}>
-          {health.issues.map(issue => <li key={issue.kind}>{issue.text}</li>)}
-        </ul>
-      )}
+      {/* The drawer is a column: the name stays at the top, the actions at
+          the bottom, and only what is between them scrolls. */}
+      <div className="dr-body">
+        {health && health.issues.length > 0 && (
+          <ul className="dr-issues">
+            {health.issues.map(issue => (
+              <li key={issue.kind} className={`state-chip ${issue.light}`}>
+                <Icon name={issue.light === 'fail' ? 'failure' : 'alert'} size={14} />
+                {issue.text.charAt(0).toUpperCase() + issue.text.slice(1)}
+              </li>
+            ))}
+          </ul>
+        )}
 
-      <div className="dr-facts3">
-        <div className={`fcard ${room.state}`}>
-          <span className="l">Memory free</span>
-          <span className="v">{room.state === 'unknown' ? 'n/a' : formatBytes(room.box.availableBytes)}</span>
-          <HeadroomBar headroom={room} />
-          <span className="s">
-            {room.state === 'unknown'
-              ? 'not reported yet'
-              : `of ${formatBytes(room.box.totalBytes)} · ${formatBytes(room.reserve)} kept free`}
+        <div className="dr-facts3">
+          <div className={`fcard ${room.state}`}>
+            <span className="l">Memory free</span>
+            <span className="v">{room.state === 'unknown' ? 'n/a' : figure(formatBytes(room.box.availableBytes))}</span>
+            <HeadroomBar headroom={room} />
+            <span className="s">
+              {room.state === 'unknown'
+                ? 'not reported yet'
+                : `of ${formatBytes(room.box.totalBytes)} · ${formatBytes(room.reserve)} kept free`}
+            </span>
+            {refused && <span className="s warn">Loads refused</span>}
+          </div>
+          <div className={`fcard ${heat}`}>
+            <span className="l">GPU temp</span>
+            <span className="v">{temperature ? figure(`${temperature} °C`) : 'n/a'}</span>
+            <span className="s">{temperature ? (heat === 'ok' ? 'in range' : 'hot') : 'not reported'}</span>
+          </div>
+          <div className="fcard">
+            <span className="l">Power</span>
+            <span className="v">{watts ? figure(`${watts.toFixed(0)} W`) : 'n/a'}</span>
+            <span className="s">{modeWord(power ? power.row.mode : row.power.mode)}</span>
+          </div>
+        </div>
+
+        <section className="dr-chart" aria-label="History">
+          <span className="seg" role="group" aria-label="Metric">
+            {METRICS.map(item => (
+              <button type="button" key={item.key} aria-pressed={metric === item.key} onClick={() => setMetric(item.key)}>
+                {item.label}
+              </button>
+            ))}
           </span>
-          {refused && <span className="s warn">Loads refused</span>}
-        </div>
-        <div className={`fcard ${heat}`}>
-          <span className="l">GPU temp</span>
-          <span className="v">{temperature ? `${temperature} °C` : 'n/a'}</span>
-          <span className="s">{temperature ? (heat === 'ok' ? 'in range' : 'hot') : 'not reported'}</span>
-        </div>
-        <div className="fcard">
-          <span className="l">Power</span>
-          <span className="v">{watts ? `${watts.toFixed(0)} W` : 'n/a'}</span>
-          <span className="s">{modeWord(power ? power.row.mode : row.power.mode)}</span>
-        </div>
+          <MetricChart
+            points={points}
+            stamps={held?.series.at}
+            title={chosen.title}
+            unit={chosen.unit}
+            format={value => (metric === 'memFree' ? value.toFixed(1) : value.toFixed(0))}
+            tone={metric === 'temperature' && heat !== 'ok' ? heat : 'plain'}
+            max={metric === 'memFree' && room.box.totalBytes ? room.box.totalBytes / GB : undefined}
+            empty={!key ? 'Telemetry unavailable from this console' : held?.latest === null ? 'Waiting for telemetry…' : undefined}
+          />
+        </section>
+
+        <dl className="dr-list">
+          {facts.map(([label, value]) => (
+            <div key={label} className="dr-fact"><dt>{label}</dt><dd>{value}</dd></div>
+          ))}
+        </dl>
       </div>
 
-      <section className="dr-chart" aria-label="History">
-        <span className="seg" role="group" aria-label="Metric">
-          {METRICS.map(item => (
-            <button type="button" key={item.key} aria-pressed={metric === item.key} onClick={() => setMetric(item.key)}>
-              {item.label}
+      {(power || (!row.isSelf && row.consoleURL)) && (
+        <footer className="dr-actions">
+          {power && <PowerSwitch name={row.displayName} power={power.row} onSet={power.set} />}
+          {!row.isSelf && row.consoleURL && (
+            <button type="button" className="ghost" onClick={() => window.open(row.consoleURL, '_blank', 'noopener,noreferrer')}>
+              Open console
             </button>
-          ))}
-        </span>
-        <MetricChart
-          points={points}
-          stamps={held?.series.at}
-          title={chosen.title}
-          unit={chosen.unit}
-          format={value => (metric === 'memFree' ? value.toFixed(1) : value.toFixed(0))}
-          tone={metric === 'temperature' && heat !== 'ok' ? heat : 'plain'}
-          max={metric === 'memFree' && room.box.totalBytes ? room.box.totalBytes / GB : undefined}
-          empty={!key ? 'Telemetry unavailable from this console' : held?.latest === null ? 'Waiting for telemetry…' : undefined}
-        />
-      </section>
-
-      <dl className="dr-list">
-        {facts.map(([label, value]) => (
-          <div key={label} className="dr-fact"><dt>{label}</dt><dd>{value}</dd></div>
-        ))}
-      </dl>
-
-      <footer className="dr-actions">
-        {power && <PowerSwitch name={row.displayName} power={power.row} onSet={power.set} />}
-        {!row.isSelf && row.consoleURL && (
-          <button type="button" className="ghost" onClick={() => window.open(row.consoleURL, '_blank', 'noopener,noreferrer')}>
-            Open console
-          </button>
-        )}
-      </footer>
+          )}
+        </footer>
+      )}
     </div>
   )
 }

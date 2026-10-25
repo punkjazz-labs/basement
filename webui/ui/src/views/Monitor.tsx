@@ -1,10 +1,14 @@
 import { useSyncExternalStore } from 'react'
 import { formatBytes, type FleetDeploymentView, type InstalledModel, type Job, type Recipe } from '../api'
-import { AttentionBanner, FleetHealthLine, HealthDot } from '../components/FleetHealth'
+import { figure } from '../components/Figure'
+import { FleetStatus, HealthDot } from '../components/FleetHealth'
+import { Icon } from '../components/Icon'
 import { MemoryFree } from '../components/Memory'
 import { MetricChart, Sparkline, windowText } from '../components/Sparkline'
 import { relativeTime } from '../feed'
-import { eventsRevision, jobEvents, latestEvents, seenEvents, subscribeEvents, type FleetEvent } from '../fleetEvents'
+import {
+  alertEvents, eventTitle, eventsRevision, jobEvents, seenEvents, subscribeEvents, timeline, type FleetEvent,
+} from '../fleetEvents'
 import { temperatureLight } from '../fleetHealth'
 import type { FleetRow } from '../fleetModels'
 import type { FleetView } from '../fleetView'
@@ -85,16 +89,16 @@ function MemberRow({ member, view, onOpen }: { member: Member; view: FleetView; 
         <>
           <div className="u-trend">
             <Sparkline points={held.series.power} label={`GPU power${span ? `, ${span}` : ''}`} />
-            <span className="n">{watts ? `${watts.toFixed(0)} W` : 'n/a'}</span>
+            <span className="n">{watts ? figure(`${watts.toFixed(0)} W`) : 'n/a'}</span>
           </div>
-          <div className={`u-num ${heat}`}>{temperature ? `${temperature} °C` : 'n/a'}</div>
+          <div className={`u-num ${heat}`}>{temperature ? figure(`${temperature} °C`) : 'n/a'}</div>
           <div className="u-mem">
             {row ? <MemoryFree headroom={view.headroomOf(row)} /> : <span className="num">{formatBytes(telemetry.memory_available)}</span>}
           </div>
         </>
       )}
       <span className="u-chev" aria-hidden="true">
-        {open && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>}
+        {open && <Icon name="chevronRight" size={14} />}
       </span>
     </div>
   )
@@ -196,6 +200,9 @@ function Throughput({ members, models, head }: { members: Member[]; models: read
   )
 }
 
+// What happened lately, as a timeline (Railway's activity feed): one node per
+// event on a hairline, coloured by how much it matters. What is wrong now
+// leads, in amber or red; past failures stay red; everything else is quiet.
 function EventList({ events, now, onOpenBox, openDeployment, openFleetDeployment }: {
   events: FleetEvent[]
   now: number
@@ -212,24 +219,32 @@ function EventList({ events, now, onOpenBox, openDeployment, openFleetDeployment
     <aside className="events" aria-label="Events">
       <h2>Events</h2>
       {events.length === 0 ? (
-        <p className="faint events-empty">Nothing has happened yet.</p>
+        <div className="events-empty">
+          <Icon name="pulse" size={18} />
+          <p><strong>Nothing yet</strong>Installs, starts, stops and alerts show here as they happen.</p>
+        </div>
       ) : (
-        <ol>
-          {events.map(event => (
-            <li key={event.id}>
-              <button type="button" onClick={() => open(event)}>
-                <i className={`edot ${event.tone}`} aria-hidden="true" />
-                <span className="ev-body">
-                  <span className="ev-sub">{event.subject}</span>
-                  <span className={`ev-text ${event.tone}`}>{event.text}</span>
-                  <span className="ev-meta">
-                    {[event.boxName && event.boxName !== event.subject ? event.boxName : '',
-                      relativeTime(new Date(event.at).toISOString(), now)].filter(Boolean).join(' · ')}
+        <ol className="timeline">
+          {events.map(event => {
+            const title = eventTitle(event)
+            return (
+              <li key={event.id} className={`ev ${event.tone} ${event.ongoing ? 'now' : ''}`}>
+                <button type="button" onClick={() => open(event)}>
+                  <i className="ev-node" aria-hidden="true" />
+                  <span className="ev-body">
+                    <span className="ev-title">
+                      {title.subject && <span className="ev-sub">{title.subject}</span>}
+                      <span className="ev-text">{title.text}</span>
+                    </span>
+                    <span className="ev-meta">
+                      {event.boxName && <span className="ev-box">{event.boxName}</span>}
+                      <span className="ev-when">{event.ongoing ? 'now' : relativeTime(new Date(event.at).toISOString(), now)}</span>
+                    </span>
                   </span>
-                </span>
-              </button>
-            </li>
-          ))}
+                </button>
+              </li>
+            )
+          })}
         </ol>
       )}
     </aside>
@@ -278,7 +293,7 @@ export default function Monitor({
   for (const machine of machines) {
     if (!covered.has(machine.id)) loose.push({ machine, role: '' })
   }
-  const events = latestEvents([
+  const events = timeline(alertEvents(view.health, now), [
     jobEvents({
       jobs, deployments, nameOf,
       self: { id: view.self.nodeID, name: view.self.displayName },
@@ -310,8 +325,7 @@ export default function Monitor({
 
   return (
     <div className="stack mon">
-      <FleetHealthLine summary={view.summary} boxes={view.health} onOpenBox={box => onOpenBox(box.id)} />
-      <AttentionBanner banner={view.banner} onOpen={onOpenBox} />
+      <FleetStatus summary={view.summary} boxes={view.health} onOpenBox={onOpenBox} />
       <div className="mon-cols">
         <div className="mon-main">
           {unitCards.map(({ unit, members }) => card(unit.key, (

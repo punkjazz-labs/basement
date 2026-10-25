@@ -3,7 +3,7 @@ import type { NodeInventory, Telemetry } from './api'
 import type { FleetRow } from './fleetModels'
 import {
   EMPTY_MACHINE, LOCAL_MACHINE, WINDOW, foldSample, forgetMachines, heartbeatKey, inventorySample, isHeartbeatKey,
-  machineSeries, monitorMachines, recordHeartbeats, recordSilence, recordTelemetry, resetTelemetry,
+  machineSeries, monitorMachines, recordHeartbeats, recordSilence, recordTelemetry, requestLine, resetTelemetry,
   subscribeTelemetry, telemetryRevision, withHeartbeatKeys,
 } from './telemetry'
 
@@ -329,5 +329,21 @@ describe('boxes read from their heartbeat', () => {
     ]
     const machines = withHeartbeatKeys(monitorMachines(fleet, [], 'attic'), fleet)
     expect(machines.map(machine => machine.key)).toEqual([LOCAL_MACHINE, 'node:node-41b8', ''])
+  })
+})
+
+// The serving card's live line says only what the runtime counts.
+describe('the requests a serving card names', () => {
+  it('says what is in flight and queued, as the runtime counts it', () => {
+    expect(requestLine({ requests_running: 2, requests_waiting: 0 }, '71.0M tokens served')).toEqual(['2 in flight', '0 queued'])
+  })
+
+  it('says only the counter a runtime publishes', () => {
+    expect(requestLine({ requests_running: 1 })).toEqual(['1 in flight'])
+  })
+
+  it('falls back to what was counted here when the runtime reports no requests', () => {
+    expect(requestLine(undefined, '71.0M tokens served')).toEqual(['71.0M tokens served'])
+    expect(requestLine({ kv_cache_usage: 0.2 })).toEqual([])
   })
 })

@@ -22,7 +22,9 @@ import type { FleetView } from '../fleetView'
 import { boxFromSystem, boxHeadroom, type BoxHeadroom } from '../headroom'
 import type { PowerSwitchState } from '../powerControl'
 import { unitMemory, unitPlacement, type FleetUnit } from '../units'
-import { AttentionBanner, FleetHealthLine, HealthDot } from '../components/FleetHealth'
+import { figure } from '../components/Figure'
+import { FleetStatus, HealthDot } from '../components/FleetHealth'
+import { Icon } from '../components/Icon'
 import { MemoryFree } from '../components/Memory'
 import { PowerSwitch } from '../components/Power'
 
@@ -80,7 +82,7 @@ interface SparkLine {
 }
 
 const Chevron = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+  <Icon name="chevronRight" size={14} />
 )
 
 function SparkRow({ line, expanded, onOpen, onToggle }: {
@@ -98,7 +100,6 @@ function SparkRow({ line, expanded, onOpen, onToggle }: {
         <div className="s-name">
           <span className="nm">{row.displayName}</span>
           {line.tag && <span className="role-tag">{line.tag}</span>}
-          {row.isSelf && <span className="self-tag">{THIS_SPARK}</span>}
           {line.sub && <span className="sub">{line.sub}</span>}
         </div>
       </div>
@@ -112,7 +113,7 @@ function SparkRow({ line, expanded, onOpen, onToggle }: {
         {status.word || 'n/a'}
       </div>
       <div className="s-mem" role="cell"><MemoryFree headroom={room} /></div>
-      <div className={`s-temp ${heat}`} role="cell">{temperature ? `${temperature} °C` : 'n/a'}</div>
+      <div className={`s-temp ${heat}`} role="cell">{temperature ? figure(`${temperature} °C`) : 'n/a'}</div>
       <div className="s-seen" role="cell">{line.seen}</div>
       <div className="s-power" role="cell" onClick={stop}>
         {power && <PowerSwitch compact name={row.displayName} power={power.row} onSet={power.set} />}
@@ -178,7 +179,7 @@ function UnitHeader({ unit, recipe, view, onOpen }: {
 }
 
 export default function Fleet({
-  recipes, models, peers, refreshPeers, view, openBox, openUnit, power,
+  recipes, models, peers, refreshPeers, view, openBox, openUnit, power, system,
 }: AppState) {
   const [summaries, setSummaries] = useState<Record<string, PeerSummary>>({})
   const [expanded, setExpanded] = useState('')
@@ -621,12 +622,15 @@ export default function Fleet({
     }
     const serving = row.isSelf ? thisModel : row.serving
     const age = view.ageOf(row)
+    const product = row.inventory?.product_name || (row.isSelf ? system?.product_name : '') || ''
     return {
       row, tag, peer,
       health: view.healthOf(row.nodeID),
-      // A box in no unit says what it runs; a unit's group header already
-      // says it for every member.
-      sub: tag === '' && serving ? nameOf(serving.recipe_id) : '',
+      // The quiet second line: what the machine is, which one this console
+      // runs on, and, for a box in no unit, what it runs (a unit's group
+      // header already says that for every member).
+      sub: [product, row.isSelf ? THIS_SPARK : '', tag === '' && serving ? nameOf(serving.recipe_id) : '']
+        .filter(Boolean).join(' · '),
       status: row.isSelf ? (thisModel ? { word: 'Serving', dot: 'on' } : { word: 'Idle', dot: '' }) : row.status,
       room: view.headroomOf(row),
       temperature: view.temperatureOf(row),
@@ -671,8 +675,7 @@ export default function Fleet({
 
   return (
     <div className="stack">
-      <FleetHealthLine summary={view.summary} boxes={view.health} onOpenBox={box => openBox(box.id)} />
-      <AttentionBanner banner={view.banner} onOpen={openBox} />
+      <FleetStatus summary={view.summary} boxes={view.health} onOpenBox={openBox} />
 
       {/* Every box in one table, grouped by the unit it runs in. A unit's
           header opens the unit; a row opens its box. */}
@@ -682,7 +685,7 @@ export default function Fleet({
           <span role="columnheader">Status</span>
           <span role="columnheader">Memory free</span>
           <span role="columnheader" className="r">GPU temp</span>
-          <span role="columnheader">Last seen</span>
+          <span role="columnheader" className="r">Last seen</span>
           <span role="columnheader">
             Power{!power.fanOut && power.ready && !power.isMember && <> <Tip text={POWER_MODE_NOTE} label="What the power modes do" /></>}
           </span>

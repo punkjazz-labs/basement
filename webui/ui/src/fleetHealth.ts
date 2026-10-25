@@ -201,9 +201,20 @@ export interface Banner {
 export function bannerFor(summary: FleetHealthSummary): Banner | null {
   const box = summary.attention[0]
   if (!box) return null
-  const issue = box.issues[0]
   const others = summary.attention.length - 1
   const tail = others > 0 ? ` ${others} more ${others === 1 ? 'box needs' : 'boxes need'} attention.` : ''
+  const { title, body } = describe(box)
+  return { light: summary.light === 'fail' ? 'fail' : box.issues[0].light, title, body: `${body}${tail}`.trim(), boxID: box.id, boxName: box.name }
+}
+
+// One line of the banner for every box that needs attention, worst first.
+// Each names its own box, so each carries its own way in.
+export const bannerItems = (summary: FleetHealthSummary): Banner[] =>
+  summary.attention.map(box => ({ light: box.light, ...describe(box), boxID: box.id, boxName: box.name }))
+
+// A box's worst trouble as a title and a sentence about what it means.
+function describe(box: BoxHealth): { title: string; body: string } {
+  const issue = box.issues[0]
   const room = box.headroom
   let title = `${box.name} ${issue.text}`
   let body = ''
@@ -236,7 +247,7 @@ export function bannerFor(summary: FleetHealthSummary): Banner | null {
       body = 'It answers for nothing until it has joined.'
       break
   }
-  return { light: summary.light === 'fail' ? 'fail' : issue.light, title, body: `${body}${tail}`.trim(), boxID: box.id, boxName: box.name }
+  return { title, body }
 }
 
 // ---- A unit, in one word --------------------------------------------------------

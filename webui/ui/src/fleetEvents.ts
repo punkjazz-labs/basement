@@ -29,6 +29,11 @@ export interface FleetEvent {
   // A job that ran on another box, carried whole with its placement.
   deploymentID?: string
   job?: Job
+  // The kind of trouble a box event is about, so a change the console saw
+  // and the same trouble still standing are told once.
+  issue?: IssueKind
+  // A trouble that is still the state of the box now, not a moment past.
+  ongoing?: boolean
 }
 
 // What each kind of job did once it finished well, and what to call it while
@@ -52,11 +57,17 @@ const NOUN: Record<string, string> = {
   adopt: 'adoption',
 }
 
+// A start that stopped another model first is a swap: the engine plans the
+// stop of whatever was running into the start itself (ADR 0003), so the step
+// is the record that one model made way for another.
+const swapped = (job: Job): boolean =>
+  job.kind === 'start' && (job.steps ?? []).some(step => step.operation === 'stop_container' && step.state === 'completed')
+
 export function jobText(job: Job): { tone: EventTone; text: string } {
   const noun = NOUN[job.kind] ?? job.kind
   if (job.state === 'failed') return { tone: 'fail', text: `${noun} failed` }
   if (job.state === 'cancelled') return { tone: 'warn', text: `${noun} cancelled` }
-  if (terminal(job.state)) return { tone: 'ok', text: DONE[job.kind] ?? `${noun} done` }
+  if (terminal(job.state)) return { tone: 'ok', text: swapped(job) ? 'swapped in' : DONE[job.kind] ?? `${noun} done` }
   return { tone: 'busy', text: `${noun} · ${(stateCopy[job.state] ?? job.state).toLowerCase()}` }
 }
 
@@ -145,7 +156,7 @@ export function healthChanges(
       if (before.kinds.includes(issue.kind)) continue
       events.push({
         id: `issue:${box.id}:${issue.kind}:${at}`, at, tone: issue.light, subject: box.name, text: issue.text,
-        boxID: box.id, boxName: box.name,
+        boxID: box.id, boxName: box.name, issue: issue.kind,
       })
     }
     for (const kind of before.kinds) {
@@ -166,6 +177,40 @@ export function healthChanges(
 // The column itself: newest first, at most limit.
 export function latestEvents(lists: readonly (readonly FleetEvent[])[], limit = 8): FleetEvent[] {
   return lists.flat().sort((left, right) => right.at - left.at).slice(0, limit)
+}
+
+// ---- What is wrong now --------------------------------------------------------
+
+const SEVERITY: Record<EventTone, number> = { fail: 0, warn: 1, busy: 2, ok: 3 }
+
+// Every trouble a box has right now, from the same health the banner reads,
+// as events that are still going on: failures first, then the rest, in the
+// order the boxes are drawn.
+export function alertEvents(boxes: readonly BoxHealth[], at: number): FleetEvent[] {
+  const alerts: FleetEvent[] = boxes.flatMap(box => box.issues.map(issue => ({
+    id: `alert:${box.id}:${issue.kind}`, at, tone: issue.light, subject: box.name, text: issue.text,
+    boxID: box.id, boxName: box.name, issue: issue.kind, ongoing: true,
+  })))
+  return alerts.sort((left, right) => SEVERITY[left.tone] - SEVERITY[right.tone])
+}
+
+// The timeline: what is wrong now, then what happened, newest first, at most
+// limit in all. A change the console saw that is still how the box is now is
+// told once, as the alert that stands for it.
+export function timeline(alerts: readonly FleetEvent[], history: readonly (readonly FleetEvent[])[], limit = 8): FleetEvent[] {
+  const standing = new Set(alerts.map(alert => `${alert.boxID}|${alert.issue}`))
+  const past = history.flat().filter(event => !(event.issue && standing.has(`${event.boxID}|${event.issue}`)))
+  return [...alerts, ...latestEvents([past], limit)].slice(0, limit)
+}
+
+// The first line of an event. A job names its model and what happened to it
+// ("GLM 5.3 Flash started"); a box's own news is about the box, which the
+// second line already names, so it says only what happened.
+export function eventTitle(event: FleetEvent): { subject: string; text: string } {
+  if (event.boxName && event.subject === event.boxName) {
+    return { subject: '', text: event.text.charAt(0).toUpperCase() + event.text.slice(1) }
+  }
+  return { subject: event.subject, text: event.text }
 }
 
 // ---- The changes this console has seen --------------------------------------

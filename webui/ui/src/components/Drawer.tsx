@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react'
+import { Icon } from './Icon'
 
 // The console's one drill-down: a panel from the right, about 520px wide, over
 // the screen it was opened from (Railway's service drawer, Modal's container
@@ -53,7 +54,7 @@ export function Drawer({ label, onClose, children }: {
     <div className="drawer-layer">
       <div className="drawer-scrim" aria-hidden="true" onClick={onClose} />
       <div className="drawer" role="dialog" aria-modal="true" aria-label={label} ref={panel} tabIndex={-1}>
-        <button type="button" className="dialog-close drawer-close" onClick={onClose} aria-label="Close">×</button>
+        <button type="button" className="drawer-close" onClick={onClose} aria-label="Close"><Icon name="close" /></button>
         {children}
       </div>
     </div>

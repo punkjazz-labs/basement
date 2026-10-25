@@ -6,7 +6,9 @@ import { Mark } from '../mark'
 import { LOCAL_MACHINE, machineSeries, subscribeTelemetry, telemetryRevision } from '../telemetry'
 import { localModelOf, stopRoute, stopUnit, unitAnswering } from '../unitActions'
 import { unitMemory, unitPlacement, unitServing, type FleetUnit } from '../units'
+import { figure } from './Figure'
 import { HealthDot } from './FleetHealth'
+import { Icon } from './Icon'
 import { MemoryFree } from './Memory'
 import { MetricChart } from './Sparkline'
 
@@ -78,7 +80,7 @@ export function UnitDrawerBody({ view, unit, recipes, models, onOpenBox, openPla
   }
 
   return (
-    <div className="dr">
+    <div className="dr unit">
       <header className="dr-head">
         <Mark recipe={recipe} recipeIDs={[unit.recipeID]} name={unit.recipeID} size={30} />
         <div className="dr-title">
@@ -90,93 +92,97 @@ export function UnitDrawerBody({ view, unit, recipes, models, onOpenBox, openPla
         </div>
       </header>
 
-      <div className="dr-facts3">
-        <div className="fcard">
-          <span className="l">Speed</span>
-          <span className="v">
-            {latest !== undefined ? latest.toFixed(1) : speed.measured ? speed.measured.toFixed(1) : 'n/a'}
-            {!isMedia && (latest !== undefined || speed.measured) ? <small> tok/s</small> : null}
-          </span>
-          <span className="s">{latest !== undefined ? 'now, on this Spark' : speed.measured ? 'measured on this Spark' : 'read on its head'}</span>
+      <div className="dr-body">
+        <div className="dr-facts3">
+          <div className="fcard">
+            <span className="l">Speed</span>
+            <span className="v">
+              {latest !== undefined ? latest.toFixed(1) : speed.measured ? speed.measured.toFixed(1) : 'n/a'}
+              {!isMedia && (latest !== undefined || speed.measured) ? <small> tok/s</small> : null}
+            </span>
+            <span className="s">{latest !== undefined ? 'now, on this Spark' : speed.measured ? 'measured on this Spark' : 'read on its head'}</span>
+          </div>
+          <div className="fcard">
+            <span className="l">Memory free</span>
+            <span className="v">{memory.reported > 0 ? figure(formatBytes(memory.free)) : 'n/a'}</span>
+            <span className="s">
+              {memory.reported > 0 ? `of ${formatBytes(memory.total)} across ${memory.reported} boxes` : 'not reported yet'}
+            </span>
+          </div>
+          <div className={`fcard ${tightest.length > 0 ? 'tight' : ''}`}>
+            <span className="l">Loads</span>
+            <span className="v">{tightest.length > 0 ? 'Refused' : 'Allowed'}</span>
+            <span className="s">
+              {tightest.length > 0
+                ? `${tightest.map(box => box?.name).join(', ')} under the reserve`
+                : 'every box above its reserve'}
+            </span>
+          </div>
         </div>
-        <div className="fcard">
-          <span className="l">Memory free</span>
-          <span className="v">{memory.reported > 0 ? formatBytes(memory.free) : 'n/a'}</span>
-          <span className="s">
-            {memory.reported > 0 ? `of ${formatBytes(memory.total)} across ${memory.reported} boxes` : 'not reported yet'}
-          </span>
-        </div>
-        <div className={`fcard ${tightest.length > 0 ? 'tight' : ''}`}>
-          <span className="l">Loads</span>
-          <span className="v">{tightest.length > 0 ? 'Refused' : 'Allowed'}</span>
-          <span className="s">
-            {tightest.length > 0
-              ? `${tightest.map(box => box?.name).join(', ')} under the reserve`
-              : 'every box above its reserve'}
-          </span>
-        </div>
+
+        <section className="dr-chart" aria-label="Throughput">
+          <MetricChart
+            points={speed.points}
+            stamps={speed.stamps}
+            title="Throughput"
+            unit="tok/s"
+            format={value => value.toFixed(1)}
+            tone="live"
+            empty={local
+              ? 'No tokens counted yet. The line starts once the model answers a request.'
+              : `Speed is read on the box this console runs on. ${head ? `Open ${head.row.displayName} for this unit's live speed.` : ''}`}
+          />
+        </section>
+
+        <section className="dr-members" aria-label="Boxes in this unit">
+          <h3>Boxes</h3>
+          <ol className="topology">
+            {unit.members.map(member => (
+              <li key={member.row.nodeID} className={member.head ? 'head' : 'member'}>
+                <button type="button" onClick={() => onOpenBox(member.row.nodeID)}>
+                  <HealthDot box={view.healthOf(member.row.nodeID)} />
+                  <span className="nm">{member.row.displayName}</span>
+                  <span className="role-tag">{member.head ? 'head' : 'member'}</span>
+                  <MemoryFree headroom={view.headroomOf(member.row)} size="mini" />
+                  <Icon name="chevronRight" size={14} className="chev" />
+                </button>
+              </li>
+            ))}
+            {unit.members.length < unit.size && (
+              <li className="member missing">{unit.size - unit.members.length} more not in the fleet now</li>
+            )}
+          </ol>
+        </section>
       </div>
 
-      <section className="dr-chart" aria-label="Throughput">
-        <MetricChart
-          points={speed.points}
-          stamps={speed.stamps}
-          title="Throughput"
-          unit="tok/s"
-          format={value => value.toFixed(1)}
-          tone="live"
-          empty={local
-            ? 'No tokens counted yet. The line starts once the model answers a request.'
-            : `Speed is read on the box this console runs on. ${head ? `Open ${head.row.displayName} for this unit's live speed.` : ''}`}
-        />
-      </section>
-
-      <section className="dr-members" aria-label="Boxes in this unit">
-        <h3>Boxes</h3>
-        <ol className="topology">
-          {unit.members.map(member => (
-            <li key={member.row.nodeID} className={member.head ? 'head' : 'member'}>
-              <button type="button" onClick={() => onOpenBox(member.row.nodeID)}>
-                <HealthDot box={view.healthOf(member.row.nodeID)} />
-                <span className="nm">{member.row.displayName}</span>
-                <span className="role-tag">{member.head ? 'head' : 'member'}</span>
-                <MemoryFree headroom={view.headroomOf(member.row)} size="mini" />
-                <svg className="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
-              </button>
-            </li>
-          ))}
-          {unit.members.length < unit.size && (
-            <li className="member missing">{unit.size - unit.members.length} more not in the fleet now</li>
+      {(unitAnswering(unit) || (serving && (local || head?.row.consoleURL))) && (
+        <footer className="dr-actions">
+          {unitAnswering(unit) && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={stopping || route.where === 'none'}
+              title={route.where === 'none' ? route.reason : undefined}
+              onClick={stop}
+            >
+              {stopping ? 'Stopping' : 'Stop'}
+            </button>
           )}
-        </ol>
-      </section>
-
-      <footer className="dr-actions">
-        {unitAnswering(unit) && (
-          <button
-            type="button"
-            className="ghost"
-            disabled={stopping || route.where === 'none'}
-            title={route.where === 'none' ? route.reason : undefined}
-            onClick={stop}
-          >
-            {stopping ? 'Stopping' : 'Stop'}
-          </button>
-        )}
-        {serving && (local ? (
-          <button type="button" className="primary" onClick={isMedia ? openGenerate : openPlayground}>
-            {isMedia ? 'Generate' : 'Open'}
-          </button>
-        ) : head?.row.consoleURL ? (
-          <button
-            type="button"
-            className="primary"
-            onClick={() => window.open(head.row.consoleURL, '_blank', 'noopener,noreferrer')}
-          >
-            Open on {head.row.displayName}
-          </button>
-        ) : null)}
-      </footer>
+          {serving && (local ? (
+            <button type="button" className="primary" onClick={isMedia ? openGenerate : openPlayground}>
+              {isMedia ? 'Generate' : 'Open'}
+            </button>
+          ) : head?.row.consoleURL ? (
+            <button
+              type="button"
+              className="primary"
+              onClick={() => window.open(head.row.consoleURL, '_blank', 'noopener,noreferrer')}
+            >
+              Open on {head.row.displayName}
+            </button>
+          ) : null)}
+        </footer>
+      )}
     </div>
   )
 }

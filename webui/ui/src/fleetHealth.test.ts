@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  bannerFor, boxHealth, loadsRefused, shortAge, summarize, temperatureLight, unitStatus,
+  bannerFor, bannerItems, boxHealth, loadsRefused, shortAge, summarize, temperatureLight, unitStatus,
   HOT_C, STALE_MS, VERY_HOT_C, type BoxReading,
 } from './fleetHealth'
 import { boxHeadroom } from './headroom'
@@ -181,6 +181,26 @@ describe('the attention banner', () => {
     expect(banner?.title).toBe('spark-9a07 is not answering')
     expect(banner?.light).toBe('fail')
     expect(banner?.body).toBe('Last heard from 3 min ago. Its models cannot be started or stopped from here. 1 more box needs attention.')
+  })
+})
+
+// The banner lists every box that needs a look, each line standing alone.
+describe('the banner, one line per box', () => {
+  it('says nothing while all is well', () => {
+    expect(bannerItems(summarize([boxHealth(reading('spark-f7e0', 19))]))).toEqual([])
+  })
+
+  it('gives every box its own line, worst first, without counting the others', () => {
+    const items = bannerItems(summarize([
+      boxHealth(reading('edgexpert-5e12', 7.2)),
+      boxHealth(reading('spark-9a07', 17.8, { answering: false, ageMs: 180_000 })),
+      boxHealth(reading('spark-f7e0', 19)),
+    ]))
+    expect(items.map(item => [item.boxName, item.light, item.title])).toEqual([
+      ['spark-9a07', 'fail', 'spark-9a07 is not answering'],
+      ['edgexpert-5e12', 'warn', 'edgexpert-5e12 is tight on memory'],
+    ])
+    expect(items[0].body).toBe('Last heard from 3 min ago. Its models cannot be started or stopped from here.')
   })
 })
 

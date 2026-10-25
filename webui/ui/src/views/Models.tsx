@@ -34,13 +34,14 @@ import {
   type ActionTarget, type FleetDeploymentAction, type FleetRow, type ModelsTab, type NodeChip,
   type PlacementTarget,
 } from '../fleetModels'
-import { AttentionBanner, FleetHealthLine, HealthDot } from '../components/FleetHealth'
+import { FleetStatus, HealthDot } from '../components/FleetHealth'
+import { Icon } from '../components/Icon'
 import { Sparkline } from '../components/Sparkline'
 import { loadsRefused } from '../fleetHealth'
 import { boxHeadroom, fitWord, tightestBox, type BoxHeadroom, type FitResult } from '../headroom'
 import { HeadroomBar, freeText } from '../headroomBar'
 import { boxOfRow, fleetMemory, loadFit, loadTargets, variantFamily } from '../loadFit'
-import { LOCAL_MACHINE, machineSeries, subscribeTelemetry, telemetryRevision } from '../telemetry'
+import { LOCAL_MACHINE, machineSeries, requestLine, subscribeTelemetry, telemetryRevision } from '../telemetry'
 import {
   boxesWord, unitFor, unitHealth, unitPlacement, HEALTH_WORD, type FleetUnit,
 } from '../units'
@@ -115,7 +116,7 @@ interface ConfirmState {
 // this is the empty run list that read is made against.
 const NO_POWER_RUNS: ReadonlySet<string> = new Set()
 
-// One figure of the line under the health line. At most three, and only the
+// One cell of the strip under the fleet's status. At most three, and only the
 // ones that move or that the owner would act on (Cloudflare's stat cards, the
 // research's keep list): how fast the serving models answer, which box has
 // the least memory left, and how many tokens this Spark has served. A count of
@@ -123,23 +124,44 @@ const NO_POWER_RUNS: ReadonlySet<string> = new Set()
 // Storage, so neither is said here.
 interface Fact {
   key: string
-  node: ReactNode
+  // The quiet line over the figure: what it is, and where it was read.
+  label: ReactNode
+  // The figure itself, in tabular mono.
+  value: ReactNode
+  // A bar that belongs to the figure, drawn right under it.
+  meter?: ReactNode
+  // Its shape over time, drawn to the right: the sparkline.
+  aside?: ReactNode
   tone?: '' | 'warn' | 'fail'
   title?: string
   onClick?: () => void
 }
 
+// The facts as one strip of cells in a single hairline frame (fal's stat
+// strip): a label, a figure with its bar, and its shape beside it.
 function FactsLine({ facts }: { facts: Fact[] }) {
   if (facts.length === 0) return null
   return (
-    <div className="facts-line" role="group" aria-label="At a glance">
-      {facts.map(fact => fact.onClick ? (
-        <button type="button" key={fact.key} className={`fact ${fact.tone ?? ''}`} title={fact.title} onClick={fact.onClick}>
-          {fact.node}
-        </button>
-      ) : (
-        <span key={fact.key} className={`fact ${fact.tone ?? ''}`} title={fact.title}>{fact.node}</span>
-      ))}
+    <div className="stat-strip" role="group" aria-label="At a glance">
+      {facts.map(fact => {
+        const body = (
+          <>
+            <span className="stat-text">
+              <span className="stat-label">{fact.label}</span>
+              <span className="stat-value">{fact.value}</span>
+              {fact.meter && <span className="stat-meter">{fact.meter}</span>}
+            </span>
+            {fact.aside && <span className="stat-aside">{fact.aside}</span>}
+          </>
+        )
+        return fact.onClick ? (
+          <button type="button" key={fact.key} className={`stat ${fact.tone ?? ''}`} title={fact.title} onClick={fact.onClick}>
+            {body}
+          </button>
+        ) : (
+          <div key={fact.key} className={`stat ${fact.tone ?? ''}`} title={fact.title}>{body}</div>
+        )
+      })}
     </div>
   )
 }
@@ -1550,7 +1572,19 @@ export default function Models({
       const members = bandMembers(read)
       const servingBox = host ?? (isActive ? selfTarget : undefined)
       const openTitle = unit ? () => openUnit(unit.key) : showFleet && servingBox ? () => openBox(servingBox.nodeID) : undefined
-      const live = isActive && !isMedia ? machineSeries(LOCAL_MACHINE).series.tps : []
+      const meter = isActive && !isMedia ? machineSeries(LOCAL_MACHINE) : undefined
+      const live = meter ? meter.series.tps : []
+      // The runtime's own request counters, read with the speed every five
+      // seconds. Only the model this Spark runs has them; any other card
+      // says what was measured and counted instead.
+      const runtime = meter?.latest?.active_model?.recipe_id === actionRecipe.id
+        ? meter.latest.active_model.runtime_metrics
+        : undefined
+      // A model answering nothing right now reads zero; the card then keeps
+      // the measured speed, which says more, and its tooltip says which.
+      const lastRate = runtime && live.length > 0 ? live[live.length - 1] : 0
+      const rateNow = lastRate > 0 ? lastRate : undefined
+      const liveParts = requestLine(runtime, served && servedTotal > 0 ? `${formatTokens(servedTotal)} tokens served` : '')
       // The unit's own word, read from the shared view, which knows how its
       // boxes are doing as well as whether they answer.
       const viewUnit = unit ? view.findUnit(unit.key) : undefined
@@ -1559,22 +1593,31 @@ export default function Models({
         <div className="mband-group" key={recipe.id}>
           <div className={`mband ${open ? 'open' : ''}`} {...expand}>
             <div className="m-id">
-              <Mark recipe={recipe} recipeIDs={[recipe.id]} size={34} />
+              <Mark recipe={recipe} recipeIDs={[recipe.id]} size={36} />
               <div className="mb-main">
-                <p className="tagline">{measuring ? 'Serving · measuring' : 'Serving'}</p>
                 <div className="nm">
                   {openTitle ? (
                     <button type="button" className="mb-title" onClick={act(openTitle)}>{recipe.display_name}</button>
                   ) : recipe.display_name}
+                  <span className="state-chip live"><i aria-hidden="true" />{measuring ? 'Serving · measuring' : 'Serving'}</span>
                   {revoked(revocation) && <span className="tag revoked">Revoked</span>}
                   {status && status.tone !== 'healthy' && <span className={`health ${status.tone}`}>{status.word}</span>}
                 </div>
-                {/* Speed first, with its recent line where this Spark reads
-                    one, then size and where it runs. */}
+                {/* The live line first (speed, with its recent shape where
+                    this Spark reads one, and the requests the runtime holds),
+                    then, quieter, its size and where it runs. */}
                 <div className="meta">
-                  <span className="mb-speed">{isMedia ? 'n/a' : <><b>{speed}</b> tok/s</>}</span>
-                  {live.length > 1 && <Sparkline points={live} label="Generation speed on this Spark" tone="live" />}
-                  <span>{[formatBytes(recipe.artifact_bytes), place].filter(Boolean).join(' · ')}</span>
+                  <span className="mb-live">
+                    <span
+                      className="mb-speed"
+                      title={rateNow !== undefined ? 'Generation speed on this Spark now' : measured ? 'Measured on this Spark by its last speed check' : undefined}
+                    >
+                      {isMedia ? 'n/a' : <><b>{rateNow !== undefined ? rateNow.toFixed(1) : speed}</b> tok/s</>}
+                    </span>
+                    {live.length > 1 && <Sparkline points={live} label="Generation speed on this Spark" tone="live" />}
+                    {liveParts.map(part => <span key={part} className="mb-part">{part}</span>)}
+                  </span>
+                  <span className="mb-place">{[formatBytes(recipe.artifact_bytes), place].filter(Boolean).join(' · ')}</span>
                 </div>
                 {/* Every box the model runs on, head first, each with the
                     memory it has free (PlanetScale's topology nodes). The
@@ -1658,7 +1701,7 @@ export default function Models({
           </div>
           {actions}
           <span className={`m-caret ${open ? 'open' : ''}`} aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+            <Icon name="chevronRight" size={14} />
           </span>
         </div>
         {detail}
@@ -1688,7 +1731,7 @@ export default function Models({
     bands.some(read => isTypical(read.speed)) ||
     onScreen.some(recipe => isTypical(speedOf(recipe, installed.get(recipe.id)?.tokens_per_second)))
 
-  // ---- The line under the health line ---------------------------------------
+  // ---- The strip under the fleet's status ------------------------------------
 
   // How fast the serving models answer. This Spark reads its own runtime's
   // counters every five seconds, which is the live figure; a model on another
@@ -1706,16 +1749,16 @@ export default function Models({
   const tightest = tightestBox(rooms)
   const tokenTotal = tokens ? tokens.totals.prompt_tokens + tokens.totals.generation_tokens : 0
   const facts: Fact[] = []
+  const speedLine = localMeter.series.tps.length > 1
+    ? <Sparkline points={localMeter.series.tps} label="Generation speed on this Spark" tone="live" />
+    : undefined
   if (localRate !== undefined && localRate > 0) {
     facts.push({
       key: 'speed',
       title: 'Generation speed on this Spark, read from its runtime every five seconds',
-      node: (
-        <>
-          <b>{localRate.toFixed(1)}</b> tok/s now
-          <Sparkline points={localMeter.series.tps} label="Generation speed on this Spark" tone="live" />
-        </>
-      ),
+      label: 'Speed · now',
+      value: <><b>{localRate.toFixed(1)}</b> tok/s</>,
+      aside: speedLine,
     })
   } else if (measuredBands.length > 0) {
     facts.push({
@@ -1724,14 +1767,9 @@ export default function Models({
         ? `Measured on this Spark. ${tokenBands.length - measuredBands.length} serving ${
           tokenBands.length - measuredBands.length === 1 ? 'model has' : 'models have'} no measurement here.`
         : 'Measured on this Spark by its last speed check',
-      node: (
-        <>
-          <b>{totalSpeed.toFixed(1)}</b> tok/s measured
-          {localMeter.series.tps.length > 1 && (
-            <Sparkline points={localMeter.series.tps} label="Generation speed on this Spark" tone="live" />
-          )}
-        </>
-      ),
+      label: 'Speed · measured',
+      value: <><b>{totalSpeed.toFixed(1)}</b> tok/s</>,
+      aside: speedLine,
     })
   }
   if (tightest) {
@@ -1742,15 +1780,16 @@ export default function Models({
       tone: tightest.state === 'full' ? 'fail' : tightest.state === 'tight' ? 'warn' : '',
       title: showFleet ? 'Free memory on the box with the least of it' : 'Free memory on this Spark',
       onClick: tightRow ? () => openBox(tightRow.nodeID) : undefined,
-      node: (
+      label: showFleet
+        ? <>Tightest<span className="fact-sep"> · </span><span className="fact-box">{tightest.box.name}</span></>
+        : 'Memory',
+      value: (
         <>
-          {showFleet ? 'Tightest ' : 'Memory '}
-          {showFleet && <span className="fact-box">{tightest.box.name}</span>}
-          <HeadroomBar headroom={tightest} size="mini" />
           <b>{formatBytes(tightest.box.availableBytes)}</b> free
           {refused && <span className="fact-warn">loads refused</span>}
         </>
       ),
+      meter: <HeadroomBar headroom={tightest} />,
     })
   }
   if (tokens && tokenTotal > 0) {
@@ -1758,14 +1797,14 @@ export default function Models({
       key: 'tokens',
       title: `${tokenTotal.toLocaleString()} tokens: ${formatTokens(tokens.totals.prompt_tokens)} prompt, ${
         formatTokens(tokens.totals.generation_tokens)} generated. ${TOKENS_COUNTED}`,
-      node: <><b>{formatTokens(tokenTotal)}</b> tokens served</>,
+      label: 'Tokens served',
+      value: <><b>{formatTokens(tokenTotal)}</b> <span className="stat-split">{formatTokens(tokens.totals.generation_tokens)} generated</span></>,
     })
   }
 
   return (
     <div className="stack">
-      <FleetHealthLine summary={view.summary} boxes={view.health} onOpenBox={box => openBox(box.id)} />
-      <AttentionBanner banner={view.banner} onOpen={openBox} />
+      <FleetStatus summary={view.summary} boxes={view.health} onOpenBox={openBox} />
       <FactsLine facts={facts} />
       {blockers.length > 0 && (
         <div className="alert" role="alert">

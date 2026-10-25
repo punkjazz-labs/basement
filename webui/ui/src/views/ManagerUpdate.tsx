@@ -58,7 +58,9 @@ export function ManagerUpdateSidebar({ info, managerVersion, onOpen }: {
         manager {managerVersion ?? ''}
         {!info && <span className="side-state"> · checking</span>}
         {info && !info.checked && <span className="side-state warn"> · could not check</span>}
-        {settled && info.note && <span className="side-state"> · {info.note}</span>}
+        {/* The server's note is a sentence, so it takes a line of its own
+            under the version rather than running on from it. */}
+        {settled && info.note && <span className="side-state note"><span className="sep"> · </span>{info.note}</span>}
         {settled && !info.note && <span className="side-state"> · up to date</span>}
       </button>
       {newer && (

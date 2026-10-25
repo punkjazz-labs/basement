@@ -95,7 +95,7 @@ describe('the live meters', () => {
     const markup = draw()
     expect(markup).toContain('Disconnected · Last recorded samples')
     expect(markup).toContain('sdot fail')
-    expect(markup).toContain('60 W')
+    expect(markup).toContain('60<small class="fig-unit"> W</small>')
   })
 
   // The one chart a card carries is the speed of the model this Spark serves.
@@ -106,7 +106,8 @@ describe('the live meters', () => {
     const markup = draw(CATALOG)
     expect(markup.match(/<figure/g)).toHaveLength(1)
     expect(markup).toContain('Throughput')
-    expect(markup).toContain('tok/s avg')
+    expect(markup).toContain('<small>avg</small>')
+    expect(markup).toContain('<span class="u">tok/s</span>')
   })
 
   it('draws no chart while this Spark serves nothing', () => {
@@ -143,10 +144,11 @@ describe('the meters of a fleet', () => {
     expect(markup).toContain('>member<')
   })
 
-  it('opens with the health line and the banner', () => {
+  it('opens with the one banner that says what needs attention', () => {
     const markup = render()
-    expect(markup).toContain('1 needs attention · edgexpert-5e12 memory tight (7.2 GB free, loads refused)')
+    expect(markup).toContain('1 of 6 boxes needs attention')
     expect(markup).toContain('edgexpert-5e12 is tight on memory')
+    expect(markup.match(/aria-label="Needs attention"/g)).toHaveLength(1)
   })
 
   // History is a column: one sparkline per box, and the figure beside it.
@@ -155,7 +157,7 @@ describe('the meters of a fleet', () => {
     recordTelemetry(heartbeatKey('node-edgexpert-41b8'), sample('2026-10-25T10:00:10Z', { gpu_power_draw_watts: 73, memory_total: 128.5 * GB }))
     const markup = render()
     expect(markup).not.toContain(NO_METERS)
-    expect(markup).toContain('73 W')
+    expect(markup).toContain('73<small class="fig-unit"> W</small>')
     expect(markup).toContain('class="sparkline plain"')
     expect(markup).toContain('loads refused')
   })

@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { FleetDeploymentView, Job } from './api'
 import {
-  healthChanges, jobEvents, jobText, latestEvents, recordHealth, resetEvents, seenEvents, snapshotOf,
+  alertEvents, eventTitle, healthChanges, jobEvents, jobText, latestEvents, recordHealth, resetEvents, seenEvents,
+  snapshotOf, timeline,
 } from './fleetEvents'
 import { boxHealth, type BoxReading } from './fleetHealth'
 import { boxHeadroom } from './headroom'
@@ -32,6 +33,17 @@ describe('what a job says on the timeline', () => {
   it('says what failed in red and what was cancelled in amber', () => {
     expect(jobText(job('a', 'install', 'failed', 'x', ''))).toEqual({ tone: 'fail', text: 'install failed' })
     expect(jobText(job('a', 'smoke-test', 'cancelled', 'x', ''))).toEqual({ tone: 'warn', text: 'health check cancelled' })
+  })
+
+  // The engine plans the stop of whatever was serving into the start
+  // itself, so a start that stopped something first is a swap.
+  it('calls a start that made another model stop a swap', () => {
+    const swap = { ...job('a', 'start', 'ready', 'x', ''), steps: [
+      { index: 0, operation: 'stop_container', state: 'completed' },
+      { index: 1, operation: 'start_container', state: 'completed' },
+    ] }
+    expect(jobText(swap)).toEqual({ tone: 'ok', text: 'swapped in' })
+    expect(jobText(job('a', 'start', 'ready', 'x', ''))).toEqual({ tone: 'ok', text: 'started' })
   })
 
   it('says what is still running in its own phase words', () => {
@@ -119,5 +131,54 @@ describe('the changes this console has seen', () => {
     recordHealth([health('edgexpert-5e12', 7.2)], 2)
     recordHealth([health('edgexpert-5e12', 19)], 3)
     expect(seenEvents().map(event => event.text)).toEqual(['memory back above the reserve', 'memory tight (7.2 GB free, loads refused)'])
+  })
+})
+
+// The timeline on Monitor: what is wrong now leads, then what happened.
+describe('the timeline', () => {
+  const self = { id: 'node-spark-f7e0', name: 'spark-f7e0' }
+
+  it('turns every standing trouble into an alert, failures first', () => {
+    const alerts = alertEvents([
+      health('edgexpert-5e12', 7.2),
+      health('spark-f7e0', 19),
+      health('spark-9a07', 17.8, { answering: false }),
+    ], 500)
+    expect(alerts.map(alert => `${alert.subject}: ${alert.text}`)).toEqual([
+      'spark-9a07: not answering',
+      'edgexpert-5e12: memory tight (7.2 GB free, loads refused)',
+    ])
+    expect(alerts.every(alert => alert.ongoing && alert.at === 500)).toBe(true)
+    expect(alerts.map(alert => alert.tone)).toEqual(['fail', 'warn'])
+  })
+
+  it('leads with the alerts and keeps the rest newest first, at most the limit', () => {
+    const jobs = jobEvents({
+      jobs: [
+        job('j1', 'install', 'failed', 'nemotron-omni-30b-a3b-nvfp4-1s', '2026-10-24T09:54:41Z'),
+        job('j2', 'start', 'ready', 'glm53-flash-exl3-2s', '2026-10-24T11:02:56Z'),
+        job('j3', 'stop', 'stopped', 'glm53-flash-exl3-2s', '2026-10-23T08:00:00Z'),
+      ],
+      deployments: [], nameOf, self, boxName: () => '',
+    })
+    const events = timeline(alertEvents([health('edgexpert-5e12', 7.2)], Date.parse('2026-10-25T12:00:00Z')), [jobs], 3)
+    expect(events.map(event => event.id)).toEqual(['alert:node-edgexpert-5e12:memory', 'job:j2', 'job:j1'])
+  })
+
+  // A change the console saw that is still how the box is now is one
+  // event, not two.
+  it('tells a trouble still standing once, as its alert', () => {
+    const seen = healthChanges(snapshotOf([health('edgexpert-5e12', 19)]), [health('edgexpert-5e12', 7.2)], 100)
+    const cleared = healthChanges(snapshotOf([health('spark-9a07', 17.8, { answering: false })]), [health('spark-9a07', 17.8)], 90)
+    const events = timeline(alertEvents([health('edgexpert-5e12', 7.2)], 200), [seen, cleared])
+    expect(events.map(event => event.text)).toEqual(['memory tight (7.2 GB free, loads refused)', 'answering again'])
+    expect(events[0].ongoing).toBe(true)
+  })
+
+  it('titles a job by its model, and a box event by what happened to the box', () => {
+    const [started] = jobEvents({ jobs: [job('j2', 'start', 'ready', 'glm53-flash-exl3-2s', '')], deployments: [], nameOf, self, boxName: () => '' })
+    expect(eventTitle(started)).toEqual({ subject: 'GLM 5.3 Flash', text: 'started' })
+    const [alert] = alertEvents([health('edgexpert-5e12', 7.2)], 1)
+    expect(eventTitle(alert)).toEqual({ subject: '', text: 'Memory tight (7.2 GB free, loads refused)' })
   })
 })

@@ -16,6 +16,7 @@ import Monitor from './views/Monitor'
 import Fleet, { FleetInvitationPrompt } from './views/Fleet'
 import { BoxDrawerBody } from './components/BoxDrawer'
 import { Drawer } from './components/Drawer'
+import { Icon, type IconName } from './components/Icon'
 import { PowerFanOut } from './components/Power'
 import { UnitDrawerBody } from './components/UnitDrawer'
 import { readDrawer, writeDrawer, type DrawerTarget } from './drawerLink'
@@ -51,6 +52,38 @@ const PEER_TELEMETRY_MS = 10_000
 // an explainer.
 const HEAD_TIP: Partial<Record<Tab, { text: string; label: string }>> = {
   Minutes: { text: MINUTES_HEAD_TIP, label: 'What Minutes is' },
+}
+
+// One glyph per screen on the rail, from the console's one icon set.
+const RAIL_ICON: Record<Tab, IconName> = {
+  Models: 'models',
+  Roles: 'roles',
+  Playground: 'chat',
+  Generate: 'generate',
+  Redactor: 'redactor',
+  Minutes: 'minutes',
+  Connect: 'api',
+  Monitor: 'monitor',
+  Fleet: 'sparks',
+  Storage: 'storage',
+  Activity: 'activity',
+}
+
+// The product's own mark, as the basement website draws it (and as
+// packaging/macos/icon.svg copies it): the orange "b." on a forest tile. It
+// leads the lowercase word, which stays the name.
+function BrandMark() {
+  return (
+    <svg className="brand-mark" width="22" height="22" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+      <rect width="64" height="64" rx="14" fill="#1d4733" />
+      <text
+        x="32" y="47" fontFamily="Arial Rounded MT Bold, Arial, Helvetica, sans-serif" fontSize="40" fontWeight="bold"
+        fill="#dd3c10" textAnchor="middle"
+      >
+        b.
+      </text>
+    </svg>
+  )
 }
 
 export interface AppState {
@@ -580,6 +613,7 @@ export default function App() {
       <a className="skip-link" href="#main">Skip to content</a>
       <aside className="side">
         <a className="side-mark" href="/" aria-label="basement">
+          <BrandMark />
           <strong>basement</strong>
         </a>
         <nav aria-label="Console sections">
@@ -598,25 +632,33 @@ export default function App() {
               )}
               {group.tabs.map(name => (
                 <button key={name} aria-current={tab === name} onClick={() => setTab(name)}>
-                  {tabLabel(name)}
+                  <Icon name={RAIL_ICON[name]} />
+                  <span className="rail-label">{tabLabel(name)}</span>
                   {name === 'Activity' && runningJobs > 0 && <span className="badge">{runningJobs}</span>}
                 </button>
               ))}
             </div>
           ))}
         </nav>
+        {/* What this Spark is doing, in one small card: the model it serves,
+            the box itself, and the manager's own version line. */}
         <div className="side-foot">
           <div className={`foot-live ${railClass}`} role="status" aria-live="polite">
             <i className="led" aria-hidden="true" />
-            <span>{railLabel}</span>
+            <span className="foot-model">{railLabel}</span>
             {liveTPS !== null && activeModel?.status === 'ready' && !activeMedia && (
               <span className="tps">{liveTPS.toFixed(1)} tok/s</span>
             )}
           </div>
-          <span>{system?.hostname ?? '…'}
-            {system && system.memory_available_bytes > 0 && ` · ${formatBytes(system.memory_available_bytes)} free`}
-          </span>
-          <ManagerUpdateSidebar info={update} managerVersion={system?.manager_version} onOpen={openManagerUpdate} />
+          <div className="foot-box">
+            <span className="foot-host">{system?.hostname ?? '…'}</span>
+            {system && system.memory_available_bytes > 0 && (
+              <span className="foot-free">{formatBytes(system.memory_available_bytes)} free</span>
+            )}
+          </div>
+          <div className="foot-manager">
+            <ManagerUpdateSidebar info={update} managerVersion={system?.manager_version} onOpen={openManagerUpdate} />
+          </div>
         </div>
       </aside>
       <div className="content">

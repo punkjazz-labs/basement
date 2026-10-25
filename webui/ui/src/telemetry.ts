@@ -107,6 +107,22 @@ export function foldSample(previous: MachineSeries, sample: Telemetry): MachineS
   }
 }
 
+// What a serving card says beside its speed: the requests the runtime holds
+// right now, as the runtime itself counts them. A runtime that publishes
+// neither counter says nothing here, and the card falls back to what was
+// counted on this Spark (tokensServed, already worded), or to nothing.
+export function requestLine(
+  runtime: NonNullable<Telemetry['active_model']>['runtime_metrics'] | undefined,
+  tokensServed = '',
+): string[] {
+  const parts = [
+    typeof runtime?.requests_running === 'number' ? `${runtime.requests_running} in flight` : '',
+    typeof runtime?.requests_waiting === 'number' ? `${runtime.requests_waiting} queued` : '',
+  ].filter(Boolean)
+  if (parts.length === 0 && tokensServed) parts.push(tokensServed)
+  return parts
+}
+
 // ---- The store itself ---------------------------------------------------
 
 // The key this Spark's own history is kept under. Every other key is a peer

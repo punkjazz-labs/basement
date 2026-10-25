@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useState, useSyncExternalStore } from 're
 import { api, copyText, formatBytes, idempotency, type Recipe, type Role } from '../api'
 import type { AppState } from '../App'
 import { confirmBox, noticeBox } from '../confirm'
+import { Icon } from '../components/Icon'
 import { readableWeights, sortCatalog } from '../catalog'
 import { fleetRows, shortSparkName } from '../fleetModels'
 import type { FitResult } from '../headroom'
@@ -361,7 +362,7 @@ export default function Roles({ system, recipes, models, jobs, peers, fleet, dep
             </button>
           </div>
           <span className={`r-caret ${expanded ? 'open' : ''}`} aria-hidden="true">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+            <Icon name="chevronRight" size={14} />
           </span>
         </div>
         {expanded && (
