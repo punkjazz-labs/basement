@@ -1,0 +1,54 @@
+# Attached service declaration (ADR 0025) for FastH3 on a two-box GB10 pair.
+#
+# FastH3 is not a basement recipe and not a container: systemd units outside
+# basement run it as one model split across both Sparks. basement reads this
+# file, shows the service on the Models view, checks health_url with one GET
+# every health_interval_seconds, and refuses to place or start another model
+# on either Spark named below. It never installs, starts, stops, updates or
+# calls the service in any other way.
+#
+# Install it on the fleet controller (the Spark whose console leads the
+# fleet), owned by the service user, then wait up to a minute or restart the
+# manager:
+#
+#   sudo install -d -o basement -g basement -m 0750 /var/lib/basement/attached-services.d
+#   sudo install -o basement -g basement -m 0640 fasth3-gpu-pair.yaml \
+#     /var/lib/basement/attached-services.d/
+#
+# health_url is called from the Spark that holds this file, so it is the head's
+# loopback address and the file belongs on the head. Removing the file is how
+# the Sparks are released again; stop the service first.
+schema_version: 1
+id: fasth3-gpu-pair
+display_name: FastH3 (MiniMax H3 Omni, FastVideo)
+model_by: MiniMax / FastVideo
+kind: video-generation
+served_model_name: fasth3-omniref
+managed_by: "systemd: fasth3-serve.service (head-box), h3-ray.service + h3-memguard.service (both)"
+# Display text only; basement never dials it. The OpenAI-style video API
+# listens on the head's loopback interface.
+endpoint: "http://127.0.0.1:8790 (head; reach via ssh tunnel)"
+health_url: http://127.0.0.1:8790/health
+health_interval_seconds: 30
+topology:
+  spark_count: 2
+  parallelism: TP1 x SP2 pair (Ray)
+  nodes:
+    # node_name is the name each Spark reports to the fleet, compared without
+    # case or domain suffix. node_id may be given instead of node_name.
+    # head-box and worker-box stand in for the names your two Sparks report.
+    - node_name: head-box
+      role: head/rank0
+    - node_name: worker-box
+      role: worker/rank1
+licence: MiniMax H3 Community License Agreement
+# licence_url is left out on purpose: the URL of the licence file that ships
+# with the distilled FastH3 weights was not recorded when this declaration was
+# written, and the base MiniMax H3 licence URL in the minimax-h3-comfyui recipe
+# is a different repository. The console shows n/a until it is added.
+licence_territory_exclusions:
+  - European Union
+  - United Kingdom
+  - Republic of Korea
+  - United States of America
+notes: One model split across both Sparks. NVFP4 weights. Holds about 80 GiB of memory on each Spark while it serves.

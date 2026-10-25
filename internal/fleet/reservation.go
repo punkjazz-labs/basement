@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/punkjazz-labs/basement/internal/recipe"
@@ -44,6 +45,10 @@ type Allocator struct {
 	database *store.Store
 	nodeID   string
 	now      func() time.Time
+	// holder names an attached service that holds this node from outside the
+	// manager (ADR 0025). Held atomically because it is installed after the
+	// allocator exists and read by every admission.
+	holder atomic.Pointer[func() (string, bool)]
 }
 
 func NewAllocator(database *store.Store, nodeID string) *Allocator {
@@ -51,6 +56,36 @@ func NewAllocator(database *store.Store, nodeID string) *Allocator {
 }
 
 func (a *Allocator) NodeID() string { return a.nodeID }
+
+// SetRuntimeHolder installs the question "does an attached service hold this
+// node?". Manager.SetRuntimeHolder is the production caller.
+func (a *Allocator) SetRuntimeHolder(holder func() (string, bool)) {
+	if holder == nil {
+		a.holder.Store(nil)
+		return
+	}
+	a.holder.Store(&holder)
+}
+
+// refuseHeld refuses a new runtime claim on a node an attached service holds.
+// Disk-only claims pass, exactly as they pass beside a serving model. Two
+// runtime kinds pass too, because neither puts another model in memory: a
+// recovered claim only records the model this node already serves, and
+// refusing it would turn a manager restart into a crash loop; a manager
+// update claims maintenance, not serving.
+func (a *Allocator) refuseHeld(claims Claims) error {
+	if !claims.Runtime || claims.Kind == ClaimKindRecovered || claims.Kind == ClaimKindUpdate {
+		return nil
+	}
+	holder := a.holder.Load()
+	if holder == nil {
+		return nil
+	}
+	if name, held := (*holder)(); held {
+		return HeldNodeError{Holder: name}
+	}
+	return nil
+}
 
 func ReservationID(kind, identity string) string {
 	digest := sha256.Sum256([]byte(kind + "\x00" + identity))
@@ -89,6 +124,11 @@ func (a *Allocator) Prepare(ctx context.Context, request ReservationRequest) (Re
 		}
 		return existing, false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return Reservation{}, false, err
+	}
+	// Only a new claim is judged: a retry of one admitted before the service
+	// was declared answers above, and nothing already running is touched.
+	if err := a.refuseHeld(request.Claims); err != nil {
 		return Reservation{}, false, err
 	}
 	if request.PrepareToken == "" {
@@ -185,6 +225,14 @@ func (a *Allocator) Activate(ctx context.Context, reservationID, replaceRecipeID
 	}
 	if !reservation.Claims.Runtime {
 		return errors.New("a disk-only reservation cannot claim the runtime slot")
+	}
+	// An install admitted before the service was declared can spend an hour
+	// downloading. It is stopped here, before it takes the slot, rather than
+	// after its container is already competing for the memory.
+	if reservation.State != "active" {
+		if err := a.refuseHeld(reservation.Claims); err != nil {
+			return err
+		}
 	}
 	return a.database.ActivateNodeReservation(ctx, reservationID, replaceRecipeID)
 }

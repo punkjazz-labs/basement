@@ -563,6 +563,25 @@ input[type='text'], input[type='password'], textarea {
 }
 .mb-title:hover { text-decoration-color: var(--faint); }
 
+/* A model service run outside basement on these Sparks (ADR 0025), drawn as
+   one more serving card: the same frame, mark, chips and depth, with the
+   green edge and tint only while its health check answers. The summary is
+   the band, so the whole card opens its declaration the way a band opens. */
+.attached > summary { display: block; list-style: none; border-radius: 12px; }
+.attached > summary::-webkit-details-marker { display: none; }
+.attached[open] .mband { border-radius: 12px 12px 0 0; }
+.mband.attached-band:not(.live) { background: var(--surface); }
+.mband.attached-band:not(.live)::before { content: none; }
+.attached-band .attached-role { justify-self: end; color: var(--faint); font-size: 11.5px; text-align: right; }
+/* A failed check's reason can wrap; its separator stays on the first line. */
+.attached-band .mb-part::before { align-self: flex-start; margin-top: 0.65em; }
+/* Its box chips name the Sparks; they open nothing of their own. */
+.attached-node { cursor: inherit; }
+.attached-node:hover { border-color: var(--line); background: var(--panel); }
+.attached-detail .table-note { margin: 12px 0 0; }
+.attached-notes { margin: 12px 0 0; color: var(--muted); font-size: 12.5px; max-width: 62ch; }
+.alert .attached-fix { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
+
 /* The member banner: one quiet line in place of the fleet's own lines. */
 .fleet-strip {
   display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
@@ -1619,6 +1638,7 @@ button.chip:hover { color: var(--ink); }
   .m-fit { text-align: right; }
   .r-runs { grid-column: 1 / -1; }
   .mband { grid-template-columns: 1fr; row-gap: 12px; }
+  .attached-band .attached-role { justify-self: start; text-align: left; }
   .m-id { grid-column: 1 / -1; }
   .m-id .spec { white-space: normal; }
   .m-num { text-align: left; }

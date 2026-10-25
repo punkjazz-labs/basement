@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/punkjazz-labs/basement/internal/attached"
 	"github.com/punkjazz-labs/basement/internal/auth"
 	"github.com/punkjazz-labs/basement/internal/engine"
 	"github.com/punkjazz-labs/basement/internal/fleet"
@@ -174,6 +175,11 @@ type Server struct {
 	// this machine's own filesystem, so nothing about a session is durable
 	// here to lose.
 	docredact *docredactSessions
+
+	// attached holds the model services an operator runs on these Sparks
+	// outside basement (ADR 0025): read, health-checked, never controlled.
+	// nil in a manager that was never given one, which lists nothing.
+	attached *attached.Registry
 }
 
 // peerDelegationTimeout bounds a delegated placement call. The peer answers
@@ -264,6 +270,9 @@ func New(version, dataDir string, authManager *auth.Manager, s *store.Store, pro
 	mux.HandleFunc("/api/v1/generations/events", server.withReadAuth(server.generationEvents))
 	mux.HandleFunc("/api/v1/generations/media", server.withReadAuth(server.mediaStage))
 	mux.HandleFunc("/api/v1/generations/", server.withReadAuth(server.generationAction))
+	// Model services run outside basement on these Sparks (ADR 0025). Console
+	// session only: it names machines, endpoints and how they are managed.
+	mux.HandleFunc("/api/v1/attached-services", server.withReadAuth(server.attachedServices))
 	mux.HandleFunc("/api/v1/storage", server.withReadAuth(server.storageBreakdown))
 	mux.HandleFunc("/api/v1/storage/artifacts", server.withReadAuth(server.deleteArtifact))
 	// Document redactor (docs/plans/12-doc-redactor.md), pattern pass only.
@@ -1721,6 +1730,9 @@ func (s *Server) peerInstall(w http.ResponseWriter, r *http.Request, id, recipeI
 	peer, apiKey, err := s.store.PeerCredentials(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("that Spark is not in the fleet"))
+		return
+	}
+	if s.refuseHeldPeer(w, peer.ID, peer.Name) {
 		return
 	}
 	headers := map[string]string{"Idempotency-Key": strings.TrimSpace(r.Header.Get("Idempotency-Key"))}

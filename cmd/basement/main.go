@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/punkjazz-labs/basement/internal/attached"
 	"github.com/punkjazz-labs/basement/internal/auth"
 	"github.com/punkjazz-labs/basement/internal/config"
 	"github.com/punkjazz-labs/basement/internal/engine"
@@ -120,6 +121,14 @@ func main() {
 	executor := operations.NewFleetExecutor(operations.NewHostExecutor(cfg.DataDir, "/var/run/docker.sock", provider), operations.NewPeerClient(worker))
 	jobEngine := engine.New(db, executor, recipes)
 	jobEngine.SetReservationAllocator(fleetManager.Allocator())
+	// Model services the operator runs on these Sparks outside basement (ADR
+	// 0025). Read once here, before reconciliation and resumed jobs below can
+	// claim a runtime slot, so a Spark a declaration names is already off
+	// limits by then. A missing directory leaves all of this inert.
+	attachedServices := attached.NewRegistry(cfg.DataDir, logger)
+	attachedServices.Reload()
+	fleetManager.SetRuntimeHolder(attachedServices.Holder)
+	jobEngine.SetRuntimeHolder(attachedServices.Holder)
 	// Startup reconciliation can be deferred past a fleet upgrade's latch, and
 	// what finishes it afterwards answers to nobody. Wired before the startup
 	// steps below, so a deferred pass that keeps failing is in the journal
@@ -140,6 +149,7 @@ func main() {
 	api := httpapi.New(cfg.Version, cfg.DataDir, authManager, db, provider, executor, jobEngine, cachedEffective)
 	api.SetFleetManager(fleetManager)
 	api.SetPowerController(powerControl)
+	api.SetAttachedServices(attachedServices)
 	api.SetRecipes(cachedAll, cachedEffective)
 	// A Spark adopted from this console is installed to listen the same way
 	// this one does (ADR 0014), so the API needs to know how that is.
@@ -219,6 +229,7 @@ func main() {
 	fleetCtx, stopFleet := context.WithCancel(context.Background())
 	defer stopFleet()
 	go fleetManager.Run(fleetCtx)
+	go attachedServices.Run(fleetCtx)
 	// Driver renewal and orphan cleanup share the fleet heartbeat cadence. An
 	// initial synchronous pass stops an already-expired worker rank before the
 	// listeners can admit another runtime owner after restart.

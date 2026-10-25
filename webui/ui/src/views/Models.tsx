@@ -19,6 +19,8 @@ import {
   CHECK_HOLD_MS, REVOKE_TITLE, checkFoundNothingNew, checkLabel, feedNote, revokeBody, revoked, rowRevocation,
 } from '../feed'
 import { fleetSummary, MEMBERSHIP_POLL_MS, NO_ANSWER } from '../fleetInvite'
+import { ATTACHED_PATH, ATTACHED_POLL_MS, attachedServices, type AttachedServices } from '../attached'
+import { AttachedCard, AttachedProblems } from '../attachedCard'
 import {
   deploymentActionPath, deploymentIndex, deploymentKey, fleetInstallRequest, fleetRows,
   heldTabLabel, initialPlacement, installRoute, mergePlacements, modelChips, placedTarget,
@@ -277,6 +279,9 @@ export default function Models({
   // This box's own meters, which are fresher than anything the fleet relays
   // about it. The memory rule reads them, so the page follows them.
   useSyncExternalStore(subscribeTelemetry, telemetryRevision, telemetryRevision)
+  // Model services run outside basement on these Sparks (ADR 0025), and the
+  // declaration files the manager could not use.
+  const [attached, setAttached] = useState<AttachedServices>({ services: [], errors: [] })
 
   // Storage tells us which recipes already have model files on disk, so a
   // partially downloaded model can offer to resume instead of start over.
@@ -299,6 +304,28 @@ export default function Models({
     }
     read()
     const timer = setInterval(read, 30000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  // The manager checks each attached service on its own clock; this only
+  // reads what it last found, so the read is cheap and never reaches the
+  // service itself. A manager that answers with an error shows nothing.
+  useEffect(() => {
+    let cancelled = false
+    const read = async (first = false) => {
+      if (!first && document.hidden) return
+      try {
+        const next = attachedServices(await api<unknown>(ATTACHED_PATH))
+        if (!cancelled) setAttached(next)
+      } catch {
+        /* the next read tries again */
+      }
+    }
+    void read(true)
+    const timer = setInterval(read, ATTACHED_POLL_MS)
     return () => {
       cancelled = true
       clearInterval(timer)
@@ -1901,6 +1928,14 @@ export default function Models({
       {/* What runs, over what is only installed. Two Sparks can each serve a
           model, so this is a list; it is empty while nothing serves anywhere. */}
       {bands.map(read => modelLine(read, true))}
+
+      {/* What runs here outside basement (ADR 0025). It stands with what
+          runs, as one more serving card, but nothing on it is a control:
+          basement does not install, start, stop or update it. */}
+      {attached.errors.length > 0 && <AttachedProblems problems={attached.errors} />}
+      {attached.services.map(service => (
+        <AttachedCard key={service.declaration.id} service={service} nowMs={Date.now()} />
+      ))}
 
       <div className="mtable">
         <div className="mthead" aria-hidden="true">

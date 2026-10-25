@@ -959,6 +959,14 @@ func (m *Manager) ActionDeployment(ctx context.Context, deploymentID, action, id
 	if err != nil {
 		return store.Job{}, err
 	}
+	// Start is the one action here that claims the runtime. Every other one
+	// stays open on a held Spark, so a model placed before the service was
+	// declared can still be stopped and removed from this dashboard.
+	if action == "start" {
+		if holder, held := m.runtimeHolder(target.NodeID, target.DisplayName); held {
+			return store.Job{}, m.nodeFailure(ctx, stored.OwnerNodeID, errors.New(heldNodeReason(holder)))
+		}
+	}
 	if local {
 		runtime := m.independentRuntime()
 		if runtime == nil {
