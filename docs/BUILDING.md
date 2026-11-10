@@ -302,15 +302,10 @@ built for macOS and Windows only.
    `setup.sh`, `setup.ps1`, `packaging.tar.gz`. These asset names are a
    contract: `packaging/setup.sh`, `setup.ps1` and `basement setup --binary`
    download them by name.
-3. **Mark the release prerelease until the Mac step finishes.** Nothing in the
-   repository does this: `gh release create` is called with no `--prerelease`,
-   `--draft`, or `--latest`, and there is no `gh release edit` anywhere. So the
-   moment CI publishes, GitHub makes that tag `latest` by its own rule (newest
-   non-prerelease), while `basement-setup-macos.dmg` does not exist yet and the
-   darwin manager binaries are still unsigned — the README's
-   `/releases/latest/download/basement-setup-macos.dmg` link 404s until step 4
-   runs. Marking it prerelease by hand and promoting it in step 5 is the
-   operator's job, not the workflow's.
+3. **Keep the release as a draft until signing finishes.** The workflow
+   calls `gh release create --draft`. The unsigned assets are not public and
+   do not replace `latest`. Do not publish or mark the draft latest by hand
+   before the Mac signing step succeeds.
 4. **Sign and notarize on the Mac that holds the Developer ID identity and the
    `notarytool` keychain profile.** They exist on one laptop and nowhere else,
    so this step cannot move into CI.
@@ -406,8 +401,10 @@ built for macOS and Windows only.
    To rehearse without a release, build the two slices yourself and run
    `REHEARSE=1 SETUP_SLICE_DIR=... packaging/build-macos-installer.sh v0.0.0`;
    it stops after signing the bundle and names the output `-REHEARSAL`.
-5. **Promote to latest** (`gh release edit vX.Y.Z --prerelease=false --latest`)
-   and then actually fetch the URLs the README hands people:
+5. **Verify the published release.** The signing script publishes the draft
+   with `gh release edit vX.Y.Z --draft=false --latest` as its final step.
+   Confirm the tag resolves to the tested `main` commit, then fetch the URLs
+   the README hands people:
    `/releases/latest/download/basement-setup-macos.dmg`,
    `/releases/latest/download/basement-setup-windows-amd64.exe`,
    `/releases/latest/download/setup.sh`,

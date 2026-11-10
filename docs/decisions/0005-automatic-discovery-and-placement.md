@@ -19,7 +19,7 @@ The console no longer asks for a Spark count. `GET /api/v1/system` reports a har
 
 Future multi-node support will add a controller and paired node agents:
 
-1. A node may advertise that a RunOnSpark agent exists, but advertisement never grants membership.
+1. A node may advertise that a basement agent exists, but advertisement never grants membership.
 2. An operator pairs a new node once using a short-lived local code. Pairing establishes persistent node identity and mutually authenticated transport.
 3. The controller keeps signed heartbeats and fresh per-node inventory. A missing or stale node is excluded from new placements.
 4. Recipes declare supported topology counts and whether the topology is independent or distributed. The browser never supplies an arbitrary count.

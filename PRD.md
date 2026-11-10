@@ -1,15 +1,14 @@
-# RunOnSpark Manager — Product Requirements and Technical Specification
+# basement — Product Requirements and Technical Specification
 
 Status: approved planning baseline  
 Repository: `punkjazz-labs/basement`  
-Companion catalogue: `punkjazz-labs/onspark` / [runonspark.ai](https://runonspark.ai)  
 Initial scope: one NVIDIA DGX Spark, three curated models, vLLM  
 
 ## 1. Product definition
 
-RunOnSpark Manager is a local-first management application for NVIDIA DGX Spark. It lets a person select a compatible model, install it, start it, verify it, and obtain a working OpenAI-compatible endpoint without assembling Docker and vLLM commands manually.
+basement is a local-first management application for NVIDIA DGX Spark. It lets a person select a compatible model, install it, start it, verify it, and obtain a working OpenAI-compatible endpoint without assembling Docker and vLLM commands manually.
 
-The public RunOnSpark website remains the discovery and recommendation layer. RunOnSpark Manager is the execution and lifecycle layer.
+basement owns model discovery, installation, and lifecycle management in its local console.
 
 The product promise is:
 
@@ -179,7 +178,7 @@ Browser on local network
           |
           | authenticated HTTP/WebSocket or SSE
           v
-RunOnSpark Manager agent on DGX Spark
+basement agent on DGX Spark
   |- embedded web UI
   |- local API
   |- inventory service
@@ -265,7 +264,8 @@ schema_version: 1
 id: qwen36-35b-a3b-nvfp4-1s
 version: 1
 display_name: Qwen 3.6 35B-A3B
-trust: runonspark-verified
+trust: basement-candidate
+verification: candidate
 topology:
   spark_count: 1
 runtime:
@@ -409,7 +409,7 @@ Mutating endpoints require authentication and CSRF/origin protection. Job creati
 
 ### 11.1 Non-negotiable rules
 
-- No Spark, SSH, Docker, Hugging Face, or future NGC credential is sent to runonspark.ai.
+- No Spark, SSH, Docker, Hugging Face, or future NGC credential is sent to a public catalogue.
 - Secrets are never committed, included in recipes, returned by APIs, or written into job logs.
 - The UI never accepts arbitrary shell commands.
 - Recipes cannot introduce arbitrary environment variables, mounts, host networking, privileged containers, or host paths outside explicit schema policy.
@@ -451,22 +451,11 @@ Preferred distribution is a versioned, checksummed ARM64 package from GitHub Rel
 
 The manager installation is the only unavoidable bootstrap step. After that, supported model deployment is performed through the UI.
 
-## 13. Relationship with runonspark.ai
+## 13. Catalogue and recipe boundaries
 
-The existing catalogue already contains editorial model families, artifacts, topology, runtime, source evidence, and human-run commands in `../onspark/src/data/products.json` and `../onspark/src/domain/product-schema.ts`.
-
-Those records are source material, not executable recipes.
-
-Integration comes after the local manager proves one complete recipe. At that point:
-
-- Catalogue product pages may display `Install with RunOnSpark Manager`.
-- The link identifies a recipe ID, not a shell command.
-- The local manager resolves the ID against its own trusted recipe set.
-- If the manager is absent or unreachable, the website shows manager installation instructions.
-- The public catalogue may describe models the installed manager does not yet support.
-- The UI must never claim support merely because a catalogue entry exists.
-
-Avoid a Git submodule between the repositories. Share a versioned generated catalogue/recipe contract only after its ownership and release flow are clear.
+Editorial catalogue records are source material, not executable recipes.
+The local manager resolves recipe IDs against its own trusted recipe set.
+The UI must never claim support merely because an editorial catalogue entry exists.
 
 ## 14. Observability and diagnostics
 
@@ -574,7 +563,7 @@ Work in thin, end-to-end units and preserve a runnable state after each unit.
     - Exercise clean install, manager update, reboot, interruption, low storage, and uninstall behavior.
 
 11. **Catalogue integration**
-    - Add recipe-aware install links to `runonspark.ai` only after the manager can safely resolve and execute them.
+    - Add recipe-aware install links only after the manager can safely resolve and execute them.
 
 12. **Multi-Spark design**
     - Begin as a separate specification after the one-Spark acceptance criteria pass.
@@ -587,7 +576,7 @@ Work in thin, end-to-end units and preserve a runnable state after each unit.
 - Arbitrary shell execution
 - A general-purpose terminal
 - Cloud-hosted remote management
-- User accounts hosted by RunOnSpark
+- Hosted user accounts
 - Community recipe submission
 - Model training or fine-tuning
 - Benchmark leaderboards
@@ -622,8 +611,6 @@ Do not resolve these by silently choosing convenience over security or recoverab
 - Qwen 3.6 35B-A3B NVFP4: <https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4>
 - Qwen 3.6 27B NVFP4: <https://huggingface.co/nvidia/Qwen3.6-27B-NVFP4>
 - Laguna S 2.1 NVFP4: <https://huggingface.co/poolside/Laguna-S-2.1-NVFP4>
-- Existing RunOnSpark product data: `../onspark/src/data/products.json`
-- Existing RunOnSpark product schema: `../onspark/src/domain/product-schema.ts`
 
 ## 20. Starting instruction for the next Codex session
 

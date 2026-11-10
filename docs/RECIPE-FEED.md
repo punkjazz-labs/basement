@@ -33,51 +33,34 @@ withdrawn. Section 5 of this runbook gives the full rule. One fact matters
 here: a revocation is permanent. Once a manager accepts a revocation, that
 manager keeps it forever, even if a later index drops the entry.
 
-## 2. One-time activation
+## 2. Existing production feed
 
-The feed is not live yet. Four steps make it live. Do them in order.
+The feed already exists. On 2026-11-10, the production client fetched and
+verified an index generated at `2026-11-10T09:00:13.73194Z`. It contained
+16 recipe entries and no revocations. Three recipe versions were newer than
+those embedded in v0.5.29. The same client rejected altered index bytes and
+reverified its disk cache. This proves feed delivery and signature handling,
+not qualification of a model on hardware.
 
-### 2a. Run the key ceremony
+The production public key is already embedded in
+`internal/recipe/signature.go`. The key ceremony took place on 2026-08-23.
+The private half remains in the existing release Mac's Keychain, under the
+service `basement-recipe-feed`. Do not generate a replacement key or create
+another feed repository for a routine release.
 
-Generate one ed25519 keypair. `cmd/sign-index/main.go` documents the exact
-key format: the private key file holds the base64 encoding of the raw 64-byte
-private key that `crypto/ed25519.GenerateKey` returns.
+The existing feed repository is `punkjazz-labs/runonspark-recipes`.
+`internal/recipefeed/fetch.go` owns its HTTPS index URL. Keep that URL stable:
+released clients already use it. The repository name is a delivery identifier,
+not the product name.
 
-Keep the private key out of this repository. Never commit it. Never place it
-in a log file. Never place it in an environment variable's value.
+A client carrying the older placeholder key cannot verify the production
+feed. It keeps its embedded recipes. A current binary carries the production
+key and checks the feed at startup and hourly thereafter.
 
-Record the private key's location the same way you record the release
-signing keys. Ask Simone where that record lives before you generate the key,
-so the new key ends up in the same place.
-
-### 2b. Set the public key in the binary
-
-Open `internal/recipe/signature.go`. Find the constant
-`IndexPublicKeyBase64`. Replace its placeholder value with the real public
-key from step 2a.
-
-Build and commit this change like any other code change.
-
-### 2c. Point the manager at the feed repository
-
-Two choices exist. Pick one.
-
-Choice one: create the repository `punkjazz-labs/runonspark-recipes`. This is
-the repository name `internal/recipefeed/fetch.go` already assumes.
-
-Choice two: change the constant `IndexURL` in
-`internal/recipefeed/fetch.go` to a different host. This constant is the only
-line that needs to change for a different host.
-
-### 2d. Ship one release
-
-Build and ship one manager release that carries the real public key from step
-2b.
-
-State this plainly to every reader of this runbook: a machine trusts the real
-feed only after it runs a release built with the real key. A machine on an
-older release ignores the real feed. It keeps trusting only its embedded
-recipes.
+Private keys stay out of this repository, logs, environment values, and
+command arguments. Use the existing signing Mac and its approved secret store.
+A missing identity or Keychain item is a release blocker, not a reason to
+rotate a key or create an account.
 
 ## 3. The publish flow
 
@@ -85,9 +68,8 @@ Follow these steps to publish a new index.
 
 1. Build a manager binary from the commit you want to publish.
 2. Run `build-index` from that binary: `go run ./cmd/build-index -out
-   index.json`, or `make build-index OUT=index.json`. This step reads
-   `docs/RECIPE-FEED.md` section 2a for key handling and writes an unsigned
-   `index.json`.
+   index.json`, or `make build-index OUT=index.json`. This writes an unsigned
+   `index.json` from the embedded recipes.
 3. Add revocations if you have any. Pass `-revoked
    path/to/revoked.json` to `build-index`. Section 5 of this runbook gives
    the file format.
@@ -273,25 +255,56 @@ front of the person who owns the affected model.
 
 ## 6. Automation
 
-`make publish-feed` is safe to run on a schedule. Every step in it verifies
-its own result, or the step fails and the run stops before it. A step that
-cannot confirm its own result never hands control to the step after it.
+`make publish-feed` changes recipe files and pushes both repositories. It is
+publication, not a read-only feed check. Run it only with publication authority
+and the required deployment gate. Its final byte comparison does not replace
+client signature verification or release checks.
 
 One `launchd` job runs `make publish-feed` once a day, on the owner's laptop.
 The job file is `packaging/macos/com.punkjazz.basement.feed-publish.plist`.
 It runs at 10:00. It does not run the moment it is loaded. It writes its log
 to `~/Library/Logs/basement-feed-publish.log`.
 
-Install the job with one command:
+The committed plist is a template. It contains no machine-specific paths.
+Render it on the existing signing Mac, from the checkout root, before any
+installation. This command writes a staging file only; it does not load a job
+or publish a feed:
 
-```
-launchctl load ~/Library/LaunchAgents/com.punkjazz.basement.feed-publish.plist
+```sh
+python3 - <<'PYTHON'
+import os
+import pathlib
+import plistlib
+
+root = pathlib.Path.cwd().resolve()
+source = root / "packaging/macos/com.punkjazz.basement.feed-publish.plist"
+with source.open("rb") as handle:
+    job = plistlib.load(handle)
+job["ProgramArguments"] = [str(root / "packaging/publish-feed.sh")]
+job["WorkingDirectory"] = str(root)
+log = pathlib.Path.home() / "Library/Logs/basement-feed-publish.log"
+job["StandardOutPath"] = str(log)
+job["StandardErrorPath"] = str(log)
+job["EnvironmentVariables"]["PATH"] = os.environ["PATH"]
+output = root / "var/com.punkjazz.basement.feed-publish.plist"
+output.parent.mkdir(parents=True, exist_ok=True)
+with output.open("wb") as handle:
+    plistlib.dump(job, handle, sort_keys=False)
+print(output)
+PYTHON
+plutil -lint var/com.punkjazz.basement.feed-publish.plist
 ```
 
-Copy the plist file into `~/Library/LaunchAgents/` first. The plist carries
-literal paths for the owner's own laptop, because `launchd` does not expand
-`~` or `$HOME` inside a plist file. Update those paths if the checkout ever
-moves, then unload and load the job again.
+Inspect the generated file and confirm that its PATH resolves `go`, `git`,
+`security`, and `gh`. `launchd` does not expand `~` or environment variables in
+plist strings. Keep the rendered file local and out of commits.
+
+Installing or replacing the job is a deployment. Inspect the existing job
+and checkout first, preserve any live changes, and use the required
+`deployment-integrity-gate run` path with a manifest covering the installed
+job. Rendering or linting the template does not authorize installation.
+Do not load the unrendered template. After an authorized installation,
+`RunAtLoad` remains false and the scheduled time remains 10:00.
 
 A green scheduled run does not mean nothing needs attention. feed-watch can
 still leave a "needs judgment" entry in its report for a recipe that moved

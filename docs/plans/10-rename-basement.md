@@ -2,19 +2,18 @@
 
 Branch `spec/10-rename-basement`. Commit per section.
 
-The owner's decision: every mention of "RunOnSpark", "RunOnSpark Manager", and
-"run on spark" becomes **basement**. The brand is lowercase in prose, UI copy,
-and filenames; capitalize only where a sentence starts. The public host is
+The owner's decision: the product name is **basement**. The brand is lowercase
+in prose, UI copy, and filenames; capitalize only where a sentence starts. The public host is
 already `basement.punkjazz.ai`.
 
 ## Naming table (authoritative — do not improvise)
 
 | Was | Becomes |
 |---|---|
-| product name in any copy: RunOnSpark / RunOnSpark Manager | basement |
-| manager binary `runonspark-manager` | `basement` |
+| previous product name in any copy | basement |
+| previous manager binary | `basement` |
 | setup binary `runonspark-setup` | `basement-setup` |
-| `cmd/runonspark-manager`, `cmd/runonspark-setup` | `cmd/basement`, `cmd/basement-setup` |
+| previous manager and setup command directories | `cmd/basement`, `cmd/basement-setup` |
 | systemd unit `runonspark(.service)` (verify actual name in `internal/setup/install.go`) | `basement.service` |
 | service user/group `runonspark` | `basement` |
 | server data dir (verify actual path in install.go) | same path with `basement` in place of `runonspark` |
@@ -23,9 +22,9 @@ already `basement.punkjazz.ai`.
 | bundle id `ai.runonspark.setup` | `ai.punkjazz.basement.setup` |
 | zips `RunOnSpark-Setup-<os>-<arch>.zip` | `basement-setup-<os>-<arch>.zip` |
 | env `RUNONSPARK_SIGN_KEY` | `BASEMENT_SIGN_KEY` |
-| client config dir `os.UserConfigDir()/runonspark-manager` | `.../basement` (fall back to reading the old dir's known-users.json when the new one is absent; write only the new) |
+| previous client config directory under `os.UserConfigDir()` | `.../basement` (fall back to reading the old dir's known-users.json when the new one is absent; write only the new) |
 | `recipe_by: RunOnSpark` in recipe yamls | `recipe_by: basement` |
-| wizard/CLI copy ("RunOnSpark setup", "RunOnSpark Manager is running", …) | "basement setup", "basement is running", … |
+| wizard/CLI copy using the previous product name | "basement setup", "basement is running", … |
 | console sidebar wordmark (currently the R logo + "RunOnSpark") | the word `basement`, lowercase, using the console's existing type — remove the R logo image from the sidebar (leave the file on disk; recipe logos are untouched) |
 
 **Unchanged, deliberately — do NOT rename these:**
@@ -44,7 +43,7 @@ already `basement.punkjazz.ai`.
 
 ## Migration for existing installs (the dangerous part — test it)
 
-`edgexpert-alpha` runs a live install under the old names. `setup` against a
+An existing machine may run a live install under the old names. `setup` against a
 machine with the old unit must ADOPT it, not orphan it:
 
 1. In the install path (`internal/setup/install.go`), before installing the new

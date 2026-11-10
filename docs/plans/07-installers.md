@@ -4,8 +4,8 @@ Branch `spec/07-installers`. Commit each section separately.
 
 The website will offer three actions side by side: a macOS download, a Windows
 download, and a curl one-liner. All three must land the user in the exact same
-experience: the terminal setup wizard (`runonspark-manager setup` in
-`cmd/runonspark-manager/setup.go`). That flow is the product — discovery listing,
+experience: the terminal setup wizard (`basement setup` in
+`cmd/basement/setup.go`). That flow is the product — discovery listing,
 machine choice, username prompt, listen choice, progress lines, the summary card
 with console URL and pairing token. This spec is packaging and platform
 affordances only. **The setup flow itself must not change**: same prompts, same
@@ -22,14 +22,14 @@ target. There is no reproducible artifact set to put behind download buttons.
    - `linux/arm64` (the GB10 machines)
    - `darwin/arm64`, `darwin/amd64`
    - `windows/amd64`, `windows/arm64`
-2. Output layout: `dist/<goos>-<goarch>/runonspark-manager` (`.exe` on windows),
+2. Output layout: `dist/<goos>-<goarch>/basement` (`.exe` on windows),
    plus a `dist/SHA256SUMS` covering every artifact this spec produces. `dist/`
    goes into `.gitignore`.
 3. Version stamping. **Investigate first**: find how `cfg.Version` is populated
    (start at `internal/config`) and whether an ldflags `-X` hook already exists.
    Wire the script to stamp the version as `git describe --tags --always --dirty`.
    If there is no user-visible way to print the version, add a
-   `runonspark-manager version` subcommand that prints it and exits; nothing
+   `basement version` subcommand that prints it and exits; nothing
    fancier. Record findings in the report.
 
 **Acceptance.** Running `scripts/release.sh` on the build Mac produces all five
@@ -43,10 +43,10 @@ green.
 should not need to know what a terminal is before the wizard opens one for them.
 
 **Change.**
-1. The release script stages `dist/RunOnSpark-Setup-macos-<arch>.zip` containing:
+1. The release script stages `dist/basement-setup-macos-<arch>.zip` containing:
    - the darwin binary, and
-   - `RunOnSpark Setup.command` — a small shell script that `cd`s to its own
-     directory (`"$(dirname "$0")"`) and execs `./runonspark-manager setup`.
+   - `Basement Setup.command` — a small shell script that `cd`s to its own
+     directory (`"$(dirname "$0")"`) and execs `./basement setup`.
    Double-clicking the `.command` opens Terminal and runs the wizard; that is
    the entire macOS installer.
 2. Code signing and notarization run only when the environment provides
@@ -58,7 +58,7 @@ should not need to know what a terminal is before the wizard opens one for them.
 **Acceptance.** The zip exists and unzipping + double-clicking the `.command`
 on the build Mac opens Terminal and reaches the setup wizard's first output
 (then Ctrl-C). Report includes the transcript of
-`dist/darwin-arm64/runonspark-manager setup` reaching the discovery listing (or
+`dist/darwin-arm64/basement setup` reaching the discovery listing (or
 its no-machines error) on the build Mac.
 
 ## C. Windows double-click behavior
@@ -69,14 +69,14 @@ summary card (console URL, pairing token) or any error message with it. That
 breaks the "same exact UX" promise on the platform most likely to double-click.
 
 **Change.**
-1. Windows-only, build-tagged file in `cmd/runonspark-manager`: when the process
+1. Windows-only, build-tagged file in `cmd/basement`: when the process
    is the sole owner of its console (the double-click case — investigate the
    standard detection via `GetConsoleProcessList` returning 1; check whether
    `golang.org/x/sys` is already in go.mod before adding it, and record), the
    program waits for Enter before exiting, on success and on failure alike, with
    the line `Press Enter to close this window.` When launched from an existing
    cmd or PowerShell session, behavior is unchanged — no pause.
-2. The release script stages `dist/RunOnSpark-Setup-windows-<arch>.zip`
+2. The release script stages `dist/basement-setup-windows-<arch>.zip`
    containing the `.exe`. No signing (no certificate exists); record the
    SmartScreen consequence in the report.
 3. No behavior change of any kind on darwin or linux.

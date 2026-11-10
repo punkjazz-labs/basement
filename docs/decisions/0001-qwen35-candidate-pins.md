@@ -17,7 +17,7 @@ The Docker registry returned the pinned multi-platform digest with an ARM64/Linu
 
 ## Trust state
 
-The recipe is deliberately `runonspark-candidate`, not `runonspark-verified`. Registry existence and upstream metadata are supply inputs; they are not evidence that installation, restart recovery, vLLM readiness, inference, and removal all pass on a DGX Spark. Promotion requires the complete receipts in PRD section 15.1 and a new immutable recipe version if any pin or setting changes.
+The recipe is deliberately `basement-candidate`, not `basement-verified`. Registry existence and upstream metadata are supply inputs; they are not evidence that installation, restart recovery, vLLM readiness, inference, and removal all pass on a DGX Spark. Promotion requires the complete receipts in PRD section 15.1 and a new immutable recipe version if any pin or setting changes.
 
 ## Consequences
 
