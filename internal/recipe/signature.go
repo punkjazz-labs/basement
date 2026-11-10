@@ -8,17 +8,12 @@ import (
 )
 
 // IndexPublicKeyBase64 verifies the detached signature over the remote
-// recipe index. This is the REAL feed key, generated in the 2026-08-23 key
-// ceremony (owner item #65). The private half lives only in the owner
-// laptop's login keychain (service basement-recipe-feed, account simo,
-// the same custody pattern as the release update key) and was never
-// written to this repository, a log, or a command line. Binaries built
-// before this constant landed carry the old placeholder key and ignore
-// the real feed; the first release that ships this constant is the one
-// that turns the over-the-air recipe channel on for its fleet.
+// recipe index. The production key was generated on 2026-08-23. Its private
+// half stays in the release Mac's Keychain under basement-recipe-feed.
+// Releases carrying the earlier placeholder key cannot verify this feed.
 const IndexPublicKeyBase64 = "nnN/8YJHfjsMglhSYqwH+2/GwOghge3NwjeAiu0zxjc="
 
-// IndexPublicKey decodes the embedded placeholder constant. It panics on a
+// IndexPublicKey decodes the embedded production constant. It panics on a
 // malformed constant, which can only happen if this file itself is edited
 // incorrectly — there is no untrusted input on this path.
 func IndexPublicKey() ed25519.PublicKey {

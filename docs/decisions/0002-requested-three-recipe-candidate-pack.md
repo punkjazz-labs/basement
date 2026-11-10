@@ -36,9 +36,9 @@ The manager downloads and verifies both Laguna artifacts, mounts each read-only 
 
 ## Trust state
 
-All recipes are `runonspark-candidate`. The Hugging Face revisions, byte totals, image manifests, and ARM64 availability were checked remotely on 2026-07-30. These checks do not establish that the images contain functioning GB10 kernels or that the complete lifecycle works on a DGX Spark.
+All recipes are `basement-candidate`. The Hugging Face revisions, byte totals, image manifests, and ARM64 availability were checked remotely on 2026-07-30. These checks do not establish that the images contain functioning GB10 kernels or that the complete lifecycle works on a DGX Spark.
 
-Promotion to `runonspark-verified` requires the real-device receipts in PRD sections 15.1 and 15.2. If any image, model revision, argument, resource setting, or workaround changes during qualification, the recipe version must change.
+Promotion to `basement-verified` requires the real-device receipts in PRD sections 15.1 and 15.2. If any image, model revision, argument, resource setting, or workaround changes during qualification, the recipe version must change.
 
 ## Consequences
 

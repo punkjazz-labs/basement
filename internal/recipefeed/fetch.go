@@ -23,10 +23,8 @@ import (
 	"github.com/punkjazz-labs/basement/internal/recipe"
 )
 
-// IndexURL is the single HTTPS location the manager fetches the signed
-// recipe index from. It is a placeholder: punkjazz-labs/runonspark-recipes
-// does not exist yet — see the spec 04 executor report. Once a real index is
-// published, this is the only line that needs to change.
+// IndexURL is the existing HTTPS publication location for the signed
+// recipe index. The manager verifies its detached signature before parsing.
 const IndexURL = "https://raw.githubusercontent.com/punkjazz-labs/runonspark-recipes/main/index.json"
 
 // signatureSuffix turns the index URL into its detached signature's URL. The

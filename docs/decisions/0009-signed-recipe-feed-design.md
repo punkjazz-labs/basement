@@ -1,6 +1,6 @@
 # ADR 0009: Signed recipe feed design
 
-Status: design accepted; implementation status amended 2026-08-05 below
+Status: accepted; operational status verified 2026-11-10 below
 
 ## Goal
 
@@ -161,3 +161,21 @@ They do not arrive through a signed recipe feed. The future feed design remains
 the delivery goal, but none of its missing operational parts may be described
 as live until a real key, URL, publication workflow, and evidence policy are in
 place.
+
+## Operational status, 2026-11-10
+
+The August implementation notes above are historical. The production public
+key was installed after the 2026-08-23 ceremony, and the existing feed
+repository now serves a signed index. No new signing key or repository is
+needed to activate it.
+
+On 2026-11-10 the production fetcher accepted the index generated at
+`2026-11-10T09:00:13.73194Z`, verified all 16 entries without dropping one,
+rejected a tampered copy, and reverified the cached bytes. Three recipe
+versions exceeded those embedded in the latest public release, v0.5.29.
+This is delivery evidence only. It does not promote any candidate recipe to
+verified or prove a hardware installation.
+
+`docs/RECIPE-FEED.md` describes the existing key custody and publication path.
+The feed's historical repository name remains a stable client URL. The
+revocation and trust rules in this decision remain in force.

@@ -1,6 +1,6 @@
 # 0010 — Network setup with GB10 autodiscovery
 
-Status: accepted · implemented (`runonspark-manager setup`)
+Status: accepted · implemented (`basement setup`)
 
 ## Context
 
@@ -56,7 +56,7 @@ running binary is already linux/arm64 → download of the latest GitHub
 release **on the target** with checksum verification. Uploads are refused
 unless the file is an ELF/aarch64 binary, and are sha256-verified after
 transfer. Release assets must be published as
-`runonspark-manager-linux-arm64` (+ `.sha256`) for the download path;
+`basement-linux-arm64` (+ `.sha256`) for the download path;
 signing them is ADR 0008's follow-up.
 
 ### Security posture
